@@ -463,8 +463,15 @@ def _run_tool(ctx: click.Context, tool_name: str, arguments: dict):
 
 @ax.command()
 @click.argument("token")
+@click.option(
+    "--chain",
+    "-c",
+    "sub_chain",
+    default=None,
+    help="Chain to query (overrides the group-level --chain when both are set).",
+)
 @click.pass_context
-def price(ctx, token):
+def price(ctx, token, sub_chain):
     """Get the current USD price of a token.
 
     \b
@@ -476,6 +483,19 @@ def price(ctx, token):
     from almanak.framework.cli.ax_render import render_error, render_result
 
     json_output = ctx.obj["json_output"]
+    # Subcommand-level --chain wins over group-level when provided. This
+    # matches Click's "more specific placement wins" convention and keeps
+    # both invocation styles working:
+    #   almanak ax price ETH --chain base          (sub)
+    #   almanak ax --chain base price ETH          (group)
+    #
+    # We update ctx.obj["chain"] (not just the tool arg) because downstream
+    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
+    # the chain from ctx.obj to initialize the executor / gateway client /
+    # managed gateway. Passing the override only to the tool args would leave
+    # the gateway pointed at the group-level chain (or default).
+    if sub_chain is not None:
+        ctx.obj["chain"] = sub_chain
     try:
         response = _run_tool(
             ctx,
@@ -769,9 +789,16 @@ def balance(ctx, token, sub_chain):
     default=None,
     help="Specific DEX protocol (default: best available).",
 )
+@click.option(
+    "--chain",
+    "-c",
+    "sub_chain",
+    default=None,
+    help="Chain to swap on (overrides the group-level --chain when both are set).",
+)
 @_action_options
 @click.pass_context
-def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry_run, sub_json_output):
+def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_yes, sub_dry_run, sub_json_output):
     """Swap tokens on a DEX.
 
     \b
@@ -789,6 +816,20 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
     )
 
     yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
+
+    # Subcommand-level --chain wins over group-level when provided. This
+    # matches Click's "more specific placement wins" convention and keeps
+    # both invocation styles working:
+    #   almanak ax swap USDC ETH 100 --chain base   (sub)
+    #   almanak ax --chain base swap USDC ETH 100   (group)
+    #
+    # We update ctx.obj["chain"] (not just the tool arg) because downstream
+    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
+    # the chain from ctx.obj to initialize the executor / gateway client /
+    # managed gateway. Passing the override only to the tool args would leave
+    # the gateway pointed at the group-level chain (or default).
+    if sub_chain is not None:
+        ctx.obj["chain"] = sub_chain
 
     _chain = ctx.obj["chain"]
     _network = ctx.obj.get("network")
@@ -1664,9 +1705,16 @@ def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge,
 @ax.command()
 @click.argument("token")
 @click.argument("amount")
+@click.option(
+    "--chain",
+    "-c",
+    "sub_chain",
+    default=None,
+    help="Chain to unwrap on (overrides the group-level --chain when both are set).",
+)
 @_action_options
 @click.pass_context
-def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
+def unwrap(ctx, token, amount, sub_chain, sub_yes, sub_dry_run, sub_json_output):
     """Unwrap wrapped native tokens (e.g. WETH -> ETH, WMATIC -> MATIC).
 
     \b
@@ -1684,6 +1732,20 @@ def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
     )
 
     yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
+
+    # Subcommand-level --chain wins over group-level when provided. This
+    # matches Click's "more specific placement wins" convention and keeps
+    # both invocation styles working:
+    #   almanak ax unwrap WETH 0.002 --chain base   (sub)
+    #   almanak ax --chain base unwrap WETH 0.002   (group)
+    #
+    # We update ctx.obj["chain"] (not just the tool arg) because downstream
+    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
+    # the chain from ctx.obj to initialize the executor / gateway client /
+    # managed gateway. Passing the override only to the tool args would leave
+    # the gateway pointed at the group-level chain (or default).
+    if sub_chain is not None:
+        ctx.obj["chain"] = sub_chain
 
     action_desc = f"Unwrap {amount} {token.upper()} to native on {ctx.obj['chain']}"
 
