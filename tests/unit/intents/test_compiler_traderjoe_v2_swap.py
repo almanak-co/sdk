@@ -90,8 +90,8 @@ class TestTraderJoeV2SwapCompilation:
     """Test the full compilation path with mocked adapter."""
 
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
     @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
@@ -128,11 +128,23 @@ class TestTraderJoeV2SwapCompilation:
         mock_adapter = MagicMock()
         mock_adapter_cls.return_value = mock_adapter
 
-        # VIB-3203: opt out of the slippage-quote path for this test —
-        # ``TestTraderJoeV2ExpectedOutputHumanPlumbing`` covers it explicitly.
-        from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2SDKError
+        # VIB-3203 Phase B audit fix: compile path is now fail-closed when
+        # get_swap_quote raises, so we MUST return a valid quote here. The
+        # baseline-metadata value is covered explicitly by
+        # ``TestTraderJoeV2ExpectedOutputHumanPlumbing``.
+        from almanak.framework.connectors.traderjoe_v2.adapter import SwapQuote
 
-        mock_adapter.get_swap_quote.side_effect = TraderJoeV2SDKError("quote unused in this test")
+        mock_adapter.get_swap_quote.return_value = SwapQuote(
+            token_in="USDC",
+            token_out="WAVAX",
+            amount_in=Decimal("100"),
+            amount_out=Decimal("4.0"),
+            bin_step=20,
+            price=Decimal("0.04"),
+            price_impact=Decimal("0.1"),
+            path=["0x" + "a" * 40, "0x" + "b" * 40],
+            gas_estimate=200000,
+        )
 
         # Mock build_swap_transaction to return adapter's TransactionData
         from almanak.framework.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
@@ -175,7 +187,7 @@ class TestTraderJoeV2SwapCompilation:
         assert call_kwargs.kwargs.get("bin_step") == 20 or call_kwargs[1].get("bin_step") == 20
 
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
     def test_swap_no_pool_found_fails_gracefully(
@@ -229,8 +241,8 @@ class TestTraderJoeV2SwapMetadata:
     """Test ActionBundle metadata for TJ V2 swaps."""
 
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
     @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
@@ -258,11 +270,22 @@ class TestTraderJoeV2SwapMetadata:
         mock_adapter.build_swap_transaction.return_value = TJTransactionData(
             to="0xrouter", data="0xdata", value=0, gas=200000, chain_id=43114,
         )
-        # VIB-3203: opt out of the slippage-quote path — this test only checks
-        # baseline protocol/bin_step metadata.
-        from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2SDKError
+        # VIB-3203 Phase B audit fix: compile is fail-closed on quote failure,
+        # so provide a valid quote here. This test asserts baseline metadata
+        # (protocol/bin_step/router) so the specific quote value is irrelevant.
+        from almanak.framework.connectors.traderjoe_v2.adapter import SwapQuote
 
-        mock_adapter.get_swap_quote.side_effect = TraderJoeV2SDKError("quote unused")
+        mock_adapter.get_swap_quote.return_value = SwapQuote(
+            token_in="WAVAX",
+            token_out="USDC",
+            amount_in=Decimal("1.0"),
+            amount_out=Decimal("23.5"),
+            bin_step=20,
+            price=Decimal("23.5"),
+            price_impact=Decimal("0.1"),
+            path=["0x" + "a" * 40, "0x" + "b" * 40],
+            gas_estimate=200000,
+        )
 
         compiler = _make_compiler()
         intent = SwapIntent(
@@ -293,8 +316,8 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
     """
 
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
     @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
@@ -370,12 +393,12 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         assert call_kwargs.get("quote") is single_quote
 
     @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
-    @patch(f"almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
     @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
     @patch(f"{TJ_ADAPTER_CLS}")
     @patch(f"{TJ_CONFIG_CLS}")
-    def test_quote_failure_leaves_bundle_compilable_without_metadata_key(
+    def test_quote_failure_fails_compilation_closed(
         self,
         mock_config_cls,
         mock_adapter_cls,
@@ -383,10 +406,13 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         mock_build_approve,
         mock_get_rpc,
     ):
-        """When ``get_swap_quote`` raises a recognised TJ exception, the
-        compile path must still succeed: bundle has no ``expected_output_human``
-        key, ``build_swap_transaction`` is called with ``quote=None``, and
-        slippage tracking simply degrades to ``None`` downstream."""
+        """Audit fix: when ``get_swap_quote`` raises a recognised TJ exception,
+        the compile path fails CLOSED. Previously the compile returned SUCCESS
+        with ``quote=None``, but the adapter's ``build_swap_transaction`` would
+        then re-invoke ``get_swap_quote`` internally and hit the same error —
+        so the "graceful degradation" was illusory (Codex P2, pr-auditor
+        Potential #3). Fail-closed here yields a clearer error with a single
+        on-chain read attempt."""
         from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2SDKError
         from almanak.framework.connectors.traderjoe_v2.adapter import TransactionData as TJTransactionData
         from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
@@ -416,15 +442,74 @@ class TestTraderJoeV2ExpectedOutputHumanPlumbing:
         )
 
         result = compiler.compile(intent)
-        assert result.status == CompilationStatus.SUCCESS
 
-        metadata = result.action_bundle.metadata
-        assert "expected_output_human" not in metadata
+        assert result.status == CompilationStatus.FAILED
+        assert result.error is not None
+        assert "TraderJoe V2 quote failed" in result.error
+        assert "RPC unavailable" in result.error
 
-        # Even on quote failure, the compiler must call get_swap_quote exactly
-        # once — never retry into the same compile path.
+        # Compiler MUST attempt the quote exactly once and MUST NOT fall
+        # through to build_swap_transaction on failure.
         mock_adapter.get_swap_quote.assert_called_once()
+        mock_adapter.build_swap_transaction.assert_not_called()
 
-        mock_adapter.build_swap_transaction.assert_called_once()
-        call_kwargs = mock_adapter.build_swap_transaction.call_args.kwargs
-        assert call_kwargs.get("quote") is None
+    @patch(f"{TJ_SDK_MODULE}.PoolNotFoundError", new=Exception)
+    @patch("almanak.framework.intents.compiler.IntentCompiler._get_chain_rpc_url")
+    @patch("almanak.framework.intents.compiler.IntentCompiler._build_approve_tx")
+    @patch("almanak.framework.intents.pool_validation.validate_traderjoe_pool")
+    @patch(f"{TJ_ADAPTER_CLS}")
+    @patch(f"{TJ_CONFIG_CLS}")
+    def test_zero_quote_amount_out_fails_closed(
+        self,
+        mock_config_cls,
+        mock_adapter_cls,
+        mock_validate_pool,
+        mock_build_approve,
+        mock_get_rpc,
+    ):
+        """Audit fix (pr-auditor Potential #6): a quote with ``amount_out == 0``
+        (e.g. drained or malformed pool) would produce ``amount_out_min = 0`` —
+        a swap with no slippage floor. Refuse the compile instead."""
+        from almanak.framework.connectors.traderjoe_v2.adapter import SwapQuote, TransactionData as TJTransactionData
+        from almanak.framework.intents.pool_validation import PoolValidationReason, PoolValidationResult
+
+        mock_get_rpc.return_value = "http://localhost:8545"
+        mock_validate_pool.return_value = PoolValidationResult(
+            exists=True, reason=PoolValidationReason.CONFIRMED, pool_address="0x1234"
+        )
+        mock_build_approve.return_value = []
+
+        mock_adapter = MagicMock()
+        mock_adapter_cls.return_value = mock_adapter
+        mock_adapter.sdk.get_pool_address.return_value = "0xpool"
+        mock_adapter.get_swap_quote.return_value = SwapQuote(
+            token_in="WAVAX",
+            token_out="USDC",
+            amount_in=Decimal("1.0"),
+            amount_out=Decimal("0"),  # drained pool
+            bin_step=20,
+            price=Decimal("0"),
+            price_impact=Decimal("0"),
+            path=["0x" + "a" * 40, "0x" + "b" * 40],
+            gas_estimate=200000,
+        )
+        mock_adapter.build_swap_transaction.return_value = TJTransactionData(
+            to="0xrouter", data="0xdata", value=0, gas=200000, chain_id=43114,
+        )
+
+        compiler = _make_compiler()
+        intent = SwapIntent(
+            from_token="WAVAX",
+            to_token="USDC",
+            amount=Decimal("1.0"),
+            max_slippage=Decimal("0.01"),
+            protocol="traderjoe_v2",
+            chain="avalanche",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.error is not None
+        assert "zero amount_out" in result.error
+        mock_adapter.build_swap_transaction.assert_not_called()

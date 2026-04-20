@@ -179,20 +179,48 @@ def compile_swap_curve(compiler, intent: SwapIntent) -> CompilationResult:
                 intent_id=intent.intent_id,
             )
 
+        # Gemini audit fix (consistency with TJ V2 Potential #6 in this PR):
+        # fail-closed on a zero/negative quote. The Curve adapter floors
+        # ``amount_out_minimum = max(1, int(amount_out_estimate * (10000 -
+        # slippage_bps) // 10000))`` in adapter.py — so a zero estimate
+        # degenerates to a 1-wei slippage floor (effectively no protection).
+        # Refusing to compile ensures the strategy doesn't execute unprotected
+        # swaps against degenerate or drained pools, matching the TJ V2
+        # zero-quote guard earlier in this PR.
+        if swap_result.amount_out_estimate <= 0 or swap_result.token_out_decimals < 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Curve quote returned non-positive amount_out_estimate "
+                    f"({swap_result.amount_out_estimate}, decimals={swap_result.token_out_decimals}) "
+                    f"for {from_token.symbol} -> {to_token.symbol} on pool {pool_name or pool_address}; "
+                    f"refusing to build swap with no real slippage floor"
+                ),
+                intent_id=intent.intent_id,
+            )
+
         transactions = swap_result.transactions
         total_gas = sum(tx.gas_estimate for tx in transactions)
+
+        # VIB-3203 Phase B: persist the pre-slippage quote the adapter already
+        # computed for amount_out_minimum. ResultEnricher forwards it as the
+        # ``expected_out`` kwarg to the Curve receipt parser so realized
+        # ``slippage_bps`` can be computed.
+        expected_out_human = Decimal(swap_result.amount_out_estimate) / Decimal(10**swap_result.token_out_decimals)
+        metadata: dict[str, Any] = {
+            "from_token": from_token.to_dict(),
+            "to_token": to_token.to_dict(),
+            "amount_in": str(amount_decimal),
+            "pool_address": pool_address,
+            "pool_name": pool_name,
+            "protocol": "curve",
+            "expected_output_human": str(expected_out_human),
+        }
 
         action_bundle = ActionBundle(
             intent_type=IntentType.SWAP.value,
             transactions=[tx.to_dict() for tx in transactions],
-            metadata={
-                "from_token": from_token.to_dict(),
-                "to_token": to_token.to_dict(),
-                "amount_in": str(amount_decimal),
-                "pool_address": pool_address,
-                "pool_name": pool_name,
-                "protocol": "curve",
-            },
+            metadata=metadata,
         )
 
         result.action_bundle = action_bundle

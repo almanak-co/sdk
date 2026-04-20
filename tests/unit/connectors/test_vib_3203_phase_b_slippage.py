@@ -80,6 +80,52 @@ class TestCurveExtractSwapAmountsAcceptsKwarg:
         # (0.99 - 0.98) / 0.99 * 10000 = 101.01... -> int() truncates to 101
         assert result.slippage_bps == 101
 
+    def test_negative_bps_when_realized_beats_quote(self) -> None:
+        """Realized > expected should produce a NEGATIVE slippage_bps.
+
+        The strategy_runner slippage breaker compares
+        ``actual_slippage > max_slippage`` so negatives never trigger a halt
+        (correct). Still, a future refactor that wraps the bps in ``abs()``
+        would silently flip favourable slippage into a halt — this test
+        locks in the signed-negative invariant for Phase B parsers.
+        """
+        from almanak.framework.connectors.curve.receipt_parser import (
+            CurveReceiptParser,
+            ParseResult,
+            SwapEventData,
+        )
+
+        parser = CurveReceiptParser(chain="ethereum")
+        swap = SwapEventData(
+            pool_address="0x" + "0" * 40,
+            buyer="0x" + "1" * 40,
+            sold_id=0,
+            bought_id=1,
+            tokens_sold=1_000_000,  # 1.0 USDC
+            tokens_bought=1_010_000_000_000_000_000,  # 1.01 WETH — better than quote
+        )
+        parse_result = ParseResult(success=True, swap_events=[swap])
+
+        with (
+            patch.object(parser, "parse_receipt", return_value=parse_result),
+            patch.object(
+                parser,
+                "_find_swap_token_addresses",
+                return_value=("0x" + "a" * 40, "0x" + "b" * 40),
+            ),
+            patch.object(parser, "_resolve_decimals", side_effect=[6, 18]),
+        ):
+            result = parser.extract_swap_amounts(
+                {"logs": [], "from": "0x" + "2" * 40},
+                expected_out=Decimal("1.0"),  # quote was 1.0 WETH, realized 1.01
+            )
+
+        assert isinstance(result, SwapAmounts)
+        # (1.0 - 1.01) / 1.0 * 10000 = -100
+        assert result.slippage_bps is not None
+        assert result.slippage_bps < 0
+        assert result.slippage_bps == -100
+
     def test_slippage_none_without_expected_out(self) -> None:
         """Legacy call path (no kwarg) must keep slippage_bps at None."""
         from almanak.framework.connectors.curve.receipt_parser import (

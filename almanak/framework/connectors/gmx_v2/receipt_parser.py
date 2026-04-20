@@ -1218,6 +1218,14 @@ class GMXv2ReceiptParser:
                         amount_in_decimal=amount_in_decimal,
                         amount_out_decimal=amount_out_decimal,
                         effective_price=effective_price,
+                        # VIB-3203: slippage_bps and expected_out_decimal are
+                        # INTENTIONALLY unset for GMX V2 — perp orders compare
+                        # collateral vs size_usd (not realized vs quoted swap
+                        # output), so forwarding the VIB-3203 signal here would
+                        # persist a misleading value. The kwarg is accepted at
+                        # the signature level for interface parity and then
+                        # ignored. Don't "fix" this asymmetry without also
+                        # redesigning perp slippage semantics.
                         slippage_bps=None,
                         token_in=None,  # GMX swaps don't have simple token in/out
                         token_out=None,

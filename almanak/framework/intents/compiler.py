@@ -4178,8 +4178,21 @@ class IntentCompiler:
                 TraderJoeV2SDKError as _TJSDKError,
             )
 
-            quote = None
-            expected_output_human: Decimal | None = None
+            # VIB-3203 Phase B: fetch the quote once and anchor BOTH ``amount_out_min``
+            # and ``expected_output_human`` to the same on-chain read.
+            # We pass the resulting quote to ``build_swap_transaction`` which skips
+            # its own internal ``get_swap_quote`` call when a matching quote is
+            # provided — this eliminates the Liquidity Book bin-drift between two
+            # reads that would otherwise mis-anchor realized slippage.
+            #
+            # If this quote fails (PoolNotFound / RPC flake / TokenResolution),
+            # fail-closed here instead of falling through to
+            # ``build_swap_transaction`` and letting it re-query the same broken
+            # RPC. The pre-Phase-B behaviour already failed the compile in this
+            # case (the adapter itself would have hit the same error), but an
+            # explicit fail-closed here surfaces a clearer error to the strategy
+            # author and documents the contract: a successful TJ V2 swap
+            # compile requires a successful quote.
             try:
                 quote = tj_adapter.get_swap_quote(
                     token_in=from_token.symbol,
@@ -4187,14 +4200,31 @@ class IntentCompiler:
                     amount_in=amount_decimal,
                     bin_step=bin_step,
                 )
-                if quote.amount_out > 0:
-                    expected_output_human = quote.amount_out
             except (_TJPoolNotFoundError, _TJSDKError) as quote_exc:
-                # Expected failure modes (pool missing / SDK-level RPC error).
-                # Keep at debug — strategy author already gets the compile
-                # failure if the swap can't proceed.
-                logger.debug("TJ V2 get_swap_quote unavailable (slippage tracking skipped): %s", quote_exc)
-                quote = None
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"TraderJoe V2 quote failed for {from_token.symbol} -> {to_token.symbol} "
+                        f"(bin_step={bin_step}): {quote_exc}"
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
+            if quote.amount_out <= 0:
+                # Drained / malformed pool returning a zero quote would produce a
+                # swap with ``amount_out_min = 0`` — no slippage protection. Refuse
+                # the compile rather than build a zero-floor swap (pr-auditor P6).
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"TraderJoe V2 quote returned zero amount_out for {from_token.symbol} -> "
+                        f"{to_token.symbol} (bin_step={bin_step}); refusing to build swap with no "
+                        f"slippage floor"
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
+            expected_output_human: Decimal = quote.amount_out
 
             # Build swap TX using adapter, reusing the quote so amount_out_min
             # and expected_output_human are anchored to the same on-chain read.
@@ -4222,22 +4252,22 @@ class IntentCompiler:
 
             total_gas = sum(tx.gas_estimate for tx in transactions)
 
-            bundle_metadata: dict[str, Any] = {
-                "from_token": from_token.to_dict(),
-                "to_token": to_token.to_dict(),
-                "amount_in": str(amount_in_wei),
-                "bin_step": bin_step,
-                "protocol": "traderjoe_v2",
-                "router": router_address,
-                "chain": self.chain,
-            }
-            if expected_output_human is not None:
-                bundle_metadata["expected_output_human"] = str(expected_output_human)
-
             action_bundle = ActionBundle(
                 intent_type=IntentType.SWAP.value,
                 transactions=[tx.to_dict() for tx in transactions],
-                metadata=bundle_metadata,
+                metadata={
+                    "from_token": from_token.to_dict(),
+                    "to_token": to_token.to_dict(),
+                    "amount_in": str(amount_in_wei),
+                    "bin_step": bin_step,
+                    "protocol": "traderjoe_v2",
+                    "router": router_address,
+                    "chain": self.chain,
+                    # Anchored to the same on-chain read as ``amount_out_min``.
+                    # Consumed by ResultEnricher -> extract_swap_amounts for
+                    # realized slippage_bps (VIB-3203).
+                    "expected_output_human": str(expected_output_human),
+                },
             )
 
             result.action_bundle = action_bundle

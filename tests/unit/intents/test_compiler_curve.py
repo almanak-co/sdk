@@ -88,7 +88,16 @@ def _make_mock_tx(description: str = "Curve swap USDC -> USDT", gas: int = 246_0
 
 
 def _make_mock_swap_result(success: bool = True, error: str | None = None) -> MagicMock:
-    """Create a mock SwapResult."""
+    """Create a mock SwapResult.
+
+    Sets concrete numeric values for ``amount_out_estimate`` and
+    ``token_out_decimals`` (not bare MagicMocks) because the Phase B compile
+    path reads them to enrich ``bundle_metadata["expected_output_human"]``
+    via ``swap_result.amount_out_estimate > 0``. Left as MagicMock, the
+    comparison raises ``'>' not supported between 'MagicMock' and 'int'``.
+    Values below correspond to a realistic USDC -> USDT quote (~1000 out,
+    USDT 6 decimals).
+    """
     result = MagicMock()
     result.success = success
     result.error = error
@@ -96,8 +105,12 @@ def _make_mock_swap_result(success: bool = True, error: str | None = None) -> Ma
         approve_tx = _make_mock_tx("Approve USDC", 46_000)
         swap_tx = _make_mock_tx("Curve swap USDC -> USDT", 200_000)
         result.transactions = [approve_tx, swap_tx]
+        result.amount_out_estimate = 1_000_000_000  # 1000 USDT in wei (6 decimals)
+        result.token_out_decimals = 6
     else:
         result.transactions = []
+        result.amount_out_estimate = 0
+        result.token_out_decimals = -1
     return result
 
 
@@ -153,6 +166,15 @@ class TestCurveSwap:
         assert result.action_bundle.metadata["pool_name"] == "usdc_usdt"
         assert result.action_bundle.metadata["protocol"] == "curve"
         assert len(result.action_bundle.transactions) == 2  # approve + swap
+        # VIB-3203 Phase B: the compile path must persist
+        # ``expected_output_human`` in bundle_metadata so the ResultEnricher
+        # forwards it to the Curve receipt parser for realized-slippage_bps.
+        # Without this assertion, a future refactor that drops the metadata
+        # write would silently re-introduce the "Curve parser is dead code"
+        # regression that this PR restores the fix for (pr-auditor
+        # Important #1 on #1606 orphaned 6454382a6).
+        # amount_out_estimate=1_000_000_000, decimals=6 -> "1000" USDT.
+        assert result.action_bundle.metadata["expected_output_human"] == "1000"
         mock_adapter.swap.assert_called_once()
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
@@ -175,9 +197,72 @@ class TestCurveSwap:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS
+        # Same expected_output_human invariant as the USD-amount path —
+        # the direct-token path must not bypass metadata enrichment.
+        assert result.action_bundle.metadata["expected_output_human"] == "1000"
         call_kwargs = mock_adapter.swap.call_args
         # amount_in should be 500 (the direct token amount)
         assert call_kwargs.kwargs["amount_in"] == Decimal("500")
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_swap_with_zero_quote_fails_closed(self, mock_config_cls, mock_adapter_cls, compiler):
+        """Degenerate/drained pool returning amount_out_estimate=0 must
+        fail compilation — the adapter floors amount_out_minimum at 1 wei
+        which is effectively no slippage protection. Fail-closed matches
+        the TJ V2 zero-quote guard in this same PR (Gemini audit fix,
+        pr-auditor Potential #6 for consistency across protocols).
+        """
+        mock_adapter = MagicMock()
+        zero_result = _make_mock_swap_result(success=True)
+        zero_result.amount_out_estimate = 0  # drained pool / zero quote
+        mock_adapter.swap.return_value = zero_result
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="USDT",
+            amount_usd=Decimal("1000"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "non-positive amount_out_estimate" in result.error
+        assert "no real slippage floor" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_swap_with_missing_decimals_fails_closed(self, mock_config_cls, mock_adapter_cls, compiler):
+        """``token_out_decimals < 0`` is the adapter's "unknown" sentinel
+        (see SwapResult). Same fail-closed invariant as zero quote — if we
+        can't convert the wei estimate to human units, we can't produce a
+        valid ``expected_output_human`` anchor, and forwarding it blind
+        would break the realized-slippage calculation downstream.
+        """
+        mock_adapter = MagicMock()
+        weird_result = _make_mock_swap_result(success=True)
+        weird_result.amount_out_estimate = 1_000_000_000
+        weird_result.token_out_decimals = -1  # adapter sentinel for unknown
+        mock_adapter.swap.return_value = weird_result
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="USDT",
+            amount_usd=Decimal("1000"),
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "non-positive amount_out_estimate" in result.error
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)

@@ -483,6 +483,8 @@ class SwapResult:
     pool_address: str = ""
     amount_in: int = 0
     amount_out_minimum: int = 0
+    amount_out_estimate: int = 0  # VIB-3203 Phase B — pre-slippage quote (wei)
+    token_out_decimals: int = 18  # VIB-3203 Phase B — for human-unit conversion
     token_in: str = ""
     token_out: str = ""
     error: str | None = None
@@ -496,6 +498,8 @@ class SwapResult:
             "pool_address": self.pool_address,
             "amount_in": str(self.amount_in),
             "amount_out_minimum": str(self.amount_out_minimum),
+            "amount_out_estimate": str(self.amount_out_estimate),
+            "token_out_decimals": self.token_out_decimals,
             "token_in": self.token_in,
             "token_out": self.token_out,
             "error": self.error,
@@ -719,9 +723,13 @@ class CurveAdapter:
             # Convert amount to wei
             amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
 
-            # Estimate output for min_amount_out slippage protection
+            # Estimate output for min_amount_out slippage protection.
+            # VIB-3203 Phase B: also surface this pre-slippage estimate on
+            # SwapResult so the IntentCompiler can persist it as
+            # ``expected_output_human`` for realized slippage tracking.
             amount_out_estimate = self._estimate_swap_output(pool_info, i, j, amount_in_wei, price_ratio=price_ratio)
             amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
+            token_out_decimals = self._get_token_decimals(pool_info.coins[j])
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -767,6 +775,8 @@ class CurveAdapter:
                 pool_address=pool_address,
                 amount_in=amount_in_wei,
                 amount_out_minimum=amount_out_minimum,
+                amount_out_estimate=amount_out_estimate,
+                token_out_decimals=token_out_decimals,
                 token_in=token_in_address,
                 token_out=token_out_address,
                 gas_estimate=total_gas,
