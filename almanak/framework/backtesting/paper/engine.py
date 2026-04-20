@@ -3202,7 +3202,7 @@ class PaperTrader:
 
         try:
             dexscreener_source = DexScreenerPriceSource(
-                chain_id=self.config.chain.lower(),
+                default_chain_id=self.config.chain.lower(),
                 cache_ttl=30,
                 token_resolver=_get_resolver(),
             )

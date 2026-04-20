@@ -752,100 +752,46 @@ class TestCoinGeckoPriceSourceContextManager:
 
 
 class TestCoinGeckoPriceSourceAddressLookup:
-    """Tests for contract address-based token resolution."""
+    """Tests for contract address-based token resolution.
 
-    def setup_method(self) -> None:
-        """Reset class-level caches between tests."""
-        CoinGeckoPriceSource._token_registry = None
-        CoinGeckoPriceSource._address_to_coingecko_id_map = None
+    Phase 2 of VIB-3259 removed the chain-agnostic reverse-map lookup in
+    ``_resolve_token_id`` because it silently returned the wrong chain's
+    CoinGecko ID when two tokens shared an address across chains. Address
+    resolution now goes through ``_try_fetch_by_address`` keyed on
+    ``ResolvedToken.chain`` — correct by construction. These tests pin the
+    new behaviour.
+    """
 
-    def teardown_method(self) -> None:
-        """Clean up class-level caches after tests."""
-        CoinGeckoPriceSource._token_registry = None
-        CoinGeckoPriceSource._address_to_coingecko_id_map = None
+    def test_resolve_token_id_rejects_address_input(self) -> None:
+        """An EVM address passed to ``_resolve_token_id`` must return None.
 
-    def test_valid_address_resolves_via_registry(self) -> None:
-        """Test that a valid contract address resolves to a coingecko_id."""
+        The chain-scoped address path lives in ``_try_fetch_by_address``;
+        falling back to a chain-agnostic reverse map here was the exact bug
+        Phase 2 fixed.
+        """
         source = CoinGeckoPriceSource(cache_ttl=30)
 
-        # Mock the token registry with a token that has addresses
-        mock_token = MagicMock()
-        mock_token.coingecko_id = "usd-coin"
-        mock_token.addresses = {
-            "arbitrum": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            "base": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-        }
+        # USDC on Arbitrum — a real address that the old reverse map would
+        # have resolved. It must now return None to force the caller to go
+        # through the chain-scoped contract-address endpoint.
+        addr = "0XAF88D065E77C8CC2239327C5EDB3A432268E5831"
+        assert source._resolve_token_id(addr) is None
 
-        mock_registry = MagicMock()
-        mock_registry.get.return_value = None  # Symbol lookup fails
-        mock_registry.list_tokens.return_value = [mock_token]
-        mock_registry.__bool__ = lambda self: True
-
-        CoinGeckoPriceSource._token_registry = mock_registry
-
-        # Resolve by address (uppercased by get_price before calling _resolve_token_id)
-        result = source._resolve_token_id("0XAF88D065E77C8CC2239327C5EDB3A432268E5831")
-        assert result == "usd-coin"
-
-    def test_malformed_address_not_hex_rejected(self) -> None:
-        """Test that a non-hex address (e.g. 0xGGGG...) is rejected."""
+    def test_malformed_address_returns_none(self) -> None:
+        """A malformed address string still returns None (not exercising symbol map)."""
         source = CoinGeckoPriceSource(cache_ttl=30)
-
-        # Mock registry so we can verify the address branch is NOT entered
-        mock_registry = MagicMock()
-        mock_registry.get.return_value = None
-        mock_registry.list_tokens.return_value = []
-        mock_registry.__bool__ = lambda self: True
-
-        CoinGeckoPriceSource._token_registry = mock_registry
-
-        # 0x + 40 non-hex chars — should fail hex validation and return None
         malformed = "0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
-        result = source._resolve_token_id(malformed)
-        assert result is None
+        assert source._resolve_token_id(malformed) is None
 
-        # list_tokens should NOT have been called (address branch not entered)
-        mock_registry.list_tokens.assert_not_called()
-
-    def test_short_address_not_treated_as_address(self) -> None:
-        """Test that a string shorter than 42 chars is not treated as address."""
+    def test_short_address_returns_none(self) -> None:
+        """A string shorter than 42 chars (e.g. '0xABCD') is treated as an
+        unknown symbol and returns None."""
         source = CoinGeckoPriceSource(cache_ttl=30)
+        assert source._resolve_token_id("0xABCD") is None
 
-        mock_registry = MagicMock()
-        mock_registry.get.return_value = None
-        mock_registry.__bool__ = lambda self: True
-
-        CoinGeckoPriceSource._token_registry = mock_registry
-
-        result = source._resolve_token_id("0xABCD")
-        assert result is None
-        mock_registry.list_tokens.assert_not_called()
-
-    def test_address_lookup_uses_cached_reverse_map(self) -> None:
-        """Test that the reverse address map is built once and reused."""
+    def test_symbol_lookup_still_works(self) -> None:
+        """Removing the address reverse map must NOT break symbol resolution
+        — ``_resolve_token_id`` is the primary code path for symbol inputs."""
         source = CoinGeckoPriceSource(cache_ttl=30)
-
-        mock_token = MagicMock()
-        mock_token.coingecko_id = "ethereum"
-        mock_token.addresses = {
-            "arbitrum": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
-        }
-
-        mock_registry = MagicMock()
-        mock_registry.get.return_value = None
-        mock_registry.list_tokens.return_value = [mock_token]
-        mock_registry.__bool__ = lambda self: True
-
-        CoinGeckoPriceSource._token_registry = mock_registry
-
-        addr = "0X82AF49447D8A07E3BD95BD0D56F35241523FBAB1"
-
-        # First call — builds the map
-        result1 = source._resolve_token_id(addr)
-        assert result1 == "ethereum"
-        assert mock_registry.list_tokens.call_count == 1
-
-        # Second call — reuses cached map
-        result2 = source._resolve_token_id(addr)
-        assert result2 == "ethereum"
-        assert mock_registry.list_tokens.call_count == 1  # Not called again
+        # USDC is in the static symbol registry.
+        assert source._resolve_token_id("USDC") == "usd-coin"

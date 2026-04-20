@@ -224,9 +224,13 @@ async def test_getprice_address_without_chain_uses_primary_chain():
 @pytest.mark.asyncio
 async def test_getprice_multi_chain_gateway_requires_explicit_chain():
     """A gateway serving multiple chains must NOT silently pick one when the
-    request omits the chain hint — that would query the wrong RPC. The path
-    must decline to resolve and let the caller get "Unknown token" instead
-    of a bogus price from a same-address token on the wrong chain."""
+    request omits the chain hint — that would query the wrong RPC.
+
+    Phase 2 (VIB-3259) tightens this to a hard contract: the resolver raises
+    MultiChainAmbiguousPriceRequest so GetPrice can surface INVALID_ARGUMENT
+    rather than silently cascading into "Unknown token"."""
+    from almanak.gateway.services.market_service import MultiChainAmbiguousPriceRequest
+
     settings = MagicMock()
     settings.chains = ["base", "arbitrum"]  # multi-chain
     settings.network = "mainnet"
@@ -240,10 +244,67 @@ async def test_getprice_multi_chain_gateway_requires_explicit_chain():
     fake_lookup.lookup = AsyncMock(return_value=None)
 
     with patch.object(servicer, "_get_onchain_lookup", new=AsyncMock(return_value=fake_lookup)):
-        resolved = await servicer._resolve_token_for_pricing(CBBTC_ADDRESS, "")
+        with pytest.raises(MultiChainAmbiguousPriceRequest) as exc_info:
+            await servicer._resolve_token_for_pricing(CBBTC_ADDRESS, "")
 
-    assert resolved is None
+    # Error must mention both configured chains for debuggability.
+    message = str(exc_info.value)
+    assert "base" in message
+    assert "arbitrum" in message
+    assert "PriceRequest.chain" in message
     fake_lookup.lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_getprice_multi_chain_empty_chain_returns_invalid_argument():
+    """End-to-end: multi-chain gateway + EVM address + empty chain must return
+    gRPC INVALID_ARGUMENT, not a silent pricing miss."""
+    import grpc
+
+    settings = MagicMock()
+    settings.chains = ["base", "arbitrum"]  # multi-chain
+    settings.network = "mainnet"
+    settings.coingecko_api_key = ""
+    settings.enable_manual_price_overrides = False
+
+    servicer = MarketServiceServicer(settings)
+    await servicer._ensure_initialized()
+
+    context = MagicMock()
+    context.set_code = MagicMock()
+    context.set_details = MagicMock()
+
+    # Empty chain + EVM address on a multi-chain gateway → must reject.
+    request = gateway_pb2.PriceRequest(token=CBBTC_ADDRESS, quote="USD", chain="")
+    response = await servicer.GetPrice(request, context)
+
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    assert context.set_details.call_count == 1
+    details = context.set_details.call_args.args[0]
+    assert "Multi-chain gateway" in details
+    assert "PriceRequest.chain" in details
+    # Configured chains must be enumerated in the error for debuggability.
+    assert "base" in details
+    assert "arbitrum" in details
+    assert response.price == ""
+
+
+@pytest.mark.asyncio
+async def test_getprice_multi_chain_symbol_token_keeps_fallthrough():
+    """Multi-chain gateway + SYMBOL token (not an EVM address) + empty chain
+    must still fall through to the normal symbol-based aggregator path.
+    Only address-based lookups are tightened by Phase 2."""
+    settings = MagicMock()
+    settings.chains = ["base", "arbitrum"]  # multi-chain
+    settings.network = "mainnet"
+    settings.coingecko_api_key = ""
+    settings.enable_manual_price_overrides = False
+
+    servicer = MarketServiceServicer(settings)
+
+    resolved = await servicer._resolve_token_for_pricing("ETH", "")
+    # Symbol token → no raise, no resolution (fall through to aggregator).
+    assert resolved is None
 
 
 @pytest.mark.asyncio

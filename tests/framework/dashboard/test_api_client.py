@@ -269,10 +269,16 @@ class TestGetSummary:
 
 
 class TestGetPrice:
-    """Tests for get_price method."""
+    """Tests for get_price method.
 
-    def test_get_price_success(self, api_client, mock_gateway_client):
-        """Test getting token price."""
+    Phase 2 of VIB-3259 threads chain context through ``get_price`` so the
+    gateway can enforce multi-chain correctness. Tests pin that the explicit
+    ``chain`` kwarg is honoured and that config fall-through still works
+    for dashboards written against the old 2-arg signature.
+    """
+
+    def test_get_price_explicit_chain(self, api_client, mock_gateway_client):
+        """Explicit ``chain`` kwarg must be forwarded to PriceRequest."""
         mock_market = MagicMock()
         mock_response = MagicMock()
         mock_response.price = "2500.50"
@@ -282,13 +288,38 @@ class TestGetPrice:
         mock_gateway_client._client.market = mock_market
 
         with patch("almanak.gateway.proto.gateway_pb2") as mock_pb2:
-            price = api_client.get_price("ETH", "USD")
+            price = api_client.get_price("ETH", "USD", chain="arbitrum")
 
             assert price == 2500.50
-            mock_pb2.PriceRequest.assert_called_once_with(token="ETH", quote="USD")
+            mock_pb2.PriceRequest.assert_called_once_with(token="ETH", quote="USD", chain="arbitrum")
 
-    def test_get_price_default_quote(self, api_client, mock_gateway_client):
-        """Test default quote currency is USD."""
+    def test_get_price_falls_back_to_config_chain(self, api_client, mock_gateway_client):
+        """When ``chain`` is omitted, the config's ``default_chain`` or
+        ``chain`` must be forwarded — this keeps dashboards written against
+        the old 2-arg signature correct on single-chain gateways and makes
+        them work on multi-chain gateways too."""
+        mock_market = MagicMock()
+        mock_response = MagicMock()
+        mock_response.price = "45000"
+        mock_market.GetPrice.return_value = mock_response
+
+        mock_gateway_client._client = MagicMock()
+        mock_gateway_client._client.market = mock_market
+        # Strategy config exposes default_chain (fall-through target).
+        mock_gateway_client.get_strategy_config = MagicMock(return_value={"default_chain": "base"})
+
+        with patch("almanak.gateway.proto.gateway_pb2") as mock_pb2:
+            # Force get_config to surface the mocked chain.
+            with patch.object(api_client, "get_config", return_value={"default_chain": "base"}):
+                api_client.get_price("BTC")
+
+            # Chain must be forwarded from config, not empty.
+            mock_pb2.PriceRequest.assert_called_once_with(token="BTC", quote="USD", chain="base")
+
+    def test_get_price_default_quote_sends_empty_chain_if_config_missing(self, api_client, mock_gateway_client):
+        """If the config has no chain and none was passed explicitly, the
+        request forwards an empty chain — the gateway decides whether to
+        accept (single-chain) or reject (multi-chain, EVM address)."""
         mock_market = MagicMock()
         mock_response = MagicMock()
         mock_response.price = "45000"
@@ -298,9 +329,10 @@ class TestGetPrice:
         mock_gateway_client._client.market = mock_market
 
         with patch("almanak.gateway.proto.gateway_pb2") as mock_pb2:
-            price = api_client.get_price("BTC")
+            with patch.object(api_client, "get_config", return_value={}):
+                api_client.get_price("BTC")
 
-            mock_pb2.PriceRequest.assert_called_once_with(token="BTC", quote="USD")
+            mock_pb2.PriceRequest.assert_called_once_with(token="BTC", quote="USD", chain="")
 
     def test_get_price_not_available(self, api_client, mock_gateway_client):
         """Test price not available returns None."""
@@ -313,7 +345,8 @@ class TestGetPrice:
         mock_gateway_client._client.market = mock_market
 
         with patch("almanak.gateway.proto.gateway_pb2"):
-            price = api_client.get_price("UNKNOWN")
+            with patch.object(api_client, "get_config", return_value={}):
+                price = api_client.get_price("UNKNOWN")
 
             assert price is None
 
@@ -324,8 +357,64 @@ class TestGetPrice:
 
         with patch("almanak.gateway.proto.gateway_pb2"):
             price = api_client.get_price("ETH")
-
             assert price is None
+
+    def test_get_price_chain_fallback_caches_config(self, api_client, mock_gateway_client):
+        """Strategy config chain is immutable for a session, so the fallback
+        must cache it on the instance. Dashboards refresh charts on every
+        tick; a gRPC ``get_config`` round-trip per price call multiplies
+        gateway load for no benefit.
+        """
+        mock_market = MagicMock()
+        mock_response = MagicMock()
+        mock_response.price = "2500.50"
+        mock_market.GetPrice.return_value = mock_response
+
+        mock_gateway_client._client = MagicMock()
+        mock_gateway_client._client.market = mock_market
+
+        get_config_calls = 0
+
+        def _counting_get_config():
+            nonlocal get_config_calls
+            get_config_calls += 1
+            return {"default_chain": "base"}
+
+        with patch("almanak.gateway.proto.gateway_pb2"):
+            with patch.object(api_client, "get_config", side_effect=_counting_get_config):
+                api_client.get_price("ETH")
+                api_client.get_price("USDC")
+                api_client.get_price("WBTC")
+
+        # Despite three price calls with no explicit chain, config is
+        # fetched exactly once. Second and third calls use the cached
+        # value.
+        assert get_config_calls == 1
+
+    def test_get_price_explicit_chain_does_not_poison_cache(self, api_client, mock_gateway_client):
+        """An explicit ``chain`` kwarg must NOT populate the fallback cache
+        — otherwise a one-off call with an override chain would silently
+        change the default for subsequent calls that omit the kwarg.
+        """
+        mock_market = MagicMock()
+        mock_response = MagicMock()
+        mock_response.price = "1"
+        mock_market.GetPrice.return_value = mock_response
+        mock_gateway_client._client = MagicMock()
+        mock_gateway_client._client.market = mock_market
+
+        with patch("almanak.gateway.proto.gateway_pb2") as mock_pb2:
+            # Explicit chain: must NOT hit get_config at all.
+            with patch.object(api_client, "get_config") as mock_get_config:
+                api_client.get_price("ETH", chain="arbitrum")
+                mock_get_config.assert_not_called()
+
+            # Subsequent call with no chain still falls back to config
+            # (the explicit "arbitrum" did not leak into the cache).
+            with patch.object(api_client, "get_config", return_value={"default_chain": "base"}) as mock_get_config:
+                api_client.get_price("ETH")
+                mock_get_config.assert_called_once()
+                mock_pb2.PriceRequest.assert_called_with(token="ETH", quote="USD", chain="base")
 
 
 class TestGetBalance:

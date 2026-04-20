@@ -17,7 +17,10 @@ from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
 
 @pytest.fixture
 def dexscreener_source():
-    return DexScreenerPriceSource(chain_id="solana", cache_ttl=30, min_liquidity_usd=10_000)
+    # Phase 2 (VIB-3259) renamed ``chain_id`` to ``default_chain_id``; the
+    # old kwarg is still accepted for backward compatibility. Use the new
+    # name here so the fixture documents the current API surface.
+    return DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30, min_liquidity_usd=10_000)
 
 
 def _make_price_result(price: Decimal = Decimal("0.00001234"), source: str = "dexscreener") -> PriceResult:
@@ -108,8 +111,9 @@ class TestDexScreenerCaching:
         with patch.object(dexscreener_source, "_fetch_price", mock_fetch):
             await dexscreener_source.get_price("BONK")
 
-        # Expire cache
-        dexscreener_source._cache["BONK/USD"].cached_at = time.time() - 1000
+        # Expire cache. Cache keys are chain-scoped now (VIB-3259):
+        # ``{chain}:{identity}/{quote}``.
+        dexscreener_source._cache["solana:BONK/USD"].cached_at = time.time() - 1000
 
         mock_fetch_fail = AsyncMock(side_effect=Exception("Network error"))
         with patch.object(dexscreener_source, "_fetch_price", mock_fetch_fail):
@@ -171,7 +175,7 @@ class TestDexScreenerFetchPrice:
         mock_session.get = MagicMock(return_value=mock_cm)
 
         with patch.object(dexscreener_source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
-            result = await dexscreener_source._fetch_price("SOL")
+            result = await dexscreener_source._fetch_price("SOL", chain_name="solana", platform="solana")
 
         assert result.price == Decimal("84.50")
         assert result.source == "dexscreener"
@@ -192,7 +196,7 @@ class TestDexScreenerFetchPrice:
 
         with patch.object(dexscreener_source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
             with pytest.raises(DataSourceUnavailable, match="No pairs found"):
-                await dexscreener_source._fetch_price("SOL")
+                await dexscreener_source._fetch_price("SOL", chain_name="solana", platform="solana")
 
     @pytest.mark.asyncio
     async def test_fetch_low_liquidity_raises(self, dexscreener_source):
@@ -219,7 +223,7 @@ class TestDexScreenerFetchPrice:
 
         with patch.object(dexscreener_source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
             with pytest.raises(DataSourceUnavailable, match="No liquid pair"):
-                await dexscreener_source._fetch_price("SOL")
+                await dexscreener_source._fetch_price("SOL", chain_name="solana", platform="solana")
 
 
 # ---------------------------------------------------------------------------

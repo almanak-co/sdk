@@ -16,6 +16,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class _Sentinel:
+    """Marker type for "value never resolved" distinct from ``None``."""
+
+
+_UNSET: _Sentinel = _Sentinel()
+
+
 class DashboardAPIClient:
     """API client for custom dashboards.
 
@@ -48,6 +55,12 @@ class DashboardAPIClient:
         """
         self._client = gateway_client
         self._strategy_id = strategy_id
+        # Cache of the strategy's configured chain, resolved lazily on first
+        # chain-omitted price/balance call. Config is immutable for a given
+        # strategy session, so there is no need to re-fetch on every chart
+        # tick. Sentinel ``_UNSET`` distinguishes "never resolved" from
+        # "resolved and empty".
+        self._chain_cache: str | None | _Sentinel = _UNSET
 
     @property
     def strategy_id(self) -> str:
@@ -141,12 +154,18 @@ class DashboardAPIClient:
     # Market Data (via gateway)
     # =========================================================================
 
-    def get_price(self, token: str, quote: str = "USD") -> float | None:
+    def get_price(self, token: str, quote: str = "USD", chain: str | None = None) -> float | None:
         """Get current token price.
 
         Args:
-            token: Token symbol (e.g., "ETH", "BTC")
+            token: Token symbol (e.g., "ETH", "BTC") or contract address.
             quote: Quote currency (default "USD")
+            chain: Chain name (e.g., "arbitrum", "base"). When omitted, falls
+                back to the strategy config's ``default_chain``/``chain`` so
+                the request carries the same chain context the strategy runs
+                on. This is REQUIRED for address-based lookups on multi-chain
+                gateways (VIB-3259) — without it the gateway rejects the
+                request with gRPC ``INVALID_ARGUMENT``.
 
         Returns:
             Price as float, or None if unavailable.
@@ -155,7 +174,28 @@ class DashboardAPIClient:
             # Access the underlying gateway client's market service
             from almanak.gateway.proto import gateway_pb2
 
-            response = self._client._client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote=quote))
+            # Fall back to strategy config for chain context so dashboards
+            # written against the previous 2-arg signature still work.
+            # Strategy config chain is immutable for the session — cache it
+            # on the instance so dashboards calling get_price on every chart
+            # tick don't pay an extra gRPC round-trip each time.
+            resolved_chain = chain
+            if resolved_chain is None:
+                if isinstance(self._chain_cache, _Sentinel):
+                    try:
+                        config = self.get_config()
+                        self._chain_cache = config.get("default_chain") or config.get("chain") or None
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"Could not read chain from config: {e}")
+                        self._chain_cache = None
+                resolved_chain = self._chain_cache
+
+            request = gateway_pb2.PriceRequest(
+                token=token,
+                quote=quote,
+                chain=resolved_chain or "",
+            )
+            response = self._client._client.market.GetPrice(request)
             return float(response.price) if response.price else None
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Failed to get price for {token}/{quote}: {e}")

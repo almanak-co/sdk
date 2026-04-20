@@ -25,6 +25,30 @@ from almanak.gateway.validation import (
 # Pattern for detecting EVM contract addresses in price requests.
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
+
+class MultiChainAmbiguousPriceRequest(Exception):
+    """Raised when a multi-chain gateway receives an EVM-address price lookup
+    with no explicit ``PriceRequest.chain``.
+
+    On a gateway serving more than one chain, silently falling back to an
+    arbitrary "primary" chain would route the RPC at the wrong network and
+    either return "not a contract" or (worse) a bogus price for a same-address
+    deployment on another chain. The resolver raises this; ``GetPrice``
+    translates it to gRPC ``INVALID_ARGUMENT`` so the caller sees a clear
+    contract violation instead of a silent wrong-chain price.
+    """
+
+    def __init__(self, token: str, configured_chains: list[str]) -> None:
+        self.token = token
+        self.configured_chains = list(configured_chains)
+        short = f"{token[:6]}...{token[-4:]}" if len(token) > 12 else token
+        super().__init__(
+            "Multi-chain gateway requires PriceRequest.chain for address-based "
+            f"lookups (token={short}, configured_chains={self.configured_chains}). "
+            "Set PriceRequest.chain to one of the configured chains."
+        )
+
+
 # Timeout for gateway-local on-chain ERC20 metadata lookups driven by GetPrice.
 # Mirrors TokenService's DEFAULT_ONCHAIN_TIMEOUT so both code paths bound slow
 # RPCs the same way.
@@ -197,7 +221,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             from almanak.gateway.data.price.pyth import PythPriceSource
 
             pyth_source = PythPriceSource(cache_ttl=15)
-            dexscreener_source = DexScreenerPriceSource(chain_id="solana", cache_ttl=30)
+            # Solana-only gateway: keep a default chain so tokens arriving
+            # without a ResolvedToken still dispatch to the right platform.
+            dexscreener_source = DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30)
             sources = [pyth_source, dexscreener_source, cg_source]
             logger.info("MarketService: Pyth (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
         else:
@@ -211,8 +237,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
             onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
             binance_source = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
+            # Keep the primary chain as the default so bare-symbol requests
+            # (no ResolvedToken) still dispatch correctly. Multi-chain price
+            # requests carry a ResolvedToken whose .chain overrides this.
             dexscreener_source = DexScreenerPriceSource(
-                chain_id=chain.lower(),
+                default_chain_id=chain.lower(),
                 cache_ttl=30,
                 token_resolver=get_token_resolver(),
             )
@@ -383,15 +412,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             configured = [c for c in (self.settings.chains or []) if c]
             if len(configured) == 1:
                 chain = configured[0].lower()
+            elif len(configured) > 1:
+                # Strict contract (Phase 2, VIB-3259): multi-chain gateway MUST
+                # receive an explicit chain for address-based lookups. Raise
+                # so GetPrice can translate to gRPC INVALID_ARGUMENT — silently
+                # skipping here would just cascade into a confusing "Unknown
+                # token" downstream with no hint at the real cause.
+                raise MultiChainAmbiguousPriceRequest(token, configured)
             else:
-                if len(configured) > 1:
-                    logger.warning(
-                        "Address price lookup for %s skipped: gateway serves "
-                        "multiple chains (%s) and request did not specify one. "
-                        "Set PriceRequest.chain to enable address resolution.",
-                        token,
-                        configured,
-                    )
+                # Zero configured chains: nothing we can do. Fall through to
+                # symbol-based resolution (caller may still get a price from a
+                # chain-agnostic symbol source like CoinGecko's /simple/price).
                 return None
 
         # Enforce the gateway's chain allowlist. Without this, a caller could
@@ -508,7 +539,16 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # If the caller sent a contract address, resolve it on-chain so every
         # downstream price source can use address-based endpoints. This is
         # what unlocks pricing for tokens absent from our hardcoded registry.
-        resolved_token = await self._resolve_token_for_pricing(token, requested_chain)
+        try:
+            resolved_token = await self._resolve_token_for_pricing(token, requested_chain)
+        except MultiChainAmbiguousPriceRequest as e:
+            # Multi-chain gateway + empty chain + EVM address = caller contract
+            # violation. Surface as INVALID_ARGUMENT so the caller sees the
+            # real cause (missing chain hint) instead of a generic pricing miss.
+            logger.info("GetPrice rejected: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.PriceResponse()
 
         try:
             result = await self._price_aggregator.get_aggregated_price(token, quote, resolved_token=resolved_token)

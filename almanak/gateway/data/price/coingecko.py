@@ -367,9 +367,6 @@ class CoinGeckoPriceSource(BasePriceSource):
     # Supported tokens on Arbitrum
     _SUPPORTED_TOKENS = list(ARBITRUM_TOKEN_IDS.keys())
 
-    # Reverse mapping: lowercased contract address -> CoinGecko ID (lazy-built)
-    _address_to_coingecko_id_map: dict[str, str] | None = None
-
     def __init__(
         self,
         api_key: str | None = None,
@@ -474,18 +471,30 @@ class CoinGeckoPriceSource(BasePriceSource):
         )
 
     def _resolve_token_id(self, token: str) -> str | None:
-        """Resolve token symbol or contract address to CoinGecko ID.
+        """Resolve a token SYMBOL to CoinGecko ID.
 
         Resolution order:
         1. DEFAULT_TOKENS by symbol (uses Token.coingecko_id)
         2. Hardcoded symbol mappings (backward compatibility)
-        3. DEFAULT_TOKENS by contract address (for callers that pass addresses)
+
+        Address-based resolution was REMOVED in VIB-3259 Phase 2. The prior
+        process-wide ``{address.lower() → coingecko_id}`` reverse map was
+        not chain-scoped, so two tokens sharing an address across chains
+        (USDC/USDT variants, same-address same-bytecode deploys) resolved
+        first-write-wins to the wrong chain's CoinGecko ID.
+
+        Address-based lookups now go exclusively through
+        ``_try_fetch_by_address`` which hits
+        ``/simple/token_price/{platform}`` keyed on ``ResolvedToken.chain``
+        — correct by construction because the endpoint is chain-scoped.
 
         Args:
-            token: Token symbol (already uppercased) or contract address
+            token: Token symbol (already uppercased). Address inputs return
+                None here; ``get_price`` routes them via
+                ``_try_fetch_by_address`` when ``resolved_token`` is present.
 
         Returns:
-            CoinGecko ID if found, None otherwise
+            CoinGecko ID if the symbol is known, None otherwise.
         """
         # Try DEFAULT_TOKENS first (uses Token.coingecko_id)
         try:
@@ -497,37 +506,8 @@ class CoinGeckoPriceSource(BasePriceSource):
         except ImportError:
             pass
 
-        # Fall back to hardcoded mappings
-        result = GLOBAL_TOKEN_IDS.get(token)
-        if result:
-            return result
-
-        # If token looks like a valid EVM address, try address-based lookup
-        _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
-        if len(token) == 42 and token[:2].lower() == "0x" and all(c in _HEX_CHARS for c in token[2:]):
-            # Build reverse mapping (address -> coingecko_id) once and cache on the class
-            if CoinGeckoPriceSource._address_to_coingecko_id_map is None:
-                try:
-                    from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
-
-                    address_map: dict[str, str] = {}
-                    for token_obj in DEFAULT_TOKENS:
-                        if token_obj.coingecko_id:
-                            for chain_addr in token_obj.addresses.values():
-                                address_map[chain_addr.lower()] = token_obj.coingecko_id
-                    CoinGeckoPriceSource._address_to_coingecko_id_map = address_map
-                except ImportError:
-                    logger.warning("DEFAULT_TOKENS import failed during address map init; will retry next call")
-                    # Leave as None so initialization is retried on the next call
-
-            addr_lower = token.lower()
-            addr_map = CoinGeckoPriceSource._address_to_coingecko_id_map
-            coingecko_id = addr_map.get(addr_lower) if addr_map is not None else None
-            if coingecko_id:
-                logger.debug("Resolved address %s to CoinGecko ID '%s'", addr_lower, coingecko_id)
-                return coingecko_id
-
-        return None
+        # Fall back to hardcoded symbol-based mappings.
+        return GLOBAL_TOKEN_IDS.get(token)
 
     async def get_price(
         self,
