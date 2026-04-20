@@ -578,7 +578,12 @@ class TraderJoeV2ReceiptParser:
             )
             return 18
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> "SwapAmounts | None":
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
         Uses actual token decimals when chain is known (passed to __init__).
@@ -586,6 +591,12 @@ class TraderJoeV2ReceiptParser:
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
+            expected_out: VIB-3203 Phase B — pre-slippage-discount quote in
+                human (Decimal) units, sourced from
+                ``ActionBundle.metadata["expected_output_human"]`` by the
+                ResultEnricher. When provided and positive, realized
+                ``slippage_bps`` is computed. When absent, ``slippage_bps``
+                stays ``None``.
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -609,13 +620,41 @@ class TraderJoeV2ReceiptParser:
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
 
+            # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
+            # Decimal resolution above silently falls back to 18 when the token
+            # is unknown — that's safe for amount logging but corrupts slippage
+            # math (a USDC fallback would scale amount_out_decimal by 1e12).
+            # Suppress slippage_bps unless we can confirm the token_out decimals
+            # via a strict resolver lookup. ``self._chain`` must be set, AND the
+            # resolver must succeed — otherwise leave slippage_bps as None.
+            # Amounts themselves still surface for legacy paths.
+            slippage_bps: int | None = None
+            if (
+                expected_out is not None
+                and expected_out > 0
+                and amount_out_decimal > 0
+                and self._chain
+                and sr.token_out
+            ):
+                try:
+                    get_token_resolver().get_decimals(self._chain, sr.token_out)
+                    realized = (expected_out - amount_out_decimal) / expected_out
+                    slippage_bps = int(realized * Decimal(10_000))
+                except Exception as decimals_exc:  # noqa: BLE001 — strict gate, suppress slippage
+                    logger.debug(
+                        "TJ V2 slippage suppressed for %s: token_out decimals unconfirmed (%s)",
+                        sr.token_out,
+                        decimals_exc,
+                    )
+
             return SwapAmounts(
                 amount_in=amount_in,
                 amount_out=amount_out,
                 amount_in_decimal=amount_in_decimal,
                 amount_out_decimal=amount_out_decimal,
                 effective_price=effective_price,
-                slippage_bps=None,
+                slippage_bps=slippage_bps,
+                expected_out_decimal=expected_out,
                 token_in=sr.token_in,
                 token_out=sr.token_out,
             )

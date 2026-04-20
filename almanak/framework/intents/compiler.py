@@ -4164,13 +4164,47 @@ class IntentCompiler:
                 )
                 transactions.extend(approve_txs)
 
-            # Build swap TX using adapter
+            # VIB-3203 Phase B: fetch the router quote ONCE up front so the
+            # same SwapQuote shapes both (a) ``amount_out_min`` baked into the
+            # swap calldata and (b) ``expected_output_human`` persisted on the
+            # bundle metadata for realized-slippage measurement. A second
+            # quote call between TX build and metadata persistence would let
+            # the LB pool drift across bins, making realized slippage measure
+            # against a different baseline than the protection threshold.
+            from almanak.framework.connectors.traderjoe_v2 import (
+                PoolNotFoundError as _TJPoolNotFoundError,
+            )
+            from almanak.framework.connectors.traderjoe_v2 import (
+                TraderJoeV2SDKError as _TJSDKError,
+            )
+
+            quote = None
+            expected_output_human: Decimal | None = None
+            try:
+                quote = tj_adapter.get_swap_quote(
+                    token_in=from_token.symbol,
+                    token_out=to_token.symbol,
+                    amount_in=amount_decimal,
+                    bin_step=bin_step,
+                )
+                if quote.amount_out > 0:
+                    expected_output_human = quote.amount_out
+            except (_TJPoolNotFoundError, _TJSDKError) as quote_exc:
+                # Expected failure modes (pool missing / SDK-level RPC error).
+                # Keep at debug — strategy author already gets the compile
+                # failure if the swap can't proceed.
+                logger.debug("TJ V2 get_swap_quote unavailable (slippage tracking skipped): %s", quote_exc)
+                quote = None
+
+            # Build swap TX using adapter, reusing the quote so amount_out_min
+            # and expected_output_human are anchored to the same on-chain read.
             swap_tx = tj_adapter.build_swap_transaction(
                 token_in=from_token.symbol,
                 token_out=to_token.symbol,
                 amount_in=amount_decimal,
                 bin_step=bin_step,
                 slippage_bps=slippage_bps,
+                quote=quote,
             )
 
             # Convert adapter TransactionData to compiler TransactionData
@@ -4188,18 +4222,22 @@ class IntentCompiler:
 
             total_gas = sum(tx.gas_estimate for tx in transactions)
 
+            bundle_metadata: dict[str, Any] = {
+                "from_token": from_token.to_dict(),
+                "to_token": to_token.to_dict(),
+                "amount_in": str(amount_in_wei),
+                "bin_step": bin_step,
+                "protocol": "traderjoe_v2",
+                "router": router_address,
+                "chain": self.chain,
+            }
+            if expected_output_human is not None:
+                bundle_metadata["expected_output_human"] = str(expected_output_human)
+
             action_bundle = ActionBundle(
                 intent_type=IntentType.SWAP.value,
                 transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "from_token": from_token.to_dict(),
-                    "to_token": to_token.to_dict(),
-                    "amount_in": str(amount_in_wei),
-                    "bin_step": bin_step,
-                    "protocol": "traderjoe_v2",
-                    "router": router_address,
-                    "chain": self.chain,
-                },
+                metadata=bundle_metadata,
             )
 
             result.action_bundle = action_bundle

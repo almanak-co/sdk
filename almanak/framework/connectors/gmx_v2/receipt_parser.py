@@ -1160,17 +1160,31 @@ class GMXv2ReceiptParser:
         """Fail-closed variant of :meth:`extract_fees_paid` — see VIB-3159."""
         return self._wrap_extract(self.extract_fees_paid, receipt, "no fees_paid in order")
 
-    def extract_swap_amounts(self, receipt: dict[str, Any]) -> Any:
+    def extract_swap_amounts(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,  # noqa: ARG002 — see docstring
+    ) -> Any:
         """Extract swap amounts from transaction receipt.
 
-        GMX V2 swaps are executed through orders, not traditional swap events.
+        GMX V2 "swaps" are executed through perpetual orders, not spot swaps.
         For GMX orders:
         - amount_in = initial_collateral_delta_amount (collateral deposited)
         - amount_out = size_delta_usd (position size in USD, scaled by 1e30)
         - effective_price represents the leverage ratio
 
+        The VIB-3203 ``expected_out`` kwarg is accepted for interface parity
+        with spot-swap parsers, but NOT used to compute ``slippage_bps`` —
+        comparing "realized collateral" to a "quoted collateral" is not the
+        same semantic as realized vs quoted swap output, and would produce
+        misleading slippage values. Slippage reporting for GMX V2 perps
+        (acceptable price vs execution price) is a separate semantic and is
+        out of scope for VIB-3203.
+
         Args:
             receipt: Transaction receipt dict with 'logs' field
+            expected_out: Accepted but ignored — see docstring.
 
         Returns:
             SwapAmounts dataclass if swap order found, None otherwise

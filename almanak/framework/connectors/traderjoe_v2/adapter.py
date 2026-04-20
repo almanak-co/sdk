@@ -489,6 +489,8 @@ class TraderJoeV2Adapter:
         bin_step: int = 20,
         slippage_bps: int | None = None,
         recipient: str | None = None,
+        *,
+        quote: SwapQuote | None = None,
     ) -> TransactionData:
         """Build a swap transaction without executing it.
 
@@ -499,6 +501,11 @@ class TraderJoeV2Adapter:
             bin_step: Bin step for the pair
             slippage_bps: Slippage tolerance in basis points
             recipient: Recipient address (default: wallet_address)
+            quote: Optional pre-computed SwapQuote to avoid a second on-chain
+                ``getSwapOut`` call. Callers that already fetched a quote (e.g.
+                the IntentCompiler persisting ``expected_output_human`` for
+                realized-slippage tracking) should pass it here so the same
+                quote shapes both ``amount_out_min`` and the metadata baseline.
 
         Returns:
             TransactionData ready for signing and execution
@@ -510,8 +517,24 @@ class TraderJoeV2Adapter:
         slippage = slippage_bps or self.config.default_slippage_bps
         recipient_addr = recipient or self.config.wallet_address
 
-        # Get quote for minimum output
-        quote = self.get_swap_quote(token_in, token_out, amount_in, bin_step)
+        if quote is None:
+            quote = self.get_swap_quote(token_in, token_out, amount_in, bin_step)
+        elif (
+            quote.token_in != token_in
+            or quote.token_out != token_out
+            or quote.amount_in != amount_in
+            or quote.bin_step != bin_step
+        ):
+            # Caller supplied a stale or mismatched quote. Refusing to use it
+            # protects ``amount_out_min`` from being computed off the wrong
+            # baseline (could lead to over-tolerant slippage protection).
+            raise TraderJoeV2SDKError(
+                f"Provided quote does not match swap request: "
+                f"quote=(token_in={quote.token_in}, token_out={quote.token_out}, "
+                f"amount_in={quote.amount_in}, bin_step={quote.bin_step}); "
+                f"request=(token_in={token_in}, token_out={token_out}, "
+                f"amount_in={amount_in}, bin_step={bin_step})"
+            )
         amount_out_min = self.to_wei(
             quote.amount_out * Decimal(10000 - slippage) / Decimal(10000),
             token_out,
