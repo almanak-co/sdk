@@ -155,6 +155,11 @@ class TestTokensJsonSchema:
             # aliases but excluded from DEFAULT_TOKENS (see in_default_set flag).
             ("solana", "epjfwdd5aufqssqem2qn1xzybapc8g4weggkzwytdt1v"),
             ("solana", "es9vmfrzacermjfrf4h2fyd4kconky11mcce8benwnyb"),
+            # MATIC / POL_POLYGON: POL is the Sep-2024 rename of MATIC on
+            # Polygon (1:1). Both symbols are kept so users can query by either
+            # name, and both point at the EVM native-sentinel address because
+            # they represent the same native gas token (VIB-3137).
+            ("polygon", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
         }
 
         seen: dict[tuple[str, str], str] = {}

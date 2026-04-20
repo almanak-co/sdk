@@ -72,7 +72,13 @@ TOKEN_IDS: dict[str, str] = {
     "OP": "optimism",
     "AVAX": "avalanche-2",
     "BNB": "binancecoin",
-    "MATIC": "matic-network",
+    # MATIC was renamed to POL (1:1) in Sep 2024; prefer the POL id so that
+    # ``matic-network`` (deprecated) doesn't diverge from live oracle prices
+    # (VIB-3137).
+    "MATIC": "polygon-ecosystem-token",
+    "POL": "polygon-ecosystem-token",
+    "WMATIC": "polygon-ecosystem-token",
+    "WPOL": "polygon-ecosystem-token",
     "AAVE": "aave",
     "CRV": "curve-dao-token",
 }

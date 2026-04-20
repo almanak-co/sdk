@@ -39,11 +39,58 @@ logger = logging.getLogger(__name__)
 NATIVE_PRICE_ALIASES: dict[str, str] = {
     "MNT": "WMNT",
     "MATIC": "WMATIC",
+    # POL is the Sep-2024 rename of MATIC on Polygon (1:1). Route native-price
+    # failures through WMATIC (aka WPOL) — same asset, better exchange coverage.
+    "POL": "WMATIC",
     "AVAX": "WAVAX",
     "FTM": "WFTM",
     "BNB": "WBNB",
     "S": "WS",  # Sonic
 }
+
+# Chain-scoped native gas tokens. A symbol is treated as the chain's native
+# coin (and routed through `provider.get_native_balance()`) ONLY if it appears
+# in this chain's set. This prevents `GetBalance(token="POL", chain="ethereum")`
+# from returning ETH balance, etc. Both MATIC and POL are accepted on Polygon
+# because POL is the Sep-2024 1:1 rename of MATIC and many wallets still use
+# the old symbol.
+NATIVE_SYMBOLS_BY_CHAIN: dict[str, frozenset[str]] = {
+    "ethereum": frozenset({"ETH"}),
+    "arbitrum": frozenset({"ETH"}),
+    "optimism": frozenset({"ETH"}),
+    "base": frozenset({"ETH"}),
+    "linea": frozenset({"ETH"}),
+    "blast": frozenset({"ETH"}),
+    "scroll": frozenset({"ETH"}),
+    "zksync": frozenset({"ETH"}),
+    "polygon": frozenset({"MATIC", "POL"}),
+    "avalanche": frozenset({"AVAX"}),
+    "bsc": frozenset({"BNB"}),
+    "sonic": frozenset({"S"}),
+    "fantom": frozenset({"FTM"}),
+    "mantle": frozenset({"MNT"}),
+    "berachain": frozenset({"BERA"}),
+    "monad": frozenset({"MON"}),
+    "plasma": frozenset({"XPL"}),
+    "x-layer": frozenset({"OKB"}),
+    "solana": frozenset({"SOL"}),
+}
+
+
+def _is_native_symbol(token: str, chain: str) -> bool:
+    """Return True iff `token` is the native gas symbol for `chain`.
+
+    Fails CLOSED for chains not in NATIVE_SYMBOLS_BY_CHAIN: an unmapped
+    chain returns False for every symbol so the request falls through to
+    `provider.get_balance(token)` (the safe ERC-20 path) instead of
+    silently routing to `get_native_balance()` and returning the wrong
+    asset. New chains MUST be added to the map in the same change that
+    adds chain support — see VIB-3137 follow-up.
+    """
+    natives = NATIVE_SYMBOLS_BY_CHAIN.get(chain.lower())
+    if natives is None:
+        return False
+    return token.upper() in natives
 
 
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
@@ -600,7 +647,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         try:
             provider = await self._get_balance_provider(chain, wallet_address)
 
-            if token.upper() in ("ETH", "AVAX", "MATIC", "SOL", "MNT"):
+            # Chain-scoped native check: only route to get_native_balance when
+            # the symbol is actually native to THIS chain. Prevents POL on
+            # Ethereum from returning ETH balance, etc.
+            if _is_native_symbol(token, chain):
                 result = await provider.get_native_balance()
             else:
                 result = await provider.get_balance(token)
@@ -611,7 +661,16 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 price_result = await self._price_aggregator.get_aggregated_price(token, "USD")
                 balance_usd = str(result.balance * price_result.price)
             except Exception:
-                pass  # USD conversion optional
+                # USD conversion optional. Try the native->wrapped alias (e.g.
+                # MATIC/POL -> WMATIC) so that a symbol with weak exchange
+                # coverage still gets a price via its wrapped equivalent.
+                alias = NATIVE_PRICE_ALIASES.get(token.upper())
+                if alias:
+                    try:
+                        price_result = await self._price_aggregator.get_aggregated_price(alias, "USD")
+                        balance_usd = str(result.balance * price_result.price)
+                    except Exception:
+                        pass
 
             return gateway_pb2.BalanceResponse(
                 balance=str(result.balance),
@@ -667,7 +726,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             try:
                 provider = await self._get_balance_provider(chain, wallet_address)
 
-                if token.upper() in ("ETH", "AVAX", "MATIC", "SOL", "MNT"):
+                # Chain-scoped native check: only route to get_native_balance when
+                # the symbol is actually native to THIS chain. Prevents POL on
+                # Ethereum from returning ETH balance, etc.
+                if _is_native_symbol(token, chain):
                     result = await provider.get_native_balance()
                 else:
                     result = await provider.get_balance(token)
@@ -677,7 +739,14 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     price_result = await self._price_aggregator.get_aggregated_price(token, "USD")
                     balance_usd = str(result.balance * price_result.price)
                 except Exception:
-                    pass
+                    # Try native->wrapped alias (MATIC/POL -> WMATIC) before giving up.
+                    alias = NATIVE_PRICE_ALIASES.get(token.upper())
+                    if alias:
+                        try:
+                            price_result = await self._price_aggregator.get_aggregated_price(alias, "USD")
+                            balance_usd = str(result.balance * price_result.price)
+                        except Exception:
+                            pass
 
                 return gateway_pb2.BalanceResponse(
                     balance=str(result.balance),

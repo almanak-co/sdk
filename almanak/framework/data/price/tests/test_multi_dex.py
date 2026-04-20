@@ -580,8 +580,32 @@ class TestSlippageEstimation:
     """Tests for slippage estimation."""
 
     @pytest.mark.asyncio
-    async def test_slippage_increases_with_size(self, service):
-        """Test that slippage increases with trade size."""
+    async def test_slippage_increases_with_size(self, service, mock_uniswap_quote):
+        """Test that slippage increases with trade size.
+
+        VIB-3137: The service no longer fabricates prices for non-stable pairs,
+        so this test mocks Uniswap directly. Slippage is still computed from
+        the real ``_estimate_slippage`` path inside the service via stable
+        pairs below — this test focuses on the mock quote's slippage field.
+        """
+
+        def varying_slippage_fn(token_in: str, token_out: str, amount_in: Decimal) -> DexQuote:
+            # Mirror the production slippage model: small trades have small
+            # slippage, large trades have larger slippage.
+            bps = 5 if amount_in < Decimal("100000") else 50
+            return DexQuote(
+                dex="uniswap_v3",
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=amount_in,
+                amount_out=amount_in * Decimal("0.0004"),
+                price=Decimal("0.0004"),
+                slippage_estimate_bps=bps,
+                chain="ethereum",
+            )
+
+        service.set_mock_quote("uniswap_v3", varying_slippage_fn)
+
         # Small trade
         small_quote = await service.get_quote(
             dex="uniswap_v3",

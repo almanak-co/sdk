@@ -651,36 +651,50 @@ class MultiDexPriceService:
         )
 
     def _get_default_price(self, token_in: str, token_out: str) -> Decimal:
-        """Get default price for a token pair.
+        """Compute a reference exchange rate for a token pair.
 
-        These are approximate market prices for simulation.
-        In production, this would use real-time price feeds.
+        This helper is used ONLY to generate simulated DEX quotes when no real
+        price feed and no test mock are wired. It is NOT a production oracle.
+
+        Behaviour:
+        * Stablecoin <-> stablecoin: returns ``Decimal("1")`` (peg assumption
+          derived from ``almanak.core.constants.STABLECOINS``, the single
+          source of truth for stablecoin identification in the SDK).
+        * Everything else: raises :class:`QuoteUnavailableError` so the caller
+          ``get_prices_across_dexs`` reports the DEX as unavailable instead of
+          fabricating a fake price from a hardcoded dict (historically this
+          module shipped stale prices like ``MATIC=$0.50``, ``WBTC=$45000``,
+          ``ETH=$2500`` that produced divergent USD valuations — see VIB-3137).
+
+        Callers that need real prices must either:
+        * Pass a mock via ``set_mock_quote()`` (unit tests), or
+        * Wire a real ``PriceAggregator``-backed oracle (production).
         """
-        # Price of tokens in USD (approximate)
-        prices_usd: dict[str, Decimal] = {
-            "ETH": Decimal("2500"),
-            "WETH": Decimal("2500"),
-            "USDC": Decimal("1"),
-            "USDT": Decimal("1"),
-            "DAI": Decimal("1"),
-            "FRAX": Decimal("1"),
-            "WBTC": Decimal("45000"),
-            "stETH": Decimal("2480"),  # Slight discount to ETH
-            "cbETH": Decimal("2600"),  # Slight premium
-            "ARB": Decimal("0.80"),
-            "OP": Decimal("1.50"),
-            "MATIC": Decimal("0.50"),
-            "WMATIC": Decimal("0.50"),
-            "CRV": Decimal("0.40"),
-        }
+        from almanak.core.constants import STABLECOINS
 
-        price_in = prices_usd.get(token_in, Decimal("1"))
-        price_out = prices_usd.get(token_out, Decimal("1"))
+        token_in_upper = token_in.upper()
+        token_out_upper = token_out.upper()
 
-        if price_out == 0:
-            return Decimal("0")
+        # Stable <-> stable: 1:1 peg is a design invariant, not a hardcoded price.
+        if token_in_upper in STABLECOINS and token_out_upper in STABLECOINS:
+            return Decimal("1")
 
-        return price_in / price_out
+        # No hardcoded fallback dict: fail loud. The caller's exception handler
+        # in ``get_prices_across_dexs`` downgrades this to a missing quote, and
+        # the user sees that the DEX is unavailable (instead of silently
+        # receiving a quote built from a stale number baked into this file).
+        raise QuoteUnavailableError(
+            dex="<simulation>",
+            token_in=token_in,
+            token_out=token_out,
+            reason=(
+                f"No simulated price for {token_in_upper}->{token_out_upper} on {self._chain}. "
+                "MultiDexPriceService.get_*_quote() is simulation-only; callers must either "
+                "register a mock via set_mock_quote() or wire a real price oracle. "
+                "Previously this path silently returned hardcoded prices (e.g. MATIC=$0.50, "
+                "WBTC=$45000), which produced divergent USD valuations."
+            ),
+        )
 
     def _estimate_price_impact(self, trade_size_usd: float, dex: str) -> int:
         """Estimate price impact in basis points.
