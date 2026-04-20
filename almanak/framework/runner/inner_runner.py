@@ -803,6 +803,16 @@ class _MinimalIntent:
             "unstake": IntentType.UNSTAKE,
             "wrap_native": IntentType.WRAP_NATIVE,
             "unwrap_native": IntentType.UNWRAP_NATIVE,
+            "lp_collect_fees": IntentType.LP_COLLECT_FEES,
+            "vault_deposit": IntentType.VAULT_DEPOSIT,
+            "vault_redeem": IntentType.VAULT_REDEEM,
+            "vault_reallocate": IntentType.VAULT_REALLOCATE,
+            "vault_manage": IntentType.VAULT_MANAGE,
+            "prediction_buy": IntentType.PREDICTION_BUY,
+            "prediction_sell": IntentType.PREDICTION_SELL,
+            "prediction_redeem": IntentType.PREDICTION_REDEEM,
+            "ensure_balance": IntentType.ENSURE_BALANCE,
+            "flash_loan": IntentType.FLASH_LOAN,
         }
 
         mapped = _TYPE_MAP.get(intent_type.lower())
