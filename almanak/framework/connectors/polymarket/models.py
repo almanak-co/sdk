@@ -791,6 +791,7 @@ class Position(BaseModel):
     current_price: Decimal = Field(default=Decimal("0"), description="Current price")
     unrealized_pnl: Decimal = Field(default=Decimal("0"), description="Unrealized PnL")
     realized_pnl: Decimal = Field(default=Decimal("0"), description="Realized PnL")
+    market_question: str = Field(default="", description="Market question text (for UX/reconciliation)")
 
 
 class Trade(BaseModel):

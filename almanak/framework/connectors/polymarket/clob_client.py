@@ -797,6 +797,41 @@ class ClobClient:
         markets = self.get_markets(MarketFilters(slug=slug, limit=1))
         return markets[0] if markets else None
 
+    # Sentinel stored in ``_cache`` so negative lookups (condition_id → no
+    # market) are cached too — otherwise a closed/delisted market would
+    # trigger a Gamma call on every ``get_positions`` invocation.
+    _MARKET_NOT_FOUND: Any = object()
+
+    def get_market_by_condition_id(self, condition_id: str) -> GammaMarket | None:
+        """Get market by CTF condition ID, with per-session caching.
+
+        Used by :meth:`get_positions` to backfill ``market_id``/``token_id``
+        when the Data API returns them empty. Gamma's ``/markets`` endpoint
+        accepts a ``condition_ids`` filter and returns one entry per match.
+
+        Args:
+            condition_id: CTF condition ID (``0x…``)
+
+        Returns:
+            GammaMarket or None if no market with that condition_id exists
+            (e.g. resolved/delisted).
+        """
+        if not condition_id:
+            return None
+
+        cache_key = f"market_by_cid:{condition_id}"
+        cached_entry = self._cache.get(cache_key)
+        if cached_entry is not None:
+            value, expires_at = cached_entry
+            if time.time() < expires_at:
+                return None if value is self._MARKET_NOT_FOUND else value
+            del self._cache[cache_key]
+
+        markets = self.get_markets(MarketFilters(condition_ids=[condition_id], limit=1))
+        market = markets[0] if markets else None
+        self._set_cached(cache_key, market if market is not None else self._MARKET_NOT_FOUND)
+        return market
+
     # =========================================================================
     # Market Data (CLOB API)
     # =========================================================================
@@ -1781,17 +1816,48 @@ class ClobClient:
                 # Calculate unrealized PnL: (current_price - avg_price) * size
                 unrealized_pnl = (current_price - avg_price) * size
 
+                market_id = item.get("market") or ""
+                token_id = item.get("tokenId") or ""
+                condition_id = item.get("conditionId") or ""
+                market_question = item.get("title") or item.get("question") or ""
+
+                # The Data API inconsistently populates ``market`` and
+                # ``tokenId``. Without them, PM/dashboards cannot reconcile
+                # the position to a strategy, call ``get_market`` by id, or
+                # compute per-market PnL. Resolve from ``conditionId`` via
+                # Gamma (cached per-session). If the market is gone
+                # (closed/delisted) we still return the position so PnL
+                # isn't silently dropped.
+                if (not market_id or not token_id) and condition_id:
+                    market = self.get_market_by_condition_id(condition_id)
+                    if market is not None:
+                        if not market_id:
+                            market_id = market.id
+                        if not token_id:
+                            resolved_token = market.yes_token_id if outcome == "YES" else market.no_token_id
+                            if resolved_token:
+                                token_id = resolved_token
+                        if not market_question:
+                            market_question = market.question
+                    else:
+                        logger.warning(
+                            "Market not found in Gamma; keeping position with empty ids",
+                            condition_id=condition_id,
+                            outcome=outcome,
+                        )
+
                 positions.append(
                     Position(
-                        market_id=item.get("market", ""),
-                        condition_id=item.get("conditionId", ""),
-                        token_id=item.get("tokenId", ""),
+                        market_id=market_id,
+                        condition_id=condition_id,
+                        token_id=token_id,
                         outcome=outcome,
                         size=size,
                         avg_price=avg_price,
                         current_price=current_price,
                         unrealized_pnl=unrealized_pnl,
                         realized_pnl=Decimal(str(item.get("realizedPnl", "0"))),
+                        market_question=market_question,
                     )
                 )
             except Exception as e:
