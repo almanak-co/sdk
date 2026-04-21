@@ -307,7 +307,7 @@ def format_slippage_bps(bps: int | float) -> str:
         Formatted string like '50bp (0.50%)'
     """
     pct = Decimal(str(bps)) / 100
-    return f"{int(bps)}bp ({pct:.2f}%)"
+    return f"{round(bps)}bp ({pct:.2f}%)"
 
 
 def format_balance_delta(
@@ -351,8 +351,12 @@ def format_balance_delta(
         # Add USD value if price available
         if prices and token in prices:
             delta_usd = delta * prices[token]
-            usd_sign = "+" if delta_usd > 0 else ""
-            delta_str += f" ({usd_sign}{format_usd(delta_usd)})"
+            if delta_usd > 0:
+                delta_str += f" (+{format_usd(delta_usd)})"
+            elif delta_usd < 0:
+                delta_str += f" (-{format_usd(abs(delta_usd))})"
+            else:
+                delta_str += f" ({format_usd(Decimal('0'))})"
 
         parts.append(f"{token}: {delta_str}")
 
