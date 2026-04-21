@@ -312,7 +312,7 @@ The command reads `supported_protocols` and `intent_types` from your `@almanak_s
 ## Want an LLM to Make the Decisions?
 
 The SDK also supports **agentic strategies** where an LLM autonomously decides
-what to do using Almanak's 29 built-in tools. Instead of writing `decide()` logic
+what to do using Almanak's 38 built-in tools. Instead of writing `decide()` logic
 in Python, you write a system prompt and let the LLM reason over market data.
 
 This approach requires **your own LLM API key** (OpenAI, Anthropic, or any

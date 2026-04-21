@@ -308,7 +308,7 @@ almanak strat permissions -o permissions.json
 
 ## 想让 LLM 来做决策？
 
-SDK 还支持**代理策略**，其中 LLM 使用 Almanak 的 29 个内置工具自主决定
+SDK 还支持**代理策略**，其中 LLM 使用 Almanak 的 38 个内置工具自主决定
 要做什么。您无需在 Python 中编写 `decide()` 逻辑，而是编写系统提示词，
 让 LLM 基于市场数据进行推理。
 

@@ -312,7 +312,7 @@ La commande lit `supported_protocols` et `intent_types` depuis votre décorateur
 ## Vous voulez qu'un LLM prenne les décisions ?
 
 Le SDK supporte aussi les **stratégies agentiques** où un LLM décide
-de manière autonome quoi faire en utilisant les 29 outils intégrés d'Almanak. Au lieu
+de manière autonome quoi faire en utilisant les 38 outils intégrés d'Almanak. Au lieu
 d'écrire la logique `decide()` en Python, vous écrivez un prompt système et laissez
 le LLM raisonner sur les données de marché.
 

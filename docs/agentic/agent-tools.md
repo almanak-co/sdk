@@ -188,9 +188,9 @@ Standard envelope returned by every tool call.
 
 ## Built-in Tools
 
-The default catalog includes 29 tools organized into four categories.
+The default catalog includes 38 tools organized into four categories.
 
-### Data Tools (9)
+### Data Tools (14)
 
 Read-only tools with no on-chain side effects. Risk tier: **NONE**.
 
@@ -218,7 +218,7 @@ Pre-execution analysis tools. Risk tier: **NONE**.
 | `estimate_gas` | Estimate gas cost (USD + native token) | `intent_type`, `chain` |
 | `compute_rebalance_candidate` | Check economic viability of LP rebalance | `position_id`, `chain` |
 
-### Action Tools (12)
+### Action Tools (16)
 
 On-chain execution tools. Risk tier: **MEDIUM** or **HIGH**. All support `dry_run` for simulation.
 

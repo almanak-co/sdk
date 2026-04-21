@@ -312,7 +312,7 @@ El comando lee `supported_protocols` e `intent_types` de tu decorador `@almanak_
 ## Quieres que un LLM tome las decisiones?
 
 El SDK tambien soporta **estrategias agentivas** donde un LLM decide
-autonomamente que hacer usando las 29 herramientas integradas de Almanak. En lugar de
+autonomamente que hacer usando las 38 herramientas integradas de Almanak. En lugar de
 escribir la logica `decide()` en Python, escribes un prompt de sistema y dejas que
 el LLM razone sobre los datos de mercado.
 
