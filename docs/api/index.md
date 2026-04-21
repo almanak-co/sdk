@@ -7,7 +7,6 @@ This section documents the public Python API of the Almanak SDK.
 ```python
 # Top-level exports (most common)
 from almanak import (
-    Almanak,
     Chain, Network, Protocol, ActionType,
     IntentStrategy, MarketSnapshot,
     SwapIntent, HoldIntent, LPOpenIntent, LPCloseIntent,

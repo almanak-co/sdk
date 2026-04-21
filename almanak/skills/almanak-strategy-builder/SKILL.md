@@ -253,6 +253,7 @@ Intent.swap(
     amount_usd=Decimal("1000"),  # Amount in USD (use amount_usd OR amount)
     amount=Decimal("500"),       # Amount in token units (alternative to amount_usd)
     max_slippage=Decimal("0.005"),  # Max slippage (0.5%)
+    max_price_impact=Decimal("0.30"),  # Optional: max quoter-vs-oracle deviation (default: 30%)
     protocol="uniswap_v3",      # Optional: specific DEX
     chain="arbitrum",            # Optional: override chain
     destination_chain="base",    # Optional: cross-chain swap
@@ -350,6 +351,7 @@ Intent.withdraw(
     amount=Decimal("10"),
     withdraw_all=False,      # Set True to withdraw everything
     market_id=None,
+    is_collateral=True,      # Morpho Blue only: True = collateral, False = loan token
 )
 ```
 
@@ -380,6 +382,7 @@ Intent.perp_close(
     size_usd=None,               # None = close full position
     max_slippage=Decimal("0.01"),
     protocol="gmx_v2",
+    position_id=None,            # Required for venues keyed on bytes32 (e.g. pancakeswap_perps)
 )
 ```
 
@@ -418,6 +421,7 @@ Intent.unstake(
     protocol="lido",
     token_in="wstETH",
     amount=Decimal("10"),
+    protocol_params=None,    # Optional: e.g. {"phase": "cooldown"} for Ethena
 )
 ```
 
