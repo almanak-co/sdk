@@ -56,6 +56,7 @@ from .extracted_data import BridgeData, LPCloseData, PredictionFill, SwapAmounts
 if TYPE_CHECKING:
     from .outcome import ExecutionOutcome
 
+from ._pipeline_state import ExecutionPipelineState
 from .interfaces import (
     ExecutionError,
     GasEstimationError,
@@ -1083,7 +1084,41 @@ class ExecutionOrchestrator:
         Returns:
             ExecutionResult with complete execution details
         """
-        # Initialize context
+        state = self._init_pipeline_state(action_bundle, context)
+        try:
+            phases: tuple[Callable[[ExecutionPipelineState], Any], ...] = (
+                self._phase_build,
+                self._phase_validate,
+                self._phase_simulate,
+                self._phase_gas,
+                self._phase_sign,
+                self._phase_submit_and_confirm,
+                self._phase_enrich,
+            )
+            for phase in phases:
+                early = await phase(state)
+                if early is not None:
+                    return early
+            return state.result
+        except Exception as exc:
+            return self._handle_execution_exception(state, exc)
+
+    # -------------------------------------------------------------------------
+    # Pipeline setup
+    # -------------------------------------------------------------------------
+
+    def _init_pipeline_state(
+        self,
+        action_bundle: ActionBundle,
+        context: ExecutionContext | None,
+    ) -> ExecutionPipelineState:
+        """Set up the mutable ``ExecutionPipelineState`` for ``execute``.
+
+        Fills in default context values (wallet_address, chain,
+        intent_description), builds a fresh ``ExecutionResult``, and creates
+        the crash-recovery ``ExecutionSession`` if a session store is
+        configured.
+        """
         if context is None:
             context = ExecutionContext(
                 wallet_address=self.signer.address,
@@ -1108,484 +1143,483 @@ class ExecutionOrchestrator:
         # Create execution session for crash recovery (PREPARING phase)
         session = self._create_session(context, action_bundle)
 
-        try:
-            # Step 0: Refresh deferred transactions (LiFi, Enso) with fresh route data
-            from .deferred_refresh import refresh_deferred_bundle
+        return ExecutionPipelineState(
+            action_bundle=action_bundle,
+            context=context,
+            result=result,
+            session=session,
+        )
 
-            action_bundle = refresh_deferred_bundle(action_bundle, context.wallet_address, rpc_url=self.rpc_url)
+    # -------------------------------------------------------------------------
+    # Phase helpers
+    # -------------------------------------------------------------------------
 
-            # Step 1: Build unsigned transactions from ActionBundle
-            # Gas prices are set as placeholders; _update_gas_prices() sets final values.
-            unsigned_txs = await self._build_unsigned_transactions(action_bundle, context)
+    async def _phase_build(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 0, 1, 1.5, 1.6: refresh deferred, build unsigned, pre-flight, gas fallback.
 
-            if not unsigned_txs:
-                intent_type = (action_bundle.intent_type or "").upper()
-                # HOLD intents legitimately produce 0 transactions.
-                # No-op bundles (e.g., withdraw_all on zero collateral) are also legitimate.
-                is_no_op = bool(action_bundle.metadata and action_bundle.metadata.get("no_op"))
-                if intent_type == "HOLD" or is_no_op:
-                    no_op_reason = (
-                        action_bundle.metadata.get("reason", "No-op bundle")
-                        if is_no_op
-                        else "No transactions to execute (HOLD intent)"
-                    )
-                    result.success = True
-                    result.phase = ExecutionPhase.COMPLETE
-                    result.completed_at = datetime.now(UTC)
-                    self._complete_session(session, success=True)
-                    self._emit_event(
-                        ExecutionEventType.EXECUTION_SUCCESS,
-                        context,
-                        {"message": no_op_reason, "intent_type": intent_type},
-                    )
-                    return result
+        Returns an ``ExecutionResult`` to short-circuit when the bundle is
+        empty (either a legitimate HOLD/no-op SUCCESS, or a failure for any
+        other intent type that compiled to 0 transactions). Returns ``None``
+        to continue pipeline execution.
+        """
+        context = state.context
+        result = state.result
+        session = state.session
 
-                # For all other intent types (LP_CLOSE, SWAP, etc.), 0 transactions
-                # means nothing happened -- this is a false positive if reported as
-                # SUCCESS. Mark as failed so the strategy knows the action didn't execute.
-                error_msg = (
-                    f"Empty ActionBundle: {intent_type} compiled to 0 transactions. "
-                    f"Nothing was executed. This usually means no position was found to close "
-                    f"or the compiler could not build the required transactions."
-                )
-                logger.warning(error_msg)
-                result.success = False
-                result.error = error_msg
-                result.error_phase = ExecutionPhase.COMPLETE
-                result.phase = ExecutionPhase.COMPLETE
-                result.completed_at = datetime.now(UTC)
-                self._complete_session(session, success=False, error=error_msg)
-                self._emit_event(
-                    ExecutionEventType.EXECUTION_FAILED,
-                    context,
-                    {"error": error_msg, "message": error_msg, "intent_type": intent_type},
-                )
-                return result
+        # Step 0: Refresh deferred transactions (LiFi, Enso) with fresh route data
+        from .deferred_refresh import refresh_deferred_bundle
 
-            # Step 1.5: Pre-flight token balance check
-            # Prevents sending doomed transactions that can hang Anvil forks
-            # via expensive upstream RPC calls during gas estimation / simulation.
-            await self._check_token_balance_before_submit(action_bundle, context)
+        state.action_bundle = refresh_deferred_bundle(state.action_bundle, context.wallet_address, rpc_url=self.rpc_url)
+        action_bundle = state.action_bundle
 
-            # Step 1.6: On-chain gas estimation fallback (when simulation is disabled)
-            if not context.simulation_enabled:
-                unsigned_txs, gas_warnings = await self._maybe_estimate_gas_limits(unsigned_txs, context)
-                if gas_warnings:
-                    result.gas_warnings = gas_warnings
+        # Step 1: Build unsigned transactions from ActionBundle
+        # Gas prices are set as placeholders; _update_gas_prices() sets final values.
+        unsigned_txs = await self._build_unsigned_transactions(action_bundle, context)
 
-            # Step 2: Validate via RiskGuard
-            self._emit_event(
-                ExecutionEventType.VALIDATING,
-                context,
-                {"tx_count": len(unsigned_txs)},
+        if not unsigned_txs:
+            return self._handle_empty_bundle(state)
+
+        # Step 1.5: Pre-flight token balance check
+        # Prevents sending doomed transactions that can hang Anvil forks
+        # via expensive upstream RPC calls during gas estimation / simulation.
+        await self._check_token_balance_before_submit(action_bundle, context)
+
+        # Step 1.6: On-chain gas estimation fallback (when simulation is disabled)
+        if not context.simulation_enabled:
+            unsigned_txs, gas_warnings = await self._maybe_estimate_gas_limits(unsigned_txs, context)
+            if gas_warnings:
+                result.gas_warnings = gas_warnings
+
+        state.unsigned_txs = unsigned_txs
+        # session is unused here but referenced via state.session elsewhere
+        _ = session
+        return None
+
+    def _handle_empty_bundle(self, state: ExecutionPipelineState) -> ExecutionResult:
+        """Short-circuit result for an ActionBundle that built 0 transactions.
+
+        HOLD intents and no-op bundles (e.g., withdraw_all on zero
+        collateral) are legitimate SUCCESS. Any other intent type with 0
+        transactions is a failure (the compiler produced nothing, so
+        nothing happened).
+        """
+        action_bundle = state.action_bundle
+        context = state.context
+        result = state.result
+        session = state.session
+
+        intent_type = (action_bundle.intent_type or "").upper()
+        # HOLD intents legitimately produce 0 transactions.
+        # No-op bundles (e.g., withdraw_all on zero collateral) are also legitimate.
+        is_no_op = bool(action_bundle.metadata and action_bundle.metadata.get("no_op"))
+        if intent_type == "HOLD" or is_no_op:
+            no_op_reason = (
+                action_bundle.metadata.get("reason", "No-op bundle")
+                if is_no_op
+                else "No transactions to execute (HOLD intent)"
             )
-
-            validation_result = await self._validate_transactions(unsigned_txs, context)
-            if not validation_result.passed:
-                result.error = f"RiskGuard blocked: {'; '.join(validation_result.violations)}"
-                result.error_phase = ExecutionPhase.VALIDATION
-                self._complete_session(session, success=False, error=result.error)
-                self._emit_event(
-                    ExecutionEventType.RISK_BLOCKED,
-                    context,
-                    {"violations": validation_result.violations},
-                )
-                return result
-
-            # Step 2.5: Pre-flight balance check (VIB-521)
-            # Prevents wasting gas on approvals when the wallet can't cover the
-            # final action (e.g., LP mint). Extracts required token amounts from
-            # the ActionBundle metadata and checks on-chain balances.
-            preflight_error = await self._preflight_balance_check(action_bundle, context)
-            if preflight_error:
-                result.error = preflight_error
-                result.error_phase = ExecutionPhase.VALIDATION
-                self._complete_session(session, success=False, error=result.error)
-                self._emit_event(
-                    ExecutionEventType.RISK_BLOCKED,
-                    context,
-                    {"violations": [preflight_error]},
-                )
-                return result
-
-            result.phase = ExecutionPhase.SIMULATION
-
-            # Step 3: Simulate (if enabled)
-            if context.simulation_enabled:
-                self._emit_event(
-                    ExecutionEventType.SIMULATING,
-                    context,
-                    {"tx_count": len(unsigned_txs)},
-                )
-
-                # Build state overrides for Safe wallet simulation
-                # Safe wallets hold the tokens, but EOA signs - simulator needs to
-                # see the Safe's balance, not the EOA's
-                state_overrides = None
-                if isinstance(self.signer, SafeSigner):
-                    safe_address = self.signer.address
-                    # Override Safe wallet ETH balance for simulation
-                    # This ensures simulation sees the Safe can pay for gas
-                    state_overrides = {
-                        safe_address: {
-                            "balance": hex(10 * 10**18)  # 10 ETH for simulation
-                        }
-                    }
-                    logger.info(
-                        "Using state overrides for Safe wallet simulation",
-                        extra={
-                            "safe_address": safe_address,
-                            "eoa_address": self.signer.eoa_address,
-                        },
-                    )
-
-                simulation_result = await self.simulator.simulate(
-                    unsigned_txs, context.chain, state_overrides=state_overrides
-                )
-                result.simulation_result = simulation_result
-
-                if not simulation_result.success:
-                    result.error = f"Simulation failed: {simulation_result.revert_reason or 'Unknown reason'}"
-                    result.error_phase = ExecutionPhase.SIMULATION
-                    self._complete_session(session, success=False, error=result.error)
-                    self._emit_event(
-                        ExecutionEventType.SIMULATION_FAILED,
-                        context,
-                        {"revert_reason": simulation_result.revert_reason},
-                    )
-                    return result
-
-                # Update gas estimates from simulation if available
-                if simulation_result.gas_estimates:
-                    source = simulation_result.simulator_name or "unknown"
-                    for i, gas_estimate in enumerate(simulation_result.gas_estimates):
-                        if i < len(unsigned_txs):
-                            buffered = int(gas_estimate * self.gas_buffer_multiplier)
-                            logger.info(
-                                f"Gas estimate tx[{i}]: raw={gas_estimate:,} "
-                                f"buffered={buffered:,} (x{self.gas_buffer_multiplier}) "
-                                f"source={source}"
-                            )
-                            unsigned_txs[i] = self._update_gas_estimate(unsigned_txs[i], gas_estimate)
-
-            # Step 3.5: Update gas prices from network
-            unsigned_txs = await self._update_gas_prices(unsigned_txs)
-
-            # Step 3.6: Validate gas prices against configured cap
-            # This must run AFTER _update_gas_prices() sets real values.
-            gas_price_result = self._validate_gas_prices(unsigned_txs)
-            if not gas_price_result.passed:
-                result.error = f"Gas price cap exceeded: {'; '.join(gas_price_result.violations)}"
-                result.error_phase = ExecutionPhase.VALIDATION
-                self._complete_session(session, success=False, error=result.error)
-                self._emit_event(
-                    ExecutionEventType.RISK_BLOCKED,
-                    context,
-                    {"violations": gas_price_result.violations},
-                )
-                return result
-
-            result.phase = ExecutionPhase.NONCE_ASSIGNMENT
-
-            # Step 4: Assign nonces
-            unsigned_txs = await self._assign_nonces(unsigned_txs, context)
-
-            result.phase = ExecutionPhase.SIGNING
-
-            # Step 5: Sign transactions
-            self._emit_event(
-                ExecutionEventType.SIGNING,
-                context,
-                {"tx_count": len(unsigned_txs)},
-            )
-
-            if isinstance(self.signer, SafeSigner):
-                signed_txs = await self._sign_safe_batch(unsigned_txs, context)
-            else:
-                signed_txs = await self.signer.sign_batch(unsigned_txs, context.chain)
-
-            # Checkpoint session after signing (SIGNING phase with nonces)
-            tx_states = [
-                TransactionState(
-                    nonce=tx.nonce if tx.nonce is not None else 0,
-                    status=TransactionStatus.PENDING,
-                )
-                for tx in unsigned_txs
-            ]
-            self._checkpoint_session(session, SessionPhase.SIGNING, transactions=tx_states)
-
-            result.phase = ExecutionPhase.SUBMISSION
-
-            # Step 6: Dry run check
-            if context.dry_run:
-                result.success = True
-                result.phase = ExecutionPhase.COMPLETE
-                result.completed_at = datetime.now(UTC)
-                self._complete_session(session, success=True)
-                self._emit_event(
-                    ExecutionEventType.EXECUTION_SUCCESS,
-                    context,
-                    {"message": "Dry run completed", "tx_count": len(signed_txs)},
-                )
-                return result
-
-            # Step 7+8: Submit transactions and collect receipts.
-            #
-            # Use sequential submit-and-confirm for multi-TX bundles with EOA
-            # signers to avoid hitting RPC in-flight TX limits (e.g. Alchemy's
-            # 2-TX limit for delegated accounts on Base).  Safe signers bundle
-            # atomically via MultiSend into a single on-chain TX, so they are
-            # exempt and use the faster parallel path.
-            self._emit_event(
-                ExecutionEventType.SUBMITTING,
-                context,
-                {"tx_count": len(signed_txs)},
-            )
-
-            use_sequential = len(signed_txs) >= 2 and not isinstance(self.signer, SafeSigner)
-
-            if use_sequential:
-                # --- Sequential path: submit TX -> confirm -> submit next ---
-                from .submitter.public import PublicMempoolSubmitter
-
-                if isinstance(self.submitter, PublicMempoolSubmitter):
-                    logger.info(f"Using sequential submit for {len(signed_txs)} TXs (avoids RPC in-flight limits)")
-                    try:
-                        submission_results, receipts = await self.submitter.submit_sequential(
-                            signed_txs, receipt_timeout=self.tx_timeout_seconds
-                        )
-                    except Exception as exc:
-                        # Record partial tx_hashes from already-confirmed TXs
-                        # so retry logic can detect them and avoid duplicate swaps.
-                        partial = getattr(exc, "partial_results", [])
-                        for i, sub in enumerate(partial):
-                            if sub.submitted and session and i < len(session.transactions):
-                                session.transactions[i].tx_hash = sub.tx_hash
-                                session.transactions[i].status = TransactionStatus.SUBMITTED
-                                session.transactions[i].submitted_at = datetime.now(UTC)
-                        if partial:
-                            self._checkpoint_session(
-                                session,
-                                SessionPhase.SUBMITTED,
-                                transactions=session.transactions if session else None,
-                            )
-                        raise
-                else:
-                    # Non-public submitter fallback: submit all, then confirm
-                    submission_results = await self.submitter.submit(signed_txs)
-                    use_sequential = False  # fall through to parallel receipt path
-            else:
-                submission_results = await self.submitter.submit(signed_txs)
-
-            if not use_sequential:
-                # --- Parallel path (single TX, Safe signer, or fallback) ---
-                # Check for submission failures
-                failed_submissions = [r for r in submission_results if not r.submitted]
-                if failed_submissions:
-                    first_error = failed_submissions[0].error or "Unknown submission error"
-                    result.error = f"Submission failed: {first_error}"
-                    result.error_phase = ExecutionPhase.SUBMISSION
-                    self._complete_session(session, success=False, error=result.error)
-                    self._emit_event(
-                        ExecutionEventType.EXECUTION_FAILED,
-                        context,
-                        {"error": first_error, "failed_count": len(failed_submissions)},
-                    )
-                    return result
-
-            # Emit TX_SENT events and update transaction states
-            for i, submission in enumerate(submission_results):
-                self._emit_event(
-                    ExecutionEventType.TX_SENT,
-                    context,
-                    {"tx_hash": submission.tx_hash},
-                )
-                # Update transaction state with tx_hash
-                if session and i < len(session.transactions):
-                    session.transactions[i].tx_hash = submission.tx_hash
-                    session.transactions[i].status = TransactionStatus.SUBMITTED
-                    session.transactions[i].submitted_at = datetime.now(UTC)
-
-            # Checkpoint SUBMITTED phase with tx_hash and nonce
-            self._checkpoint_session(
-                session,
-                SessionPhase.SUBMITTED,
-                transactions=session.transactions if session else None,
-            )
-
-            result.phase = ExecutionPhase.CONFIRMATION
-
-            # Checkpoint CONFIRMING phase
-            self._checkpoint_session(session, SessionPhase.CONFIRMING)
-
-            if not use_sequential:
-                # Parallel receipt polling (single TX or Safe bundles)
-                self._emit_event(
-                    ExecutionEventType.WAITING,
-                    context,
-                    {"tx_count": len(submission_results)},
-                )
-                tx_hashes = [r.tx_hash for r in submission_results]
-                receipts = await self.submitter.get_receipts(tx_hashes, timeout=self.tx_timeout_seconds)
-
-            # Step 9: Process receipts
-            for _i, receipt in enumerate(receipts):
-                tx_result = TransactionResult(
-                    tx_hash=receipt.tx_hash,
-                    success=receipt.success,
-                    receipt=receipt,
-                    gas_used=receipt.gas_used,
-                    gas_cost_wei=receipt.gas_cost_wei,
-                    logs=receipt.logs,
-                )
-
-                result.transaction_results.append(tx_result)
-                result.total_gas_used += receipt.gas_used
-                result.total_gas_cost_wei += receipt.gas_cost_wei
-
-                # Update session transaction state
-                if session:
-                    session.update_transaction(
-                        tx_hash=receipt.tx_hash,
-                        status=(TransactionStatus.CONFIRMED if receipt.success else TransactionStatus.FAILED),
-                        gas_used=receipt.gas_used,
-                        block_number=receipt.block_number,
-                    )
-
-                if receipt.success:
-                    self._emit_event(
-                        ExecutionEventType.TX_CONFIRMED,
-                        context,
-                        {
-                            "tx_hash": receipt.tx_hash,
-                            "block_number": receipt.block_number,
-                            "gas_used": receipt.gas_used,
-                        },
-                    )
-                else:
-                    self._emit_event(
-                        ExecutionEventType.TX_REVERTED,
-                        context,
-                        {
-                            "tx_hash": receipt.tx_hash,
-                            "block_number": receipt.block_number,
-                            "gas_used": receipt.gas_used,
-                        },
-                    )
-
-            # Check for any reverted transactions
-            reverted = [tr for tr in result.transaction_results if not tr.success]
-            if reverted:
-                first_reverted = reverted[0]
-                result.error_phase = ExecutionPhase.CONFIRMATION
-
-                # Build and log verbose revert report for debugging
-                verbose_report = build_verbose_revert_report(
-                    context=context,
-                    action_bundle=action_bundle,
-                    transaction_results=result.transaction_results,
-                    intent=getattr(action_bundle, "intent", None),
-                    raw_error=first_reverted.error,
-                    started_at=result.started_at,
-                )
-
-                result.error = f"{verbose_report.format()}"
-                self._complete_session(session, success=False, error=result.error)
-                self._emit_event(
-                    ExecutionEventType.EXECUTION_FAILED,
-                    context,
-                    {
-                        "error": result.error,
-                        "reverted_count": len(reverted),
-                        "verbose_report": verbose_report.to_dict(),
-                    },
-                )
-
-                # Log user-friendly failure summary
-                intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
-                tx_hash_fmt = format_tx_hash(first_reverted.tx_hash)
-                logger.error(f"FAILED: {intent_type} - Transaction reverted at {tx_hash_fmt}")
-                logger.error(f"   Reverted: {len(reverted)}/{len(result.transaction_results)} transactions")
-
-                return result
-
-            # Success!
             result.success = True
             result.phase = ExecutionPhase.COMPLETE
             result.completed_at = datetime.now(UTC)
-
-            # Update local nonce cache ONLY after confirmed on-chain success.
-            # This prevents nonce drift when transactions fail. (VIB-1449)
-            confirmed_count = len([tr for tr in result.transaction_results if tr.success])
-            if confirmed_count > 0:
-                wallet_key = context.wallet_address.lower()
-                # Set nonce to chain_nonce + confirmed_count (or use the
-                # highest confirmed nonce + 1 from the transaction results).
-                web3 = await self._get_web3()
-                fresh_nonce = await web3.eth.get_transaction_count(
-                    web3.to_checksum_address(context.wallet_address), "pending"
-                )
-                self._local_nonce[wallet_key] = fresh_nonce
-                logger.debug(f"Updated local nonce cache to {fresh_nonce} after {confirmed_count} confirmed TXs")
-
-            # Mark session complete on success
             self._complete_session(session, success=True)
-
             self._emit_event(
                 ExecutionEventType.EXECUTION_SUCCESS,
                 context,
-                {
-                    "tx_count": len(result.transaction_results),
-                    "total_gas_used": result.total_gas_used,
-                    "total_gas_cost_wei": str(result.total_gas_cost_wei),
+                {"message": no_op_reason, "intent_type": intent_type},
+            )
+            return result
+
+        # For all other intent types (LP_CLOSE, SWAP, etc.), 0 transactions
+        # means nothing happened -- this is a false positive if reported as
+        # SUCCESS. Mark as failed so the strategy knows the action didn't execute.
+        error_msg = (
+            f"Empty ActionBundle: {intent_type} compiled to 0 transactions. "
+            f"Nothing was executed. This usually means no position was found to close "
+            f"or the compiler could not build the required transactions."
+        )
+        logger.warning(error_msg)
+        result.success = False
+        result.error = error_msg
+        result.error_phase = ExecutionPhase.COMPLETE
+        result.phase = ExecutionPhase.COMPLETE
+        result.completed_at = datetime.now(UTC)
+        self._complete_session(session, success=False, error=error_msg)
+        self._emit_event(
+            ExecutionEventType.EXECUTION_FAILED,
+            context,
+            {"error": error_msg, "message": error_msg, "intent_type": intent_type},
+        )
+        return result
+
+    async def _phase_validate(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 2 and 2.5: RiskGuard validation and VIB-521 pre-flight balance check."""
+        context = state.context
+        result = state.result
+        session = state.session
+        assert state.unsigned_txs is not None  # set by _phase_build
+
+        # Step 2: Validate via RiskGuard
+        self._emit_event(
+            ExecutionEventType.VALIDATING,
+            context,
+            {"tx_count": len(state.unsigned_txs)},
+        )
+
+        validation_result = await self._validate_transactions(state.unsigned_txs, context)
+        if not validation_result.passed:
+            result.error = f"RiskGuard blocked: {'; '.join(validation_result.violations)}"
+            result.error_phase = ExecutionPhase.VALIDATION
+            self._complete_session(session, success=False, error=result.error)
+            self._emit_event(
+                ExecutionEventType.RISK_BLOCKED,
+                context,
+                {"violations": validation_result.violations},
+            )
+            return result
+
+        # Step 2.5: Pre-flight balance check (VIB-521)
+        # Prevents wasting gas on approvals when the wallet can't cover the
+        # final action (e.g., LP mint). Extracts required token amounts from
+        # the ActionBundle metadata and checks on-chain balances.
+        preflight_error = await self._preflight_balance_check(state.action_bundle, context)
+        if preflight_error:
+            result.error = preflight_error
+            result.error_phase = ExecutionPhase.VALIDATION
+            self._complete_session(session, success=False, error=result.error)
+            self._emit_event(
+                ExecutionEventType.RISK_BLOCKED,
+                context,
+                {"violations": [preflight_error]},
+            )
+            return result
+
+        return None
+
+    async def _phase_simulate(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 3: simulate transactions (if enabled) and update gas estimates."""
+        context = state.context
+        result = state.result
+        session = state.session
+        assert state.unsigned_txs is not None
+
+        result.phase = ExecutionPhase.SIMULATION
+
+        if not context.simulation_enabled:
+            return None
+
+        self._emit_event(
+            ExecutionEventType.SIMULATING,
+            context,
+            {"tx_count": len(state.unsigned_txs)},
+        )
+
+        # Build state overrides for Safe wallet simulation
+        # Safe wallets hold the tokens, but EOA signs - simulator needs to
+        # see the Safe's balance, not the EOA's
+        state_overrides = None
+        if isinstance(self.signer, SafeSigner):
+            safe_address = self.signer.address
+            # Override Safe wallet ETH balance for simulation
+            # This ensures simulation sees the Safe can pay for gas
+            state_overrides = {
+                safe_address: {
+                    "balance": hex(10 * 10**18)  # 10 ETH for simulation
+                }
+            }
+            logger.info(
+                "Using state overrides for Safe wallet simulation",
+                extra={
+                    "safe_address": safe_address,
+                    "eoa_address": self.signer.eoa_address,
                 },
             )
 
-            # Log user-friendly execution summary
-            intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
-            tx_hashes = [format_tx_hash(tr.tx_hash) for tr in result.transaction_results]
-            gas_fmt = format_gas_cost(result.total_gas_used)
+        simulation_result = await self.simulator.simulate(
+            state.unsigned_txs, context.chain, state_overrides=state_overrides
+        )
+        result.simulation_result = simulation_result
 
-            ok_prefix = "✅" if _emojis_enabled() else "[OK]"
-            logger.info(f"{ok_prefix} EXECUTED: {intent_type} completed successfully")
-            logger.info(f"   Txs: {len(result.transaction_results)} ({', '.join(tx_hashes)}) | {gas_fmt}")
-
-            return result
-
-        except NonceError as e:
-            result.error = str(e)
-            result.error_phase = ExecutionPhase.NONCE_ASSIGNMENT
-            self._complete_session(session, success=False, error=str(e))
+        if not simulation_result.success:
+            result.error = f"Simulation failed: {simulation_result.revert_reason or 'Unknown reason'}"
+            result.error_phase = ExecutionPhase.SIMULATION
+            self._complete_session(session, success=False, error=result.error)
             self._emit_event(
-                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.SIMULATION_FAILED,
                 context,
-                {"error": str(e), "error_type": "NonceError"},
+                {"revert_reason": simulation_result.revert_reason},
             )
             return result
 
-        except InsufficientFundsError as e:
-            result.error = str(e)
-            result.error_phase = result.phase
-            self._complete_session(session, success=False, error=str(e))
+        # Update gas estimates from simulation if available
+        if simulation_result.gas_estimates:
+            source = simulation_result.simulator_name or "unknown"
+            for i, gas_estimate in enumerate(simulation_result.gas_estimates):
+                if i < len(state.unsigned_txs):
+                    buffered = int(gas_estimate * self.gas_buffer_multiplier)
+                    logger.info(
+                        f"Gas estimate tx[{i}]: raw={gas_estimate:,} "
+                        f"buffered={buffered:,} (x{self.gas_buffer_multiplier}) "
+                        f"source={source}"
+                    )
+                    state.unsigned_txs[i] = self._update_gas_estimate(state.unsigned_txs[i], gas_estimate)
+
+        return None
+
+    async def _phase_gas(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 3.5 and 3.6: fetch network gas prices, then validate against cap."""
+        context = state.context
+        result = state.result
+        session = state.session
+        assert state.unsigned_txs is not None
+
+        # Step 3.5: Update gas prices from network
+        state.unsigned_txs = await self._update_gas_prices(state.unsigned_txs)
+
+        # Step 3.6: Validate gas prices against configured cap
+        # This must run AFTER _update_gas_prices() sets real values.
+        gas_price_result = self._validate_gas_prices(state.unsigned_txs)
+        if not gas_price_result.passed:
+            result.error = f"Gas price cap exceeded: {'; '.join(gas_price_result.violations)}"
+            result.error_phase = ExecutionPhase.VALIDATION
+            self._complete_session(session, success=False, error=result.error)
             self._emit_event(
-                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.RISK_BLOCKED,
                 context,
-                {"error": str(e), "error_type": "InsufficientFundsError"},
+                {"violations": gas_price_result.violations},
             )
             return result
 
-        except GasEstimationError as e:
-            result.error = str(e)
-            result.error_phase = result.phase
-            self._complete_session(session, success=False, error=str(e))
+        return None
+
+    async def _phase_sign(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 4, 5, 6: assign nonces, sign (or Safe-batch), checkpoint, dry-run short-circuit."""
+        context = state.context
+        result = state.result
+        session = state.session
+        assert state.unsigned_txs is not None
+
+        result.phase = ExecutionPhase.NONCE_ASSIGNMENT
+
+        # Step 4: Assign nonces
+        state.unsigned_txs = await self._assign_nonces(state.unsigned_txs, context)
+
+        result.phase = ExecutionPhase.SIGNING
+
+        # Step 5: Sign transactions
+        self._emit_event(
+            ExecutionEventType.SIGNING,
+            context,
+            {"tx_count": len(state.unsigned_txs)},
+        )
+
+        if isinstance(self.signer, SafeSigner):
+            signed_txs = await self._sign_safe_batch(state.unsigned_txs, context)
+        else:
+            signed_txs = await self.signer.sign_batch(state.unsigned_txs, context.chain)
+        state.signed_txs = signed_txs
+
+        # Checkpoint session after signing (SIGNING phase with nonces)
+        tx_states = [
+            TransactionState(
+                nonce=tx.nonce if tx.nonce is not None else 0,
+                status=TransactionStatus.PENDING,
+            )
+            for tx in state.unsigned_txs
+        ]
+        self._checkpoint_session(session, SessionPhase.SIGNING, transactions=tx_states)
+
+        result.phase = ExecutionPhase.SUBMISSION
+
+        # Step 6: Dry run check
+        if context.dry_run:
+            result.success = True
+            result.phase = ExecutionPhase.COMPLETE
+            result.completed_at = datetime.now(UTC)
+            self._complete_session(session, success=True)
             self._emit_event(
-                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.EXECUTION_SUCCESS,
                 context,
-                {"error": str(e), "error_type": "GasEstimationError"},
+                {"message": "Dry run completed", "tx_count": len(signed_txs)},
             )
             return result
 
-        except TransactionRevertedError as e:
+        return None
+
+    async def _phase_submit_and_confirm(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 7 and 8: submit (sequential or parallel), gather receipts, emit TX_SENT."""
+        context = state.context
+        result = state.result
+        session = state.session
+        assert state.signed_txs is not None
+        signed_txs = state.signed_txs
+
+        # Step 7+8: Submit transactions and collect receipts.
+        #
+        # Use sequential submit-and-confirm for multi-TX bundles with EOA
+        # signers to avoid hitting RPC in-flight TX limits (e.g. Alchemy's
+        # 2-TX limit for delegated accounts on Base).  Safe signers bundle
+        # atomically via MultiSend into a single on-chain TX, so they are
+        # exempt and use the faster parallel path.
+        self._emit_event(
+            ExecutionEventType.SUBMITTING,
+            context,
+            {"tx_count": len(signed_txs)},
+        )
+
+        use_sequential = len(signed_txs) >= 2 and not isinstance(self.signer, SafeSigner)
+        submission_results: list[Any]
+        receipts: list[Any] | None = None
+
+        if use_sequential:
+            # --- Sequential path: submit TX -> confirm -> submit next ---
+            from .submitter.public import PublicMempoolSubmitter
+
+            if isinstance(self.submitter, PublicMempoolSubmitter):
+                logger.info(f"Using sequential submit for {len(signed_txs)} TXs (avoids RPC in-flight limits)")
+                try:
+                    submission_results, receipts = await self.submitter.submit_sequential(
+                        signed_txs, receipt_timeout=self.tx_timeout_seconds
+                    )
+                except Exception as exc:
+                    # Record partial tx_hashes from already-confirmed TXs
+                    # so retry logic can detect them and avoid duplicate swaps.
+                    partial = getattr(exc, "partial_results", [])
+                    for i, sub in enumerate(partial):
+                        if sub.submitted and session and i < len(session.transactions):
+                            session.transactions[i].tx_hash = sub.tx_hash
+                            session.transactions[i].status = TransactionStatus.SUBMITTED
+                            session.transactions[i].submitted_at = datetime.now(UTC)
+                    if partial:
+                        self._checkpoint_session(
+                            session,
+                            SessionPhase.SUBMITTED,
+                            transactions=session.transactions if session else None,
+                        )
+                    raise
+            else:
+                # Non-public submitter fallback: submit all, then confirm
+                submission_results = await self.submitter.submit(signed_txs)
+                use_sequential = False  # fall through to parallel receipt path
+        else:
+            submission_results = await self.submitter.submit(signed_txs)
+
+        state.use_sequential = use_sequential
+        state.submission_results = submission_results
+
+        if not use_sequential:
+            # --- Parallel path (single TX, Safe signer, or fallback) ---
+            # Check for submission failures
+            failed_submissions = [r for r in submission_results if not r.submitted]
+            if failed_submissions:
+                first_error = failed_submissions[0].error or "Unknown submission error"
+                result.error = f"Submission failed: {first_error}"
+                result.error_phase = ExecutionPhase.SUBMISSION
+                self._complete_session(session, success=False, error=result.error)
+                self._emit_event(
+                    ExecutionEventType.EXECUTION_FAILED,
+                    context,
+                    {"error": first_error, "failed_count": len(failed_submissions)},
+                )
+                return result
+
+        # Emit TX_SENT events and update transaction states
+        for i, submission in enumerate(submission_results):
+            self._emit_event(
+                ExecutionEventType.TX_SENT,
+                context,
+                {"tx_hash": submission.tx_hash},
+            )
+            # Update transaction state with tx_hash
+            if session and i < len(session.transactions):
+                session.transactions[i].tx_hash = submission.tx_hash
+                session.transactions[i].status = TransactionStatus.SUBMITTED
+                session.transactions[i].submitted_at = datetime.now(UTC)
+
+        # Checkpoint SUBMITTED phase with tx_hash and nonce
+        self._checkpoint_session(
+            session,
+            SessionPhase.SUBMITTED,
+            transactions=session.transactions if session else None,
+        )
+
+        result.phase = ExecutionPhase.CONFIRMATION
+
+        # Checkpoint CONFIRMING phase
+        self._checkpoint_session(session, SessionPhase.CONFIRMING)
+
+        if not use_sequential:
+            # Parallel receipt polling (single TX or Safe bundles)
+            self._emit_event(
+                ExecutionEventType.WAITING,
+                context,
+                {"tx_count": len(submission_results)},
+            )
+            tx_hashes = [r.tx_hash for r in submission_results]
+            receipts = await self.submitter.get_receipts(tx_hashes, timeout=self.tx_timeout_seconds)
+
+        state.receipts = receipts
+        return None
+
+    async def _phase_enrich(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 9: process receipts, detect reverts, emit final EXECUTION_SUCCESS/FAILED.
+
+        Updates local nonce cache after confirmed success only.
+        """
+        context = state.context
+        result = state.result
+        session = state.session
+        action_bundle = state.action_bundle
+        assert state.receipts is not None
+
+        # Step 9: Process receipts
+        for _i, receipt in enumerate(state.receipts):
+            tx_result = TransactionResult(
+                tx_hash=receipt.tx_hash,
+                success=receipt.success,
+                receipt=receipt,
+                gas_used=receipt.gas_used,
+                gas_cost_wei=receipt.gas_cost_wei,
+                logs=receipt.logs,
+            )
+
+            result.transaction_results.append(tx_result)
+            result.total_gas_used += receipt.gas_used
+            result.total_gas_cost_wei += receipt.gas_cost_wei
+
+            # Update session transaction state
+            if session:
+                session.update_transaction(
+                    tx_hash=receipt.tx_hash,
+                    status=(TransactionStatus.CONFIRMED if receipt.success else TransactionStatus.FAILED),
+                    gas_used=receipt.gas_used,
+                    block_number=receipt.block_number,
+                )
+
+            if receipt.success:
+                self._emit_event(
+                    ExecutionEventType.TX_CONFIRMED,
+                    context,
+                    {
+                        "tx_hash": receipt.tx_hash,
+                        "block_number": receipt.block_number,
+                        "gas_used": receipt.gas_used,
+                    },
+                )
+            else:
+                self._emit_event(
+                    ExecutionEventType.TX_REVERTED,
+                    context,
+                    {
+                        "tx_hash": receipt.tx_hash,
+                        "block_number": receipt.block_number,
+                        "gas_used": receipt.gas_used,
+                    },
+                )
+
+        # Check for any reverted transactions
+        reverted = [tr for tr in result.transaction_results if not tr.success]
+        if reverted:
+            first_reverted = reverted[0]
             result.error_phase = ExecutionPhase.CONFIRMATION
 
             # Build and log verbose revert report for debugging
@@ -1594,7 +1628,135 @@ class ExecutionOrchestrator:
                 action_bundle=action_bundle,
                 transaction_results=result.transaction_results,
                 intent=getattr(action_bundle, "intent", None),
-                raw_error=str(e),
+                raw_error=first_reverted.error,
+                started_at=result.started_at,
+            )
+
+            result.error = f"{verbose_report.format()}"
+            self._complete_session(session, success=False, error=result.error)
+            self._emit_event(
+                ExecutionEventType.EXECUTION_FAILED,
+                context,
+                {
+                    "error": result.error,
+                    "reverted_count": len(reverted),
+                    "verbose_report": verbose_report.to_dict(),
+                },
+            )
+
+            # Log user-friendly failure summary
+            intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
+            tx_hash_fmt = format_tx_hash(first_reverted.tx_hash)
+            logger.error(f"FAILED: {intent_type} - Transaction reverted at {tx_hash_fmt}")
+            logger.error(f"   Reverted: {len(reverted)}/{len(result.transaction_results)} transactions")
+
+            return result
+
+        # Success!
+        result.success = True
+        result.phase = ExecutionPhase.COMPLETE
+        result.completed_at = datetime.now(UTC)
+
+        # Update local nonce cache ONLY after confirmed on-chain success.
+        # This prevents nonce drift when transactions fail. (VIB-1449)
+        confirmed_count = len([tr for tr in result.transaction_results if tr.success])
+        if confirmed_count > 0:
+            wallet_key = context.wallet_address.lower()
+            # Set nonce to chain_nonce + confirmed_count (or use the
+            # highest confirmed nonce + 1 from the transaction results).
+            web3 = await self._get_web3()
+            fresh_nonce = await web3.eth.get_transaction_count(
+                web3.to_checksum_address(context.wallet_address), "pending"
+            )
+            self._local_nonce[wallet_key] = fresh_nonce
+            logger.debug(f"Updated local nonce cache to {fresh_nonce} after {confirmed_count} confirmed TXs")
+
+        # Mark session complete on success
+        self._complete_session(session, success=True)
+
+        self._emit_event(
+            ExecutionEventType.EXECUTION_SUCCESS,
+            context,
+            {
+                "tx_count": len(result.transaction_results),
+                "total_gas_used": result.total_gas_used,
+                "total_gas_cost_wei": str(result.total_gas_cost_wei),
+            },
+        )
+
+        # Log user-friendly execution summary
+        intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
+        tx_hashes = [format_tx_hash(tr.tx_hash) for tr in result.transaction_results]
+        gas_fmt = format_gas_cost(result.total_gas_used)
+
+        ok_prefix = "✅" if _emojis_enabled() else "[OK]"
+        logger.info(f"{ok_prefix} EXECUTED: {intent_type} completed successfully")
+        logger.info(f"   Txs: {len(result.transaction_results)} ({', '.join(tx_hashes)}) | {gas_fmt}")
+
+        return result
+
+    # -------------------------------------------------------------------------
+    # Exception consolidation
+    # -------------------------------------------------------------------------
+
+    def _handle_execution_exception(
+        self,
+        state: ExecutionPipelineState,
+        exc: Exception,
+    ) -> ExecutionResult:
+        """Map an in-pipeline exception to the canonical ExecutionResult failure shape.
+
+        Preserves the exact error_phase / event_type behaviour that lived in
+        the seven inline ``except`` blocks pre-refactor.
+        """
+        context = state.context
+        result = state.result
+        session = state.session
+        action_bundle = state.action_bundle
+
+        if isinstance(exc, NonceError):
+            result.error = str(exc)
+            result.error_phase = ExecutionPhase.NONCE_ASSIGNMENT
+            self._complete_session(session, success=False, error=str(exc))
+            self._emit_event(
+                ExecutionEventType.EXECUTION_FAILED,
+                context,
+                {"error": str(exc), "error_type": "NonceError"},
+            )
+            return result
+
+        if isinstance(exc, InsufficientFundsError):
+            result.error = str(exc)
+            result.error_phase = result.phase
+            self._complete_session(session, success=False, error=str(exc))
+            self._emit_event(
+                ExecutionEventType.EXECUTION_FAILED,
+                context,
+                {"error": str(exc), "error_type": "InsufficientFundsError"},
+            )
+            return result
+
+        if isinstance(exc, GasEstimationError):
+            result.error = str(exc)
+            result.error_phase = result.phase
+            self._complete_session(session, success=False, error=str(exc))
+            self._emit_event(
+                ExecutionEventType.EXECUTION_FAILED,
+                context,
+                {"error": str(exc), "error_type": "GasEstimationError"},
+            )
+            return result
+
+        if isinstance(exc, TransactionRevertedError):
+            result.error_phase = ExecutionPhase.CONFIRMATION
+
+            # Build and log verbose revert report for debugging
+            verbose_report = build_verbose_revert_report(
+                context=context,
+                action_bundle=action_bundle,
+                transaction_results=result.transaction_results,
+                intent=getattr(action_bundle, "intent", None),
+                raw_error=str(exc),
                 started_at=result.started_at,
             )
 
@@ -1605,22 +1767,22 @@ class ExecutionOrchestrator:
                 ExecutionEventType.TX_REVERTED,
                 context,
                 {
-                    "tx_hash": e.tx_hash,
-                    "revert_reason": e.revert_reason,
+                    "tx_hash": exc.tx_hash,
+                    "revert_reason": exc.revert_reason,
                     "verbose_report": verbose_report.to_dict(),
                 },
             )
 
             # Log user-friendly failure summary
             intent_type = action_bundle.intent_type if action_bundle else "UNKNOWN"
-            tx_hash_fmt = format_tx_hash(e.tx_hash)
+            tx_hash_fmt = format_tx_hash(exc.tx_hash)
             logger.error(f"FAILED: {intent_type} - Transaction reverted at {tx_hash_fmt}")
-            logger.error(f"   Reason: {e.revert_reason or 'Unknown'}")
+            logger.error(f"   Reason: {exc.revert_reason or 'Unknown'}")
 
             return result
 
-        except SubmissionError as e:
-            result.error = str(e)
+        if isinstance(exc, SubmissionError):
+            result.error = str(exc)
             result.error_phase = ExecutionPhase.SUBMISSION
 
             # Preserve submitted tx_hashes on timeout so the runner can check
@@ -1637,36 +1799,36 @@ class ExecutionOrchestrator:
                             )
                         )
 
-            self._complete_session(session, success=False, error=str(e))
+            self._complete_session(session, success=False, error=str(exc))
             self._emit_event(
                 ExecutionEventType.EXECUTION_FAILED,
                 context,
-                {"error": str(e), "error_type": "SubmissionError"},
+                {"error": str(exc), "error_type": "SubmissionError"},
             )
             return result
 
-        except ExecutionError as e:
-            result.error = str(e)
+        if isinstance(exc, ExecutionError):
+            result.error = str(exc)
             result.error_phase = result.phase
-            self._complete_session(session, success=False, error=str(e))
+            self._complete_session(session, success=False, error=str(exc))
             self._emit_event(
                 ExecutionEventType.EXECUTION_FAILED,
                 context,
-                {"error": str(e), "error_type": "ExecutionError"},
+                {"error": str(exc), "error_type": "ExecutionError"},
             )
             return result
 
-        except Exception as e:
-            logger.exception(f"Unexpected execution error: {e}")
-            result.error = f"Unexpected error: {e}"
-            result.error_phase = result.phase
-            self._complete_session(session, success=False, error=str(e))
-            self._emit_event(
-                ExecutionEventType.EXECUTION_FAILED,
-                context,
-                {"error": str(e), "error_type": type(e).__name__},
-            )
-            return result
+        # Generic / unexpected exception path.
+        logger.exception(f"Unexpected execution error: {exc}")
+        result.error = f"Unexpected error: {exc}"
+        result.error_phase = result.phase
+        self._complete_session(session, success=False, error=str(exc))
+        self._emit_event(
+            ExecutionEventType.EXECUTION_FAILED,
+            context,
+            {"error": str(exc), "error_type": type(exc).__name__},
+        )
+        return result
 
     async def _build_unsigned_transactions(
         self,
