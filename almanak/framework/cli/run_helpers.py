@@ -24,8 +24,15 @@ Scope of 4c (this module):
     - _build_components             — phase 13 of run()
     - _build_cleanup_fn             — phase 14 of run()
 
-Later phases (4d-4e) will extend this module for dashboard and execution
-wrappers. See `jazzy-tinkering-zephyr.md`.
+Scope of 4d (this module):
+    - _start_dashboard_background   — phase 5a of run()
+    - _stop_dashboard               — phase 5b of run()
+    - _handle_standalone_dashboard  — phase 5c of run()
+    - _run_once                     — phase 15 of run()
+    - _run_continuous               — phase 16 of run()
+
+Phase 4e (extended tests) will add additional coverage. See
+`jazzy-tinkering-zephyr.md`.
 """
 
 from __future__ import annotations
@@ -2219,3 +2226,486 @@ def _build_components(
         sys.exit(1)
 
     return components
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Dashboard helpers
+# ---------------------------------------------------------------------------
+
+
+def _start_dashboard_background(
+    *,
+    port: int,
+    gateway_host: str = "127.0.0.1",
+    gateway_port: int = 50051,
+) -> Any:
+    """Launch the Streamlit dashboard as a background subprocess.
+
+    Mirrors the nested ``start_dashboard_background`` previously defined
+    inside ``run()``. Behavior-preserving: probes the requested port with
+    a transient socket bind, falls back to 8502-8509 if busy, and returns
+    ``None`` on any launch failure (no streamlit, spawn error, no free port).
+
+    Args:
+        port: The requested dashboard port.
+        gateway_host: Gateway host for the dashboard env (GATEWAY_HOST).
+        gateway_port: Gateway port for the dashboard env (GATEWAY_PORT).
+
+    Returns:
+        A ``subprocess.Popen`` handle, or ``None`` if launch failed.
+    """
+    import importlib.util
+    import socket
+    import subprocess
+
+    if importlib.util.find_spec("streamlit") is None:
+        click.echo("Error: streamlit not found. Install with: pip install streamlit", err=True)
+        return None
+
+    def is_port_available(p: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("localhost", p))
+                return True
+            except OSError:
+                return False
+
+    actual_port = port
+    if not is_port_available(actual_port):
+        click.echo(f"Warning: Dashboard port {actual_port} is already in use.", err=True)
+        for alt_port in range(8502, 8510):
+            if is_port_available(alt_port):
+                actual_port = alt_port
+                click.echo(f"Using alternative dashboard port: {actual_port}", err=True)
+                break
+        else:
+            click.echo(
+                f"Error: Could not find an available port for dashboard. "
+                f"Please free up port {port} or specify a different port with --dashboard-port",
+                err=True,
+            )
+            return None
+
+    project_root = Path(__file__).parent.parent.parent.parent
+    dashboard_path = project_root / "almanak" / "framework" / "dashboard" / "app.py"
+
+    # Pass gateway connection info to the dashboard subprocess
+    env = os.environ.copy()
+    env["GATEWAY_HOST"] = gateway_host
+    env["GATEWAY_PORT"] = str(gateway_port)
+
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "streamlit",
+                "run",
+                str(dashboard_path),
+                "--server.port",
+                str(actual_port),
+                "--server.headless",
+                "false",
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        click.echo(f"Dashboard started at http://localhost:{actual_port}")
+        return process
+    except Exception as e:
+        click.echo(f"Error launching dashboard: {e}", err=True)
+        return None
+
+
+def _stop_dashboard(process: Any) -> None:
+    """Terminate the background dashboard process (best-effort).
+
+    Mirrors the nested ``stop_dashboard`` previously defined inside
+    ``run()``. ``None`` process is a no-op. Terminates first, falls back
+    to kill on any exception during terminate/wait.
+
+    Args:
+        process: The ``subprocess.Popen`` handle returned by
+            ``_start_dashboard_background`` (may be ``None``).
+    """
+    if process is None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def _handle_standalone_dashboard(
+    *,
+    working_dir: str,
+    dashboard: bool,
+    dashboard_port: int,
+    gateway_host: str,
+    gateway_port: int,
+) -> bool:
+    """Handle the standalone dashboard early-exit branch.
+
+    Mirrors the block in ``run()``::
+
+        if dashboard and working_dir == ".":
+            <launch banner + block on Ctrl+C>
+            return
+
+    Launches the dashboard as a background subprocess, prints the banner,
+    and blocks on ``process.wait()`` until interrupted. On ``KeyboardInterrupt``
+    tears the dashboard down and returns ``True``. When launch fails,
+    exits with status 1 (preserving original semantics).
+
+    Args:
+        working_dir: CLI ``--working-dir`` (standalone path iff ``"."``).
+        dashboard: CLI ``--dashboard`` flag.
+        dashboard_port: CLI ``--dashboard-port`` flag.
+        gateway_host: Effective gateway host (post-``_setup_gateway``).
+        gateway_port: Effective gateway port (post-``_setup_gateway``).
+
+    Returns:
+        ``True`` if the branch handled the request (caller must ``return``),
+        ``False`` otherwise.
+    """
+    if not (dashboard and working_dir == "."):
+        return False
+
+    click.echo()
+    click.echo("=" * 60)
+    click.echo("LAUNCHING DASHBOARD (standalone mode)")
+    click.echo("=" * 60)
+    click.echo("Press Ctrl+C to stop")
+    proc = _start_dashboard_background(
+        port=dashboard_port,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+    )
+    if proc is None:
+        sys.exit(1)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        _stop_dashboard(proc)
+        click.echo("Dashboard stopped.")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Phase 15 — --once execution
+# ---------------------------------------------------------------------------
+
+
+def _run_once(
+    *,
+    runner: Any,
+    strategy_instance: Any,
+    state_manager: Any,
+    cleanup_fn: Callable[[], Coroutine[Any, Any, None]],
+    teardown_after: bool,
+) -> int:
+    """Execute a single strategy iteration (and optional teardown) and return exit code.
+
+    Synchronous wrapper that mirrors the ``if once:`` block in ``run()``.
+    Owns the outer ``asyncio.run(run_once_with_cleanup())`` call plus the
+    exit-code resolution and the top-level error/except handling. Keeping
+    this sync preserves the original ``asyncio.run`` boundary and lets
+    ``KeyboardInterrupt`` semantics remain identical to the inlined code.
+
+    Behavior-preserving:
+
+        * Restores persisted strategy state and copy-trading cursor
+          (inside the async wrapper).
+        * Runs a single iteration, captures portfolio snapshot, emits summary.
+        * If ``teardown_after`` is True, runs a second iteration after
+          registering a TeardownRequest.
+        * Persists copy-trading cursor and flushes pending saves.
+        * Always runs gateway-integration teardown and ``cleanup_fn`` in
+          ``finally``.
+
+    Returns:
+        Exit code: ``0`` on success, ``1`` on iteration or teardown failure
+        (or unhandled exception).
+    """
+    import asyncio
+
+    # Lazy-import so tests that monkeypatch these modules observe the fakes.
+    from ..runner import IterationResult, IterationStatus
+
+    # Runtime-local reference for format_iteration_result (lives in run.py to
+    # avoid moving unrelated code; deferred import breaks the cycle).
+    from .run import format_iteration_result
+
+    click.echo()
+    click.echo("Running single iteration...")
+    click.echo()
+
+    async def run_once_with_cleanup() -> tuple[Any, Any]:
+        """Run single iteration, optional teardown, and cleanup resources."""
+        # Guarded layout ensures cleanup_fn() always runs, even if
+        # setup_gateway_integration or teardown_gateway_integration raise.
+        # Mirrors the Phase 4a copy_replay_file safety fix (always-run cleanup).
+        gateway_integration_ready = False
+        try:
+            runner.setup_gateway_integration(strategy_instance)
+            gateway_integration_ready = True
+            # Restore persisted strategy state (e.g. position_id after restart)
+            if hasattr(strategy_instance, "load_state_async"):
+                if await strategy_instance.load_state_async():
+                    click.secho("  Strategy state restored from persistence", fg="yellow")
+                else:
+                    click.echo("  No previous state found (fresh start)")
+
+            # Restore copy trading cursor state (mirrors run_loop pattern)
+            activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
+            if activity_provider is not None:
+                try:
+                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    if ct_state is not None and "copy_trading_state" in ct_state.state:
+                        activity_provider.set_state(ct_state.state["copy_trading_state"])
+                except Exception as e:
+                    logger.warning(f"Failed to restore copy trading state: {e}")
+
+            result = await runner.run_iteration(strategy_instance)
+
+            # Capture portfolio snapshot after --once iteration
+            # (run_loop does this automatically but run_iteration does not)
+            if runner.config.enable_state_persistence:
+                await runner._capture_portfolio_snapshot(
+                    strategy=strategy_instance,
+                    iteration_number=runner._total_iterations,
+                )
+
+            # Emit structured iteration summary for JSONL log analysis
+            runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
+
+            # --- teardown-after: signal + second iteration ---
+            teardown_result = None
+            if teardown_after:
+                click.echo()
+                click.echo("Teardown requested -- closing positions...")
+
+                from almanak.framework.teardown import get_teardown_state_manager
+                from almanak.framework.teardown.models import TeardownMode, TeardownRequest
+
+                strategy_id = strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME
+                manager = get_teardown_state_manager()
+                manager.create_request(
+                    TeardownRequest(
+                        strategy_id=strategy_id,
+                        mode=TeardownMode.SOFT,
+                        reason="--teardown-after flag (CI cleanup)",
+                        requested_by="cli",
+                    )
+                )
+
+                teardown_result = await runner.run_iteration(strategy_instance)
+                runner._emit_iteration_summary(teardown_result, chain=getattr(strategy_instance, "chain", None))
+                click.echo(format_iteration_result(teardown_result))
+            elif teardown_after:
+                teardown_result = IterationResult(
+                    status=IterationStatus.EXECUTION_FAILED,
+                    error="--teardown-after requested but strategy does not support teardown",
+                )
+                click.echo(teardown_result.error, err=True)
+
+            # Persist copy trading cursor state
+            if activity_provider is not None:
+                try:
+                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    if ct_state is None:
+                        from almanak.framework.state.state_manager import StateData
+
+                        ct_state = StateData(
+                            strategy_id=strategy_instance.strategy_id,
+                            version=0,
+                            state={},
+                        )
+                    ct_state.state["copy_trading_state"] = activity_provider.get_state()
+                    await state_manager.save_state(ct_state, expected_version=ct_state.version)
+                except Exception as e:
+                    logger.warning(f"Failed to persist copy trading state: {e}")
+
+            # Flush any pending state saves before cleanup
+            # (run_loop does this automatically, but run_iteration doesn't)
+            if hasattr(strategy_instance, "flush_pending_saves"):
+                try:
+                    await strategy_instance.flush_pending_saves()
+                except Exception as e:
+                    logger.warning(f"Error flushing pending saves: {e}")
+            return result, teardown_result
+        finally:
+            # Nested try/finally guarantees cleanup_fn() runs even if
+            # teardown_gateway_integration raises. The ready-guard avoids
+            # calling teardown when setup itself failed (pairing invariant).
+            try:
+                if gateway_integration_ready:
+                    runner.teardown_gateway_integration(strategy_instance.strategy_id)
+            finally:
+                await cleanup_fn()
+
+    try:
+        result, teardown_result = asyncio.run(run_once_with_cleanup())
+        click.echo(format_iteration_result(result))
+
+        # Determine exit code: main iteration + optional teardown
+        if teardown_result is not None:
+            # With --teardown-after: both iteration and teardown must succeed
+            teardown_ok = teardown_result.status == IterationStatus.TEARDOWN
+            if result.success and teardown_ok:
+                click.echo()
+                click.echo("Iteration and teardown completed successfully.")
+                return 0
+            click.echo()
+            if not result.success:
+                click.echo(f"Iteration failed: {result.error}")
+            if not teardown_ok:
+                click.echo(f"Teardown failed: {teardown_result.error or teardown_result.status.value}")
+            return 1
+        if result.success:
+            click.echo()
+            click.echo("Iteration completed successfully.")
+            return 0
+        click.echo()
+        click.echo(f"Iteration failed: {result.error}")
+        return 1
+
+    except Exception as e:
+        click.echo(f"Error running iteration: {e}", err=True)
+        logger.exception("Iteration failed")
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 16 — Continuous execution
+# ---------------------------------------------------------------------------
+
+
+def _run_continuous(
+    *,
+    runner: Any,
+    strategy_instance: Any,
+    cleanup_fn: Callable[[], Coroutine[Any, Any, None]],
+    interval: int,
+    max_iterations: int | None,
+    reset_fork: bool,
+    managed_gateway: Any,
+) -> int:
+    """Execute the continuous run loop and return exit code.
+
+    Synchronous wrapper that mirrors the ``else:`` block in ``run()``. Owns
+    the outer ``asyncio.run(run_loop_with_cleanup())`` call, the
+    ``KeyboardInterrupt`` fresh-loop cleanup (``asyncio.run(cleanup_fn())``),
+    and the exit-code resolution. Keeping this sync preserves the original
+    boundary: ``KeyboardInterrupt`` is raised from ``asyncio.run`` into the
+    enclosing try/except, not into the coroutine itself.
+
+    Behavior-preserving:
+
+        * Registers runner signal handlers.
+        * Wires an ``on_iteration`` echo callback.
+        * Builds a ``pre_iteration`` callback if ``reset_fork`` is set and a
+          managed gateway owns forks (raises ``CriticalCallbackError`` on
+          reset failure).
+        * Restores persisted strategy state inside the loop wrapper.
+        * Runs ``runner.run_loop`` with the wired callbacks.
+        * On ``KeyboardInterrupt`` requests shutdown and runs cleanup in a
+          fresh event loop (matches original behavior).
+
+    Returns:
+        Exit code: ``2`` on signal-triggered stop, ``1`` on
+        max-iterations-all-failed or unhandled exception, ``0`` otherwise.
+    """
+    import asyncio
+
+    from ..runner.strategy_runner import CriticalCallbackError
+
+    # Runtime-local reference for format_iteration_result.
+    from .run import format_iteration_result
+
+    if sys.stdout.isatty():
+        click.echo()
+        click.echo("Starting continuous execution...")
+        click.echo("Press Ctrl+C to stop gracefully.")
+        click.echo()
+
+    # Set up signal handlers for graceful shutdown
+    runner.setup_signal_handlers()
+
+    def on_iteration(result: Any) -> None:
+        """Callback for each iteration."""
+        timestamp = result.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        click.echo(f"[{timestamp}] {format_iteration_result(result)}")
+
+    # Build pre-iteration callback for --reset-fork
+    pre_iteration_cb: Callable[[], None] | None = None
+    if reset_fork and managed_gateway is not None:
+
+        def pre_iteration_cb() -> None:
+            click.echo("Resetting Anvil fork to latest block...")
+            ok = managed_gateway.reset_anvil_forks()
+            if ok:
+                click.echo("Fork reset complete.")
+            else:
+                raise CriticalCallbackError(
+                    "Anvil fork reset failed. Cannot continue with stale fork state. "
+                    "Remove --reset-fork to run without fork resets."
+                )
+
+    async def run_loop_with_cleanup() -> None:
+        """Run loop and cleanup resources."""
+        try:
+            # Restore persisted strategy state (e.g. position_id after restart)
+            if hasattr(strategy_instance, "load_state_async"):
+                if await strategy_instance.load_state_async():
+                    click.secho("  Strategy state restored from persistence", fg="yellow")
+                else:
+                    click.echo("  No previous state found (fresh start)")
+
+            await runner.run_loop(
+                strategy=strategy_instance,
+                interval_seconds=interval,
+                iteration_callback=on_iteration,
+                pre_iteration_callback=pre_iteration_cb,
+                max_iterations=max_iterations,
+            )
+        finally:
+            await cleanup_fn()
+
+    try:
+        asyncio.run(run_loop_with_cleanup())
+        click.echo()
+
+        # Exit 2 when stopped by signal (SIGTERM/SIGINT) so K8s sees a
+        # pod failure and retries.  Check this first so it takes
+        # precedence over the max-iterations branch.
+        if runner._signal_received:
+            click.echo("Runner stopped by signal.")
+            return 2
+
+        # Return a failure exit code when max_iterations is set and every
+        # single iteration failed (no successful iterations at all).
+        if max_iterations and runner._successful_iterations == 0 and runner._total_iterations > 0:
+            click.echo(f"Runner completed {runner._total_iterations} iterations with 0 successes.")
+            return 1
+
+        click.echo("Runner stopped gracefully.")
+        return 0
+
+    except KeyboardInterrupt:
+        click.echo()
+        click.echo("Shutdown requested. Stopping...")
+        runner.request_shutdown()
+        # Run cleanup in a new event loop since the previous one was interrupted
+        asyncio.run(cleanup_fn())
+        return 0
+
+    except Exception as e:
+        click.echo(f"Error in run loop: {e}", err=True)
+        logger.exception("Run loop failed")
+        return 1

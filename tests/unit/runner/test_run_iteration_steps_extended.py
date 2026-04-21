@@ -436,8 +436,16 @@ class TestStepLogIntents:
 
         # Helper is side-effect-only and returns None
         assert result is None
-        # Single-intent path emits exactly one INFO line mentioning the strategy id
-        info_records = [r for r in caplog.records if r.levelname == "INFO"]
+        # Single-intent path emits exactly one INFO line mentioning the strategy id.
+        # Filter by BOTH level AND logger name: caplog collects propagated
+        # records from ancestor loggers (a.f.runner, a.f, a, root), which can
+        # cause duplicate counts in CI environments where a handler has been
+        # attached to an ancestor logger.
+        info_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "INFO" and r.name == "almanak.framework.runner.strategy_runner"
+        ]
         assert len(info_records) == 1
         assert strategy.strategy_id in info_records[0].message
         assert "intent:" in info_records[0].message
@@ -458,7 +466,13 @@ class TestStepLogIntents:
             result = runner._step_log_intents(state)
 
         assert result is None
-        info_records = [r for r in caplog.records if r.levelname == "INFO"]
+        # Filter by logger name to avoid ancestor-propagation duplicates
+        # (see test_single_intent_logs_without_raising for rationale).
+        info_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "INFO" and r.name == "almanak.framework.runner.strategy_runner"
+        ]
         # One header line plus one per-step line — regression guard against
         # a refactor that accidentally skips the per-step loop body.
         assert len(info_records) == 1 + len(intents)
@@ -481,7 +495,13 @@ class TestStepLogIntents:
         # With no intents, the helper takes the else-branch and emits the
         # sequence-header log line with a "0 steps" count but no per-step lines.
         assert result is None
-        info_records = [r for r in caplog.records if r.levelname == "INFO"]
+        # Filter by logger name to avoid ancestor-propagation duplicates
+        # (see test_single_intent_logs_without_raising for rationale).
+        info_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "INFO" and r.name == "almanak.framework.runner.strategy_runner"
+        ]
         assert len(info_records) == 1
         assert "intent sequence (0 steps)" in info_records[0].message
         assert state.intents == []

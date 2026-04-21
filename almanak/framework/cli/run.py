@@ -77,7 +77,7 @@ from ..execution.orchestrator import ExecutionOrchestrator
 from ..execution.signer.local import LocalKeySigner
 from ..execution.simulator import create_simulator
 from ..execution.submitter.public import PublicMempoolSubmitter
-from ..runner import IterationResult, IterationStatus
+from ..runner import IterationResult
 from ..strategies import IntentStrategy
 from ..strategies.intent_strategy import IndicatorProvider
 
@@ -1274,11 +1274,16 @@ def run(
         _detect_state_resume,
         _discover_and_load_config,
         _handle_list_all,
+        _handle_standalone_dashboard,
         _instantiate_strategy,
         _load_strategy_class,
         _print_startup_banner,
         _resolve_identity,
+        _run_continuous,
+        _run_once,
         _setup_gateway,
+        _start_dashboard_background,
+        _stop_dashboard,
         _wire_token_resolver,
     )
 
@@ -1323,117 +1328,26 @@ def run(
     if _handle_list_all(list_all, gateway_client):
         return
 
-    # Dashboard helpers (defined early for dashboard-only mode)
-    def start_dashboard_background(
-        port: int,
-        gw_host: str = "127.0.0.1",
-        gw_port: int = 50051,
-    ) -> Any:
-        """Launch the Streamlit dashboard as a background subprocess.
-
-        Returns the Popen process object, or None if launch failed.
-        """
-        import socket
-        import subprocess
-
-        # Check if port is available
-        def is_port_available(p: int) -> bool:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind(("localhost", p))
-                    return True
-                except OSError:
-                    return False
-
-        # Try to find an available port if the requested one is in use
-        actual_port = port
-        if not is_port_available(actual_port):
-            click.echo(f"Warning: Dashboard port {actual_port} is already in use.", err=True)
-            for alt_port in range(8502, 8510):
-                if is_port_available(alt_port):
-                    actual_port = alt_port
-                    click.echo(f"Using alternative dashboard port: {actual_port}", err=True)
-                    break
-            else:
-                click.echo(
-                    f"Error: Could not find an available port for dashboard. "
-                    f"Please free up port {port} or specify a different port with --dashboard-port",
-                    err=True,
-                )
-                return None
-
-        project_root = Path(__file__).parent.parent.parent.parent
-        dashboard_path = project_root / "almanak" / "framework" / "dashboard" / "app.py"
-
-        # Pass gateway connection info to the dashboard subprocess
-        env = os.environ.copy()
-        env["GATEWAY_HOST"] = gw_host
-        env["GATEWAY_PORT"] = str(gw_port)
-
-        try:
-            process = subprocess.Popen(
-                [
-                    "streamlit",
-                    "run",
-                    str(dashboard_path),
-                    "--server.port",
-                    str(actual_port),
-                    "--server.headless",
-                    "false",
-                ],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            click.echo(f"Dashboard started at http://localhost:{actual_port}")
-            return process
-        except FileNotFoundError:
-            click.echo("Error: streamlit not found. Install with: pip install streamlit", err=True)
-            return None
-        except Exception as e:
-            click.echo(f"Error launching dashboard: {e}", err=True)
-            return None
-
-    def stop_dashboard(process: Any) -> None:
-        """Terminate the background dashboard process (best-effort)."""
-        if process is None:
-            return
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
-
-    # If only --dashboard is provided without a working directory, launch dashboard and block
-    if dashboard and working_dir == ".":
-        click.echo()
-        click.echo("=" * 60)
-        click.echo("LAUNCHING DASHBOARD (standalone mode)")
-        click.echo("=" * 60)
-        click.echo("Press Ctrl+C to stop")
-        proc = start_dashboard_background(dashboard_port, effective_host, gateway_port)
-        if proc is None:
-            sys.exit(1)
-        try:
-            proc.wait()
-        except KeyboardInterrupt:
-            stop_dashboard(proc)
-            click.echo("Dashboard stopped.")
+    # If only --dashboard is provided without a working directory, launch dashboard and block (phase 5 helper)
+    if _handle_standalone_dashboard(
+        working_dir=working_dir,
+        dashboard=dashboard,
+        dashboard_port=dashboard_port,
+        gateway_host=effective_host,
+        gateway_port=gateway_port,
+    ):
         return
 
     # Start dashboard as background subprocess (after gateway is healthy, before strategy runs)
     dashboard_process = None
     if dashboard:
-        dashboard_process = start_dashboard_background(
+        dashboard_process = _start_dashboard_background(
             port=dashboard_port,
-            gw_host=effective_host,
-            gw_port=gateway_port,
+            gateway_host=effective_host,
+            gateway_port=gateway_port,
         )
         if dashboard_process is not None:
-            atexit.register(stop_dashboard, dashboard_process)
+            atexit.register(_stop_dashboard, dashboard_process)
 
     # Load strategy from working directory (reuse early-loaded class if available) (phase 6 helper)
     strategy_class: type[IntentStrategy[Any]] = _load_strategy_class(working_dir, _early_strategy_class)
@@ -1607,231 +1521,28 @@ def run(
         components=components,
     )
 
-    # Run strategy
+    # Run strategy (phase 15/16 helpers).
     if once:
-        click.echo()
-        click.echo("Running single iteration...")
-        click.echo()
-
-        async def run_once_with_cleanup() -> tuple[IterationResult, IterationResult | None]:
-            """Run single iteration, optional teardown, and cleanup resources."""
-            runner.setup_gateway_integration(strategy_instance)
-            try:
-                # Restore persisted strategy state (e.g. position_id after restart)
-                if hasattr(strategy_instance, "load_state_async"):
-                    if await strategy_instance.load_state_async():
-                        click.secho("  Strategy state restored from persistence", fg="yellow")
-                    else:
-                        click.echo("  No previous state found (fresh start)")
-
-                # Restore copy trading cursor state (mirrors run_loop pattern)
-                activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
-                if activity_provider is not None:
-                    try:
-                        ct_state = await state_manager.load_state(strategy_instance.strategy_id)
-                        if ct_state is not None and "copy_trading_state" in ct_state.state:
-                            activity_provider.set_state(ct_state.state["copy_trading_state"])
-                    except Exception as e:
-                        logger.warning(f"Failed to restore copy trading state: {e}")
-
-                result = await runner.run_iteration(strategy_instance)
-
-                # Capture portfolio snapshot after --once iteration
-                # (run_loop does this automatically but run_iteration does not)
-                if runner.config.enable_state_persistence:
-                    await runner._capture_portfolio_snapshot(
-                        strategy=strategy_instance,
-                        iteration_number=runner._total_iterations,
-                    )
-
-                # Emit structured iteration summary for JSONL log analysis
-                runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
-
-                # --- teardown-after: signal + second iteration ---
-                teardown_result = None
-                if teardown_after:
-                    click.echo()
-                    click.echo("Teardown requested -- closing positions...")
-
-                    from almanak.framework.teardown import get_teardown_state_manager
-                    from almanak.framework.teardown.models import TeardownMode, TeardownRequest
-
-                    strategy_id = strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME
-                    manager = get_teardown_state_manager()
-                    manager.create_request(
-                        TeardownRequest(
-                            strategy_id=strategy_id,
-                            mode=TeardownMode.SOFT,
-                            reason="--teardown-after flag (CI cleanup)",
-                            requested_by="cli",
-                        )
-                    )
-
-                    teardown_result = await runner.run_iteration(strategy_instance)
-                    runner._emit_iteration_summary(teardown_result, chain=getattr(strategy_instance, "chain", None))
-                    click.echo(format_iteration_result(teardown_result))
-                elif teardown_after:
-                    teardown_result = IterationResult(
-                        status=IterationStatus.EXECUTION_FAILED,
-                        error="--teardown-after requested but strategy does not support teardown",
-                    )
-                    click.echo(teardown_result.error, err=True)
-
-                # Persist copy trading cursor state
-                if activity_provider is not None:
-                    try:
-                        ct_state = await state_manager.load_state(strategy_instance.strategy_id)
-                        if ct_state is None:
-                            from almanak.framework.state.state_manager import StateData
-
-                            ct_state = StateData(
-                                strategy_id=strategy_instance.strategy_id,
-                                version=0,
-                                state={},
-                            )
-                        ct_state.state["copy_trading_state"] = activity_provider.get_state()
-                        await state_manager.save_state(ct_state, expected_version=ct_state.version)
-                    except Exception as e:
-                        logger.warning(f"Failed to persist copy trading state: {e}")
-
-                # Flush any pending state saves before cleanup
-                # (run_loop does this automatically, but run_iteration doesn't)
-                if hasattr(strategy_instance, "flush_pending_saves"):
-                    try:
-                        await strategy_instance.flush_pending_saves()
-                    except Exception as e:
-                        logger.warning(f"Error flushing pending saves: {e}")
-                return result, teardown_result
-            finally:
-                runner.teardown_gateway_integration(strategy_instance.strategy_id)
-                await cleanup_resources()
-
-        try:
-            result, teardown_result = asyncio.run(run_once_with_cleanup())
-            click.echo(format_iteration_result(result))
-
-            # Determine exit code: main iteration + optional teardown
-            if teardown_result is not None:
-                # With --teardown-after: both iteration and teardown must succeed
-                teardown_ok = teardown_result.status == IterationStatus.TEARDOWN
-                if result.success and teardown_ok:
-                    click.echo()
-                    click.echo("Iteration and teardown completed successfully.")
-                    stop_dashboard(dashboard_process)
-                    sys.exit(0)
-                else:
-                    click.echo()
-                    if not result.success:
-                        click.echo(f"Iteration failed: {result.error}")
-                    if not teardown_ok:
-                        click.echo(f"Teardown failed: {teardown_result.error or teardown_result.status.value}")
-                    stop_dashboard(dashboard_process)
-                    sys.exit(1)
-            elif result.success:
-                click.echo()
-                click.echo("Iteration completed successfully.")
-                stop_dashboard(dashboard_process)
-                sys.exit(0)
-            else:
-                click.echo()
-                click.echo(f"Iteration failed: {result.error}")
-                stop_dashboard(dashboard_process)
-                sys.exit(1)
-
-        except Exception as e:
-            click.echo(f"Error running iteration: {e}", err=True)
-            logger.exception("Iteration failed")
-            stop_dashboard(dashboard_process)
-            sys.exit(1)
-
+        exit_code = _run_once(
+            runner=runner,
+            strategy_instance=strategy_instance,
+            state_manager=state_manager,
+            cleanup_fn=cleanup_resources,
+            teardown_after=teardown_after,
+        )
     else:
-        if sys.stdout.isatty():
-            click.echo()
-            click.echo("Starting continuous execution...")
-            click.echo("Press Ctrl+C to stop gracefully.")
-            click.echo()
+        exit_code = _run_continuous(
+            runner=runner,
+            strategy_instance=strategy_instance,
+            cleanup_fn=cleanup_resources,
+            interval=interval,
+            max_iterations=max_iterations,
+            reset_fork=reset_fork,
+            managed_gateway=managed_gateway,
+        )
 
-        # Set up signal handlers for graceful shutdown
-        runner.setup_signal_handlers()
-
-        def on_iteration(result: IterationResult) -> None:
-            """Callback for each iteration."""
-            timestamp = result.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            click.echo(f"[{timestamp}] {format_iteration_result(result)}")
-
-        # Build pre-iteration callback for --reset-fork
-        pre_iteration_cb: Callable[[], None] | None = None
-        if reset_fork and managed_gateway is not None:
-            from ..runner.strategy_runner import CriticalCallbackError
-
-            def pre_iteration_cb() -> None:
-                click.echo("Resetting Anvil fork to latest block...")
-                ok = managed_gateway.reset_anvil_forks()
-                if ok:
-                    click.echo("Fork reset complete.")
-                else:
-                    raise CriticalCallbackError(
-                        "Anvil fork reset failed. Cannot continue with stale fork state. "
-                        "Remove --reset-fork to run without fork resets."
-                    )
-
-        async def run_loop_with_cleanup() -> None:
-            """Run loop and cleanup resources."""
-            try:
-                # Restore persisted strategy state (e.g. position_id after restart)
-                if hasattr(strategy_instance, "load_state_async"):
-                    if await strategy_instance.load_state_async():
-                        click.secho("  Strategy state restored from persistence", fg="yellow")
-                    else:
-                        click.echo("  No previous state found (fresh start)")
-
-                await runner.run_loop(
-                    strategy=strategy_instance,
-                    interval_seconds=interval,
-                    iteration_callback=on_iteration,
-                    pre_iteration_callback=pre_iteration_cb,
-                    max_iterations=max_iterations,
-                )
-            finally:
-                await cleanup_resources()
-
-        try:
-            asyncio.run(run_loop_with_cleanup())
-            click.echo()
-
-            # Exit 2 when stopped by signal (SIGTERM/SIGINT) so K8s sees a
-            # pod failure and retries.  Check this first so it takes
-            # precedence over the max-iterations branch.
-            if runner._signal_received:
-                click.echo("Runner stopped by signal.")
-                stop_dashboard(dashboard_process)
-                sys.exit(2)
-
-            # Return a failure exit code when max_iterations is set and every
-            # single iteration failed (no successful iterations at all).
-            if max_iterations and runner._successful_iterations == 0 and runner._total_iterations > 0:
-                click.echo(f"Runner completed {runner._total_iterations} iterations with 0 successes.")
-                stop_dashboard(dashboard_process)
-                sys.exit(1)
-
-            click.echo("Runner stopped gracefully.")
-            stop_dashboard(dashboard_process)
-            sys.exit(0)
-
-        except KeyboardInterrupt:
-            click.echo()
-            click.echo("Shutdown requested. Stopping...")
-            runner.request_shutdown()
-            # Run cleanup in a new event loop since the previous one was interrupted
-            asyncio.run(cleanup_resources())
-            stop_dashboard(dashboard_process)
-            sys.exit(0)
-
-        except Exception as e:
-            click.echo(f"Error in run loop: {e}", err=True)
-            logger.exception("Run loop failed")
-            stop_dashboard(dashboard_process)
-            sys.exit(1)
+    _stop_dashboard(dashboard_process)
+    sys.exit(exit_code)
 
 
 def _has_placeholder_vault_address(vault_raw: dict) -> bool:
