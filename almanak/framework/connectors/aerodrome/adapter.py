@@ -305,6 +305,59 @@ class TransactionData:
         }
 
 
+MAX_UINT128 = 2**128 - 1
+
+
+@dataclass
+class CLLiquidityResult:
+    """Result of a Slipstream CL liquidity operation.
+
+    Attributes:
+        success: Whether operation was built successfully
+        transactions: List of transactions to execute
+        token0: Token0 address
+        token1: Token1 address
+        token_id: NFT tokenId (None before TX executes on open)
+        amount0: Amount of token0
+        amount1: Amount of token1
+        tick_lower: Lower tick bound
+        tick_upper: Upper tick bound
+        tick_spacing: Pool tick spacing
+        error: Error message if failed
+        gas_estimate: Total gas estimate
+    """
+
+    success: bool
+    transactions: list["TransactionData"] = field(default_factory=list)
+    token0: str = ""
+    token1: str = ""
+    token_id: int | None = None
+    amount0: int = 0
+    amount1: int = 0
+    tick_lower: int = 0
+    tick_upper: int = 0
+    tick_spacing: int = 100
+    error: str | None = None
+    gas_estimate: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "success": self.success,
+            "transactions": [tx.to_dict() for tx in self.transactions],
+            "token0": self.token0,
+            "token1": self.token1,
+            "token_id": self.token_id,
+            "amount0": str(self.amount0),
+            "amount1": str(self.amount1),
+            "tick_lower": self.tick_lower,
+            "tick_upper": self.tick_upper,
+            "tick_spacing": self.tick_spacing,
+            "error": self.error,
+            "gas_estimate": self.gas_estimate,
+        }
+
+
 # =============================================================================
 # Aerodrome Adapter
 # =============================================================================
@@ -747,6 +800,295 @@ class AerodromeAdapter:
 
         except Exception as e:
             logger.exception(f"Failed to build remove liquidity: {e}")
+            return LiquidityResult(success=False, error=str(e))
+
+    # =========================================================================
+    # Slipstream CL Liquidity Operations
+    # =========================================================================
+
+    def _get_web3(self) -> Any:
+        """Get a Web3 instance, preferring gateway over direct RPC.
+
+        Returns:
+            Web3 instance
+
+        Raises:
+            ValueError: If neither gateway_client nor rpc_url is configured
+        """
+        from web3 import Web3
+
+        if self.config.gateway_client is not None:
+            from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+            return Web3(GatewayWeb3Provider(self.config.gateway_client, chain=self.chain))
+        if self.config.rpc_url:
+            return Web3(
+                Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 15})
+            )  # vib-2986-exempt: gateway-internal fallback
+        raise ValueError("No gateway_client or rpc_url configured for CL LP operations")
+
+    def add_cl_liquidity(
+        self,
+        token_a: str,
+        token_b: str,
+        tick_spacing: int,
+        tick_lower: int,
+        tick_upper: int,
+        amount_a: Decimal,
+        amount_b: Decimal,
+        slippage_bps: int | None = None,
+        recipient: str | None = None,
+    ) -> CLLiquidityResult:
+        """Build Slipstream CL add liquidity transactions.
+
+        Builds approve + mint transactions for an Aerodrome Slipstream CL position.
+        Tokens are sorted by address (token0 < token1) as required by V3-style pools.
+
+        Args:
+            token_a: First token symbol or address
+            token_b: Second token symbol or address
+            tick_spacing: Pool tick spacing
+            tick_lower: Lower tick bound (must be multiple of tick_spacing)
+            tick_upper: Upper tick bound (must be multiple of tick_spacing)
+            amount_a: Desired amount of token_a (in token units)
+            amount_b: Desired amount of token_b (in token units)
+            slippage_bps: Slippage tolerance in basis points (unused for LP, kept for API compat)
+            recipient: Address to receive the NFT position (default: wallet_address)
+
+        Returns:
+            CLLiquidityResult with transaction data
+        """
+        try:
+            if "cl_nft" not in self.addresses:
+                return CLLiquidityResult(
+                    success=False,
+                    error=f"Aerodrome Slipstream CL not supported on chain '{self.chain}' (no cl_nft address)",
+                )
+
+            slippage_bps = slippage_bps if slippage_bps is not None else self.config.default_slippage_bps
+            recipient = recipient or self.wallet_address
+
+            # Resolve token addresses
+            token_a_address = self._resolve_token(token_a)
+            token_b_address = self._resolve_token(token_b)
+
+            # Get token decimals
+            token_a_decimals = self._get_token_decimals(token_a)
+            token_b_decimals = self._get_token_decimals(token_b)
+
+            # Convert amounts to wei
+            amount_a_wei = int(amount_a * Decimal(10**token_a_decimals))
+            amount_b_wei = int(amount_b * Decimal(10**token_b_decimals))
+
+            # Sort tokens: Slipstream (V3-style) requires token0 < token1 by address
+            if token_a_address.lower() <= token_b_address.lower():
+                token0_address = token_a_address
+                token1_address = token_b_address
+                amount0_desired = amount_a_wei
+                amount1_desired = amount_b_wei
+            else:
+                token0_address = token_b_address
+                token1_address = token_a_address
+                amount0_desired = amount_b_wei
+                amount1_desired = amount_a_wei
+
+            cl_nft_address = self.addresses["cl_nft"]
+
+            web3 = self._get_web3()
+
+            from datetime import UTC, datetime
+
+            deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+
+            transactions: list[TransactionData] = []
+
+            # Build approve transactions for both tokens (approving cl_nft manager)
+            approve_0 = self._build_approve_tx(token0_address, cl_nft_address, amount0_desired)
+            if approve_0:
+                approve_0.description = f"Approve {self._get_token_symbol(token0_address)} for Aerodrome CL NFT Manager"
+                transactions.append(approve_0)
+
+            approve_1 = self._build_approve_tx(token1_address, cl_nft_address, amount1_desired)
+            if approve_1:
+                approve_1.description = f"Approve {self._get_token_symbol(token1_address)} for Aerodrome CL NFT Manager"
+                transactions.append(approve_1)
+
+            # Build mint transaction.
+            # amount0_min / amount1_min protect against price movement between compile and execution.
+            amount0_min = int(amount0_desired * (10000 - slippage_bps) // 10000)
+            amount1_min = int(amount1_desired * (10000 - slippage_bps) // 10000)
+            mint_tx_dict = self.sdk.build_cl_mint_tx(
+                token0=token0_address,
+                token1=token1_address,
+                tick_spacing=tick_spacing,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                amount0_desired=amount0_desired,
+                amount1_desired=amount1_desired,
+                amount0_min=amount0_min,
+                amount1_min=amount1_min,
+                recipient=recipient,
+                deadline=deadline,
+                sender=self.wallet_address,
+                web3=web3,
+            )
+
+            token0_symbol = self._get_token_symbol(token0_address)
+            token1_symbol = self._get_token_symbol(token1_address)
+            mint_tx = TransactionData(
+                to=mint_tx_dict["to"],
+                value=mint_tx_dict.get("value", 0),
+                data=mint_tx_dict["data"].hex() if isinstance(mint_tx_dict["data"], bytes) else mint_tx_dict["data"],
+                gas_estimate=AERODROME_GAS_ESTIMATES["cl_mint"],
+                description=f"Aerodrome Slipstream CL mint {token0_symbol}/{token1_symbol} tick=[{tick_lower},{tick_upper}]",
+                tx_type="add_liquidity",
+            )
+            transactions.append(mint_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            logger.info(
+                f"Built Aerodrome Slipstream CL add_liquidity: {token0_symbol}/{token1_symbol}, "
+                f"tick_spacing={tick_spacing}, tick=[{tick_lower},{tick_upper}], "
+                f"transactions={len(transactions)}"
+            )
+
+            return CLLiquidityResult(
+                success=True,
+                transactions=transactions,
+                token0=token0_address,
+                token1=token1_address,
+                token_id=None,
+                amount0=amount0_desired,
+                amount1=amount1_desired,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                tick_spacing=tick_spacing,
+                gas_estimate=total_gas,
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to build CL add liquidity: {e}")
+            return CLLiquidityResult(success=False, error=str(e))
+
+    def remove_cl_liquidity(
+        self,
+        token_id: int,
+        slippage_bps: int | None = None,
+        recipient: str | None = None,
+    ) -> LiquidityResult:
+        """Build Slipstream CL remove liquidity transactions (decreaseLiquidity + collect).
+
+        Args:
+            token_id: NFT tokenId for the CL position
+            slippage_bps: Slippage tolerance (unused, mins set to 0)
+            recipient: Address to receive tokens (default: wallet_address)
+
+        Returns:
+            LiquidityResult with transaction data
+        """
+        try:
+            # slippage_bps is accepted for API compatibility but is not applied to
+            # decreaseLiquidity amount0Min/amount1Min.  Computing precise expected
+            # amounts from liquidity requires sqrtPrice math (FullMath/TickMath) and
+            # a live pool query.  For a full-close the practical MEV risk is low
+            # compared to mint: the position is already yours and there is no
+            # competing liquidity being added.  We use amount0Min=0, amount1Min=0
+            # (Uniswap/Aerodrome frontend standard for close flows) and rely on
+            # the two-step decreaseLiquidity→collect to preserve all owed tokens.
+            _ = slippage_bps
+            recipient = recipient or self.wallet_address
+
+            web3 = self._get_web3()
+
+            # Query current position
+            position = self.sdk.get_cl_position(token_id, web3)
+            if position is None:
+                return LiquidityResult(
+                    success=False,
+                    error=f"Could not query CL position for tokenId={token_id}. Ensure rpc/gateway access is configured.",
+                )
+
+            # A position can have zero liquidity but still hold owed tokens
+            # (e.g. decreaseLiquidity succeeded on a prior run but collect failed,
+            # or fees accrued after liquidity was manually removed).  Only treat
+            # as a true no-op when both owed balances are also zero.
+            has_owed = position.tokens_owed0 > 0 or position.tokens_owed1 > 0
+            if position.liquidity == 0 and not has_owed:
+                logger.info(f"CL position tokenId={token_id} has zero liquidity and no owed tokens — treating as no-op")
+                return LiquidityResult(
+                    success=True,
+                    transactions=[],
+                    gas_estimate=0,
+                )
+
+            from datetime import UTC, datetime
+
+            deadline = int(datetime.now(UTC).timestamp()) + self.config.deadline_seconds
+
+            transactions: list[TransactionData] = []
+
+            # Build decreaseLiquidity transaction only when there is liquidity to remove.
+            if position.liquidity > 0:
+                dec_tx_dict = self.sdk.build_cl_decrease_liquidity_tx(
+                    token_id=token_id,
+                    liquidity=position.liquidity,
+                    amount0_min=0,
+                    amount1_min=0,
+                    deadline=deadline,
+                    sender=self.wallet_address,
+                    web3=web3,
+                )
+                dec_tx = TransactionData(
+                    to=dec_tx_dict["to"],
+                    value=dec_tx_dict.get("value", 0),
+                    data=dec_tx_dict["data"].hex() if isinstance(dec_tx_dict["data"], bytes) else dec_tx_dict["data"],
+                    gas_estimate=AERODROME_GAS_ESTIMATES["cl_decrease_liquidity"],
+                    description=f"Aerodrome Slipstream CL decreaseLiquidity tokenId={token_id}",
+                    tx_type="remove_liquidity",
+                )
+                transactions.append(dec_tx)
+
+            # Build collect transaction (collect all tokens including fees).
+            # Always emitted when there is anything to collect (owed or just unlocked).
+            collect_tx_dict = self.sdk.build_cl_collect_tx(
+                token_id=token_id,
+                recipient=recipient,
+                amount0_max=MAX_UINT128,
+                amount1_max=MAX_UINT128,
+                sender=self.wallet_address,
+                web3=web3,
+            )
+            collect_tx = TransactionData(
+                to=collect_tx_dict["to"],
+                value=collect_tx_dict.get("value", 0),
+                data=collect_tx_dict["data"].hex()
+                if isinstance(collect_tx_dict["data"], bytes)
+                else collect_tx_dict["data"],
+                gas_estimate=AERODROME_GAS_ESTIMATES["cl_collect"],
+                description=f"Aerodrome Slipstream CL collect tokenId={token_id}",
+                tx_type="remove_liquidity",
+            )
+            transactions.append(collect_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            logger.info(
+                f"Built Aerodrome Slipstream CL remove_liquidity: tokenId={token_id}, "
+                f"liquidity={position.liquidity}, owed=({position.tokens_owed0},{position.tokens_owed1}), "
+                f"transactions={len(transactions)}"
+            )
+
+            return LiquidityResult(
+                success=True,
+                transactions=transactions,
+                token_a=position.token0,
+                token_b=position.token1,
+                gas_estimate=total_gas,
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to build CL remove liquidity: {e}")
             return LiquidityResult(success=False, error=str(e))
 
     # =========================================================================
@@ -1319,6 +1661,7 @@ class AerodromeAdapter:
 __all__ = [
     "AerodromeAdapter",
     "AerodromeConfig",
+    "CLLiquidityResult",
     "SwapQuote",
     "SwapResult",
     "SwapType",
@@ -1327,4 +1670,5 @@ __all__ = [
     "TransactionData",
     "AERODROME_ADDRESSES",
     "AERODROME_GAS_ESTIMATES",
+    "MAX_UINT128",
 ]

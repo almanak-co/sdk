@@ -397,6 +397,11 @@ class LPOpenIntent(AlmanakImmutableModel):
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
+    # Protocols where range_lower/range_upper carry raw tick values (integers that may be
+    # negative) rather than price bounds (which are always positive).  The positivity
+    # guard below is skipped for these protocols.
+    _TICK_BASED_LP_PROTOCOLS: frozenset[str] = frozenset({"aerodrome_slipstream"})
+
     @model_validator(mode="after")
     def validate_lp_open_intent(self) -> "LPOpenIntent":
         """Validate LP open parameters."""
@@ -408,7 +413,10 @@ class LPOpenIntent(AlmanakImmutableModel):
             raise ValueError("At least one amount must be positive")
         if self.range_lower >= self.range_upper:
             raise ValueError("range_lower must be less than range_upper")
-        if self.range_lower <= 0:
+        # Skip positivity check for tick-based protocols: their range values are raw
+        # Uniswap V3-style ticks (integers) which are legitimately negative for pools
+        # where the current price tick is below zero (e.g. WETH/USDC on Base).
+        if self.protocol not in self._TICK_BASED_LP_PROTOCOLS and self.range_lower <= 0:
             raise ValueError("range_lower must be positive")
         if self.protocol_params is not None:
             if not isinstance(self.protocol_params, dict):

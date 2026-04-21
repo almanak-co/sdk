@@ -661,6 +661,357 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:
     return result
 
 
+def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> CompilationResult:
+    """Compile LP_OPEN intent for Aerodrome Slipstream CL (concentrated liquidity).
+
+    Aerodrome Slipstream uses Uniswap V3-style concentrated liquidity with NFT positions.
+    Pool format: "TOKEN0/TOKEN1/200" (tick_spacing as 3rd component, integer)
+
+    The intent's ``range_lower`` and ``range_upper`` are the tick bounds (cast to int).
+
+    Args:
+        compiler: IntentCompiler instance
+        intent: LPOpenIntent to compile
+
+    Returns:
+        CompilationResult with Aerodrome Slipstream mint ActionBundle
+    """
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[Any] = []
+    warnings: list[str] = []
+
+    try:
+        from almanak.framework.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
+
+        # Parse pool: "TOKEN0/TOKEN1/tick_spacing"
+        pool_parts = intent.pool.split("/")
+        if len(pool_parts) < 3:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Invalid pool format for aerodrome_slipstream: '{intent.pool}'. Expected: TOKEN0/TOKEN1/tick_spacing (e.g. WETH/USDC/200)",
+                intent_id=intent.intent_id,
+            )
+
+        token0_symbol = pool_parts[0]
+        token1_symbol = pool_parts[1]
+        try:
+            tick_spacing = int(pool_parts[2])
+        except ValueError:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Invalid tick_spacing in pool '{intent.pool}': '{pool_parts[2]}' must be an integer",
+                intent_id=intent.intent_id,
+            )
+
+        # Validate CL support (only Base has cl_nft)
+        cl_nft = LP_POSITION_MANAGERS.get(compiler.chain, {}).get("aerodrome_slipstream")
+        if not cl_nft:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
+                intent_id=intent.intent_id,
+            )
+
+        logger.info(
+            f"Compiling Aerodrome Slipstream LP_OPEN: {token0_symbol}/{token1_symbol}, "
+            f"tick_spacing={tick_spacing}, ticks=[{intent.range_lower},{intent.range_upper}], "
+            f"amounts={intent.amount0}/{intent.amount1}"
+        )
+
+        # Resolve tokens
+        token0_info = compiler._resolve_token(token0_symbol)
+        token1_info = compiler._resolve_token(token1_symbol)
+
+        if token0_info is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown token: {token0_symbol}",
+                intent_id=intent.intent_id,
+            )
+        if token1_info is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown token: {token1_symbol}",
+                intent_id=intent.intent_id,
+            )
+
+        # Enforce canonical token order (token0 address < token1 address by EVM convention).
+        # Slipstream/V3 ticks are defined relative to token0/token1: reversing the order
+        # silently inverts the tick direction, placing the position on the wrong side of
+        # the price curve.
+        if int(token0_info.address, 16) > int(token1_info.address, 16):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Non-canonical pool token order: {token0_symbol} ({token0_info.address}) "
+                    f"has a higher address than {token1_symbol} ({token1_info.address}). "
+                    f"Slipstream ticks are defined with the lower-address token as token0. "
+                    f"Use '{token1_symbol}/{token0_symbol}/{tick_spacing}' instead."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        # Validate pool existence
+        from .pool_validation import validate_aerodrome_cl_pool
+
+        pool_check = validate_aerodrome_cl_pool(
+            compiler.chain,
+            token0_info.address,
+            token1_info.address,
+            tick_spacing,
+            compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
+        )
+        failed = compiler._validate_pool(pool_check, intent.intent_id)
+        if failed is not None:
+            return failed
+
+        # Validate tick bounds: must be integers, ordered, and aligned to tick_spacing.
+        if int(intent.range_lower) != intent.range_lower or int(intent.range_upper) != intent.range_upper:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Aerodrome Slipstream tick bounds must be integers, "
+                    f"got range_lower={intent.range_lower}, range_upper={intent.range_upper}"
+                ),
+                intent_id=intent.intent_id,
+            )
+        tick_lower = int(intent.range_lower)
+        tick_upper = int(intent.range_upper)
+        if tick_lower >= tick_upper:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Aerodrome Slipstream tick_lower ({tick_lower}) must be less than tick_upper ({tick_upper})",
+                intent_id=intent.intent_id,
+            )
+        if tick_lower % tick_spacing != 0 or tick_upper % tick_spacing != 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Aerodrome Slipstream tick bounds must be aligned to tick_spacing={tick_spacing}: "
+                    f"tick_lower={tick_lower} (rem={tick_lower % tick_spacing}), "
+                    f"tick_upper={tick_upper} (rem={tick_upper % tick_spacing})"
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        # Create Aerodrome adapter
+        config = AerodromeConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            price_provider=compiler.price_oracle,
+            rpc_url=compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
+        )
+        adapter = AerodromeAdapter(config)
+
+        # Build CL mint transactions
+        cl_result = adapter.add_cl_liquidity(
+            token_a=token0_symbol,
+            token_b=token1_symbol,
+            tick_spacing=tick_spacing,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            amount_a=intent.amount0,
+            amount_b=intent.amount1,
+            recipient=compiler.wallet_address,
+        )
+
+        if not cl_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Failed to build CL mint TX: {cl_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        for tx in cl_result.transactions:
+            transactions.append(tx)
+
+        total_gas = sum(tx.gas_estimate for tx in transactions)
+
+        action_bundle = ActionBundle(
+            intent_type=IntentType.LP_OPEN.value,
+            transactions=[tx.to_dict() for tx in transactions],
+            metadata={
+                "pool": intent.pool,
+                "token0": token0_info.to_dict(),
+                "token1": token1_info.to_dict(),
+                "tick_spacing": tick_spacing,
+                "tick_lower": tick_lower,
+                "tick_upper": tick_upper,
+                "amount0": str(intent.amount0),
+                "amount1": str(intent.amount1),
+                "protocol": "aerodrome_slipstream",
+                "token_id": None,
+                "nft_manager": cl_nft,
+            },
+        )
+
+        result.action_bundle = action_bundle
+        result.transactions = transactions
+        result.total_gas_estimate = total_gas
+        result.warnings = warnings
+
+        tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
+        tx_summary = f" ({tx_types})" if tx_types else ""
+        logger.info(
+            f"Compiled Aerodrome Slipstream LP_OPEN: {token0_symbol}/{token1_symbol}, "
+            f"tick_spacing={tick_spacing}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+        )
+
+    except Exception as e:
+        logger.exception(f"Failed to compile Aerodrome Slipstream LP_OPEN intent: {e}")
+        result.status = CompilationStatus.FAILED
+        result.error = str(e)
+
+    return result
+
+
+def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> CompilationResult:
+    """Compile LP_CLOSE intent for Aerodrome Slipstream CL.
+
+    The ``intent.position_id`` is the NFT tokenId as a numeric string (e.g. "12345").
+
+    Args:
+        compiler: IntentCompiler instance
+        intent: LPCloseIntent to compile
+
+    Returns:
+        CompilationResult with Aerodrome Slipstream decreaseLiquidity + collect ActionBundle
+    """
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[Any] = []
+    warnings: list[str] = []
+
+    try:
+        from almanak.framework.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
+
+        position_id_raw = intent.position_id or ""
+
+        # Validate and parse tokenId
+        if not position_id_raw:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="position_id is required for aerodrome_slipstream LP_CLOSE (must be NFT tokenId string)",
+                intent_id=intent.intent_id,
+            )
+
+        try:
+            token_id = int(position_id_raw)
+        except ValueError:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Invalid position_id '{position_id_raw}': aerodrome_slipstream LP_CLOSE requires a numeric tokenId",
+                intent_id=intent.intent_id,
+            )
+
+        # Validate CL support
+        cl_nft = LP_POSITION_MANAGERS.get(compiler.chain, {}).get("aerodrome_slipstream")
+        if not cl_nft:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. Only 'base' is supported.",
+                intent_id=intent.intent_id,
+            )
+
+        logger.info(f"Compiling Aerodrome Slipstream LP_CLOSE: tokenId={token_id}")
+
+        # Handle permission discovery mode: tokenId=0 → synthetic non-zero
+        _cfg = getattr(compiler, "_config", None)
+        permission_discovery = _cfg and getattr(_cfg, "permission_discovery", False)
+        if permission_discovery and token_id == 0:
+            # Use a non-zero synthetic tokenId so the adapter can produce real TXs
+            token_id = 1
+            logger.debug("Permission discovery mode: using synthetic tokenId=1 for Aerodrome Slipstream LP_CLOSE")
+
+        # Create Aerodrome adapter
+        config = AerodromeConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            price_provider=compiler.price_oracle,
+            rpc_url=compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
+        )
+        adapter = AerodromeAdapter(config)
+
+        # Build remove liquidity transactions
+        cl_result = adapter.remove_cl_liquidity(
+            token_id=token_id,
+            recipient=compiler.wallet_address,
+        )
+
+        if not cl_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Failed to build CL decreaseLiquidity TX: {cl_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        # Handle zero-liquidity case (position already closed)
+        if not cl_result.transactions:
+            warning = f"CL position tokenId={token_id} has zero liquidity — treating LP_CLOSE as no-op"
+            warnings.append(warning)
+            logger.info(warning)
+
+            result.action_bundle = ActionBundle(
+                intent_type=IntentType.LP_CLOSE.value,
+                transactions=[],
+                metadata={
+                    "position_id": intent.position_id,
+                    "token_id": token_id,
+                    "protocol": "aerodrome_slipstream",
+                    "collect_fees": intent.collect_fees,
+                    "warning": "Zero liquidity; LP_CLOSE no-op",
+                },
+            )
+            result.transactions = []
+            result.total_gas_estimate = 0
+            result.warnings = warnings
+            return result
+
+        for tx in cl_result.transactions:
+            transactions.append(tx)
+
+        total_gas = sum(tx.gas_estimate for tx in transactions)
+
+        action_bundle = ActionBundle(
+            intent_type=IntentType.LP_CLOSE.value,
+            transactions=[tx.to_dict() for tx in transactions],
+            metadata={
+                "position_id": intent.position_id,
+                "token_id": token_id,
+                "protocol": "aerodrome_slipstream",
+                "collect_fees": intent.collect_fees,
+                "nft_manager": cl_nft,
+            },
+        )
+
+        result.action_bundle = action_bundle
+        result.transactions = transactions
+        result.total_gas_estimate = total_gas
+        result.warnings = warnings
+
+        tx_types = " + ".join(str(getattr(tx, "tx_type", "")) for tx in transactions) if transactions else ""
+        tx_summary = f" ({tx_types})" if tx_types else ""
+        logger.info(
+            f"Compiled Aerodrome Slipstream LP_CLOSE: tokenId={token_id}, "
+            f"{len(transactions)} txs{tx_summary}, {total_gas} gas"
+        )
+
+    except Exception as e:
+        logger.exception(f"Failed to compile Aerodrome Slipstream LP_CLOSE intent: {e}")
+        result.status = CompilationStatus.FAILED
+        result.error = str(e)
+
+    return result
+
+
 def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: bool) -> str | None:
     """Query Aerodrome pool address, preferring gateway RPC over direct calls.
 

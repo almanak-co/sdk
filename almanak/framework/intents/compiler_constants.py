@@ -209,6 +209,7 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "sushiswap_v3": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         # Aerodrome uses the Router for liquidity operations (fungible LP tokens)
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",  # Aerodrome Router
+        "aerodrome_slipstream": "0x827922686190790b37229fd06084350E74485b72",  # Slipstream NonfungiblePositionManager
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
     },
     "avalanche": {

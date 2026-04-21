@@ -1,0 +1,43 @@
+[
+  {
+    "type": "function",
+    "name": "slot0",
+    "inputs": [],
+    "outputs": [
+      { "name": "sqrtPriceX96", "type": "uint160" },
+      { "name": "tick", "type": "int24" },
+      { "name": "observationIndex", "type": "uint16" },
+      { "name": "observationCardinality", "type": "uint16" },
+      { "name": "observationCardinalityNext", "type": "uint16" },
+      { "name": "unlocked", "type": "bool" }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "token0",
+    "inputs": [],
+    "outputs": [
+      { "name": "", "type": "address" }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "token1",
+    "inputs": [],
+    "outputs": [
+      { "name": "", "type": "address" }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "tickSpacing",
+    "inputs": [],
+    "outputs": [
+      { "name": "", "type": "int24" }
+    ],
+    "stateMutability": "view"
+  }
+]

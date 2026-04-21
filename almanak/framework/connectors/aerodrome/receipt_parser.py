@@ -43,6 +43,10 @@ EVENT_TOPICS: dict[str, str] = {
     "Sync": "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+    # Slipstream CL NFT events (NonfungiblePositionManager)
+    "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
+    "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
+    "CollectCL": "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01",
 }
 
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
@@ -1617,8 +1621,252 @@ class AerodromeReceiptParser:
         return self.registry.get_event_type_from_topic(topic) or AerodromeEventType.UNKNOWN
 
 
+# =============================================================================
+# Aerodrome Slipstream CL Receipt Parser
+# =============================================================================
+
+# Zero address constant for ERC-721 mint detection
+_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+# Slipstream CL NFT event topic constants
+_INCREASE_LIQUIDITY_TOPIC = EVENT_TOPICS["IncreaseLiquidity"].lower()
+_DECREASE_LIQUIDITY_TOPIC = EVENT_TOPICS["DecreaseLiquidity"].lower()
+_COLLECT_CL_TOPIC = EVENT_TOPICS["CollectCL"].lower()
+_ERC721_TRANSFER_TOPIC = EVENT_TOPICS["Transfer"].lower()
+
+
+class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
+    """Receipt parser for Aerodrome Slipstream CL (concentrated liquidity) transactions.
+
+    Extends AerodromeReceiptParser to handle NFT position events from the
+    NonfungiblePositionManager contract:
+    - IncreaseLiquidity: emitted on mint (LP_OPEN)
+    - DecreaseLiquidity: emitted on decreaseLiquidity (LP_CLOSE)
+    - ERC-721 Transfer: used to extract tokenId on mint
+
+    Position ID is the NFT tokenId extracted from the ERC-721 Transfer (mint)
+    event where from == zero_address.
+    """
+
+    def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
+        """Extract NFT tokenId from LP mint receipt.
+
+        For Slipstream CL, minting creates an ERC-721 NFT. The tokenId is
+        found in the Transfer event emitted by the NonfungiblePositionManager
+        where ``from == zero_address`` (mint). ERC-721 Transfer events have
+        4 topics: [Transfer_sig, from (indexed), to (indexed), tokenId (indexed)].
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            NFT tokenId as string (e.g. "12345"), or None if not found
+        """
+        try:
+            logs = receipt.get("logs", [])
+            for log in logs:
+                topics = log.get("topics", [])
+                # ERC-721 Transfer has exactly 4 topics
+                if len(topics) != 4:
+                    continue
+
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                if topic0.lower() != _ERC721_TRANSFER_TOPIC:
+                    continue
+
+                # Check if from == zero_address (mint)
+                from_addr = HexDecoder.topic_to_address(topics[1])
+                if from_addr.lower() != _ZERO_ADDRESS:
+                    continue
+
+                # tokenId is in topics[3] (indexed uint256)
+                topic3 = topics[3]
+                if isinstance(topic3, bytes | bytearray):
+                    token_id_hex = bytes(topic3).hex()
+                else:
+                    token_id_hex = str(topic3).replace("0x", "").replace("0X", "")
+                token_id = int(token_id_hex, 16)
+                return str(token_id)
+
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract Slipstream CL position_id: {e}")
+            return None
+
+    def extract_liquidity(self, receipt: dict[str, Any]) -> int | None:
+        """Extract liquidity from CL mint receipt via IncreaseLiquidity event.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Liquidity amount if found, None otherwise
+        """
+        try:
+            logs = receipt.get("logs", [])
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                if topic0.lower() != _INCREASE_LIQUIDITY_TOPIC:
+                    continue
+
+                # IncreaseLiquidity: topics[1]=tokenId(indexed), data=liquidity(uint128)+amount0(uint256)+amount1(uint256)
+                data = HexDecoder.normalize_hex(log.get("data", ""))
+                if len(data) >= 2 + 64:
+                    # uint128 liquidity is the first 32-byte slot in data
+                    liquidity = HexDecoder.decode_uint256(data, 0)
+                    return liquidity
+
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract Slipstream CL liquidity: {e}")
+            return None
+
+    def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
+        """Extract LP close data from Slipstream CL receipt.
+
+        Reads the ``Collect`` event (actual amounts transferred to recipient) in
+        preference to ``DecreaseLiquidity`` (amounts unlocked but not yet transferred).
+        This ensures fees already owed before the close are included in the reported
+        amounts, not just the principal removed in this transaction.
+
+        The Slipstream close is a two-tx flow (decreaseLiquidity → collect).
+        The Collect event appears in the second tx receipt; the DecreaseLiquidity
+        event appears in the first.  ResultEnricher iterates all receipts and takes
+        the first successful extraction, so the correct receipt will win.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            LPCloseData if found, None otherwise
+        """
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        try:
+            logs = receipt.get("logs", [])
+
+            # Pass 1: prefer the Collect event — includes principal + pre-existing fees.
+            # Collect: topics[0]=sig, topics[1]=tokenId(indexed),
+            #          data = recipient(address,32b) + amount0Collected(uint256) + amount1Collected(uint256)
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                if topic0.lower() != _COLLECT_CL_TOPIC:
+                    continue
+
+                data = HexDecoder.normalize_hex(log.get("data", ""))
+                # data = address(32b) + amount0(32b) + amount1(32b)
+                if len(data) >= 2 + 96:
+                    amount0 = HexDecoder.decode_uint256(data, 32)
+                    amount1 = HexDecoder.decode_uint256(data, 64)
+                    return LPCloseData(
+                        amount0_collected=amount0,
+                        amount1_collected=amount1,
+                        fees0=0,
+                        fees1=0,
+                    )
+
+            # Pass 2: fall back to DecreaseLiquidity (first tx receipt in two-tx close).
+            # DecreaseLiquidity: topics[1]=tokenId(indexed),
+            #                    data = liquidity(uint128) + amount0(uint256) + amount1(uint256)
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                if topic0.lower() != _DECREASE_LIQUIDITY_TOPIC:
+                    continue
+
+                data = HexDecoder.normalize_hex(log.get("data", ""))
+                if len(data) >= 2 + 96:
+                    liquidity = HexDecoder.decode_uint256(data, 0)
+                    amount0 = HexDecoder.decode_uint256(data, 32)
+                    amount1 = HexDecoder.decode_uint256(data, 64)
+                    return LPCloseData(
+                        amount0_collected=amount0,
+                        amount1_collected=amount1,
+                        fees0=0,
+                        fees1=0,
+                        liquidity_removed=liquidity,
+                    )
+
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract Slipstream CL lp_close_data: {e}")
+            return None
+
+    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
+        """Fail-closed variant of extract_lp_close_data for Slipstream CL."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_lp_close_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no Collect or DecreaseLiquidity event in receipt")
+        return ExtractOk(value=value)
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
+        """Fail-closed variant of extract_position_id for Slipstream CL."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_position_id(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no ERC-721 mint Transfer event found")
+        return ExtractOk(value=value)
+
+    def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of extract_liquidity for Slipstream CL."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = self.extract_liquidity(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no IncreaseLiquidity event in receipt")
+        return ExtractOk(value=value)
+
+
 __all__ = [
     "AerodromeReceiptParser",
+    "AerodromeSlipstreamReceiptParser",
     "AerodromeEvent",
     "AerodromeEventType",
     "SwapEventData",

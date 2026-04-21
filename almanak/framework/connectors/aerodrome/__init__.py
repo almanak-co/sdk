@@ -37,8 +37,10 @@ Example:
 """
 
 from .adapter import (
+    MAX_UINT128,
     AerodromeAdapter,
     AerodromeConfig,
+    CLLiquidityResult,
     LiquidityResult,
     PoolType,
     SwapQuote,
@@ -56,6 +58,7 @@ from .receipt_parser import (
     AerodromeEvent,
     AerodromeEventType,
     AerodromeReceiptParser,
+    AerodromeSlipstreamReceiptParser,
     BurnEventData,
     MintEventData,
     ParsedLiquidityResult,
@@ -70,6 +73,7 @@ from .sdk import (
     MAX_UINT256,
     AerodromeSDK,
     AerodromeSDKError,
+    CLPositionInfo,
     InsufficientLiquidityError,
     PoolInfo,
     PoolNotFoundError,
@@ -88,6 +92,7 @@ from .sdk import (
 __all__ = [
     # SDK
     "AerodromeSDK",
+    "CLPositionInfo",
     "PoolInfo",
     "SwapRoute",
     "SDKSwapQuote",
@@ -97,14 +102,17 @@ __all__ = [
     # Adapter
     "AerodromeAdapter",
     "AerodromeConfig",
+    "CLLiquidityResult",
     "SwapQuote",
     "SwapResult",
     "SwapType",
     "PoolType",
     "LiquidityResult",
     "TransactionData",
+    "MAX_UINT128",
     # Receipt Parser
     "AerodromeReceiptParser",
+    "AerodromeSlipstreamReceiptParser",
     "AerodromeEvent",
     "AerodromeEventType",
     "SwapEventData",

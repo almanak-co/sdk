@@ -58,6 +58,11 @@ AERODROME_GAS_ESTIMATES: dict[str, int] = {
     "remove_liquidity": 200000,
     "wrap": 30000,
     "unwrap": 30000,
+    # Slipstream CL operations
+    "cl_mint": 500000,
+    "cl_decrease_liquidity": 150000,
+    "cl_collect": 120000,
+    "cl_approve": 46000,
 }
 
 # Maximum uint256 value
@@ -107,6 +112,47 @@ class PoolInfo:
             "reserve1": str(self.reserve1),
             "decimals0": self.decimals0,
             "decimals1": self.decimals1,
+        }
+
+
+@dataclass
+class CLPositionInfo:
+    """Information about a Slipstream CL NFT position.
+
+    Attributes:
+        token_id: NFT token ID
+        token0: Address of token0
+        token1: Address of token1
+        tick_spacing: Pool tick spacing
+        tick_lower: Lower tick of the position range
+        tick_upper: Upper tick of the position range
+        liquidity: Current liquidity in the position
+        tokens_owed0: Uncollected fees for token0
+        tokens_owed1: Uncollected fees for token1
+    """
+
+    token_id: int
+    token0: str
+    token1: str
+    tick_spacing: int
+    tick_lower: int
+    tick_upper: int
+    liquidity: int
+    tokens_owed0: int
+    tokens_owed1: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "token_id": self.token_id,
+            "token0": self.token0,
+            "token1": self.token1,
+            "tick_spacing": self.tick_spacing,
+            "tick_lower": self.tick_lower,
+            "tick_upper": self.tick_upper,
+            "liquidity": str(self.liquidity),
+            "tokens_owed0": str(self.tokens_owed0),
+            "tokens_owed1": str(self.tokens_owed1),
         }
 
 
@@ -284,6 +330,13 @@ class AerodromeSDK:
 
         # Gas buffer for Base chain (higher base fees)
         self.gas_buffer = 0.5
+
+        # Load CL ABIs (only if cl_nft address is present for chain)
+        self._cl_nft_abi: list[dict] = []
+        self._cl_pool_abi: list[dict] = []
+        if "cl_nft" in self.addresses:
+            self._cl_nft_abi = self._load_abi("cl_nft")
+            self._cl_pool_abi = self._load_abi("cl_pool")
 
         logger.info(f"AerodromeSDK initialized for chain={chain}")
 
@@ -777,6 +830,281 @@ class AerodromeSDK:
         return tx
 
     # =========================================================================
+    # Slipstream CL Methods
+    # =========================================================================
+
+    def get_cl_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        tick_spacing: int,
+        web3: Any,
+    ) -> str | None:
+        """Get Slipstream CL pool address from cl_factory.
+
+        Args:
+            token_a: First token address
+            token_b: Second token address
+            tick_spacing: Pool tick spacing (int24)
+            web3: Web3 instance
+
+        Returns:
+            Pool address if exists, None otherwise
+        """
+        if "cl_factory" not in self.addresses:
+            logger.warning(f"No cl_factory address for chain {self.chain}")
+            return None
+        try:
+            # Minimal ABI for getPool(address,address,int24)
+            cl_factory_abi = [
+                {
+                    "type": "function",
+                    "name": "getPool",
+                    "inputs": [
+                        {"name": "tokenA", "type": "address"},
+                        {"name": "tokenB", "type": "address"},
+                        {"name": "tickSpacing", "type": "int24"},
+                    ],
+                    "outputs": [{"name": "pool", "type": "address"}],
+                    "stateMutability": "view",
+                }
+            ]
+            factory = web3.eth.contract(
+                address=web3.to_checksum_address(self.addresses["cl_factory"]),
+                abi=cl_factory_abi,
+            )
+            pool_address = factory.functions.getPool(
+                web3.to_checksum_address(token_a),
+                web3.to_checksum_address(token_b),
+                tick_spacing,
+            ).call()
+            if pool_address == "0x0000000000000000000000000000000000000000":
+                return None
+            return pool_address
+        except Exception as e:
+            logger.warning(f"Failed to query CL pool address: {e}")
+            return None
+
+    def get_cl_pool_slot0(
+        self,
+        pool_address: str,
+        web3: Any,
+    ) -> tuple[int, int] | None:
+        """Get sqrtPriceX96 and current tick from Slipstream CL pool slot0.
+
+        Args:
+            pool_address: CL pool contract address
+            web3: Web3 instance
+
+        Returns:
+            Tuple of (sqrtPriceX96, current_tick) or None if query failed
+        """
+        try:
+            pool = web3.eth.contract(
+                address=web3.to_checksum_address(pool_address),
+                abi=self._cl_pool_abi,
+            )
+            slot0 = pool.functions.slot0().call()
+            # slot0 returns (sqrtPriceX96, tick, observationIndex, observationCardinality, observationCardinalityNext, unlocked)
+            return int(slot0[0]), int(slot0[1])
+        except Exception as e:
+            logger.warning(f"Failed to query CL pool slot0 for {pool_address}: {e}")
+            return None
+
+    def get_cl_position(
+        self,
+        token_id: int,
+        web3: Any,
+    ) -> "CLPositionInfo | None":
+        """Get Slipstream CL position info by NFT token ID.
+
+        Args:
+            token_id: NFT token ID
+            web3: Web3 instance
+
+        Returns:
+            CLPositionInfo if found, None otherwise
+        """
+        if "cl_nft" not in self.addresses:
+            logger.warning(f"No cl_nft address for chain {self.chain}")
+            return None
+        try:
+            nft = web3.eth.contract(
+                address=web3.to_checksum_address(self.addresses["cl_nft"]),
+                abi=self._cl_nft_abi,
+            )
+            pos = nft.functions.positions(token_id).call()
+            # positions returns: (nonce, operator, token0, token1, tickSpacing, tickLower, tickUpper, liquidity, feeGrowth0, feeGrowth1, tokensOwed0, tokensOwed1)
+            return CLPositionInfo(
+                token_id=token_id,
+                token0=pos[2].lower(),
+                token1=pos[3].lower(),
+                tick_spacing=int(pos[4]),
+                tick_lower=int(pos[5]),
+                tick_upper=int(pos[6]),
+                liquidity=int(pos[7]),
+                tokens_owed0=int(pos[10]),
+                tokens_owed1=int(pos[11]),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to query CL position {token_id}: {e}")
+            return None
+
+    def build_cl_mint_tx(
+        self,
+        token0: str,
+        token1: str,
+        tick_spacing: int,
+        tick_lower: int,
+        tick_upper: int,
+        amount0_desired: int,
+        amount1_desired: int,
+        amount0_min: int,
+        amount1_min: int,
+        recipient: str,
+        deadline: int,
+        sender: str,
+        web3: Any,
+        sqrt_price_x96: int = 0,
+    ) -> dict[str, Any]:
+        """Build Slipstream CL NonfungiblePositionManager mint transaction.
+
+        Args:
+            token0: Token0 address (must be < token1 by address)
+            token1: Token1 address
+            tick_spacing: Pool tick spacing
+            tick_lower: Lower tick bound
+            tick_upper: Upper tick bound
+            amount0_desired: Desired token0 amount
+            amount1_desired: Desired token1 amount
+            amount0_min: Minimum token0 amount (slippage protection)
+            amount1_min: Minimum token1 amount (slippage protection)
+            recipient: NFT recipient address
+            deadline: Transaction deadline (unix timestamp)
+            sender: Transaction sender
+            web3: Web3 instance
+            sqrt_price_x96: Initial sqrt price (0 for existing pool)
+
+        Returns:
+            Transaction dictionary
+        """
+        if "cl_nft" not in self.addresses:
+            raise ValueError(f"cl_nft not configured for chain {self.chain}")
+
+        nft = web3.eth.contract(
+            address=web3.to_checksum_address(self.addresses["cl_nft"]),
+            abi=self._cl_nft_abi,
+        )
+
+        params = (
+            web3.to_checksum_address(token0),
+            web3.to_checksum_address(token1),
+            tick_spacing,
+            tick_lower,
+            tick_upper,
+            amount0_desired,
+            amount1_desired,
+            amount0_min,
+            amount1_min,
+            web3.to_checksum_address(recipient),
+            deadline,
+            sqrt_price_x96,
+        )
+
+        tx = nft.functions.mint(params).build_transaction(
+            {
+                "from": web3.to_checksum_address(sender),
+                "gas": AERODROME_GAS_ESTIMATES["cl_mint"],
+                "nonce": web3.eth.get_transaction_count(sender),
+            }
+        )
+        return tx
+
+    def build_cl_decrease_liquidity_tx(
+        self,
+        token_id: int,
+        liquidity: int,
+        amount0_min: int,
+        amount1_min: int,
+        deadline: int,
+        sender: str,
+        web3: Any,
+    ) -> dict[str, Any]:
+        """Build Slipstream CL decreaseLiquidity transaction.
+
+        Args:
+            token_id: NFT token ID
+            liquidity: Amount of liquidity to remove
+            amount0_min: Minimum token0 to receive
+            amount1_min: Minimum token1 to receive
+            deadline: Transaction deadline
+            sender: Transaction sender
+            web3: Web3 instance
+
+        Returns:
+            Transaction dictionary
+        """
+        if "cl_nft" not in self.addresses:
+            raise ValueError(f"cl_nft not configured for chain {self.chain}")
+
+        nft = web3.eth.contract(
+            address=web3.to_checksum_address(self.addresses["cl_nft"]),
+            abi=self._cl_nft_abi,
+        )
+
+        params = (token_id, liquidity, amount0_min, amount1_min, deadline)
+
+        tx = nft.functions.decreaseLiquidity(params).build_transaction(
+            {
+                "from": web3.to_checksum_address(sender),
+                "gas": AERODROME_GAS_ESTIMATES["cl_decrease_liquidity"],
+                "nonce": web3.eth.get_transaction_count(sender),
+            }
+        )
+        return tx
+
+    def build_cl_collect_tx(
+        self,
+        token_id: int,
+        recipient: str,
+        amount0_max: int,
+        amount1_max: int,
+        sender: str,
+        web3: Any,
+    ) -> dict[str, Any]:
+        """Build Slipstream CL collect transaction.
+
+        Args:
+            token_id: NFT token ID
+            recipient: Token recipient address
+            amount0_max: Maximum token0 to collect (use MAX_UINT128 for all)
+            amount1_max: Maximum token1 to collect (use MAX_UINT128 for all)
+            sender: Transaction sender
+            web3: Web3 instance
+
+        Returns:
+            Transaction dictionary
+        """
+        if "cl_nft" not in self.addresses:
+            raise ValueError(f"cl_nft not configured for chain {self.chain}")
+
+        nft = web3.eth.contract(
+            address=web3.to_checksum_address(self.addresses["cl_nft"]),
+            abi=self._cl_nft_abi,
+        )
+
+        params = (token_id, web3.to_checksum_address(recipient), amount0_max, amount1_max)
+
+        tx = nft.functions.collect(params).build_transaction(
+            {
+                "from": web3.to_checksum_address(sender),
+                "gas": AERODROME_GAS_ESTIMATES["cl_collect"],
+                "nonce": web3.eth.get_transaction_count(sender),
+            }
+        )
+        return tx
+
+    # =========================================================================
     # Helper Methods
     # =========================================================================
 
@@ -849,6 +1177,7 @@ class AerodromeSDK:
 
 __all__ = [
     "AerodromeSDK",
+    "CLPositionInfo",
     "PoolInfo",
     "SwapRoute",
     "SwapQuote",

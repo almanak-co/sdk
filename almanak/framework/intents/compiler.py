@@ -2450,6 +2450,10 @@ class IntentCompiler:
         if intent.protocol == "traderjoe_v2":
             return self._compile_lp_open_traderjoe_v2(intent)
 
+        # Handle Aerodrome Slipstream CL (concentrated liquidity, NFT positions)
+        if intent.protocol == "aerodrome_slipstream":
+            return self._compile_lp_open_aerodrome_slipstream(intent)
+
         # Handle Aerodrome/Velodrome separately (Solidly-fork with fungible LP tokens)
         # Resolve alias so velodrome -> aerodrome on Optimism (LP dispatch doesn't pre-resolve)
         if self._resolve_protocol(intent.protocol) == "aerodrome":
@@ -3327,6 +3331,10 @@ class IntentCompiler:
         if intent.protocol == "traderjoe_v2":
             return self._compile_lp_close_traderjoe_v2(intent)
 
+        # Handle Aerodrome Slipstream CL close (NFT tokenId-based)
+        if intent.protocol == "aerodrome_slipstream":
+            return self._compile_lp_close_aerodrome_slipstream(intent)
+
         # Handle Aerodrome/Velodrome separately (Solidly-fork with fungible LP tokens)
         # Resolve alias so velodrome -> aerodrome on Optimism (LP dispatch doesn't pre-resolve)
         if self._resolve_protocol(intent.protocol) == "aerodrome":
@@ -4069,6 +4077,18 @@ class IntentCompiler:
         from .compiler_aerodrome import compile_swap_aerodrome
 
         return compile_swap_aerodrome(self, intent)
+
+    def _compile_lp_open_aerodrome_slipstream(self, intent: LPOpenIntent) -> CompilationResult:
+        """Compile LP_OPEN intent for Aerodrome Slipstream CL (concentrated liquidity)."""
+        from .compiler_aerodrome import compile_lp_open_aerodrome_slipstream
+
+        return compile_lp_open_aerodrome_slipstream(self, intent)
+
+    def _compile_lp_close_aerodrome_slipstream(self, intent: LPCloseIntent) -> CompilationResult:
+        """Compile LP_CLOSE intent for Aerodrome Slipstream CL."""
+        from .compiler_aerodrome import compile_lp_close_aerodrome_slipstream
+
+        return compile_lp_close_aerodrome_slipstream(self, intent)
 
     def _compile_swap_traderjoe_v2(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for TraderJoe V2 Liquidity Book (VIB-1928).

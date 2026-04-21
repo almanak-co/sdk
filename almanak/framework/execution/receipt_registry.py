@@ -151,6 +151,10 @@ class ReceiptParserRegistry:
             "almanak.framework.connectors.aerodrome.receipt_parser",
             "AerodromeReceiptParser",
         ),
+        "aerodrome_slipstream": (
+            "almanak.framework.connectors.aerodrome.receipt_parser",
+            "AerodromeSlipstreamReceiptParser",
+        ),
         "traderjoe_v2": (
             "almanak.framework.connectors.traderjoe_v2.receipt_parser",
             "TraderJoeV2ReceiptParser",
