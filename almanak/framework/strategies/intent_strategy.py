@@ -2828,11 +2828,16 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Scans config for common token-related field names and extracts
         symbols from their values. Handles both direct symbol fields
         (e.g., base_token="WETH") and pool format fields
-        (e.g., pool="WETH/USDC/500").
+        (e.g., pool="WETH/USDC/500", "WETH/USDC/volatile").
 
         Returns:
             Deduplicated list of token symbols, or empty list if none found.
         """
+        # Lazy import to avoid pulling in the full runner package at
+        # strategies/ import time (strategies/__init__.py is loaded eagerly
+        # by the strategy auto-discovery pipeline).
+        from ..runner.token_extraction import parse_pool_tokens
+
         config = self.config
         if config is None:
             return []
@@ -2854,7 +2859,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         }
 
         # Field names whose value is a slash-separated pool descriptor
-        # like "WETH/USDC/500" or "WETH/USDC"
+        # like "WETH/USDC/500", "WETH/USDC/volatile", or "WETH/USDC"
         _POOL_FIELDS = {"pool", "pair", "market"}
 
         seen: set[str] = set()
@@ -2881,18 +2886,12 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 continue
 
             if key in _POOL_FIELDS:
-                # Parse pool-style values: "WETH/USDC/500" -> ["WETH", "USDC"]
-                # Only parse if the value contains "/" (actual pool format).
-                # Bare strings like "usdc_e" are market IDs, not token symbols.
-                if "/" not in value:
-                    continue
-                parts = value.split("/")
-                for part in parts:
-                    # Skip numeric parts (fee tiers like "500", "3000")
-                    if part.isdigit():
-                        continue
-                    symbol = part.strip()
-                    if symbol and symbol not in seen:
+                # Delegate pool parsing to the canonical helper so the
+                # trailing pool-type-suffix filter (volatile/stable/
+                # concentrated/cl) stays in one place. Bare strings like
+                # "usdc_e" have no "/" and return [] — correctly skipped.
+                for symbol in parse_pool_tokens(value):
+                    if symbol not in seen:
                         seen.add(symbol)
                         tokens.append(symbol)
             elif key in _TOKEN_FIELDS:

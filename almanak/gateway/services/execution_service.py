@@ -113,21 +113,19 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
     @staticmethod
     def _extract_token_symbols_from_intent(intent: object) -> list[str]:
-        """Extract token symbols from an intent object for price fetching."""
-        tokens = []
-        for attr in ("from_token", "to_token", "token", "collateral_token", "borrow_token"):
-            val = getattr(intent, attr, None)
-            if val and isinstance(val, str):
-                tokens.append(val)
-        # LP intents carry pool (e.g. "WETH/USDC/500") but no explicit token fields.
-        # Extract token symbols from the pool string so prices can be self-served.
-        pool = getattr(intent, "pool", None)
-        if pool and isinstance(pool, str) and "/" in pool:
-            parts = pool.split("/")
-            for p in parts:
-                if p and not p.isdigit() and p not in tokens:
-                    tokens.append(p)
-        return tokens
+        """Extract token symbols from an intent object for price fetching.
+
+        Delegates to the canonical ``extract_token_symbols`` helper in
+        ``almanak.framework.runner.token_extraction`` — the same parser
+        StrategyRunner uses on the client side — so runner and gateway
+        cannot drift on which fields (or which pool suffixes) count as
+        token symbols. In particular, trailing pool-type suffixes like
+        ``"volatile"``/``"stable"``/``"concentrated"``/``"cl"`` are correctly
+        filtered out.
+        """
+        from almanak.framework.runner.token_extraction import extract_token_symbols
+
+        return extract_token_symbols(intent)
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of execution components."""

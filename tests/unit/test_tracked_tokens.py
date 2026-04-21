@@ -223,6 +223,39 @@ class TestDeriveTokensFromConfig:
         tokens = strategy._derive_tokens_from_config()
         assert tokens == ["WAVAX", "USDC"]
 
+    def test_pool_field_skips_volatile_suffix(self):
+        """Regression: Aerodrome 'volatile' suffix must not leak as a token.
+
+        Observed in staging deployment b3f41304: the pool 'WETH/USDC/volatile'
+        was producing 'No Chainlink feed for VOLATILE on base' errors because
+        _derive_tokens_from_config returned ['WETH', 'USDC', 'volatile'] and
+        the portfolio valuer/pre-warmer then queried price/balance for
+        'volatile'.
+        """
+        strategy = _make_strategy(PoolConfig(pool="WETH/USDC/volatile"))
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["WETH", "USDC"]
+        assert "volatile" not in tokens
+
+    def test_pool_field_skips_stable_suffix(self):
+        strategy = _make_strategy(PoolConfig(pool="USDC/USDT/stable"))
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["USDC", "USDT"]
+        assert "stable" not in tokens
+
+    def test_pool_field_skips_concentrated_suffix(self):
+        strategy = _make_strategy(PoolConfig(pool="WETH/USDC/concentrated"))
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["WETH", "USDC"]
+        assert "concentrated" not in tokens
+
+    def test_pool_field_skips_cl_suffix(self):
+        """Aerodrome Slipstream 'cl' suffix."""
+        strategy = _make_strategy(PoolConfig(pool="WETH/USDC/cl"))
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["WETH", "USDC"]
+        assert "cl" not in tokens
+
     def test_market_id_not_treated_as_token(self):
         """Compound V3 market IDs like 'usdc_e' must NOT leak as token symbols.
 

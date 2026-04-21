@@ -46,6 +46,55 @@ def _is_symbol(value: Any) -> TypeGuard[str]:
     return bool(stripped) and len(stripped) < MAX_SYMBOL_LENGTH and not stripped.lower().startswith("0x")
 
 
+def parse_pool_tokens(pool: str) -> list[str]:
+    """Extract token symbols from a slash-separated pool descriptor.
+
+    Handles the pool-string format used across DEX intents:
+
+        "WETH/USDC/500"          -> ["WETH", "USDC"]     (Uniswap V3 fee tier)
+        "WETH/USDC/volatile"     -> ["WETH", "USDC"]     (Solidly/Aerodrome pool type)
+        "WETH/USDC"              -> ["WETH", "USDC"]     (two-token)
+        "USDC (0.05%)/WETH/500"  -> ["USDC", "WETH"]     (decorations stripped)
+        "VOLATILE/WETH/500"      -> ["VOLATILE", "WETH"] (suffix filter is trailing-only)
+
+    Filters:
+    - Numeric segments (fee tiers, bin steps).
+    - Trailing pool-type suffixes: volatile, stable, concentrated, cl.
+      Filter applies only at the last position — a token that happens to be
+      named "VOLATILE" in positions 0/1 is preserved.
+    - Segments that don't look like token symbols (addresses, empty, overlong).
+
+    Preserves first-seen order; does NOT deduplicate (caller's concern).
+
+    Args:
+        pool: Pool descriptor string.
+
+    Returns:
+        List of token symbols in order of appearance. Empty list if *pool*
+        is not a string, has no "/" separator, or yields no valid symbols.
+    """
+    if not isinstance(pool, str) or "/" not in pool:
+        return []
+
+    parts = [p for p in pool.split("/") if p.strip()]
+    last_idx = len(parts) - 1
+    tokens: list[str] = []
+
+    for idx, raw in enumerate(parts):
+        # Strip whitespace and common pool decorations (e.g., "USDC (0.05%)").
+        part = raw.strip().split("(")[0].split(" ")[0].strip()
+        # Skip numeric parts (fee tiers like "500", "3000", bin steps like "20").
+        if part.isdigit():
+            continue
+        # Skip pool-type suffixes only in trailing position.
+        if idx == last_idx and part.lower() in _POOL_TYPE_SUFFIXES:
+            continue
+        if _is_symbol(part):
+            tokens.append(part)
+
+    return tokens
+
+
 def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
     """Extract token symbols from an intent for price pre-fetching.
 
@@ -70,20 +119,8 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
 
     # Parse pool name (e.g., "WETH/USDC/500") for LP intents
     pool = _get("pool")
-    if isinstance(pool, str) and "/" in pool:
-        parts = [p for p in pool.split("/") if p.strip()]
-        last_idx = len(parts) - 1
-        for idx, part in enumerate(parts):
-            # Strip whitespace and common pool decorations (e.g., "USDC (0.05%)")
-            part = part.strip().split("(")[0].split(" ")[0].strip()
-            # Skip numeric parts (fee tiers like "500", "3000", bin steps like "20")
-            if part.isdigit():
-                continue
-            # Skip pool-type suffixes only in trailing position (e.g., "volatile", "stable")
-            if idx == last_idx and part.lower() in _POOL_TYPE_SUFFIXES:
-                continue
-            if _is_symbol(part):
-                symbols.append(part)
+    if isinstance(pool, str):
+        symbols.extend(parse_pool_tokens(pool))
 
     # Recurse into callback_intents (FlashLoanIntent)
     callbacks = _get("callback_intents")

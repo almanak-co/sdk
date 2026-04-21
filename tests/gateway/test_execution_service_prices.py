@@ -649,3 +649,77 @@ class TestExtractTokenSymbolsFromIntent:
         tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
         assert tokens.count("WETH") == 1
         assert "USDC" in tokens
+
+    def test_pool_field_skips_volatile_suffix(self):
+        """Regression: Aerodrome 'volatile' suffix must not leak as a token.
+
+        Observed in staging deployment b3f41304: 'WETH/USDC/volatile' caused
+        'No Chainlink feed for VOLATILE on base' errors during self-serve
+        price prefetch because 'volatile' was split out and queried as a
+        token symbol.
+        """
+        intent = MagicMock(spec=[])
+        intent.pool = "WETH/USDC/volatile"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert "volatile" not in tokens
+        assert "VOLATILE" not in tokens
+        assert tokens == ["WETH", "USDC"]
+
+    def test_pool_field_skips_stable_suffix(self):
+        intent = MagicMock(spec=[])
+        intent.pool = "USDC/USDT/stable"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert "stable" not in tokens
+        assert tokens == ["USDC", "USDT"]
+
+    def test_pool_field_skips_concentrated_suffix(self):
+        intent = MagicMock(spec=[])
+        intent.pool = "WETH/USDC/concentrated"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert "concentrated" not in tokens
+        assert tokens == ["WETH", "USDC"]
+
+    def test_pool_field_skips_cl_suffix(self):
+        """Aerodrome Slipstream 'cl' suffix."""
+        intent = MagicMock(spec=[])
+        intent.pool = "WETH/USDC/cl"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert "cl" not in tokens
+        assert tokens == ["WETH", "USDC"]
+
+    def test_extracts_token_in_and_token_out(self):
+        """Delegating to the canonical parser picks up token_in/token_out.
+
+        The previous hand-rolled parser only looked at
+        (from_token, to_token, token, collateral_token, borrow_token), so
+        any intent carrying token_in/token_out (e.g., some CLOB flows)
+        silently missed price prefetch. Delegation fixes this.
+        """
+        intent = MagicMock(spec=[])
+        intent.token_in = "USDC"
+        intent.token_out = "WETH"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert "USDC" in tokens
+        assert "WETH" in tokens
+
+    def test_extracts_token_a_and_token_b(self):
+        """Canonical parser also covers token_a / token_b (LP intents)."""
+        intent = MagicMock(spec=[])
+        intent.token_a = "USDC"
+        intent.token_b = "WETH"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert "USDC" in tokens
+        assert "WETH" in tokens
+
+    def test_recurses_into_callback_intents(self):
+        """Flash-loan callback intents now get their tokens extracted too."""
+        cb = MagicMock(spec=[])
+        cb.from_token = "WETH"
+        cb.to_token = "USDC"
+        intent = MagicMock(spec=[])
+        intent.token = "WETH"
+        intent.callback_intents = [cb]
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        # WETH appears in both levels but deduped
+        assert tokens.count("WETH") == 1
+        assert "USDC" in tokens
