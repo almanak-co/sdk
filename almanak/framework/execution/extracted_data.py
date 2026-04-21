@@ -385,6 +385,106 @@ class PredictionFill:
 
 
 @dataclass(frozen=True)
+class BridgeData:
+    """Extracted bridge execution data (VIB-3226).
+
+    Typed view of what happened on the *source* chain when a BRIDGE intent
+    executed. Populated by :class:`ResultEnricher` after a bridge adapter's
+    receipt parser (Across / Stargate / LiFi) extracts the deposit event.
+
+    Semantics:
+        - All fields describe the **source-chain** transaction (the deposit).
+          The destination-chain settlement is observed asynchronously by
+          :class:`EnsoStateProvider` and is NOT guaranteed to be present at
+          enrichment time. ``destination_tx_hash`` is a forward-looking hook
+          and will be ``None`` on first enrichment for nearly every bridge.
+        - ``amount_sent_raw`` is the raw on-chain integer in the token's
+          smallest unit (as observed from the deposit log / ERC-20 Transfer).
+          ``amount_sent`` is the same value as a human-readable Decimal using
+          the input token's decimals. Raising rather than defaulting to 18
+          is handled in the parser — if decimals cannot be resolved, the
+          parser returns ``None`` and the enricher treats it as a missing
+          extraction (VIB-3226 does not introduce silent 18-decimal lies).
+        - ``bridge_name`` is the lowercased adapter identifier the framework
+          uses in its registries (``"across"``, ``"stargate"``, ``"lifi"``),
+          NOT the human-readable display name ("Across", "Stargate").
+
+    Attributes:
+        source_tx_hash: Source-chain transaction hash for the deposit.
+        source_chain: Canonical source chain identifier (e.g. ``"base"``).
+        destination_chain: Canonical destination chain identifier. For
+            protocols that encode a chain id on-chain (Across ``destinationChainId``,
+            Stargate LZ eid), the parser translates that to the framework's
+            chain name when possible; unknown chain ids fall back to the raw
+            value as a string.
+        token_symbol: Uppercase symbol of the token being bridged (e.g.
+            ``"USDC"``). Sourced from the intent when the parser cannot
+            recover it from the receipt alone.
+        source_token_address: ERC-20 contract address of the bridged token
+            on the source chain (lowercased 0x...). Optional — not every
+            bridge event carries it.
+        destination_token_address: ERC-20 contract address on the destination
+            chain. Optional — populated when the deposit event includes a
+            destination-token field (Across depositV3 / LiFi quote); None
+            otherwise.
+        amount_sent: Human-readable amount the wallet deposited into the
+            bridge on the source chain.
+        amount_sent_raw: Raw integer amount in the token's smallest unit.
+        bridge_name: Lowercased bridge adapter identifier used in the
+            receipt-parser registry.
+        destination_tx_hash: Destination-chain settlement tx hash, if the
+            parser was able to discover it synchronously. This is almost
+            always ``None`` at first enrichment (settlement is async);
+            strategies that need the destination tx should continue to use
+            ``EnsoStateProvider.wait_for_bridge_completion``.
+        expected_amount_out: Expected amount delivered on the destination
+            chain per the compiler-time quote (pre-slippage). ``None`` when
+            the parser could not resolve it.
+
+    Example::
+
+        def on_intent_executed(self, intent, success, result):
+            if success and result.bridge_data:
+                bd = result.bridge_data
+                self.state["last_bridge"] = {
+                    "amount": str(bd.amount_sent),
+                    "from": bd.source_chain,
+                    "to": bd.destination_chain,
+                    "tx": bd.source_tx_hash,
+                    "bridge": bd.bridge_name,
+                }
+    """
+
+    source_tx_hash: str
+    source_chain: str
+    destination_chain: str
+    token_symbol: str
+    amount_sent: Decimal
+    amount_sent_raw: int
+    bridge_name: str
+    source_token_address: str | None = None
+    destination_token_address: str | None = None
+    destination_tx_hash: str | None = None
+    expected_amount_out: Decimal | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "source_tx_hash": self.source_tx_hash,
+            "source_chain": self.source_chain,
+            "destination_chain": self.destination_chain,
+            "token_symbol": self.token_symbol,
+            "amount_sent": str(self.amount_sent),
+            "amount_sent_raw": str(self.amount_sent_raw),
+            "bridge_name": self.bridge_name,
+            "source_token_address": self.source_token_address,
+            "destination_token_address": self.destination_token_address,
+            "destination_tx_hash": self.destination_tx_hash,
+            "expected_amount_out": str(self.expected_amount_out) if self.expected_amount_out is not None else None,
+        }
+
+
+@dataclass(frozen=True)
 class ProtocolFees:
     """Protocol fees paid by the user on a single transaction.
 
@@ -495,4 +595,5 @@ __all__ = [
     "StakeData",
     "PredictionFill",
     "ProtocolFees",
+    "BridgeData",
 ]

@@ -51,7 +51,7 @@ from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..models.reproduction_bundle import ActionBundle
 from ..strategies.base import RiskGuard, RiskGuardResult
 from ..utils.log_formatters import _emojis_enabled, format_gas_cost, format_tx_hash
-from .extracted_data import LPCloseData, PredictionFill, SwapAmounts
+from .extracted_data import BridgeData, LPCloseData, PredictionFill, SwapAmounts
 
 if TYPE_CHECKING:
     from .outcome import ExecutionOutcome
@@ -185,6 +185,11 @@ class ExecutionResult:
             intents. Populated by the runner's CLOB branch (VIB-3218). Strategy
             authors should read ``result.prediction_fill.filled_shares`` rather
             than assuming the intent's requested size filled.
+        bridge_data: Typed source-chain deposit data for BRIDGE intents
+            (VIB-3226). Populated by ResultEnricher via the bridge adapter's
+            receipt parser. The destination-chain settlement is tracked
+            asynchronously by EnsoStateProvider; ``bridge_data.destination_tx_hash``
+            is a forward-looking hook and will usually be ``None`` here.
         bin_ids: TraderJoe V2 bin IDs for LP positions
         extracted_data: Flexible dict for protocol-specific extracted data
         extraction_warnings: Non-fatal warnings from extraction process
@@ -210,6 +215,7 @@ class ExecutionResult:
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
     prediction_fill: PredictionFill | None = None
+    bridge_data: BridgeData | None = None  # VIB-3226: BRIDGE intent enrichment
     bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)
@@ -264,6 +270,7 @@ class ExecutionResult:
             position_id=self.position_id,
             swap_amounts=self.swap_amounts,
             lp_close_data=self.lp_close_data,
+            bridge_data=self.bridge_data,
             extracted_data=self.extracted_data,
             extraction_warnings=self.extraction_warnings,
         )
@@ -299,6 +306,7 @@ class ExecutionResult:
             "swap_amounts": self.swap_amounts.to_dict() if self.swap_amounts else None,
             "lp_close_data": self.lp_close_data.to_dict() if self.lp_close_data else None,
             "prediction_fill": self.prediction_fill.to_dict() if self.prediction_fill else None,
+            "bridge_data": self.bridge_data.to_dict() if self.bridge_data else None,
             "extracted_data": self.extracted_data,
             "extraction_warnings": self.extraction_warnings,
         }

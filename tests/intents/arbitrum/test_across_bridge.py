@@ -345,6 +345,68 @@ class TestAcrossBridgeIntent:
             f"total={format_token_amount(total_transferred_wei, in_decimals)} USDC"
         )
 
+        # --- Layer 3.5: Bridge extraction via AcrossReceiptParser (VIB-3226) ---
+        # Exercise the parser the ResultEnricher would invoke for BRIDGE intents
+        # on a real on-chain receipt, and assert the typed BridgeData payload
+        # matches the deposit's actual amount, token, and route.
+        from almanak.framework.connectors.bridges.across.receipt_parser import (
+            AcrossReceiptParser,
+        )
+
+        parser = AcrossReceiptParser(chain=CHAIN_NAME)
+        bridge_data = parser.extract_bridge_data(
+            deposit_receipt,
+            from_chain=CHAIN_NAME,
+            to_chain=DEST_CHAIN,
+            token="USDC",
+            amount=bridge_amount,
+            bridge="across",
+        )
+        assert bridge_data is not None, "AcrossReceiptParser must extract BridgeData from the deposit receipt"
+        assert bridge_data.bridge_name == "across"
+        assert bridge_data.source_chain == CHAIN_NAME
+        assert bridge_data.destination_chain == DEST_CHAIN
+        assert bridge_data.token_symbol == "USDC"
+        assert bridge_data.amount_sent_raw == expected_wei, (
+            f"BridgeData.amount_sent_raw must equal bridge amount. "
+            f"Expected: {expected_wei}, got: {bridge_data.amount_sent_raw}"
+        )
+        assert bridge_data.amount_sent == bridge_amount, (
+            f"BridgeData.amount_sent must equal human-readable bridge amount. "
+            f"Expected: {bridge_amount}, got: {bridge_data.amount_sent}"
+        )
+        assert bridge_data.source_tx_hash.lower() == deposit_result.tx_hash.lower()
+        print(
+            f"BridgeData extracted: bridge={bridge_data.bridge_name}, "
+            f"amount={bridge_data.amount_sent} {bridge_data.token_symbol}, "
+            f"{bridge_data.source_chain}->{bridge_data.destination_chain}"
+        )
+
+        # --- Layer 3.6: Full ResultEnricher round-trip (VIB-3226) ---
+        # Drive the same path the StrategyRunner uses in production: invoke
+        # ResultEnricher on the ExecutionResult and assert bridge_data ends
+        # up on the result object (not just on a parser return value).
+        from almanak.framework.execution.orchestrator import ExecutionContext
+        from almanak.framework.execution.result_enricher import ResultEnricher
+
+        enricher = ResultEnricher(live_mode=True)
+        enrich_context = ExecutionContext(chain=CHAIN_NAME, wallet_address=funded_wallet)
+        enriched = enricher.enrich(
+            execution_result,
+            intent,
+            enrich_context,
+            bundle_metadata=bundle.metadata,
+        )
+        assert enriched is execution_result, "enrich() should mutate the same ExecutionResult"
+        assert enriched.bridge_data is not None, (
+            "ResultEnricher must populate ExecutionResult.bridge_data for a BRIDGE intent"
+        )
+        assert enriched.bridge_data.bridge_name == "across"
+        assert enriched.bridge_data.amount_sent_raw == expected_wei
+        assert enriched.bridge_data.source_chain == CHAIN_NAME
+        assert enriched.bridge_data.destination_chain == DEST_CHAIN
+        assert enriched.bridge_data.token_symbol == "USDC"
+
         # --- Layer 4: Exact balance deltas (source chain) ---
         usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
         pool_usdc_after = get_token_balance(web3, usdc_addr, spoke_pool_checksummed)

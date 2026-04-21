@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
-from almanak.framework.execution.extracted_data import SwapAmounts
+from almanak.framework.execution.extracted_data import BridgeData, SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +258,133 @@ class LiFiReceiptParser:
             token_out=token_out_addr,
         )
 
+    def extract_bridge_data(
+        self,
+        receipt: dict[str, Any],
+        *,
+        from_chain: str | None = None,
+        to_chain: str | None = None,
+        token: str | None = None,
+        amount: str | Decimal | None = None,
+        bridge: str | None = None,
+        expected_amount_out: str | Decimal | None = None,
+    ) -> BridgeData | None:
+        """Extract typed BridgeData from a LiFi bridge receipt (VIB-3226).
+
+        LiFi is primarily a swap aggregator but also handles cross-chain
+        transfers (via embedded bridge "tools" like Across, Hop, etc.).
+        When a BRIDGE intent is routed through LiFi — or a SwapIntent is
+        cross-chain — the Diamond proxy emits ERC-20 Transfers that move
+        the wallet's tokens to the bridge facet. We use the first
+        wallet->contract Transfer to derive ``amount_sent`` and the token.
+
+        Destination-chain settlement must be tracked via the LiFi status
+        API — ``destination_tx_hash`` is intentionally None here.
+        """
+        if receipt.get("status", 0) != 1:
+            return None
+
+        logs = receipt.get("logs", [])
+        transfers = self._get_all_transfers(logs)
+
+        wallet = _norm_addr(receipt.get("from") or receipt.get("from_address") or "")
+        if not wallet:
+            return None
+
+        # First outgoing transfer from the wallet is the deposit into LiFi.
+        # ``_get_all_transfers`` stores ``from`` via ``HexDecoder.topic_to_address``
+        # which returns checksummed (EIP-55) addresses; lowercase both sides
+        # before comparing so mixed-case never silently drops a wallet transfer.
+        wallet_outgoing = [t for t in transfers if str(t.get("from", "")).lower() == wallet]
+
+        source_chain = (from_chain or self._chain or "").lower()
+        dest_chain = (to_chain or "").lower() if to_chain else None
+        if not source_chain or not dest_chain:
+            logger.debug("LiFi bridge_data: missing chain hints (from=%s, to=%s)", source_chain, dest_chain)
+            return None
+
+        source_token_addr: str | None
+        amount_sent_raw: int
+
+        if wallet_outgoing:
+            first_out = wallet_outgoing[0]
+            amount_sent_raw = int(first_out.get("amount", 0) or 0)
+            source_token_addr = first_out.get("token")
+            if amount_sent_raw <= 0 or not source_token_addr:
+                return None
+
+            # Pass ``source_chain`` explicitly so decimals resolution uses the
+            # caller-provided from_chain rather than ``self._chain`` (which
+            # may not match when a single parser services multi-chain flows).
+            decimals = self._get_decimals(source_token_addr, chain=source_chain)
+            if decimals is None and token:
+                try:
+                    from almanak.framework.data.tokens import get_token_resolver
+
+                    decimals = get_token_resolver().resolve(token, source_chain).decimals
+                except Exception:
+                    decimals = None
+            if decimals is None:
+                logger.warning(
+                    "LiFi bridge_data: cannot resolve token decimals (token=%s, address=%s, chain=%s)",
+                    token,
+                    source_token_addr,
+                    source_chain,
+                )
+                return None
+
+            amount_sent_decimal = Decimal(amount_sent_raw) / Decimal(10**decimals)
+        else:
+            # Native-asset bridge (msg.value-funded, no ERC-20 Transfer).
+            # Resolve amount from the compiler-provided quote and the native
+            # token's decimals via the resolver — never default to 18.
+            if amount in (None, "") or not token:
+                return None
+            try:
+                amount_sent_decimal = Decimal(str(amount))
+            except Exception:
+                return None
+            if not amount_sent_decimal.is_finite() or amount_sent_decimal <= 0:
+                return None
+            try:
+                from almanak.framework.data.tokens import get_token_resolver
+
+                decimals = get_token_resolver().resolve(token, source_chain).decimals
+            except Exception:
+                logger.warning(
+                    "LiFi bridge_data: native-asset path cannot resolve decimals (token=%s, chain=%s)",
+                    token,
+                    source_chain,
+                )
+                return None
+            amount_sent_raw = int(amount_sent_decimal * Decimal(10**decimals))
+            source_token_addr = None
+
+        expected_out_decimal: Decimal | None = None
+        if expected_amount_out not in (None, ""):
+            try:
+                candidate = Decimal(str(expected_amount_out))
+                if candidate.is_finite():
+                    expected_out_decimal = candidate
+            except Exception:
+                expected_out_decimal = None
+
+        tx_hash = self._normalize_tx_hash(receipt.get("transactionHash") or receipt.get("tx_hash"))
+
+        return BridgeData(
+            source_tx_hash=tx_hash,
+            source_chain=source_chain,
+            destination_chain=dest_chain,
+            token_symbol=(token or "").upper(),
+            amount_sent=amount_sent_decimal,
+            amount_sent_raw=amount_sent_raw,
+            bridge_name="lifi",
+            source_token_address=source_token_addr.lower() if source_token_addr else None,
+            destination_token_address=None,
+            destination_tx_hash=None,
+            expected_amount_out=expected_out_decimal,
+        )
+
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """LiFi swaps do not create LP positions."""
         return None
@@ -425,25 +552,35 @@ class LiFiReceiptParser:
 
         return transfers
 
-    def _get_decimals(self, token_address: str | None) -> int | None:
+    def _get_decimals(self, token_address: str | None, chain: str | None = None) -> int | None:
         """Look up token decimals via the token resolver.
 
         Args:
             token_address: Token contract address.
+            chain: Chain to resolve on. Takes precedence over ``self._chain``.
+                VIB-3226 CodeRabbit audit: bridge flows need the *source*
+                chain of the deposit — the parser-construction ``self._chain``
+                can diverge from it when the same LiFiReceiptParser instance
+                services a bridge whose from_chain is different from the
+                parser's default.
 
         Returns:
             Decimals if resolvable, None otherwise.
         """
         if not token_address:
             return None
+        chain_name = (chain or self._chain or "").lower()
+        if not chain_name:
+            logger.debug("LiFi _get_decimals: no chain available for resolution")
+            return None
         try:
             from almanak.framework.data.tokens import get_token_resolver
 
             resolver = get_token_resolver()
-            token = resolver.resolve(token_address, self._chain or "ethereum")
+            token = resolver.resolve(token_address, chain_name)
             return token.decimals
         except Exception:
-            logger.debug(f"Could not resolve decimals for {token_address}")
+            logger.debug(f"Could not resolve decimals for {token_address} on {chain_name}")
             return None
 
     @staticmethod
@@ -453,6 +590,13 @@ class LiFiReceiptParser:
             result = tx_hash.hex()
             return result if result.startswith("0x") else "0x" + result
         return str(tx_hash) if tx_hash else ""
+
+
+def _norm_addr(value: Any) -> str:
+    """Normalize an address value to lowercase hex with 0x prefix."""
+    if isinstance(value, bytes):
+        value = "0x" + value.hex()
+    return str(value).lower() if value else ""
 
 
 __all__ = ["LiFiReceiptParser", "LiFiSwapResult"]

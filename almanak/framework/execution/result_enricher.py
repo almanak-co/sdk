@@ -33,7 +33,7 @@ from .extract_result import (
     ExtractMissing,
     ExtractOk,
 )
-from .extracted_data import LPCloseData, ProtocolFees, SwapAmounts
+from .extracted_data import BridgeData, LPCloseData, ProtocolFees, SwapAmounts
 from .receipt_registry import ReceiptParserRegistry
 
 if TYPE_CHECKING:
@@ -173,11 +173,19 @@ class ResultEnricher:
         "PREDICTION_SELL": ["outcome_tokens_sold", "proceeds", "market_id"],
         "PREDICTION_REDEEM": ["redemption_amount", "payout", "market_id"],
         # === Cross-Chain ===
+        # VIB-3226: BRIDGE enrichment returns a typed ``BridgeData`` struct
+        # describing the *source-chain* deposit. Destination-chain settlement
+        # is observed asynchronously (``EnsoStateProvider``) — the enricher
+        # does not block on it. ``bridge_data`` carries the individual
+        # scalars (source_tx_hash, destination_chain, expected_amount_out)
+        # as typed fields; legacy scalar keys are intentionally NOT in the
+        # spec — no caller reads ``result.extracted_data["source_tx_hash"]``
+        # and the bridge parsers explicitly do not implement
+        # ``extract_source_tx_hash`` etc., so including them here would only
+        # generate spurious SUPPORTED_EXTRACTIONS warnings on every bridge
+        # execution.
         "BRIDGE": [
-            "source_tx_hash",
-            "bridge_id",
-            "destination_chain",
-            "expected_amount",
+            "bridge_data",
         ],
         "ENSURE_BALANCE": ["amount_transferred", "source_chain"],
         # === Vault Operations (MetaMorpho ERC-4626) ===
@@ -275,6 +283,17 @@ class ResultEnricher:
         intent_protocol = self._get_protocol(intent)
         context_protocol = getattr(context, "protocol", None)
         protocol = intent_protocol or context_protocol
+
+        # VIB-3226: BridgeIntent does not carry a protocol — the adapter is
+        # selected by the compiler and recorded in ActionBundle.metadata as
+        # ``"bridge": "<Name>"``. Fall back to that when nothing else is set
+        # so BRIDGE enrichment works without requiring the runner to thread
+        # the bridge adapter name through ExecutionContext.
+        if not protocol and intent_type == "BRIDGE" and bundle_metadata:
+            bridge_name = bundle_metadata.get("bridge")
+            if bridge_name:
+                protocol = str(bridge_name).lower()
+
         if not protocol:
             logger.debug(f"Enrichment skipped: protocol=None on both intent and context (intent_type={intent_type})")
             return result
@@ -521,6 +540,24 @@ class ResultEnricher:
             except (TypeError, ValueError):
                 logger.debug("Could not coerce selected_fee_tier=%r to int; skipping", raw_tier)
                 return {}
+        if field == "bridge_data":
+            # VIB-3226: bridge receipts typically do not carry the user-facing
+            # symbol or canonical chain names — they encode chain IDs and token
+            # addresses. The compiler writes the resolved intent shape into
+            # ``ActionBundle.metadata`` (see compiler._compile_bridge), so we
+            # thread those hints into the parser to keep the typed output
+            # stable and avoid re-deriving them at parse time.
+            kwargs: dict[str, Any] = {}
+            for key in ("from_chain", "to_chain", "token", "amount", "bridge"):
+                val = bundle_metadata.get(key)
+                if val is not None and val != "":
+                    kwargs[key] = val
+            # Expected output (post-fee) from the compiler quote — optional,
+            # parsers that do not accept it fall back via TypeError handling.
+            out_amount = bundle_metadata.get("output_amount")
+            if out_amount is not None:
+                kwargs["expected_amount_out"] = out_amount
+            return kwargs
         return {}
 
     def _invoke_extract(
@@ -659,6 +696,19 @@ class ResultEnricher:
             result.swap_amounts = value
         elif field == "lp_close_data" and isinstance(value, LPCloseData):
             result.lp_close_data = value
+        elif field == "bridge_data":
+            # VIB-3226: reject anything that is not BridgeData so a broken
+            # parser cannot silently populate ``result.bridge_data`` with a
+            # dict / None-fielded struct. Matches the ProtocolFees pattern:
+            # return False so the enricher keeps scanning subsequent receipts
+            # in a multi-tx bundle (approve + deposit is the common shape).
+            if not isinstance(value, BridgeData):
+                logger.warning(
+                    "Enrichment: parser returned non-BridgeData value for 'bridge_data' "
+                    f"(type={type(value).__name__}); ignoring and continuing receipt scan"
+                )
+                return False
+            result.bridge_data = value
         elif field == "protocol_fees" and not isinstance(value, ProtocolFees):
             # VIB-3204 audit fix (CodeRabbit multi-receipt): rejecting the
             # value is correct, but the caller MUST continue scanning the
@@ -692,6 +742,8 @@ class ResultEnricher:
             return result.swap_amounts is not None
         if field == "lp_close_data":
             return result.lp_close_data is not None
+        if field == "bridge_data":
+            return getattr(result, "bridge_data", None) is not None
 
         # Check extracted_data
         return field in result.extracted_data
@@ -713,6 +765,9 @@ class ResultEnricher:
             return f"{sa.amount_in_decimal} -> {sa.amount_out_decimal}"
         if field == "lp_close_data" and result.lp_close_data:
             return f"amount0={result.lp_close_data.amount0_collected}, amount1={result.lp_close_data.amount1_collected}"
+        bd = getattr(result, "bridge_data", None)
+        if field == "bridge_data" and bd is not None:
+            return f"{bd.amount_sent} {bd.token_symbol} {bd.source_chain}->{bd.destination_chain} via {bd.bridge_name}"
         val = result.extracted_data.get(field)
         return str(val)[:100] if val is not None else val
 

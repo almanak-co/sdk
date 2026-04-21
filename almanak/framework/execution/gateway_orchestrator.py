@@ -29,7 +29,7 @@ from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
-    from .extracted_data import LPCloseData, SwapAmounts
+    from .extracted_data import BridgeData, LPCloseData, SwapAmounts
     from .outcome import ExecutionOutcome
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,7 @@ class GatewayExecutionResult:
     position_id: int | str | None = None
     swap_amounts: "SwapAmounts | None" = None
     lp_close_data: "LPCloseData | None" = None
+    bridge_data: "BridgeData | None" = None  # VIB-3226: BRIDGE intent enrichment
     bin_ids: list[int] | None = None
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)
@@ -183,12 +184,13 @@ class GatewayExecutionResult:
             position_id=self.position_id,
             swap_amounts=self.swap_amounts,
             lp_close_data=self.lp_close_data,
+            bridge_data=self.bridge_data,
             extracted_data=self.extracted_data,
             extraction_warnings=self.extraction_warnings,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
+        """Serialize to a dictionary, including bridge_data enrichment."""
         return {
             "success": self.success,
             "tx_hashes": self.tx_hashes,
@@ -196,6 +198,7 @@ class GatewayExecutionResult:
             "execution_id": self.execution_id,
             "error": self.error,
             "error_code": self.error_code,
+            "bridge_data": self.bridge_data.to_dict() if self.bridge_data else None,
         }
 
     def get_extracted(self, key: str, expected_type: type | None = None, default: Any = None) -> Any:
