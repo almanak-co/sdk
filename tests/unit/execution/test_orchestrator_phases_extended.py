@@ -631,6 +631,64 @@ class TestPhaseEnrich:
         assert len(early.transaction_results) == 2
         assert early.total_gas_used == 71000
 
+    @pytest.mark.asyncio
+    async def test_reverted_receipt_error_propagates_to_tx_result_and_report(self, orchestrator):
+        """Regression for #1659: receipt.error must be copied onto TransactionResult.error
+        and forwarded to build_verbose_revert_report(raw_error=...).
+        """
+        state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
+        receipt = _make_receipt(
+            success=False,
+            tx_hash="0xdead",
+            gas_used=50000,
+            effective_gas_price=4,
+            block_number=456,
+        )
+        # Submitter implementations may attach a `.error` attribute carrying the
+        # decoded revert reason. Simulate that here.
+        receipt.error = "SomeRevertReason"
+        state.receipts = [receipt]
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "VERBOSE REVERT"
+            mock_report.to_dict.return_value = {}
+            mock_build.return_value = mock_report
+
+            early = await orchestrator._phase_enrich(state)
+
+        assert early is not None
+        assert early.success is False
+        # The receipt error must now live on the TransactionResult (was None pre-fix).
+        assert len(early.transaction_results) == 1
+        assert early.transaction_results[0].error == "SomeRevertReason"
+        # And it must have been forwarded to the verbose report builder.
+        _, kwargs = mock_build.call_args
+        assert kwargs["raw_error"] == "SomeRevertReason"
+
+    @pytest.mark.asyncio
+    async def test_reverted_receipt_raw_error_fallback_propagates(self, orchestrator):
+        """Regression for #1659: when a receipt exposes `raw_error` (not `error`),
+        it must still be copied onto TransactionResult.error.
+        """
+        state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
+        receipt = _make_receipt(success=False, tx_hash="0xdeadbeef", gas_used=50000)
+        receipt.raw_error = "RawRevertReason"
+        state.receipts = [receipt]
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "VERBOSE REVERT"
+            mock_report.to_dict.return_value = {}
+            mock_build.return_value = mock_report
+
+            early = await orchestrator._phase_enrich(state)
+
+        assert early is not None
+        assert early.transaction_results[0].error == "RawRevertReason"
+        _, kwargs = mock_build.call_args
+        assert kwargs["raw_error"] == "RawRevertReason"
+
 
 # =============================================================================
 # _handle_execution_exception - extended

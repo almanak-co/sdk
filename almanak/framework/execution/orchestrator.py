@@ -1610,6 +1610,12 @@ class ExecutionOrchestrator:
                 gas_used=receipt.gas_used,
                 gas_cost_wei=receipt.gas_cost_wei,
                 logs=receipt.logs,
+                # Preserve the receipt's revert reason so downstream diagnostics
+                # (e.g. build_verbose_revert_report) receive the original failure
+                # payload instead of None. Support both `error` and `raw_error`
+                # attribute names since not every submitter populates the same
+                # field (see issue #1659).
+                error=getattr(receipt, "error", None) or getattr(receipt, "raw_error", None),
             )
 
             result.transaction_results.append(tx_result)
