@@ -404,7 +404,6 @@ class TestUniswapV3SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.xfail(reason="flaky: needs more investigation", strict=False)
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

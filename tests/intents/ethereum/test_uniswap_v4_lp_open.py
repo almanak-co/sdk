@@ -185,14 +185,15 @@ class TestUniswapV4LPOpenIntent:
         print(f"WETH spent: {format_token_amount(weth_spent, weth_decimals)}")
         print(f"USDC spent: {format_token_amount(usdc_spent, usdc_decimals)}")
 
-        # At least one token must have been deposited (both for in-range positions)
-        assert weth_spent > 0 or usdc_spent > 0, (
-            "Must deposit at least one token into LP position"
+        # MANDATORY bilateral delta (see .claude/rules/intent-tests.md and #1691):
+        # the position is opened with `range_lower=1000`, `range_upper=10000` and
+        # WETH/USDC at ~2500 at fork time — unambiguously in-range. Both tokens
+        # MUST have been deposited. Permitting `or` here would let a V4 no-op
+        # silently pass.
+        assert weth_spent > 0 and usdc_spent > 0, (
+            f"In-range LP_OPEN must deposit BOTH tokens (no-op guard). "
+            f"weth_spent={weth_spent}, usdc_spent={usdc_spent}"
         )
-
-        # Both should be deposited for an in-range position with the wide range we specified
-        assert weth_spent >= 0, "WETH balance should not increase from LP_OPEN"
-        assert usdc_spent >= 0, "USDC balance should not increase from LP_OPEN"
 
         print(f"\nPosition ID: {position_id}")
         print(f"Liquidity:   {liquidity}")

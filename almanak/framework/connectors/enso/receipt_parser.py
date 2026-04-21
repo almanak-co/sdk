@@ -158,6 +158,26 @@ class EnsoReceiptParser:
         gas_used = receipt.get("gasUsed", 0)
         effective_gas_price = receipt.get("effectiveGasPrice", 0)
 
+        # Fail loudly when we can neither extract amount_out from logs nor fall
+        # back to an expected value (see #1692). A silent success=True with
+        # amount_out=0 corrupts downstream PnL by writing 0 to strategy state.
+        if amount_out == 0:
+            logger.warning(
+                "Enso swap receipt parsing failed: no matching Transfer event "
+                "found for token_out=%s and no expected_amount_out fallback",
+                token_out,
+            )
+            return SwapResult(
+                success=False,
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=amount_in,
+                tx_hash=tx_hash,
+                gas_used=gas_used,
+                effective_gas_price=effective_gas_price,
+                error="Could not extract amount_out from logs and no expected fallback provided",
+            )
+
         # Log parsed receipt with user-friendly formatting
         tx_fmt = format_tx_hash(tx_hash)
         gas_fmt = format_gas_cost(gas_used)

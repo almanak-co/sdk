@@ -595,17 +595,45 @@ class TestPathGenerationMethods:
 
         assert result.method == PathGenerationMethod.GBM
 
-    def test_bootstrap_falls_back_to_gbm(self):
-        """Test that bootstrap method falls back to GBM (not yet implemented)."""
+    def test_bootstrap_falls_back_to_gbm_and_reports_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bootstrap falls back to GBM and the result REPORTS gbm, not bootstrap.
+
+        Regression guard for #1690: the method metadata must reflect what
+        actually ran, so downstream consumers don't interpret GBM paths as
+        bootstrap samples.
+        """
         historical = [Decimal("100"), Decimal("102"), Decimal("101")]
         generator = MonteCarloPathGenerator()
-        result = generator.generate_price_paths(
-            historical_prices=historical, n_paths=10, method="bootstrap"
-        )
 
-        # Should still produce valid paths (falls back to GBM)
+        with caplog.at_level("WARNING"):
+            result = generator.generate_price_paths(
+                historical_prices=historical, n_paths=10, method="bootstrap"
+            )
+
+        # Paths still produced (fallback worked).
         assert len(result.paths) == 10
-        assert result.method == PathGenerationMethod.BOOTSTRAP
+        # The honest label: GBM ran, so the result says GBM.
+        assert result.method == PathGenerationMethod.GBM
+        # The fallback is announced, not silent.
+        assert any("not implemented" in rec.message.lower() for rec in caplog.records)
+
+    def test_jump_diffusion_falls_back_to_gbm_and_reports_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Same contract as bootstrap: jump_diffusion falls back, reports GBM."""
+        historical = [Decimal("100"), Decimal("102"), Decimal("101")]
+        generator = MonteCarloPathGenerator()
+
+        with caplog.at_level("WARNING"):
+            result = generator.generate_price_paths(
+                historical_prices=historical, n_paths=10, method="jump_diffusion"
+            )
+
+        assert len(result.paths) == 10
+        assert result.method == PathGenerationMethod.GBM
+        assert any("not implemented" in rec.message.lower() for rec in caplog.records)
 
 
 class TestStatisticalProperties:

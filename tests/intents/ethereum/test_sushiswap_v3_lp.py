@@ -530,7 +530,6 @@ class TestSushiSwapV3LPCloseIntent:
         print(f"WETH delta: {weth_delta}")
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.xfail(reason="flaky: needs more investigation", strict=False)
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
         self,

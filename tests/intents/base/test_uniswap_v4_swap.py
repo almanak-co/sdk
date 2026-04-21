@@ -55,7 +55,6 @@ class TestUniswapV4SwapIntent:
     - Balance changes match expected amounts
     """
 
-    @pytest.mark.xfail(reason="V4 USDC/ETH pool on Base has insufficient liquidity on Anvil fork — reverts with V4TooLittleReceived", strict=False)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -165,7 +164,6 @@ class TestUniswapV4SwapIntent:
 
         print("\nALL 4 LAYERS PASSED")
 
-    @pytest.mark.xfail(reason="V4 USDC/ETH pool on Base has insufficient liquidity on Anvil fork — reverts with V4TooLittleReceived", strict=False)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,

@@ -105,8 +105,10 @@ class TestBasicParsing:
         assert result.success is False
         assert result.error == "Transaction reverted"
 
-    def test_parse_empty_logs(self, parser):
-        """Parse receipt with no logs extracts zero amounts."""
+    def test_parse_empty_logs_same_chain_fails(self, parser):
+        """Same-chain swap with no parseable logs and no fallback MUST fail
+        (see #1693). Previously returned success=True with amount_out=0,
+        which silently corrupted PnL state."""
         receipt = _make_receipt(logs=[])
 
         result = parser.parse_swap_receipt(
@@ -115,8 +117,25 @@ class TestBasicParsing:
             token_out=WETH_ADDRESS,
         )
 
-        assert result.success is True
+        assert result.success is False
         assert result.amount_out == 0
+        assert result.error and "amount_out" in result.error
+
+    def test_parse_empty_logs_cross_chain_still_succeeds(self, parser):
+        """Cross-chain bridges are lenient: destination delivery is tracked
+        via the LiFi status API, so an unparsed source receipt is expected
+        and should not fail the parser (regression guard for #1693)."""
+        receipt = _make_receipt(logs=[])
+
+        result = parser.parse_swap_receipt(
+            receipt=receipt,
+            wallet_address=WALLET_ADDRESS,
+            token_out=WETH_ADDRESS,
+            is_cross_chain=True,
+        )
+
+        assert result.success is True
+        assert result.is_cross_chain is True
 
     def test_parse_with_expected_amount_fallback(self, parser):
         """Falls back to expected amount when logs have no match."""

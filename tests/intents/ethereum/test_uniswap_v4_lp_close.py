@@ -251,9 +251,12 @@ class TestUniswapV4LPCloseIntent:
         print(f"WETH received: {format_token_amount(weth_received, weth_decimals)}")
         print(f"USDC received: {format_token_amount(usdc_received, usdc_decimals)}")
 
-        # At least one token must have been returned
-        assert weth_received > 0 or usdc_received > 0, (
-            "Must receive at least one token back from LP_CLOSE"
+        # MANDATORY bilateral delta (see .claude/rules/intent-tests.md and #1691):
+        # the position was opened with both tokens, so closing it MUST return
+        # both. Permitting `or` here would let a V4 one-sided-close bug pass.
+        assert weth_received > 0 and usdc_received > 0, (
+            f"LP_CLOSE on a two-token position must return BOTH tokens (no-op guard). "
+            f"weth_received={weth_received}, usdc_received={usdc_received}"
         )
 
         print(f"\nPosition {position_id} successfully closed")

@@ -136,7 +136,11 @@ class TestEnsoReceiptParserBasic:
         assert result.amount_out == 1000  # Used expected amount
 
     def test_parse_swap_receipt_bytes_tx_hash(self):
-        """Test parsing receipt with bytes transaction hash."""
+        """Bytes tx_hash is normalized to a 0x-prefixed hex string.
+
+        Uses `expected_amount_out` so the parser still succeeds (see #1692
+        for why no-log + no-fallback now returns success=False).
+        """
         parser = EnsoReceiptParser()
 
         receipt = {
@@ -149,6 +153,7 @@ class TestEnsoReceiptParserBasic:
             receipt=receipt,
             wallet_address="0xwallet",
             token_out="0xtoken",
+            expected_amount_out=1,  # keep the helper on the happy path
         )
 
         assert result.success is True
@@ -196,7 +201,7 @@ class TestEnsoReceiptParserEdgeCases:
     """Tests for edge cases and error handling."""
 
     def test_extract_transfer_no_matching_token(self):
-        """Test that parser returns 0 when token address doesn't match."""
+        """Parser fails when no matching Transfer is found (see #1692)."""
         parser = EnsoReceiptParser()
 
         receipt = {
@@ -221,11 +226,12 @@ class TestEnsoReceiptParserEdgeCases:
             token_out="0xcorrect_token",  # Looking for different token
         )
 
-        assert result.success is True
-        assert result.amount_out == 0  # No matching transfer found
+        assert result.success is False
+        assert result.amount_out == 0
+        assert result.error and "amount_out" in result.error
 
     def test_extract_transfer_wrong_event_signature(self):
-        """Test that parser ignores non-Transfer events."""
+        """Parser fails when the only logs are non-Transfer events (see #1692)."""
         parser = EnsoReceiptParser()
 
         receipt = {
@@ -250,11 +256,11 @@ class TestEnsoReceiptParserEdgeCases:
             token_out="0xtoken",
         )
 
-        assert result.success is True
-        assert result.amount_out == 0  # Event signature didn't match
+        assert result.success is False
+        assert result.amount_out == 0
 
     def test_extract_transfer_insufficient_topics(self):
-        """Test handling of Transfer event with insufficient topics."""
+        """Parser fails on malformed Transfer event with insufficient topics (see #1692)."""
         parser = EnsoReceiptParser()
 
         receipt = {
@@ -278,11 +284,11 @@ class TestEnsoReceiptParserEdgeCases:
             token_out="0xtoken",
         )
 
-        assert result.success is True
-        assert result.amount_out == 0  # Insufficient topics
+        assert result.success is False
+        assert result.amount_out == 0
 
     def test_extract_transfer_invalid_data(self):
-        """Test handling of invalid hex data."""
+        """Parser fails on Transfer event with unparseable data (see #1692)."""
         parser = EnsoReceiptParser()
 
         receipt = {
@@ -307,8 +313,32 @@ class TestEnsoReceiptParserEdgeCases:
             token_out="0xtoken",
         )
 
+        assert result.success is False
+        assert result.amount_out == 0
+
+    def test_fallback_to_expected_amount_out_still_succeeds(self):
+        """When log extraction fails but expected_amount_out is supplied,
+        the parser should succeed with the fallback value (see #1692).
+
+        Regression guard against over-eager failure on the fallback path.
+        """
+        parser = EnsoReceiptParser()
+
+        receipt = {
+            "transactionHash": "0xswap",
+            "status": 1,
+            "logs": [],  # no logs at all
+        }
+
+        result = parser.parse_swap_receipt(
+            receipt=receipt,
+            wallet_address="0x" + "2" * 40,
+            token_out="0xtoken",
+            expected_amount_out=12345,
+        )
+
         assert result.success is True
-        assert result.amount_out == 0  # No data to decode
+        assert result.amount_out == 12345
 
 
 class TestSwapResult:

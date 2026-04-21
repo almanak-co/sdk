@@ -180,6 +180,28 @@ class LiFiReceiptParser:
         gas_used = receipt.get("gasUsed", 0)
         effective_gas_price = receipt.get("effectiveGasPrice", 0)
 
+        # Fail loudly on same-chain swaps that couldn't be parsed (see #1693).
+        # Cross-chain legs stay lenient: the destination delivery is tracked
+        # via the LiFi status API, so an unparsed source receipt is expected.
+        if amount_out == 0 and not is_cross_chain:
+            logger.warning(
+                "LiFi swap receipt parsing failed: no matching Transfer event "
+                "found for token_out=%s and no expected_amount_out fallback",
+                token_out,
+            )
+            return LiFiSwapResult(
+                success=False,
+                token_in=token_in,
+                token_out=token_out,
+                amount_in=amount_in,
+                tx_hash=tx_hash,
+                gas_used=gas_used,
+                effective_gas_price=effective_gas_price,
+                tool=tool,
+                is_cross_chain=is_cross_chain,
+                error="Could not extract amount_out from logs and no expected fallback provided",
+            )
+
         logger.info(
             f"Parsed LiFi {'bridge' if is_cross_chain else 'swap'}: "
             f"tx={tx_hash[:10] if tx_hash else 'N/A'}..., "

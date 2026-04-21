@@ -102,7 +102,6 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 # Supply/Withdraw Tests
 # =============================================================================
 
-@pytest.mark.xfail(reason="flaky: needs more investigation", strict=False)
 @pytest.mark.avalanche
 @pytest.mark.supply
 @pytest.mark.lending
@@ -380,7 +379,6 @@ class TestAaveV3SupplyIntent:
 # =============================================================================
 
 
-@pytest.mark.xfail(reason="flaky: needs more investigation", strict=False)
 @pytest.mark.avalanche
 @pytest.mark.borrow
 @pytest.mark.lending

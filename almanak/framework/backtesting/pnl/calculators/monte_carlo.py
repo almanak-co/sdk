@@ -51,12 +51,15 @@ References:
     - Geometric Brownian Motion: https://en.wikipedia.org/wiki/Geometric_Brownian_motion
 """
 
+import logging
 import math
 import random
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class PathGenerationMethod(StrEnum):
@@ -402,22 +405,27 @@ class MonteCarloPathGenerator:
         Returns:
             PricePathResult with generated paths
         """
+        # Track the method actually used so downstream consumers don't see a
+        # lie when Bootstrap/JumpDiffusion fall back to GBM (see #1690).
+        actual_method = method
         if method == PathGenerationMethod.GBM:
             paths = self._generate_gbm_paths(start_price, n_steps, n_paths, drift, volatility, dt)
-        elif method == PathGenerationMethod.BOOTSTRAP:
-            # Bootstrap not implemented in this story - fall back to GBM
-            paths = self._generate_gbm_paths(start_price, n_steps, n_paths, drift, volatility, dt)
-        elif method == PathGenerationMethod.JUMP_DIFFUSION:
-            # Jump diffusion not implemented in this story - fall back to GBM
+        elif method in (PathGenerationMethod.BOOTSTRAP, PathGenerationMethod.JUMP_DIFFUSION):
+            logger.warning(
+                "Path generation method %s is not implemented; falling back to GBM.",
+                method.value,
+            )
+            actual_method = PathGenerationMethod.GBM
             paths = self._generate_gbm_paths(start_price, n_steps, n_paths, drift, volatility, dt)
         else:
+            actual_method = PathGenerationMethod.GBM
             paths = self._generate_gbm_paths(start_price, n_steps, n_paths, drift, volatility, dt)
 
         return PricePathResult(
             paths=paths,
             n_paths=n_paths,
             n_steps=n_steps,
-            method=method,
+            method=actual_method,
             drift=drift,
             volatility=volatility,
             start_price=start_price,

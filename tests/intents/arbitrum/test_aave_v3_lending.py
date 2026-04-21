@@ -36,13 +36,6 @@ from tests.intents.conftest import (
 # Test Configuration
 # =============================================================================
 
-# Aave V3 protocol issue affecting arbitrum/base/ethereum lending intent tests.
-# xfail to unblock devs while the underlying protocol issue is investigated.
-pytestmark = pytest.mark.xfail(
-    reason="Aave V3 protocol issue on arbitrum -- tracked separately, unblocking devs",
-    strict=False,
-)
-
 CHAIN_NAME = "arbitrum"
 
 # Aave V3 Pool ABI (minimal - just what we need for getUserAccountData)
@@ -398,6 +391,10 @@ class TestAaveV3BorrowIntent:
     - Balance changes and account data match expected amounts
     """
 
+    @pytest.mark.xfail(
+        reason="#1696: USDC reserve is frozen for borrowing on the Aave V3 mainnet fork (ReserveFrozen)",
+        strict=True,
+    )
     @pytest.mark.asyncio
     async def test_borrow_usdc_with_weth_collateral_using_intent(
         self,
@@ -539,6 +536,10 @@ class TestAaveV3BorrowIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    @pytest.mark.xfail(
+        reason="#1696: cascade of frozen USDC borrow — repay has no debt to settle (NoDebtOfSelectedType)",
+        strict=True,
+    )
     @pytest.mark.asyncio
     async def test_repay_usdc_using_intent(
         self,
