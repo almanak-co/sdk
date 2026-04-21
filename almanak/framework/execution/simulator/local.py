@@ -31,6 +31,7 @@ Example:
     # result.gas_estimates contains accurate estimates from eth_estimateGas
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -52,6 +53,14 @@ logger = logging.getLogger(__name__)
 # Aave V3 supply and similar complex transactions can take 12-15s.
 # 10s was too short and caused spurious failures on non-L2 chains (VIB-1842).
 _STATE_SETUP_TX_TIMEOUT = 30
+
+# Hard timeout for a single eth_estimateGas call. Without this, a slow or
+# misbehaving upstream RPC (e.g. public endpoint fetching hundreds of storage
+# slots for deep-call contracts like MetaMorpho->Morpho Blue market routing)
+# can block the whole simulation indefinitely (VIB-3295). Matches the
+# _STATE_SETUP_TX_TIMEOUT envelope so a single tx can never hang the caller
+# past the combined timeout budget.
+_ESTIMATE_GAS_TIMEOUT = 30
 
 # Gas buffer multiplier for state-setup transaction execution.
 # eth_estimateGas returns the minimum gas needed at the current block state,
@@ -173,7 +182,15 @@ class LocalSimulator(Simulator):
             if tx.to:
                 tx_params["to"] = web3.to_checksum_address(tx.to)
 
-            gas_estimate = await web3.eth.estimate_gas(tx_params)
+            # Hard timeout: eth_estimateGas on deep-call contracts against a
+            # slow public RPC can hang indefinitely (e.g. MetaMorpho deposit
+            # routing into Morpho Blue markets exercises hundreds of storage
+            # slots). VIB-3295. Surface the hang as a clean timeout so the
+            # caller can fall back to compiler-provided gas_limit.
+            gas_estimate = await asyncio.wait_for(
+                web3.eth.estimate_gas(tx_params),
+                timeout=_ESTIMATE_GAS_TIMEOUT,
+            )
 
             logger.debug(
                 f"Gas estimated (raw): {gas_estimate}",
@@ -185,6 +202,13 @@ class LocalSimulator(Simulator):
 
             return gas_estimate, None
 
+        except TimeoutError:
+            timeout_msg = f"eth_estimateGas timed out after {_ESTIMATE_GAS_TIMEOUT}s"
+            logger.warning(
+                f"Gas estimation timeout: {timeout_msg}",
+                extra={"to": tx.to, "timeout_seconds": _ESTIMATE_GAS_TIMEOUT},
+            )
+            return 0, timeout_msg
         except Exception as e:
             error_str = str(e)
             # Try to extract revert reason from common error formats

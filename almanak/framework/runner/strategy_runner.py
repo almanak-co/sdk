@@ -2673,6 +2673,18 @@ class StrategyRunner:
                 if native_price:
                     tx_risk_cfg.native_token_price_usd = float(native_price)
 
+        # VIB-3295: emit a breadcrumb right before the execute
+        # gRPC call so any hang in the orchestrator (strategy
+        # process or gateway-side pipeline) leaves a visible
+        # last-known-good log line. Silence here historically
+        # looked indistinguishable between "still compiling"
+        # and "gateway hung" in shard regressions.
+        _tx_count = len(getattr(step_result.action_bundle, "transactions", []) or [])
+        _intent_type = getattr(step_result.action_bundle, "intent_type", "unknown")
+        logger.info(
+            f"Dispatching {_intent_type} ({_tx_count} tx) to execution orchestrator "
+            f"(intent={execution_context.correlation_id[:8]}..., chain={strategy.chain})"
+        )
         execution_result = await single_chain_orch.execute(
             action_bundle=step_result.action_bundle,
             context=execution_context,

@@ -453,6 +453,10 @@ class TestStepLogIntents:
         state.intents = [intent]
 
         with caplog.at_level("INFO", logger="almanak.framework.runner.strategy_runner"):
+            # Drop any records captured before this block (e.g. the
+            # StrategyRunner.__init__ "initialized" log emitted by _make_runner)
+            # so the assertion counts only records emitted by the helper under test.
+            caplog.clear()
             result = runner._step_log_intents(state)
 
         # Helper is side-effect-only and returns None
@@ -476,6 +480,8 @@ class TestStepLogIntents:
         state.intents = list(intents)
 
         with caplog.at_level("INFO", logger="almanak.framework.runner.strategy_runner"):
+            # Drop any records captured before this block (see single-intent test).
+            caplog.clear()
             result = runner._step_log_intents(state)
 
         assert result is None
@@ -497,6 +503,8 @@ class TestStepLogIntents:
         state.intents = []
 
         with caplog.at_level("INFO", logger="almanak.framework.runner.strategy_runner"):
+            # Drop any records captured before this block (see single-intent test).
+            caplog.clear()
             result = runner._step_log_intents(state)
 
         # With no intents, the helper takes the else-branch and emits the
