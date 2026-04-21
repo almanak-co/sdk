@@ -34,6 +34,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -153,6 +154,36 @@ def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
     if getattr(config, "paper_mode", False):
         return ExecutionMode.PAPER
     return ExecutionMode.LIVE
+
+
+# =============================================================================
+# Per-iteration mutable state (Phase 3b refactor)
+# =============================================================================
+
+
+@dataclass
+class RunIterationState:
+    """Mutable bag of per-iteration values threaded through step helpers.
+
+    ``StrategyRunner.run_iteration`` was previously a single ~600 line method
+    with CC=107. Phase 3b splits it into small step helpers on the runner
+    that each receive this state object, mutate it, and return either
+    ``None`` (continue to the next step) or an ``IterationResult`` early-exit.
+
+    This mirrors the pipeline-state pattern introduced in Phase 3a for
+    ``ExecutionOrchestrator.execute``. The dataclass is internal to the
+    runner — it is **not** part of the public API.
+    """
+
+    strategy: "StrategyProtocol"
+    strategy_id: str
+    start_time: datetime
+    market: Any | None = None
+    decide_result: Any | None = None
+    intents: list["AnyIntent"] = field(default_factory=list)
+    teardown_mode: "TeardownMode | None" = None
+    pre_balances: dict[str, Decimal] = field(default_factory=dict)
+    intent_tokens: list[str] = field(default_factory=list)
 
 
 # =============================================================================
@@ -386,6 +417,13 @@ class StrategyRunner:
         4. Executes through the orchestrator (unless dry_run)
         5. Updates state and metrics
 
+        The body is a small driver that threads :class:`RunIterationState`
+        through a sequence of step helpers (``_step_*`` methods). Each step
+        returns either ``None`` (continue) or an :class:`IterationResult`
+        that terminates the iteration early (pause gate, circuit breaker,
+        teardown, decide failure, etc.). Phase 3b refactor preserves every
+        log line, timeline event, and state-manager write ordering.
+
         Args:
             strategy: The strategy to execute
 
@@ -408,533 +446,55 @@ class StrategyRunner:
 
         logger.info(f"Starting iteration for strategy: {strategy_id}")
 
+        state = RunIterationState(
+            strategy=strategy,
+            strategy_id=strategy_id,
+            start_time=start_time,
+        )
+
         try:
             # Step 0: Honor operator pause before any strategy logic/execution.
-            paused, pause_reason = await self._is_strategy_paused(strategy_id)
-            if paused:
-                if strategy_id not in self._logged_paused_strategy_ids:
-                    logger.info(
-                        "%s %s is paused by operator%s",
-                        "[PAUSED]" if not _emojis_enabled() else "⏸️",
-                        strategy_id,
-                        f" ({pause_reason})" if pause_reason else "",
-                    )
-                    self._logged_paused_strategy_ids.add(strategy_id)
-                self._record_success()
-                return IterationResult(
-                    status=IterationStatus.HOLD,
-                    intent=HoldIntent(reason=pause_reason or "Paused by operator"),
-                    strategy_id=strategy_id,
-                    duration_ms=self._calculate_duration_ms(start_time),
-                )
+            early = await self._step_pause_gate(state)
+            if early is not None:
+                return early
 
-            # Strategy resumed: clear pause log marker.
-            self._logged_paused_strategy_ids.discard(strategy_id)
+            # Step 0a/0b/0c/0.5: teardown detection, circuit-breaker pre-gate,
+            # stuck execution resume (multi-chain), and teardown routing.
+            early = await self._step_teardown_and_cb_gate(state)
+            if early is not None:
+                return early
 
-            # Step 0a: Check for teardown early — needed to gate circuit breaker
-            # Called once here and reused at Step 0.5 to avoid double-invocation
-            # (acknowledge_teardown_request has side effects).
-            teardown_mode = self._check_teardown_requested(strategy)
+            # Periodic hooks that run every iteration but never early-exit.
+            await self._step_periodic_hooks(state)
 
-            # Step 0b: Circuit breaker check — block execution if breaker is OPEN/PAUSED
-            # Skip when a teardown is pending — teardown must always be allowed to run
-            # so operators can safely close positions even after consecutive failures.
-            if self._circuit_breaker is not None and teardown_mode is None:
-                cb_result = self._circuit_breaker.check()
-                if not cb_result.can_execute:
-                    logger.warning(
-                        "Circuit breaker blocking execution for %s: %s (state=%s, failures=%d)",
-                        strategy_id,
-                        cb_result.reason,
-                        cb_result.state.value,
-                        cb_result.consecutive_failures,
-                    )
-                    cb_state_label = cb_result.state.value  # "open" or "paused"
-                    add_event(
-                        TimelineEvent(
-                            timestamp=datetime.now(UTC),
-                            event_type=TimelineEventType.STRATEGY_STUCK,
-                            description=f"Circuit breaker {cb_state_label}: {cb_result.reason}",
-                            strategy_id=strategy_id,
-                            details=cb_result.to_dict(),
-                        )
-                    )
-                    return IterationResult(
-                        status=IterationStatus.CIRCUIT_BREAKER_OPEN,
-                        error=cb_result.reason,
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
+            # Step 1: Build market snapshot (+ dry-run balance injection +
+            # price cache pre-warm).
+            early = await self._step_build_snapshot(state)
+            if early is not None:
+                return early
 
-            # Step 0c: Check for stuck execution that needs resumption (multi-chain only)
-            # This MUST happen before decide() to prevent lost progress when state changes
-            if self._is_multi_chain:
-                stuck_result = await self._check_and_resume_stuck_execution(
-                    strategy=strategy,
-                    start_time=start_time,
-                )
-                if stuck_result is not None:
-                    return stuck_result
+            # Step 2: Call strategy.decide() with timeout + overlap guard.
+            early = await self._step_decide(state)
+            if early is not None:
+                return early
 
-            # Step 0.5: Check for teardown request (reuses result from Step 0a)
-            # If teardown is requested, intercept the iteration and execute teardown.
-            # Single-chain teardowns route through TeardownManager for full safety
-            # (loss caps, escalating slippage, cancel window, post-execution verification).
-            # Multi-chain teardowns use the inline path until TeardownManager supports it.
-            if teardown_mode is not None:
-                return await self._execute_teardown(strategy, teardown_mode, start_time)
+            # Step 3+4: Extract intents and short-circuit on HOLD/no-action.
+            early = self._step_extract_intents(state)
+            if early is not None:
+                return early
 
-            # Step 0b: Poll copy trading wallet activity (if configured)
-            activity_provider = getattr(strategy, "_wallet_activity_provider", None)
-            if activity_provider is not None:
-                try:
-                    activity_provider.poll_and_process()
-                    logger.debug("Copy trading: polled wallet activity")
-                    self._invoke_optional_hook(strategy, "on_copy_activity_polled", activity_provider)
-                except Exception as e:
-                    logger.error(f"Copy trading poll failed (continuing): {e}")
+            # Step 5 + 5.5: Log intents and run the late circuit-breaker gate
+            # now that a real intent exists.
+            self._step_log_intents(state)
+            early = self._step_circuit_breaker_pre_execute(state)
+            if early is not None:
+                return early
 
-            # Step 0c: Vault settlement lifecycle hook (if configured)
-            if self._vault_lifecycle is not None:
-                try:
-                    from ..vault.config import VaultAction
-                    from ..vault.lifecycle import VAULT_STATE_KEY
+            # Step 5.9: Snapshot pre-execution balances for delta logging.
+            await self._step_snapshot_pre_balances(state)
 
-                    vault_action = self._vault_lifecycle.pre_decide_hook(strategy)
-                    if vault_action in (VaultAction.SETTLE, VaultAction.RESUME_SETTLE):
-                        logger.info("Vault settlement triggered (%s), running settlement cycle", vault_action.value)
-                        settlement = await self._vault_lifecycle.run_settlement_cycle(strategy)
-                        if settlement.success:
-                            try:
-                                if hasattr(strategy, "on_vault_settled"):
-                                    strategy.on_vault_settled(settlement)
-                            except Exception as cb_err:
-                                logger.warning("on_vault_settled callback failed: %s", cb_err)
-                            logger.info(
-                                "Vault settlement completed: epoch=%d, total_assets=%d",
-                                settlement.epoch_id,
-                                settlement.new_total_assets,
-                            )
-                        else:
-                            logger.warning("Vault settlement failed, continuing to decide()")
-                except Exception as e:
-                    logger.error(f"Vault settlement error (continuing): {e}")
-                finally:
-                    # Always persist vault state, even if callback or settlement fails
-                    if self.config.enable_state_persistence:
-                        try:
-                            vault_state_dict = self._vault_lifecycle.get_vault_state_dict()
-                            if vault_state_dict is not None:
-                                await self._persist_vault_state(strategy_id, vault_state_dict, VAULT_STATE_KEY)
-                        except Exception as persist_err:
-                            logger.warning("Failed to persist vault state: %s", persist_err)
-
-            # Step 1: Create market snapshot
-            try:
-                market = strategy.create_market_snapshot()
-                logger.debug(f"Created market snapshot for {strategy_id}")
-            except Exception as e:
-                logger.error(f"Failed to create market snapshot: {e}")
-                return self._create_error_result(
-                    strategy_id,
-                    IterationStatus.DATA_ERROR,
-                    f"Market snapshot failed: {e}",
-                    start_time,
-                )
-
-            # Step 1a: Inject simulated balances for dry-run mode (VIB-2329)
-            # When running --dry-run --no-gateway, balance providers return 0 or error
-            # for chains where the wallet has no positions. simulated_balances in config
-            # lets strategy authors test logic without needing real on-chain funds.
-            if self.config.dry_run:
-                self._inject_simulated_balances(market, strategy)
-
-            # Step 1b: Pre-warm price cache (VIB-2568)
-            # On cold Anvil forks, gateway price fetches can take 15-30s each.
-            # If decide() makes multiple market.price() calls, the total easily
-            # exceeds the 30s decide_timeout. Pre-warming populates the snapshot's
-            # _price_cache OUTSIDE the timeout budget so decide() hits cache.
-            await self._pre_warm_prices(market, strategy)
-
-            # Step 2: Get strategy decision (with hard timeout)
-            # NOTE: asyncio.to_thread runs decide() in a worker thread. If decide()
-            # times out, the worker thread continues running (Python limitation).
-            # The _decide_in_progress guard prevents overlapping decide() calls.
-            decide_timeout = self.config.decide_timeout_seconds
-            if self._decide_in_progress:
-                # Allow recovery after 2x timeout -- the orphan thread has had plenty of time
-                if self._decide_timed_out_at is not None:
-                    elapsed = time.monotonic() - self._decide_timed_out_at
-                    if elapsed > 2 * decide_timeout:
-                        logger.warning(
-                            f"Resetting decide guard after {elapsed:.1f}s "
-                            f"(timeout was {decide_timeout}s) for {strategy_id}"
-                        )
-                        self._decide_in_progress = False
-                        self._decide_timed_out_at = None
-                if self._decide_in_progress:
-                    msg = "strategy.decide() still running from previous timed-out call"
-                    logger.error(f"OVERLAP: {msg} for {strategy_id}")
-                    if self._circuit_breaker is not None:
-                        self._circuit_breaker.record_failure(error_message=msg)
-                    return self._create_error_result(
-                        strategy_id,
-                        IterationStatus.STRATEGY_TIMEOUT,
-                        msg,
-                        start_time,
-                    )
-            try:
-                self._decide_in_progress = True
-                from almanak.framework.observability.emitter import emit_phase_event
-                from almanak.framework.observability.events import StrategyPhase
-
-                emit_phase_event(
-                    strategy_id=strategy_id,
-                    phase=StrategyPhase.DECIDE,
-                    event_type="STATE_CHANGE",
-                    description="decide() started",
-                )
-                if decide_timeout <= 0:
-                    # Timeout disabled -- run decide() without a time limit
-                    decide_result = await asyncio.to_thread(strategy.decide, market)
-                else:
-                    decide_result = await asyncio.wait_for(
-                        asyncio.to_thread(strategy.decide, market),
-                        timeout=decide_timeout,
-                    )
-                self._decide_in_progress = False
-                emit_phase_event(
-                    strategy_id=strategy_id,
-                    phase=StrategyPhase.DECIDE,
-                    event_type="STATE_CHANGE",
-                    description=f"decide() returned {type(decide_result).__name__}",
-                )
-            except TimeoutError:
-                # Worker thread may still be running; _decide_in_progress stays True
-                # to block overlapping calls. Recovery allowed after 2x timeout elapsed.
-                self._decide_timed_out_at = time.monotonic()
-                msg = f"strategy.decide() timed out after {decide_timeout}s"
-                logger.error(f"TIMEOUT: {msg} for {strategy_id}")
-                if self._circuit_breaker is not None:
-                    self._circuit_breaker.record_failure(error_message=msg)
-                return self._create_error_result(
-                    strategy_id,
-                    IterationStatus.STRATEGY_TIMEOUT,
-                    msg,
-                    start_time,
-                )
-            except Exception as e:
-                self._decide_in_progress = False  # Normal exceptions complete; reset guard
-                logger.error(f"Strategy decision failed: {e}")
-                if self._circuit_breaker is not None:
-                    self._circuit_breaker.record_failure(f"decide() error: {e}")
-                return self._create_error_result(
-                    strategy_id,
-                    IterationStatus.STRATEGY_ERROR,
-                    f"Strategy decision failed: {e}",
-                    start_time,
-                )
-
-            # Step 3: Extract intents from DecideResult
-
-            intents: list[AnyIntent] = []
-            if decide_result is None:
-                intents = []
-            elif isinstance(decide_result, IntentSequence):
-                intents = list(decide_result)
-            elif isinstance(decide_result, list):
-                for item in decide_result:
-                    if isinstance(item, IntentSequence):
-                        intents.extend(list(item))
-                    else:
-                        intents.append(item)
-            else:
-                intents = [decide_result]
-
-            # Filter out None values and check for HOLD
-            intents = [i for i in intents if i is not None]
-            self._invoke_optional_hook(strategy, "on_copy_decision_output", decide_result, intents)
-
-            # Step 4: Handle HOLD or no intent
-            if not intents or (len(intents) == 1 and isinstance(intents[0], HoldIntent)):
-                hold_intent = intents[0] if intents else None
-                reason = hold_intent.reason if isinstance(hold_intent, HoldIntent) else "No action"
-                hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
-                logger.info(f"{hold_prefix} {strategy_id} HOLD: {reason}")
-                self._record_success()
-                return IterationResult(
-                    status=IterationStatus.HOLD,
-                    intent=hold_intent,
-                    strategy_id=strategy_id,
-                    duration_ms=self._calculate_duration_ms(start_time),
-                )
-
-            # Step 5: Log intent(s) with detailed information
-            _chain = getattr(strategy, "chain", "")
-            if len(intents) == 1:
-                intent_summary = _format_intent_for_log(intents[0], chain=_chain)
-                intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
-                logger.info(f"{intent_prefix} {strategy_id} intent: {intent_summary}")
-            else:
-                # Log intent sequence with details for each step
-                intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
-                logger.info(f"{intent_prefix} {strategy_id} intent sequence ({len(intents)} steps):")
-                for i, intent in enumerate(intents, 1):
-                    intent_summary = _format_intent_for_log(intent, chain=_chain)
-                    logger.info(f"   {i}. {intent_summary}")
-
-            # Step 5.5: Circuit breaker gate — block execution if breaker is open
-            if self._circuit_breaker is not None:
-                cb_check = self._circuit_breaker.check()
-                if not cb_check.can_execute:
-                    logger.warning(
-                        f"Circuit breaker BLOCKED execution for {strategy_id}: "
-                        f"state={cb_check.state.value}, reason={cb_check.reason}"
-                    )
-                    add_event(
-                        TimelineEvent(
-                            timestamp=datetime.now(UTC),
-                            event_type=TimelineEventType.ERROR,
-                            description=f"Circuit breaker blocked execution: {cb_check.reason}",
-                            strategy_id=strategy_id,
-                            chain=getattr(strategy, "chain", ""),
-                            details={
-                                "circuit_breaker_state": cb_check.state.value,
-                                "trip_reason": cb_check.trip_reason.value if cb_check.trip_reason else None,
-                                "consecutive_failures": cb_check.consecutive_failures,
-                                "cumulative_loss_usd": str(cb_check.cumulative_loss_usd),
-                                "cooldown_remaining_seconds": cb_check.cooldown_remaining_seconds,
-                            },
-                        )
-                    )
-                    return IterationResult(
-                        status=IterationStatus.CIRCUIT_BREAKER_OPEN,
-                        intent=intents[0] if intents else None,
-                        error=f"Circuit breaker open: {cb_check.reason}",
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
-
-            # Step 5.9: Snapshot balances before execution for delta tracking
-            pre_balances: dict[str, Decimal] = {}
-            intent_tokens: list[str] = []
-            try:
-                for _intent in intents:
-                    intent_tokens.extend(_extract_tokens_from_intent(_intent))
-                intent_tokens = list(set(intent_tokens))  # dedupe
-                if intent_tokens:
-                    for token in intent_tokens:
-                        try:
-                            bal = await self.balance_provider.get_balance(token)
-                            pre_balances[token] = bal.balance
-                        except Exception:
-                            pass  # Token balance unavailable, skip delta for this token
-            except Exception:
-                logger.debug("Failed to snapshot pre-execution balances", exc_info=True)
-
-            # Step 6: Execute based on orchestrator type
-            if self._is_multi_chain:
-                # Multi-chain execution path
-                return await self._execute_multi_chain(
-                    strategy=strategy,
-                    intents=intents,
-                    start_time=start_time,
-                    market=market,
-                )
-            else:
-                # Single-chain execution path
-                # Execute all intents sequentially, stopping on first failure
-                if len(intents) > 1:
-                    logger.info(f"Executing {len(intents)} intents sequentially for {strategy.strategy_id}")
-
-                intent_result: IterationResult | None = None
-                is_multi_intent = len(intents) > 1
-                previous_amount_received: Decimal | None = None
-                for idx, intent in enumerate(intents):
-                    # Resolve amount="all" from previous step's output or wallet balance
-                    intent_to_execute = intent
-                    if Intent.has_chained_amount(intent):
-                        if is_multi_intent and previous_amount_received is not None:
-                            # Multi-intent chain: resolve from previous step output
-                            logger.info(
-                                f"  Resolving amount='all' to {previous_amount_received} "
-                                f"for intent {idx + 1}/{len(intents)}"
-                            )
-                            intent_to_execute = Intent.set_resolved_amount(intent, previous_amount_received)
-                        elif is_multi_intent and previous_amount_received is None and idx > 0:
-                            # Multi-intent but no previous output (dry-run or error)
-                            if self.config.dry_run:
-                                logger.warning(
-                                    f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
-                                    "but no previous step output available (dry-run mode). "
-                                    "Skipping compilation of this step."
-                                )
-                                intent_result = IterationResult(
-                                    status=IterationStatus.DRY_RUN,
-                                    intent=intent,
-                                    strategy_id=strategy.strategy_id,
-                                    duration_ms=self._calculate_duration_ms(start_time),
-                                )
-                                continue
-                            else:
-                                logger.error(
-                                    f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
-                                    "but no previous step amount available"
-                                )
-                                intent_result = IterationResult(
-                                    status=IterationStatus.COMPILATION_FAILED,
-                                    intent=intent,
-                                    error="amount='all' used but no previous step amount available",
-                                    strategy_id=strategy.strategy_id,
-                                    duration_ms=self._calculate_duration_ms(start_time),
-                                )
-                                break
-                        else:
-                            # Single intent or first intent in multi-sequence:
-                            # resolve amount='all' from wallet balance for wallet-funded intents.
-                            # Protocol-position intents (withdraw, repay, unstake) use amount='all'
-                            # to mean "all from the protocol position" — let the compiler handle those.
-                            _WALLET_FUNDED_TYPES = {
-                                IntentType.SWAP,
-                                IntentType.SUPPLY,
-                                IntentType.BORROW,
-                                IntentType.STAKE,
-                                IntentType.LP_OPEN,
-                                IntentType.PERP_OPEN,
-                                IntentType.VAULT_DEPOSIT,
-                                IntentType.BRIDGE,
-                            }
-                            intent_type = getattr(intent, "intent_type", None)
-                            if intent_type not in _WALLET_FUNDED_TYPES:
-                                # Protocol-position or unknown intent — let compiler handle natively
-                                logger.debug(f"  amount='all' for {intent_type} — passing to compiler as-is")
-                            else:
-                                balance_token = (
-                                    getattr(intent, "from_token", None)
-                                    or getattr(intent, "token", None)
-                                    or getattr(intent, "token_in", None)
-                                    or getattr(intent, "collateral_token", None)
-                                )
-                                if balance_token and market is not None:
-                                    try:
-                                        bal = market.balance(balance_token)
-                                        # market.balance() may return TokenBalance or Decimal
-                                        balance_value = bal.balance if hasattr(bal, "balance") else bal
-                                        if balance_value <= 0:
-                                            logger.warning(f"  amount='all' for {balance_token} but balance is 0")
-                                            intent_result = IterationResult(
-                                                status=IterationStatus.COMPILATION_FAILED,
-                                                intent=intent,
-                                                error=f"amount='all' for {balance_token} but balance is 0",
-                                                strategy_id=strategy.strategy_id,
-                                                duration_ms=self._calculate_duration_ms(start_time),
-                                            )
-                                            break
-                                        intent_to_execute = Intent.set_resolved_amount(intent, balance_value)
-                                        logger.info(
-                                            f"  Resolved amount='all' for {balance_token} from wallet: {balance_value}"
-                                        )
-                                    except Exception as e:  # noqa: BLE001
-                                        logger.error(f"  Failed to resolve amount='all' for {balance_token}: {e}")
-                                        intent_result = IterationResult(
-                                            status=IterationStatus.COMPILATION_FAILED,
-                                            intent=intent,
-                                            error=f"Cannot resolve amount='all' for {balance_token}: {e}",
-                                            strategy_id=strategy.strategy_id,
-                                            duration_ms=self._calculate_duration_ms(start_time),
-                                        )
-                                        break
-                                elif balance_token is None:
-                                    # No token field found — let compiler handle
-                                    logger.debug("  amount='all' with no token field, passing to compiler as-is")
-                                else:
-                                    # Have token but no market — cannot resolve
-                                    logger.error(f"  amount='all' for {balance_token} but no market context available")
-                                    intent_result = IterationResult(
-                                        status=IterationStatus.COMPILATION_FAILED,
-                                        intent=intent,
-                                        error=(f"amount='all' for {balance_token} but no market context available"),
-                                        strategy_id=strategy.strategy_id,
-                                        duration_ms=self._calculate_duration_ms(start_time),
-                                    )
-                                    break
-
-                    if is_multi_intent:
-                        logger.info(
-                            f"  Executing intent {idx + 1}/{len(intents)}: {_format_intent_for_log(intent_to_execute, chain=_chain)}"
-                        )
-
-                    intent_result = await self._execute_single_chain(
-                        strategy=strategy,
-                        intent=intent_to_execute,
-                        start_time=start_time,
-                        total_intents=len(intents),
-                        market=market,
-                        record_metrics=not is_multi_intent,
-                    )
-
-                    # Track amount received for chaining to next step
-                    if intent_result.status == IterationStatus.SUCCESS and intent_result.execution_result:
-                        er = intent_result.execution_result
-                        if er.swap_amounts and er.swap_amounts.amount_out_decimal is not None:
-                            previous_amount_received = er.swap_amounts.amount_out_decimal
-                        else:
-                            # No output amount extracted -- do NOT fall back to input amount
-                            # (input and output can differ wildly, e.g. 1000 USDC -> 0.5 ETH).
-                            # Reset to None so the next chained step fails explicitly
-                            # if it uses amount="all" (prevents stale value reuse).
-                            previous_amount_received = None
-                            # Only warn when there's actually a next step that could need chaining.
-                            # Single intents (LP_OPEN, LP_CLOSE, etc.) don't chain amounts.
-                            if is_multi_intent and idx < len(intents) - 1:
-                                logger.warning(
-                                    "Amount chaining: no output amount extracted from step %d; "
-                                    "subsequent amount='all' steps will fail",
-                                    idx + 1,
-                                )
-
-                    # Stop on failure - don't execute subsequent intents
-                    if not intent_result.success:
-                        if is_multi_intent:
-                            logger.warning(
-                                f"  Intent {idx + 1}/{len(intents)} failed with {intent_result.status.value}, "
-                                "skipping remaining intents"
-                            )
-                        break
-
-                # For multi-intent sequences, record metrics once per iteration
-                if is_multi_intent and intent_result is not None:
-                    if intent_result.success:
-                        self._record_success(execution_proved=intent_result.status == IterationStatus.SUCCESS)
-                    else:
-                        # Only track total_iterations here; consecutive_errors is
-                        # already handled by run_loop when result.success is False
-                        self._total_iterations += 1
-
-                # Step 6.9: Compute and log balance deltas after execution
-                if pre_balances and intent_result is not None and intent_result.success:
-                    try:
-                        self.balance_provider.invalidate_cache()
-                        post_balances: dict[str, Decimal] = {}
-                        for token in intent_tokens:
-                            try:
-                                bal = await self.balance_provider.get_balance(token)
-                                post_balances[token] = bal.balance
-                            except Exception:
-                                pass
-                        deltas = {}
-                        for token in intent_tokens:
-                            if token in pre_balances and token in post_balances:
-                                delta = post_balances[token] - pre_balances[token]
-                                if delta != 0:
-                                    deltas[token] = f"{delta:+.6g}"
-                        if deltas:
-                            delta_str = ", ".join(f"{t}: {v}" for t, v in deltas.items())
-                            logger.info(f"Balance delta: {delta_str}")
-                    except Exception:
-                        logger.debug("Failed to compute balance deltas", exc_info=True)
-
-                return intent_result  # type: ignore[return-value]
+            # Step 6: Execute based on orchestrator type.
+            return await self._step_execute(state)
 
         except Exception as e:
             # VIB-3157: accounting persistence failure -- on-chain execution may
@@ -967,6 +527,730 @@ class StrategyRunner:
             # Clear correlation context to prevent bleed across iterations
             clear_context()
             clear_cycle_id()
+
+    # -------------------------------------------------------------------------
+    # run_iteration step helpers (Phase 3b refactor)
+    #
+    # Each helper takes the ``RunIterationState`` for the current iteration,
+    # mutates it in place, and returns either ``None`` (continue to the next
+    # step) or an :class:`IterationResult` to terminate the iteration early.
+    # Helpers are intentionally conservative: the original code paths, log
+    # messages, and timeline events are preserved verbatim.
+    # -------------------------------------------------------------------------
+
+    async def _step_pause_gate(self, state: RunIterationState) -> IterationResult | None:
+        """Honor operator pause before any strategy logic/execution runs."""
+        strategy_id = state.strategy_id
+        paused, pause_reason = await self._is_strategy_paused(strategy_id)
+        if paused:
+            if strategy_id not in self._logged_paused_strategy_ids:
+                logger.info(
+                    "%s %s is paused by operator%s",
+                    "[PAUSED]" if not _emojis_enabled() else "⏸️",
+                    strategy_id,
+                    f" ({pause_reason})" if pause_reason else "",
+                )
+                self._logged_paused_strategy_ids.add(strategy_id)
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.HOLD,
+                intent=HoldIntent(reason=pause_reason or "Paused by operator"),
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(state.start_time),
+            )
+
+        # Strategy resumed: clear pause log marker.
+        self._logged_paused_strategy_ids.discard(strategy_id)
+        return None
+
+    async def _step_teardown_and_cb_gate(self, state: RunIterationState) -> IterationResult | None:
+        """Teardown detection, early CB gate, and stuck-execution recovery.
+
+        Covers the original Step 0a (teardown detection), Step 0b (circuit
+        breaker early check, skipped during teardown), Step 0c (stuck
+        execution resumption for multi-chain), and Step 0.5 (teardown
+        dispatch). These are coupled because the teardown mode gates the
+        CB check and the CB check must precede the stuck-resume call.
+        """
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        start_time = state.start_time
+
+        # Step 0a: Check for teardown early — needed to gate circuit breaker
+        # Called once here and reused below to avoid double-invocation
+        # (acknowledge_teardown_request has side effects).
+        teardown_mode = self._check_teardown_requested(strategy)
+        state.teardown_mode = teardown_mode
+
+        # Step 0b: Circuit breaker check — block execution if breaker is OPEN/PAUSED
+        # Skip when a teardown is pending — teardown must always be allowed to run
+        # so operators can safely close positions even after consecutive failures.
+        if self._circuit_breaker is not None and teardown_mode is None:
+            cb_result = self._circuit_breaker.check()
+            if not cb_result.can_execute:
+                logger.warning(
+                    "Circuit breaker blocking execution for %s: %s (state=%s, failures=%d)",
+                    strategy_id,
+                    cb_result.reason,
+                    cb_result.state.value,
+                    cb_result.consecutive_failures,
+                )
+                cb_state_label = cb_result.state.value  # "open" or "paused"
+                add_event(
+                    TimelineEvent(
+                        timestamp=datetime.now(UTC),
+                        event_type=TimelineEventType.STRATEGY_STUCK,
+                        description=f"Circuit breaker {cb_state_label}: {cb_result.reason}",
+                        strategy_id=strategy_id,
+                        details=cb_result.to_dict(),
+                    )
+                )
+                return IterationResult(
+                    status=IterationStatus.CIRCUIT_BREAKER_OPEN,
+                    error=cb_result.reason,
+                    strategy_id=strategy_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+
+        # Step 0c: Check for stuck execution that needs resumption (multi-chain only)
+        # This MUST happen before decide() to prevent lost progress when state changes
+        if self._is_multi_chain:
+            stuck_result = await self._check_and_resume_stuck_execution(
+                strategy=strategy,
+                start_time=start_time,
+            )
+            if stuck_result is not None:
+                return stuck_result
+
+        # Step 0.5: Check for teardown request (reuses result from Step 0a)
+        # If teardown is requested, intercept the iteration and execute teardown.
+        # Single-chain teardowns route through TeardownManager for full safety
+        # (loss caps, escalating slippage, cancel window, post-execution verification).
+        # Multi-chain teardowns use the inline path until TeardownManager supports it.
+        if teardown_mode is not None:
+            return await self._execute_teardown(strategy, teardown_mode, start_time)
+
+        return None
+
+    async def _step_periodic_hooks(self, state: RunIterationState) -> None:
+        """Copy trading polling + vault settlement hook.
+
+        Never early-exits: errors are logged and iteration continues.
+        """
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+
+        # Step 0b: Poll copy trading wallet activity (if configured)
+        activity_provider = getattr(strategy, "_wallet_activity_provider", None)
+        if activity_provider is not None:
+            try:
+                activity_provider.poll_and_process()
+                logger.debug("Copy trading: polled wallet activity")
+                self._invoke_optional_hook(strategy, "on_copy_activity_polled", activity_provider)
+            except Exception as e:
+                logger.error(f"Copy trading poll failed (continuing): {e}")
+
+        # Step 0c: Vault settlement lifecycle hook (if configured)
+        if self._vault_lifecycle is not None:
+            try:
+                from ..vault.config import VaultAction
+                from ..vault.lifecycle import VAULT_STATE_KEY
+
+                vault_action = self._vault_lifecycle.pre_decide_hook(strategy)
+                if vault_action in (VaultAction.SETTLE, VaultAction.RESUME_SETTLE):
+                    logger.info("Vault settlement triggered (%s), running settlement cycle", vault_action.value)
+                    settlement = await self._vault_lifecycle.run_settlement_cycle(strategy)
+                    if settlement.success:
+                        try:
+                            if hasattr(strategy, "on_vault_settled"):
+                                strategy.on_vault_settled(settlement)
+                        except Exception as cb_err:
+                            logger.warning("on_vault_settled callback failed: %s", cb_err)
+                        logger.info(
+                            "Vault settlement completed: epoch=%d, total_assets=%d",
+                            settlement.epoch_id,
+                            settlement.new_total_assets,
+                        )
+                    else:
+                        logger.warning("Vault settlement failed, continuing to decide()")
+            except Exception as e:
+                logger.error(f"Vault settlement error (continuing): {e}")
+            finally:
+                # Always persist vault state, even if callback or settlement fails.
+                # Re-import here because the Exception branch above may have
+                # triggered before VAULT_STATE_KEY was bound in the try scope.
+                if self.config.enable_state_persistence:
+                    try:
+                        from ..vault.lifecycle import VAULT_STATE_KEY
+
+                        vault_state_dict = self._vault_lifecycle.get_vault_state_dict()
+                        if vault_state_dict is not None:
+                            await self._persist_vault_state(strategy_id, vault_state_dict, VAULT_STATE_KEY)
+                    except Exception as persist_err:
+                        logger.warning("Failed to persist vault state: %s", persist_err)
+
+    async def _step_build_snapshot(self, state: RunIterationState) -> IterationResult | None:
+        """Create market snapshot, inject dry-run balances, pre-warm prices."""
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+
+        # Step 1: Create market snapshot
+        try:
+            market = strategy.create_market_snapshot()
+            logger.debug(f"Created market snapshot for {strategy_id}")
+        except Exception as e:
+            logger.error(f"Failed to create market snapshot: {e}")
+            return self._create_error_result(
+                strategy_id,
+                IterationStatus.DATA_ERROR,
+                f"Market snapshot failed: {e}",
+                state.start_time,
+            )
+
+        state.market = market
+
+        # Step 1a: Inject simulated balances for dry-run mode (VIB-2329)
+        # When running --dry-run --no-gateway, balance providers return 0 or error
+        # for chains where the wallet has no positions. simulated_balances in config
+        # lets strategy authors test logic without needing real on-chain funds.
+        if self.config.dry_run:
+            self._inject_simulated_balances(market, strategy)
+
+        # Step 1b: Pre-warm price cache (VIB-2568)
+        # On cold Anvil forks, gateway price fetches can take 15-30s each.
+        # If decide() makes multiple market.price() calls, the total easily
+        # exceeds the 30s decide_timeout. Pre-warming populates the snapshot's
+        # _price_cache OUTSIDE the timeout budget so decide() hits cache.
+        await self._pre_warm_prices(market, strategy)
+        return None
+
+    async def _step_decide(self, state: RunIterationState) -> IterationResult | None:
+        """Call ``strategy.decide(market)`` with timeout + overlap guard.
+
+        Returns an early-exit ``IterationResult`` on overlap, timeout, or
+        raised exception. Otherwise stores the raw decide result on ``state``
+        and returns ``None``.
+        """
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        market = state.market
+        start_time = state.start_time
+
+        # Step 2: Get strategy decision (with hard timeout)
+        # NOTE: asyncio.to_thread runs decide() in a worker thread. If decide()
+        # times out, the worker thread continues running (Python limitation).
+        # The _decide_in_progress guard prevents overlapping decide() calls.
+        decide_timeout = self.config.decide_timeout_seconds
+        if self._decide_in_progress:
+            # Allow recovery after 2x timeout -- the orphan thread has had plenty of time
+            if self._decide_timed_out_at is not None:
+                elapsed = time.monotonic() - self._decide_timed_out_at
+                if elapsed > 2 * decide_timeout:
+                    logger.warning(
+                        f"Resetting decide guard after {elapsed:.1f}s (timeout was {decide_timeout}s) for {strategy_id}"
+                    )
+                    self._decide_in_progress = False
+                    self._decide_timed_out_at = None
+            if self._decide_in_progress:
+                msg = "strategy.decide() still running from previous timed-out call"
+                logger.error(f"OVERLAP: {msg} for {strategy_id}")
+                if self._circuit_breaker is not None:
+                    self._circuit_breaker.record_failure(error_message=msg)
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.STRATEGY_TIMEOUT,
+                    msg,
+                    start_time,
+                )
+        try:
+            self._decide_in_progress = True
+            from almanak.framework.observability.emitter import emit_phase_event
+            from almanak.framework.observability.events import StrategyPhase
+
+            emit_phase_event(
+                strategy_id=strategy_id,
+                phase=StrategyPhase.DECIDE,
+                event_type="STATE_CHANGE",
+                description="decide() started",
+            )
+            if decide_timeout <= 0:
+                # Timeout disabled -- run decide() without a time limit
+                decide_result = await asyncio.to_thread(strategy.decide, market)
+            else:
+                decide_result = await asyncio.wait_for(
+                    asyncio.to_thread(strategy.decide, market),
+                    timeout=decide_timeout,
+                )
+            self._decide_in_progress = False
+            emit_phase_event(
+                strategy_id=strategy_id,
+                phase=StrategyPhase.DECIDE,
+                event_type="STATE_CHANGE",
+                description=f"decide() returned {type(decide_result).__name__}",
+            )
+        except TimeoutError:
+            # Worker thread may still be running; _decide_in_progress stays True
+            # to block overlapping calls. Recovery allowed after 2x timeout elapsed.
+            self._decide_timed_out_at = time.monotonic()
+            msg = f"strategy.decide() timed out after {decide_timeout}s"
+            logger.error(f"TIMEOUT: {msg} for {strategy_id}")
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_failure(error_message=msg)
+            return self._create_error_result(
+                strategy_id,
+                IterationStatus.STRATEGY_TIMEOUT,
+                msg,
+                start_time,
+            )
+        except Exception as e:
+            self._decide_in_progress = False  # Normal exceptions complete; reset guard
+            logger.error(f"Strategy decision failed: {e}")
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_failure(f"decide() error: {e}")
+            return self._create_error_result(
+                strategy_id,
+                IterationStatus.STRATEGY_ERROR,
+                f"Strategy decision failed: {e}",
+                start_time,
+            )
+
+        state.decide_result = decide_result
+        return None
+
+    def _step_extract_intents(self, state: RunIterationState) -> IterationResult | None:
+        """Normalise ``decide_result`` into ``state.intents`` and handle HOLD."""
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        decide_result = state.decide_result
+
+        # Step 3: Extract intents from DecideResult
+        intents: list[AnyIntent] = []
+        if decide_result is None:
+            intents = []
+        elif isinstance(decide_result, IntentSequence):
+            intents = list(decide_result)
+        elif isinstance(decide_result, list):
+            for item in decide_result:
+                if isinstance(item, IntentSequence):
+                    intents.extend(list(item))
+                else:
+                    intents.append(item)
+        else:
+            intents = [decide_result]
+
+        # Filter out None values and check for HOLD
+        intents = [i for i in intents if i is not None]
+        self._invoke_optional_hook(strategy, "on_copy_decision_output", decide_result, intents)
+
+        state.intents = intents
+
+        # Step 4: Handle HOLD or no intent
+        if not intents or (len(intents) == 1 and isinstance(intents[0], HoldIntent)):
+            hold_intent = intents[0] if intents else None
+            reason = hold_intent.reason if isinstance(hold_intent, HoldIntent) else "No action"
+            hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
+            logger.info(f"{hold_prefix} {strategy_id} HOLD: {reason}")
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.HOLD,
+                intent=hold_intent,
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(state.start_time),
+            )
+        return None
+
+    def _step_log_intents(self, state: RunIterationState) -> None:
+        """Log the intent or intent sequence with human-readable formatting."""
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        intents = state.intents
+
+        _chain = getattr(strategy, "chain", "")
+        if len(intents) == 1:
+            intent_summary = _format_intent_for_log(intents[0], chain=_chain)
+            intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
+            logger.info(f"{intent_prefix} {strategy_id} intent: {intent_summary}")
+        else:
+            # Log intent sequence with details for each step
+            intent_prefix = "📈" if _emojis_enabled() else "[INTENT]"
+            logger.info(f"{intent_prefix} {strategy_id} intent sequence ({len(intents)} steps):")
+            for i, intent in enumerate(intents, 1):
+                intent_summary = _format_intent_for_log(intent, chain=_chain)
+                logger.info(f"   {i}. {intent_summary}")
+
+    def _step_circuit_breaker_pre_execute(self, state: RunIterationState) -> IterationResult | None:
+        """Late circuit-breaker gate: block execution if breaker is open.
+
+        Runs after ``decide()`` succeeded and a real (non-HOLD) intent has
+        been produced. Emits an ``ERROR`` timeline event so operators can
+        distinguish this from the pre-decide gate.
+        """
+        if self._circuit_breaker is None:
+            return None
+
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        intents = state.intents
+
+        cb_check = self._circuit_breaker.check()
+        if not cb_check.can_execute:
+            logger.warning(
+                f"Circuit breaker BLOCKED execution for {strategy_id}: "
+                f"state={cb_check.state.value}, reason={cb_check.reason}"
+            )
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.ERROR,
+                    description=f"Circuit breaker blocked execution: {cb_check.reason}",
+                    strategy_id=strategy_id,
+                    chain=getattr(strategy, "chain", ""),
+                    details={
+                        "circuit_breaker_state": cb_check.state.value,
+                        "trip_reason": cb_check.trip_reason.value if cb_check.trip_reason else None,
+                        "consecutive_failures": cb_check.consecutive_failures,
+                        "cumulative_loss_usd": str(cb_check.cumulative_loss_usd),
+                        "cooldown_remaining_seconds": cb_check.cooldown_remaining_seconds,
+                    },
+                )
+            )
+            return IterationResult(
+                status=IterationStatus.CIRCUIT_BREAKER_OPEN,
+                intent=intents[0] if intents else None,
+                error=f"Circuit breaker open: {cb_check.reason}",
+                strategy_id=strategy_id,
+                duration_ms=self._calculate_duration_ms(state.start_time),
+            )
+        return None
+
+    async def _step_snapshot_pre_balances(self, state: RunIterationState) -> None:
+        """Snapshot wallet balances for all tokens referenced by the intents.
+
+        Populates ``state.pre_balances`` and ``state.intent_tokens`` for the
+        post-execution delta log. Failures are swallowed at debug level so
+        balance-provider glitches never block execution.
+        """
+        intents = state.intents
+        pre_balances: dict[str, Decimal] = {}
+        intent_tokens: list[str] = []
+        try:
+            for _intent in intents:
+                intent_tokens.extend(_extract_tokens_from_intent(_intent))
+            intent_tokens = list(set(intent_tokens))  # dedupe
+            if intent_tokens:
+                for token in intent_tokens:
+                    try:
+                        bal = await self.balance_provider.get_balance(token)
+                        pre_balances[token] = bal.balance
+                    except Exception:
+                        pass  # Token balance unavailable, skip delta for this token
+        except Exception:
+            logger.debug("Failed to snapshot pre-execution balances", exc_info=True)
+
+        state.pre_balances = pre_balances
+        state.intent_tokens = intent_tokens
+
+    async def _step_execute(self, state: RunIterationState) -> IterationResult:
+        """Dispatch execution to the multi-chain or single-chain path.
+
+        Multi-chain orchestration lives in ``_execute_multi_chain``; the
+        single-chain path (amount='all' resolution + sequential intent loop
+        + multi-intent metrics + balance deltas) lives in
+        ``_run_single_chain_intents``. Both are out of scope for Phase 3b
+        and are called as-is.
+        """
+        if self._is_multi_chain:
+            return await self._execute_multi_chain(
+                strategy=state.strategy,
+                intents=state.intents,
+                start_time=state.start_time,
+                market=state.market,
+            )
+        return await self._run_single_chain_intents(state)
+
+    async def _run_single_chain_intents(self, state: RunIterationState) -> IterationResult:
+        """Sequentially execute intents through the single-chain orchestrator.
+
+        Handles amount='all' resolution (from previous step output or wallet
+        balance), stops on first failure, records multi-intent metrics once
+        per iteration, and logs balance deltas. Behaviour is identical to
+        the inline code it replaces.
+        """
+        strategy = state.strategy
+        intents = state.intents
+        market = state.market
+        start_time = state.start_time
+        pre_balances = state.pre_balances
+        intent_tokens = state.intent_tokens
+
+        # Single-chain execution path
+        # Execute all intents sequentially, stopping on first failure
+        if len(intents) > 1:
+            logger.info(f"Executing {len(intents)} intents sequentially for {strategy.strategy_id}")
+
+        _chain = getattr(strategy, "chain", "")
+        intent_result: IterationResult | None = None
+        is_multi_intent = len(intents) > 1
+        previous_amount_received: Decimal | None = None
+        for idx, intent in enumerate(intents):
+            # Resolve amount="all" from previous step's output or wallet balance.
+            # Returns (intent_to_execute, early_result, should_continue) where
+            # early_result is a failure/dry-run sentinel and should_continue
+            # signals whether to skip this step without breaking the loop.
+            (
+                intent_to_execute,
+                early_result,
+                should_continue,
+            ) = self._resolve_chained_amount_for_intent(
+                intent=intent,
+                idx=idx,
+                intents=intents,
+                is_multi_intent=is_multi_intent,
+                previous_amount_received=previous_amount_received,
+                market=market,
+                strategy=strategy,
+                start_time=start_time,
+            )
+            if early_result is not None:
+                intent_result = early_result
+                if should_continue:
+                    continue
+                break
+
+            if is_multi_intent:
+                logger.info(
+                    f"  Executing intent {idx + 1}/{len(intents)}: {_format_intent_for_log(intent_to_execute, chain=_chain)}"
+                )
+
+            intent_result = await self._execute_single_chain(
+                strategy=strategy,
+                intent=intent_to_execute,
+                start_time=start_time,
+                total_intents=len(intents),
+                market=market,
+                record_metrics=not is_multi_intent,
+            )
+
+            # Track amount received for chaining to next step
+            if intent_result.status == IterationStatus.SUCCESS and intent_result.execution_result:
+                er = intent_result.execution_result
+                if er.swap_amounts and er.swap_amounts.amount_out_decimal is not None:
+                    previous_amount_received = er.swap_amounts.amount_out_decimal
+                else:
+                    # No output amount extracted -- do NOT fall back to input amount
+                    # (input and output can differ wildly, e.g. 1000 USDC -> 0.5 ETH).
+                    # Reset to None so the next chained step fails explicitly
+                    # if it uses amount="all" (prevents stale value reuse).
+                    previous_amount_received = None
+                    # Only warn when there's actually a next step that could need chaining.
+                    # Single intents (LP_OPEN, LP_CLOSE, etc.) don't chain amounts.
+                    if is_multi_intent and idx < len(intents) - 1:
+                        logger.warning(
+                            "Amount chaining: no output amount extracted from step %d; "
+                            "subsequent amount='all' steps will fail",
+                            idx + 1,
+                        )
+
+            # Stop on failure - don't execute subsequent intents
+            if not intent_result.success:
+                if is_multi_intent:
+                    logger.warning(
+                        f"  Intent {idx + 1}/{len(intents)} failed with {intent_result.status.value}, "
+                        "skipping remaining intents"
+                    )
+                break
+
+        # For multi-intent sequences, record metrics once per iteration
+        if is_multi_intent and intent_result is not None:
+            if intent_result.success:
+                self._record_success(execution_proved=intent_result.status == IterationStatus.SUCCESS)
+            else:
+                # Only track total_iterations here; consecutive_errors is
+                # already handled by run_loop when result.success is False
+                self._total_iterations += 1
+
+        # Step 6.9: Compute and log balance deltas after execution
+        if pre_balances and intent_result is not None and intent_result.success:
+            try:
+                self.balance_provider.invalidate_cache()
+                post_balances: dict[str, Decimal] = {}
+                for token in intent_tokens:
+                    try:
+                        bal = await self.balance_provider.get_balance(token)
+                        post_balances[token] = bal.balance
+                    except Exception:
+                        pass
+                deltas = {}
+                for token in intent_tokens:
+                    if token in pre_balances and token in post_balances:
+                        delta = post_balances[token] - pre_balances[token]
+                        if delta != 0:
+                            deltas[token] = f"{delta:+.6g}"
+                if deltas:
+                    delta_str = ", ".join(f"{t}: {v}" for t, v in deltas.items())
+                    logger.info(f"Balance delta: {delta_str}")
+            except Exception:
+                logger.debug("Failed to compute balance deltas", exc_info=True)
+
+        return intent_result  # type: ignore[return-value]
+
+    def _resolve_chained_amount_for_intent(
+        self,
+        *,
+        intent: "AnyIntent",
+        idx: int,
+        intents: list["AnyIntent"],
+        is_multi_intent: bool,
+        previous_amount_received: Decimal | None,
+        market: Any,
+        strategy: "StrategyProtocol",
+        start_time: datetime,
+    ) -> tuple["AnyIntent", IterationResult | None, bool]:
+        """Resolve an ``amount="all"`` intent to a concrete amount.
+
+        Returns a 3-tuple ``(intent_to_execute, early_result, should_continue)``:
+
+        * ``intent_to_execute`` — the (possibly) rewritten intent to send to
+          ``_execute_single_chain``. When ``early_result`` is non-None this is
+          the raw input intent and the caller should use ``early_result`` as
+          this step's result instead of executing.
+        * ``early_result`` — ``None`` when resolution succeeded (or when the
+          intent does not use ``amount="all"``). Otherwise an
+          ``IterationResult`` sentinel (DRY_RUN / COMPILATION_FAILED) that
+          the caller should record as ``intent_result`` and either skip
+          (``should_continue=True``) or stop the loop for.
+        * ``should_continue`` — when ``True`` the caller should ``continue``
+          the loop to the next intent; when ``False`` and ``early_result`` is
+          set, the caller should ``break``.
+
+        Behaviour is identical to the original inline resolution logic.
+        """
+        if not Intent.has_chained_amount(intent):
+            return intent, None, False
+
+        if is_multi_intent and previous_amount_received is not None:
+            # Multi-intent chain: resolve from previous step output
+            logger.info(f"  Resolving amount='all' to {previous_amount_received} for intent {idx + 1}/{len(intents)}")
+            return Intent.set_resolved_amount(intent, previous_amount_received), None, False
+
+        if is_multi_intent and previous_amount_received is None and idx > 0:
+            # Multi-intent but no previous output (dry-run or error)
+            if self.config.dry_run:
+                logger.warning(
+                    f"  Intent {idx + 1}/{len(intents)} uses amount='all' "
+                    "but no previous step output available (dry-run mode). "
+                    "Skipping compilation of this step."
+                )
+                result = IterationResult(
+                    status=IterationStatus.DRY_RUN,
+                    intent=intent,
+                    strategy_id=strategy.strategy_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+                return intent, result, True  # continue
+
+            logger.error(f"  Intent {idx + 1}/{len(intents)} uses amount='all' but no previous step amount available")
+            result = IterationResult(
+                status=IterationStatus.COMPILATION_FAILED,
+                intent=intent,
+                error="amount='all' used but no previous step amount available",
+                strategy_id=strategy.strategy_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+            return intent, result, False  # break
+
+        # Single intent or first intent in multi-sequence: resolve amount='all'
+        # from wallet balance for wallet-funded intents. Protocol-position
+        # intents (withdraw, repay, unstake) use amount='all' to mean "all
+        # from the protocol position" — let the compiler handle those.
+        return self._resolve_chained_amount_from_wallet(
+            intent=intent,
+            market=market,
+            strategy=strategy,
+            start_time=start_time,
+        )
+
+    def _resolve_chained_amount_from_wallet(
+        self,
+        *,
+        intent: "AnyIntent",
+        market: Any,
+        strategy: "StrategyProtocol",
+        start_time: datetime,
+    ) -> tuple["AnyIntent", IterationResult | None, bool]:
+        """Resolve ``amount="all"`` from the wallet balance for the intent.
+
+        Mirrors the inline wallet-balance fallback used for single intents
+        and the first step of a multi-intent sequence. Returns the same
+        3-tuple contract as :meth:`_resolve_chained_amount_for_intent`.
+        """
+        _WALLET_FUNDED_TYPES = {
+            IntentType.SWAP,
+            IntentType.SUPPLY,
+            IntentType.BORROW,
+            IntentType.STAKE,
+            IntentType.LP_OPEN,
+            IntentType.PERP_OPEN,
+            IntentType.VAULT_DEPOSIT,
+            IntentType.BRIDGE,
+        }
+        intent_type = getattr(intent, "intent_type", None)
+        if intent_type not in _WALLET_FUNDED_TYPES:
+            # Protocol-position or unknown intent — let compiler handle natively
+            logger.debug(f"  amount='all' for {intent_type} — passing to compiler as-is")
+            return intent, None, False
+
+        balance_token = (
+            getattr(intent, "from_token", None)
+            or getattr(intent, "token", None)
+            or getattr(intent, "token_in", None)
+            or getattr(intent, "collateral_token", None)
+        )
+
+        if balance_token and market is not None:
+            try:
+                bal = market.balance(balance_token)
+                # market.balance() may return TokenBalance or Decimal
+                balance_value = bal.balance if hasattr(bal, "balance") else bal
+                if balance_value <= 0:
+                    logger.warning(f"  amount='all' for {balance_token} but balance is 0")
+                    result = IterationResult(
+                        status=IterationStatus.COMPILATION_FAILED,
+                        intent=intent,
+                        error=f"amount='all' for {balance_token} but balance is 0",
+                        strategy_id=strategy.strategy_id,
+                        duration_ms=self._calculate_duration_ms(start_time),
+                    )
+                    return intent, result, False  # break
+                resolved = Intent.set_resolved_amount(intent, balance_value)
+                logger.info(f"  Resolved amount='all' for {balance_token} from wallet: {balance_value}")
+                return resolved, None, False
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"  Failed to resolve amount='all' for {balance_token}: {e}")
+                result = IterationResult(
+                    status=IterationStatus.COMPILATION_FAILED,
+                    intent=intent,
+                    error=f"Cannot resolve amount='all' for {balance_token}: {e}",
+                    strategy_id=strategy.strategy_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+                return intent, result, False  # break
+
+        if balance_token is None:
+            # No token field found — let compiler handle
+            logger.debug("  amount='all' with no token field, passing to compiler as-is")
+            return intent, None, False
+
+        # Have token but no market — cannot resolve
+        logger.error(f"  amount='all' for {balance_token} but no market context available")
+        result = IterationResult(
+            status=IterationStatus.COMPILATION_FAILED,
+            intent=intent,
+            error=(f"amount='all' for {balance_token} but no market context available"),
+            strategy_id=strategy.strategy_id,
+            duration_ms=self._calculate_duration_ms(start_time),
+        )
+        return intent, result, False  # break
 
     async def run_loop(
         self,
