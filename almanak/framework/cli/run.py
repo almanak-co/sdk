@@ -83,7 +83,7 @@ from ..execution.signer.local import LocalKeySigner
 from ..execution.simulator import create_simulator
 from ..execution.submitter.public import PublicMempoolSubmitter
 from ..runner import IterationResult, IterationStatus, RunnerConfig, StrategyRunner
-from ..strategies import IntentStrategy, get_strategy, list_strategies
+from ..strategies import IntentStrategy
 from ..strategies.intent_strategy import IndicatorProvider
 from .intent_debug import load_strategy_from_file
 
@@ -1269,46 +1269,22 @@ def run(
         # List registered strategies
         almanak strat run --list
     """
-    # Configure logging using structured logging
-    from ..utils.logging import LogFormat, LogLevel, add_file_handler, configure_logging
+    # Configure logging + validate setup-stage flag combinations (phase 1 helper).
+    from .run_helpers import (
+        _configure_logging_and_validate,
+        _discover_and_load_config,
+        _handle_list_all,
+        _load_strategy_class,
+        _print_startup_banner,
+    )
 
-    # Determine log level: debug > verbose > default (info)
-    if debug:
-        log_level = LogLevel.DEBUG
-    elif verbose:
-        log_level = LogLevel.DEBUG  # Verbose shows DEBUG for src.* modules
-    else:
-        log_level = LogLevel.INFO
-
-    # Use console format for human-readable output
-    configure_logging(level=log_level, format=LogFormat.CONSOLE)
-
-    # Add JSON file handler if --log-file is specified
-    if log_file:
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        add_file_handler(str(log_path), level=LogLevel.DEBUG)
-        click.echo(f"Logging to file: {log_path} (JSON format)")
-
-    # Control third-party logger verbosity based on --debug flag
-    # By default, suppress Web3/HTTP noise unless --debug is specified
-    if not debug:
-        # Suppress third-party debug logs (keep only WARNING+)
-        logging.getLogger("web3").setLevel(logging.WARNING)
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
-        logging.getLogger("aiohttp").setLevel(logging.WARNING)
-        logging.getLogger("asyncio").setLevel(logging.WARNING)
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
-    else:
-        # --debug flag: allow all debug logs including third-party
-        logging.getLogger("web3").setLevel(logging.DEBUG)
-        logging.getLogger("urllib3").setLevel(logging.DEBUG)
-
-    # Validate --teardown-after requires --once
-    if teardown_after and not once:
-        click.echo("Error: --teardown-after requires --once.", err=True)
-        sys.exit(1)
+    _configure_logging_and_validate(
+        verbose=verbose,
+        debug=debug,
+        log_file=log_file,
+        once=once,
+        teardown_after=teardown_after,
+    )
 
     # Gateway setup: auto-start a managed gateway or connect to an existing one
     import atexit
@@ -1619,27 +1595,8 @@ def run(
 
     click.echo()
 
-    # Handle --list flag
-    if list_all:
-        available = list_strategies()
-        if available:
-            click.echo("Registered strategies:")
-            for name in sorted(available):
-                # Mark multi-chain strategies
-                try:
-                    strat_class = get_strategy(name)
-                    if is_multi_chain_strategy(strat_class):
-                        chains = get_strategy_chains(strat_class)
-                        click.echo(f"  - {name} [multi-chain: {', '.join(chains)}]")
-                    else:
-                        click.echo(f"  - {name}")
-                except Exception:
-                    click.echo(f"  - {name}")
-        else:
-            click.echo("No strategies registered in the factory.")
-        click.echo()
-        click.echo("To run a strategy, cd into its directory and run:")
-        click.echo("  almanak strat run --once")
+    # Handle --list flag (phase 4 helper)
+    if _handle_list_all(list_all, gateway_client):
         return
 
     # Dashboard helpers (defined early for dashboard-only mode)
@@ -1754,26 +1711,9 @@ def run(
         if dashboard_process is not None:
             atexit.register(stop_dashboard, dashboard_process)
 
-    # Load strategy from working directory (reuse early-loaded class if available)
-    strategy_file = Path(working_dir) / "strategy.py"
-    if not strategy_file.exists():
-        click.echo(f"Error: No strategy.py found in {working_dir}", err=True)
-        click.echo()
-        click.echo("Make sure you're in a strategy directory or use --working-dir:")
-        click.echo("  almanak strat run -d almanak/demo_strategies/uniswap_rsi --once")
-        sys.exit(1)
-
-    if _early_strategy_class is not None:
-        loaded_class: type[IntentStrategy[Any]] = _early_strategy_class
-    else:
-        _loaded, error = load_strategy_from_file(strategy_file)
-        if not _loaded:
-            click.echo(f"Error loading strategy from {strategy_file}: {error}", err=True)
-            sys.exit(1)
-        loaded_class = _loaded
-
-    strategy_class: type[IntentStrategy[Any]] = loaded_class
-    strategy_name = loaded_class.__name__
+    # Load strategy from working directory (reuse early-loaded class if available) (phase 6 helper)
+    strategy_class: type[IntentStrategy[Any]] = _load_strategy_class(working_dir, _early_strategy_class)
+    strategy_name = strategy_class.__name__
     click.echo(f"Loaded strategy: {strategy_name}")
 
     # Use provided instance ID if given
@@ -1784,57 +1724,28 @@ def run(
     multi_chain = False  # Determined after config load
     strategy_protocols = get_strategy_protocols(strategy_class)
 
-    # Auto-discover config file from working directory if not explicitly provided
-    if not config_file:
-        for candidate_name in ["config.json", "config.yaml", "config.yml"]:
-            candidate = Path(working_dir) / candidate_name
-            if candidate.exists():
-                config_file = str(candidate)
-                break
-
-    # Load strategy configuration FIRST to get chain (if specified)
-    try:
-        strategy_config = load_strategy_config(strategy_name, config_file)
-    except Exception as e:
-        click.echo(f"Error loading strategy config: {e}", err=True)
-        sys.exit(1)
-
-    # Now determine multi-chain mode from config (not decorator supported_chains,
-    # which is portability metadata). A "chains" list with >1 entry in config.json
-    # signals the strategy should execute across multiple chains simultaneously.
-    multi_chain = is_multi_chain_strategy(strategy_class, config=strategy_config)
+    # Auto-discover config, load it, and apply copy-trading overrides (phase 7 helper)
+    (
+        strategy_config,
+        multi_chain,
+        effective_dry_run,
+        config_file,
+        normalized_copy_mode,
+    ) = _discover_and_load_config(
+        working_dir=working_dir,
+        config_file=config_file,
+        strategy_class=strategy_class,
+        copy_mode=copy_mode,
+        copy_shadow=copy_shadow,
+        copy_replay_file=copy_replay_file,
+        copy_strict=copy_strict,
+        dry_run=dry_run,
+    )
     if multi_chain:
         # Use chains from config if specified, else fall back to decorator
         config_chains = strategy_config.get("chains", [])
         if isinstance(config_chains, list) and len(config_chains) > 1:
             strategy_chains = config_chains
-
-    normalized_copy_mode = copy_mode.lower() if copy_mode is not None else None
-
-    # Apply copy-trading runtime overrides from CLI flags.
-    if any([normalized_copy_mode, copy_shadow, copy_replay_file, copy_strict]):
-        ct_config = strategy_config.get("copy_trading")
-        if ct_config is None:
-            ct_config = {}
-            strategy_config["copy_trading"] = ct_config
-        if not isinstance(ct_config, dict):
-            raise click.ClickException("copy_trading config must be an object when using copy override flags")
-
-        execution_policy = dict(ct_config.get("execution_policy", {}))
-        if normalized_copy_mode is not None:
-            execution_policy["copy_mode"] = normalized_copy_mode
-        if copy_shadow:
-            execution_policy["shadow"] = True
-            execution_policy["copy_mode"] = "shadow"
-        if copy_replay_file:
-            execution_policy["replay_file"] = copy_replay_file
-            execution_policy["copy_mode"] = "replay"
-        if copy_strict:
-            execution_policy["strict"] = True
-
-        ct_config["execution_policy"] = execution_policy
-
-    effective_dry_run = dry_run or copy_shadow or (normalized_copy_mode in {"shadow", "replay"})
 
     # --- Three-tier identity model (VIB-2764) ---
     # strategy_name: human/code reference (display name).
@@ -2223,48 +2134,27 @@ def run(
     except Exception as e:
         logger.debug(f"Could not check for existing state: {e}")
 
-    # Display startup information
-    click.echo("=" * 60)
-    click.echo("ALMANAK STRATEGY RUNNER")
-    click.echo("=" * 60)
-    click.echo(f"Strategy: {strategy_name}")
-    click.echo(f"Deployment ID: {strategy_id}")
-    click.echo(f"Run ID: {run_id}")
-    if is_resume:
-        click.secho("Mode: RESUME (existing state found)", fg="yellow", bold=True)
-        if existing_state_info:
-            click.echo(f"  State version: {existing_state_info['version']}, keys: {existing_state_info['keys']}")
-        if once and not fresh:
-            click.secho(
-                "WARNING: Loading state from a previous run. "
-                "If this is unexpected, re-run with --fresh to start clean.",
-                fg="red",
-                bold=True,
-            )
-    else:
-        click.secho("Mode: FRESH START (no existing state)", fg="green", bold=True)
-    if multi_chain:
-        click.echo(f"Chains: {', '.join(strategy_chains)}")
-        click.echo(f"Protocols: {strategy_protocols}")
-    else:
-        click.echo(f"Chain: {runtime_config.chain}")  # type: ignore[union-attr]
-    safe_mode_str = " (Safe)" if runtime_config.is_safe_mode else ""
-    click.echo(f"Wallet: {runtime_config.execution_address}{safe_mode_str}")
-    exec_desc = "Single run" if once else f"Continuous (every {interval}s)"
-    if max_iterations and not once:
-        exec_desc += f", max {max_iterations} iterations"
-    click.echo(f"Execution: {exec_desc}")
-    click.echo(f"Dry run: {effective_dry_run}")
-    if isinstance(strategy_config.get("copy_trading"), dict):
-        copy_execution_policy = strategy_config["copy_trading"].get("execution_policy", {})
-        copy_mode_label = copy_execution_policy.get("copy_mode", "live")
-        click.echo(f"Copy mode: {copy_mode_label}")
-        if copy_execution_policy.get("replay_file"):
-            click.echo(f"Copy replay file: {copy_execution_policy.get('replay_file')}")
-    click.secho(f"Gateway: {gateway_host}:{gateway_port}", fg="cyan")
-    if dashboard:
-        click.echo("Dashboard: Will launch alongside strategy")
-    click.echo("=" * 60)
+    # Display startup information (phase 10 helper)
+    _print_startup_banner(
+        strategy_name=strategy_name,
+        strategy_id=strategy_id,
+        run_id=run_id,
+        is_resume=is_resume,
+        existing_state_info=existing_state_info,
+        once=once,
+        fresh=fresh,
+        multi_chain=multi_chain,
+        strategy_chains=strategy_chains,
+        strategy_protocols=strategy_protocols,
+        runtime_config=runtime_config,
+        interval=interval,
+        max_iterations=max_iterations,
+        effective_dry_run=effective_dry_run,
+        strategy_config=strategy_config,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        dashboard=dashboard,
+    )
 
     # Strategy class already loaded above
     click.echo(f"Strategy class loaded: {strategy_class.__name__}")
