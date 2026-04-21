@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..models.reproduction_bundle import ActionBundle
-    from .interfaces import SignedTransaction, UnsignedTransaction
+    from .interfaces import (
+        SignedTransaction,
+        SubmissionResult,
+        TransactionReceipt,
+        UnsignedTransaction,
+    )
     from .orchestrator import ExecutionContext, ExecutionResult
     from .session import ExecutionSession
 
@@ -69,8 +74,8 @@ class ExecutionPipelineState:
     session: ExecutionSession | None = None
     unsigned_txs: list[UnsignedTransaction] | None = None
     signed_txs: list[SignedTransaction] | None = None
-    submission_results: list[Any] | None = None
-    receipts: list[Any] | None = None
+    submission_results: list[SubmissionResult] | None = None
+    receipts: list[TransactionReceipt] | None = None
     use_sequential: bool = False
 
     # Scratch space for _phase_simulate to publish state_overrides to
