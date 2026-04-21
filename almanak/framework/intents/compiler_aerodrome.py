@@ -23,6 +23,24 @@ logger = logging.getLogger("almanak.framework.intents.compiler")
 
 LP_POSITION_MANAGERS = compiler_constants.LP_POSITION_MANAGERS
 
+# Selector for Aerodrome V1 pool `metadata()` view — first 4 bytes of
+# keccak256("metadata()"). Returns
+# (uint256 dec0, uint256 dec1, uint256 r0, uint256 r1, bool stable, address token0, address token1).
+# Used by the LP_CLOSE bare-pool-address path to reverse a pool contract into
+# its pair identity, mirroring Uniswap V3's opaque tokenId convention.
+_AERODROME_POOL_METADATA_SELECTOR = "0x392f37e9"
+
+
+def _looks_like_evm_address(value: str) -> bool:
+    """Return True iff ``value`` is a syntactically valid 0x-prefixed 20-byte address."""
+    if not value or not value.startswith("0x") or len(value) != 42:
+        return False
+    try:
+        int(value, 16)
+        return True
+    except ValueError:
+        return False
+
 
 def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResult:
     """Compile LP_OPEN intent for Aerodrome Finance (Solidly fork on Base).
@@ -214,37 +232,82 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
         # Import Aerodrome adapter (lazy import to avoid circular deps)
         from almanak.framework.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
 
-        # Parse pool info from position_id (format: TOKEN0/TOKEN1/pool_type)
-        pool_parts = intent.position_id.split("/")
-        if len(pool_parts) < 2:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Invalid position ID: {intent.position_id}. Expected: TOKEN0/TOKEN1/volatile or TOKEN0/TOKEN1/stable",
-                intent_id=intent.intent_id,
+        # Parse position_id. Accepts two shapes:
+        #  1. Canonical symbolic form: "TOKEN0/TOKEN1/volatile|stable"
+        #  2. Bare Aerodrome V1 pool address: "0x..."
+        # The second form is what ResultEnricher writes into state after LP_OPEN
+        # (the pool address is the authoritative identifier for fungible LP tokens,
+        # analogous to Uniswap V3's NFT tokenId). When given an address, the pair
+        # identity is recovered on-chain via pool.metadata().
+        position_id_raw = intent.position_id or ""
+        prebuilt_pool_address: str | None = None
+
+        if _looks_like_evm_address(position_id_raw):
+            metadata = get_aerodrome_pool_metadata(compiler, position_id_raw)
+            if metadata is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Could not resolve Aerodrome pool metadata for {position_id_raw}. "
+                        f"Ensure the address is a live Aerodrome V1 pool on {compiler.chain} "
+                        f"and that RPC/gateway access is configured."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            token0_addr, token1_addr, stable = metadata
+            token0_info = compiler._resolve_token(token0_addr)
+            token1_info = compiler._resolve_token(token1_addr)
+            if token0_info is None or token1_info is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Could not resolve tokens for Aerodrome pool {position_id_raw} "
+                        f"(token0={token0_addr}, token1={token1_addr})"
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            token0_symbol = token0_info.symbol
+            token1_symbol = token1_info.symbol
+            prebuilt_pool_address = position_id_raw
+            logger.info(
+                f"Compiling Aerodrome LP_CLOSE (bare pool address): "
+                f"{token0_symbol}/{token1_symbol}, stable={stable}, pool={position_id_raw}"
             )
+        else:
+            pool_parts = position_id_raw.split("/")
+            if len(pool_parts) < 2:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Invalid position ID: {intent.position_id}. "
+                        f"Expected: TOKEN0/TOKEN1/volatile or TOKEN0/TOKEN1/stable, "
+                        f"or a bare Aerodrome pool address (0x...)."
+                    ),
+                    intent_id=intent.intent_id,
+                )
 
-        token0_symbol = pool_parts[0]
-        token1_symbol = pool_parts[1]
-        stable = pool_parts[2].lower() == "stable" if len(pool_parts) > 2 else False
+            token0_symbol = pool_parts[0]
+            token1_symbol = pool_parts[1]
+            stable = pool_parts[2].lower() == "stable" if len(pool_parts) > 2 else False
 
-        logger.info(f"Compiling Aerodrome LP_CLOSE: {token0_symbol}/{token1_symbol}, stable={stable}")
+            logger.info(f"Compiling Aerodrome LP_CLOSE: {token0_symbol}/{token1_symbol}, stable={stable}")
 
-        # Resolve token addresses
-        token0_info = compiler._resolve_token(token0_symbol)
-        token1_info = compiler._resolve_token(token1_symbol)
+            # Resolve token addresses
+            token0_info = compiler._resolve_token(token0_symbol)
+            token1_info = compiler._resolve_token(token1_symbol)
 
-        if token0_info is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown token: {token0_symbol}",
-                intent_id=intent.intent_id,
-            )
-        if token1_info is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown token: {token1_symbol}",
-                intent_id=intent.intent_id,
-            )
+            if token0_info is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown token: {token0_symbol}",
+                    intent_id=intent.intent_id,
+                )
+            if token1_info is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Unknown token: {token1_symbol}",
+                    intent_id=intent.intent_id,
+                )
 
         # Get router address
         router_address = LP_POSITION_MANAGERS.get(compiler.chain, {}).get(
@@ -268,12 +331,17 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
         )
         adapter = AerodromeAdapter(config)
 
-        # Get LP token address for the pool (gateway-aware for deployed mode)
-        pool_address = compiler._get_aerodrome_pool_address(
-            token0_info.address,
-            token1_info.address,
-            stable,
-        )
+        # Get LP token address for the pool (gateway-aware for deployed mode).
+        # When position_id was a bare pool address, we already have it — skip the
+        # factory forward lookup.
+        if prebuilt_pool_address is not None:
+            pool_address = prebuilt_pool_address
+        else:
+            pool_address = compiler._get_aerodrome_pool_address(
+                token0_info.address,
+                token1_info.address,
+                stable,
+            )
 
         if not pool_address:
             return CompilationResult(
@@ -665,3 +733,70 @@ def get_aerodrome_pool_address(compiler, token_a: str, token_b: str, stable: boo
     if pool_address:
         logger.debug(f"Resolved Aerodrome pool via direct RPC: {pool_address}")
     return pool_address
+
+
+def get_aerodrome_pool_metadata(compiler, pool_address: str) -> tuple[str, str, bool] | None:
+    """Query an Aerodrome V1 pool's (token0, token1, stable) via ``metadata()``.
+
+    Reverse of :func:`get_aerodrome_pool_address`: given the pool contract
+    address, recover the pair identity. Supports bare-pool-address position
+    IDs in LP_CLOSE, which mirrors Uniswap V3's opaque tokenId pattern (the
+    pool address is the authoritative on-chain identifier for fungible
+    Aerodrome LP tokens).
+
+    Returns:
+        Tuple of ``(token0_address, token1_address, stable)`` on success,
+        or ``None`` if the pool can't be read (no gateway/RPC access, the
+        address isn't an Aerodrome V1 pool, etc).
+    """
+    from almanak.framework.intents.pool_validation import _decode_address
+
+    def _decode(raw: bytes | None) -> tuple[str, str, bool] | None:
+        # metadata() returns 7 × 32-byte words:
+        #   [0:32]    uint256 dec0
+        #   [32:64]   uint256 dec1
+        #   [64:96]   uint256 reserve0
+        #   [96:128]  uint256 reserve1
+        #   [128:160] bool    stable
+        #   [160:192] address token0
+        #   [192:224] address token1
+        if raw is None or len(raw) < 224:
+            return None
+        stable = int.from_bytes(raw[128:160], "big") != 0
+        token0 = _decode_address(raw[160:192])
+        token1 = _decode_address(raw[192:224])
+        if not token0 or not token1:
+            return None
+        return token0, token1, stable
+
+    # --- Gateway path (deployed mode) ---
+    if compiler._gateway_client is not None:
+        try:
+            hex_result = compiler._gateway_client.eth_call(
+                chain=compiler.chain,
+                to=pool_address,
+                data=_AERODROME_POOL_METADATA_SELECTOR,
+            )
+            if hex_result and hex_result != "0x":
+                raw = bytes.fromhex(hex_result[2:] if hex_result.startswith("0x") else hex_result)
+                decoded = _decode(raw)
+                if decoded is not None:
+                    logger.debug(f"Resolved Aerodrome pool metadata via gateway for {pool_address}")
+                    return decoded
+            return None
+        except Exception as e:
+            logger.warning("Gateway Aerodrome pool metadata query failed, falling back to direct RPC: %s", e)
+
+    # --- Direct RPC fallback (local dev) ---
+    rpc_url = compiler._get_chain_rpc_url()
+    if rpc_url is None:
+        logger.warning("No RPC URL or gateway client — cannot query Aerodrome pool metadata")
+        return None
+
+    from almanak.framework.intents.pool_validation import _eth_call
+
+    rpc_raw = _eth_call(rpc_url, pool_address, _AERODROME_POOL_METADATA_SELECTOR)
+    decoded = _decode(rpc_raw)
+    if decoded is not None:
+        logger.debug(f"Resolved Aerodrome pool metadata via direct RPC for {pool_address}")
+    return decoded

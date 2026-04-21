@@ -227,3 +227,84 @@ def test_aerodrome_lp_close_permission_discovery_none_balance() -> None:
     approve_txs = [tx for tx in result.transactions if tx.tx_type == "approve"]
     assert len(approve_txs) == 1
     assert approve_txs[0].to == pool_address
+
+
+def test_aerodrome_lp_close_bare_pool_address_success() -> None:
+    """LP_CLOSE should accept a bare pool address position_id and recover token0/token1/stable on-chain.
+
+    Regression: ResultEnricher writes the pool address (from extract_position_id)
+    into state after LP_OPEN. The compiler must accept that shape — rejecting it
+    broke staging deployment 7b9be8ea-1081-4bba-8e31-8daa64951c7f.
+    """
+    compiler = _make_compiler()
+    pool_address = "0x" + "cd" * 20
+    token0_addr = "0x" + "aa" * 20
+    token1_addr = "0x" + "bb" * 20
+    token0 = _make_token_info("WETH", token0_addr)
+    token1 = _make_token_info("USDC", token1_addr)
+
+    intent = Intent.lp_close(
+        position_id=pool_address,  # bare address, not TOKEN0/TOKEN1/pool_type
+        pool=pool_address,
+        collect_fees=True,
+        protocol="aerodrome",
+    )
+
+    approve_tx = MagicMock()
+    approve_tx.gas_estimate = 45_000
+    approve_tx.to_dict.return_value = {"tx_type": "approve", "to": pool_address}
+    remove_tx = MagicMock()
+    remove_tx.gas_estimate = 180_000
+    remove_tx.to_dict.return_value = {"tx_type": "remove_liquidity", "to": "0x" + "dd" * 20}
+
+    liquidity_result = MagicMock(success=True, transactions=[approve_tx, remove_tx], error=None)
+
+    with (
+        patch(
+            "almanak.framework.intents.compiler_aerodrome.get_aerodrome_pool_metadata",
+            return_value=(token0_addr, token1_addr, False),
+        ),
+        patch.object(compiler, "_resolve_token", side_effect=[token0, token1]),
+        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
+        patch.object(compiler, "_get_aerodrome_pool_address") as mock_factory_lookup,
+        patch.object(compiler, "_query_erc20_balance", return_value=123456789),
+        patch("almanak.framework.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
+    ):
+        mock_adapter = mock_adapter_cls.return_value
+        mock_adapter.remove_liquidity.return_value = liquidity_result
+
+        result = compiler._compile_lp_close_aerodrome(intent)
+
+    assert result.status == CompilationStatus.SUCCESS
+    assert result.error is None
+    assert len(result.transactions) == 2
+    assert result.total_gas_estimate == 225_000
+    # Forward factory lookup must be skipped — we already have the pool address.
+    mock_factory_lookup.assert_not_called()
+
+
+def test_aerodrome_lp_close_bare_pool_address_metadata_unresolvable() -> None:
+    """LP_CLOSE should fail with a clear error when pool metadata can't be read."""
+    compiler = _make_compiler()
+    pool_address = "0x" + "cd" * 20
+
+    intent = Intent.lp_close(
+        position_id=pool_address,
+        pool=pool_address,
+        collect_fees=True,
+        protocol="aerodrome",
+    )
+
+    with (
+        patch(
+            "almanak.framework.intents.compiler_aerodrome.get_aerodrome_pool_metadata",
+            return_value=None,
+        ),
+        patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
+    ):
+        result = compiler._compile_lp_close_aerodrome(intent)
+
+    assert result.status == CompilationStatus.FAILED
+    assert result.error is not None
+    assert "Could not resolve Aerodrome pool metadata" in result.error
+    assert pool_address in result.error
