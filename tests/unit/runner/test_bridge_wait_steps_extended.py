@@ -281,9 +281,7 @@ class TestBridgeWaitVerifySourceTx:
         state.rpc_urls = {}  # no RPC configured
 
         with pytest.raises(RuntimeError, match="Gateway client required"):
-            await runner._bridge_wait_verify_source_tx(
-                state, tx_hash="0xabc", chain="arbitrum", step_num=1
-            )
+            await runner._bridge_wait_verify_source_tx(state, tx_hash="0xabc", chain="arbitrum", step_num=1)
         # State remains untouched when we fail loud before any I/O
         assert state.failed_step is None
         assert state.error_message is None
@@ -319,26 +317,38 @@ class TestBridgeWaitVerifySourceTx:
         assert state.failed_step is None
 
     @pytest.mark.asyncio
-    async def test_outer_exception_fails_cleanly(self) -> None:
+    async def test_grpc_rpc_error_fails_cleanly_after_retries(self) -> None:
+        """Transient gRPC errors across all 30 attempts -> timeout, clean failure.
+
+        Narrowed from the prior ``test_outer_exception_fails_cleanly`` as part
+        of #1666. ``grpc.RpcError`` is the only exception class retried inside
+        the loop; config defects (``AttributeError`` / ``TypeError``) now
+        propagate immediately and are exercised in
+        ``tests/unit/runner/test_bridge_verify_precheck.py``.
+        """
+        import grpc
+
         runner = _make_runner()
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
         state = _make_state(intents=[intent])
         state.current_intent = intent
 
-        # Use a gateway client whose attribute access raises — the outer try/except
-        # catches the AttributeError and sets failed_step.
+        # Gateway client where the RPC call raises a transient gRPC error on
+        # every attempt. All 30 attempts fail -> tx_verified=False ->
+        # failed_step / error_message set, helper returns False.
+        class _FakeRpcError(grpc.RpcError):
+            pass
+
         gw = MagicMock()
-        # The outer try/except catches any top-level exception in the method
-        gw.execution.GetTransactionStatus = MagicMock(side_effect=AttributeError("bad gateway"))
+        gw.execution.GetTransactionStatus = MagicMock(side_effect=_FakeRpcError("transient"))
         state.gateway_client = gw
 
-        # This exercises the inner RPC failure path (which is caught and just warned),
-        # not the outer try/except. Simpler to verify the gateway path returns False
-        # when attempts time out (all 30 attempts fail -> tx_verified=False -> error).
         # Use a very small sleep for the delay to keep test fast.
         with patch("almanak.framework.runner.strategy_runner.asyncio.sleep", new=AsyncMock()):
             result = await runner._bridge_wait_verify_source_tx(state, tx_hash="0xabc", chain="arbitrum", step_num=1)
         assert result is False
+        assert state.failed_step == "step-1"
+        assert "Timeout" in (state.error_message or "") or "receipt" in (state.error_message or "")
 
 
 # =============================================================================

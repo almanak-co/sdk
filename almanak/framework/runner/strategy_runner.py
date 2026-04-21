@@ -41,6 +41,8 @@ from enum import StrEnum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
+import grpc
+
 if TYPE_CHECKING:
     from ..services.emergency_manager import EmergencyManager
     from ..services.operator_card_generator import OperatorCardGenerator
@@ -107,6 +109,24 @@ from .runner_models import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Transient gRPC status codes that are worth retrying during the
+# ``GetTransactionStatus`` poll loop in ``_bridge_wait_verify_source_tx``.
+# Permanent codes (UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT,
+# UNIMPLEMENTED, ...) indicate a config or auth defect that will not
+# resolve with more attempts, so they must propagate immediately rather
+# than silently consume the full 60-second retry budget. See PR #1676.
+_TRANSIENT_GRPC_CODES: frozenset[grpc.StatusCode] = frozenset(
+    {
+        grpc.StatusCode.UNAVAILABLE,
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+        grpc.StatusCode.ABORTED,
+        grpc.StatusCode.INTERNAL,
+        grpc.StatusCode.UNKNOWN,
+    }
+)
 
 
 # =============================================================================
@@ -3342,6 +3362,13 @@ class StrategyRunner:
 
         # Walk each intent; each iteration either succeeds, sets
         # state.failed_step and breaks, or continues to the next intent.
+        # Pre-execution RuntimeErrors (e.g. missing gateway client guard in
+        # ``_bridge_wait_process_intent``) still propagate here unchanged --
+        # nothing has been submitted on-chain, so escaping is safe and the
+        # outer iteration error handler will turn it into a clean failure.
+        # Post-submission config defects are materialised INSIDE
+        # ``_bridge_wait_cross_chain`` so ``_bridge_wait_finalize`` always
+        # runs and ``progress.failed_at_step_index`` is persisted.
         for i, intent in enumerate(intents):
             state.current_intent = intent
             should_break = await self._bridge_wait_process_intent(state, i)
@@ -3559,11 +3586,54 @@ class StrategyRunner:
             if amount_field is not None and isinstance(amount_field, Decimal):
                 state.previous_amount_received = amount_field
 
-        # For cross-chain swaps, verify source TX and wait for bridge completion
+        # For cross-chain swaps, verify source TX and wait for bridge completion.
+        #
+        # Any config-defect exception that escapes ``_bridge_wait_cross_chain``
+        # (RuntimeError from the gateway precheck, permanent gRPC codes from
+        # the verify loop, proto ImportError, AttributeError/TypeError from a
+        # miswired stub) is POST-SUBMISSION: ``orchestrator.execute`` above
+        # has already broadcast the source transaction. If we let the
+        # exception escape, ``_bridge_wait_finalize`` would never run and
+        # ``progress.failed_at_step_index`` would never be persisted. The
+        # next iteration would have no failure marker and could re-decide /
+        # re-execute the same cross-chain step, risking duplicate source-TX
+        # submissions. Materialise such failures into bridge failure state
+        # and break so finalize runs. See PR #1676 review feedback.
         if is_cross_chain and dest_chain and token_symbol:
-            bridge_break = await self._bridge_wait_cross_chain(
-                state, result=result, step_num=step_num, chain=chain, dest_chain=dest_chain, token_symbol=token_symbol
-            )
+            try:
+                bridge_break = await self._bridge_wait_cross_chain(
+                    state,
+                    result=result,
+                    step_num=step_num,
+                    chain=chain,
+                    dest_chain=dest_chain,
+                    token_symbol=token_symbol,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Step %s: post-submission failure while waiting for bridge "
+                    "completion on %s -> %s (token=%s). Materialising as bridge "
+                    "failure state so progress is persisted.",
+                    step_num,
+                    chain,
+                    dest_chain,
+                    token_symbol,
+                )
+                error_message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                # Use the ``-bridge`` suffix so ``_bridge_wait_build_failed_result``
+                # classifies this as a bridge failure (skips revert diagnostics,
+                # logs the BRIDGE FAILURE banner) rather than treating it like a
+                # plain execution revert. The source tx already succeeded; what
+                # failed was the cross-chain wait.
+                state.failed_step = f"step-{step_num}-bridge"
+                state.error_message = error_message
+                # Propagate the error onto the result so downstream consumers
+                # (e.g. on_intent_executed callbacks, telemetry) see the real
+                # post-submission failure instead of an empty ``result.error``.
+                if hasattr(result, "error"):
+                    result.error = error_message
+                state.failed_result = result
+                return True
             if bridge_break:
                 return True
 
@@ -3652,12 +3722,15 @@ class StrategyRunner:
         returns False. Returns True when the TX is confirmed.
 
         Raises:
-            RuntimeError: If ``state.gateway_client`` is None. Direct Web3
-                fallback is forbidden by the gateway-only architecture
-                (see ``blueprints/20-gateway-security-architecture.md``).
-                This must fail loud so misconfigured hosted deployments do
-                not silently fall back to an egress path that has no secrets,
-                rate limits, or auth.
+            RuntimeError: If ``state.gateway_client`` is None, or if the
+                client is miswired (missing ``execution`` attribute or a
+                non-callable ``GetTransactionStatus``). Direct Web3 fallback
+                is forbidden by the gateway-only architecture (see
+                ``blueprints/20-gateway-security-architecture.md``). This
+                must fail loud so misconfigured hosted deployments do not
+                silently fall back to an egress path that has no secrets,
+                rate limits, or auth, and so shape defects surface
+                immediately instead of after a 60-second retry timeout.
         """
         # Gateway-only boundary: no direct Web3 fallback. If the gateway
         # client is missing at this point, something is misconfigured and we
@@ -3669,6 +3742,49 @@ class StrategyRunner:
                 "See blueprints/20-gateway-security-architecture.md"
             )
 
+        # Pre-validate the gateway client shape BEFORE entering the retry loop.
+        # A miswired client (wrong stub bound, missing ``execution`` attribute,
+        # ``GetTransactionStatus`` signature wrong) is a config defect, not a
+        # transient RPC error. Without this precheck, ``AttributeError`` /
+        # ``TypeError`` raised inside the loop would be swallowed by the
+        # per-attempt ``except`` and surface only as a 60-second timeout
+        # instead of an immediate loud failure. See issue #1666.
+        execution_stub = getattr(state.gateway_client, "execution", None)
+        if execution_stub is None:
+            raise RuntimeError(
+                "Gateway client is miswired: missing ``execution`` attribute. "
+                "Cannot call GetTransactionStatus for bridge source-TX verification."
+            )
+        if not callable(getattr(execution_stub, "GetTransactionStatus", None)):
+            raise RuntimeError(
+                "Gateway client is miswired: ``execution.GetTransactionStatus`` is "
+                "missing or not callable. Cannot verify bridge source TX."
+            )
+        # Import the request proto once, before the loop - an ImportError here
+        # is also a config defect, not a transient error. Convert ImportError
+        # into the same fail-fast ``RuntimeError`` contract the rest of this
+        # precheck enforces so a missing/renamed proto module surfaces with a
+        # clear operator-facing message rather than a raw ``ImportError``.
+        try:
+            from almanak.gateway.proto import gateway_pb2
+        except ImportError as exc:
+            raise RuntimeError(
+                "Gateway client is miswired: failed to import "
+                "almanak.gateway.proto.gateway_pb2. Cannot verify bridge "
+                "source TX."
+            ) from exc
+
+        # Also validate that TxStatusRequest is wired correctly. If the proto
+        # module loads but the message class was renamed/removed, we want the
+        # RuntimeError to surface here, not as a raw AttributeError on the
+        # first poll attempt. See PR #1676 review feedback.
+        tx_status_request_cls = getattr(gateway_pb2, "TxStatusRequest", None)
+        if not callable(tx_status_request_cls):
+            raise RuntimeError(
+                "Gateway client is miswired: gateway_pb2.TxStatusRequest is "
+                "missing or not callable. Cannot verify bridge source TX."
+            )
+
         # CRITICAL: Verify source TX actually succeeded on-chain before polling destination
         # This prevents polling for bridged assets when the source TX reverted
         logger.info(f"Verifying source TX confirmation on {chain}: {tx_hash}")
@@ -3676,13 +3792,10 @@ class StrategyRunner:
         try:
             tx_verified = False
 
-            # Use gateway's GetTransactionStatus RPC (no direct Web3)
-            from almanak.gateway.proto import gateway_pb2
-
             for attempt in range(30):  # Max 30 attempts, ~1 minute
                 try:
                     status_response = state.gateway_client.execution.GetTransactionStatus(
-                        gateway_pb2.TxStatusRequest(tx_hash=tx_hash, chain=chain),
+                        tx_status_request_cls(tx_hash=tx_hash, chain=chain),
                         timeout=15.0,
                     )
                     if status_response.status == "confirmed":
@@ -3697,12 +3810,38 @@ class StrategyRunner:
                         state.failed_step = f"step-{step_num}"
                         state.error_message = f"Transaction {status_response.status} on {chain}: {tx_hash}"
                         break
-                except Exception as exc:
+                except grpc.RpcError as exc:
+                    # Only TRANSIENT gRPC status codes are worth retrying.
+                    # Permanent codes (UNAUTHENTICATED, PERMISSION_DENIED,
+                    # INVALID_ARGUMENT, UNIMPLEMENTED, ...) indicate a config
+                    # or auth defect and must propagate so they surface
+                    # immediately, not after a 60-second silent retry loop.
+                    # Non-RpcError exceptions (AttributeError / TypeError /
+                    # ImportError) are config defects and already propagate
+                    # because they do not match this except clause.
+                    # See PR #1676 review feedback.
+                    #
+                    # ``code()`` is only defined on concrete gRPC status
+                    # exceptions (``_InactiveRpcError`` etc.); bare
+                    # ``grpc.RpcError`` subclasses can omit it. When the code
+                    # is unknown we retry rather than crash, matching the
+                    # pre-change "retry all RpcError" behaviour for the
+                    # unknown-code edge case.
+                    exc_code: grpc.StatusCode | None = None
+                    code_fn = getattr(exc, "code", None)
+                    if callable(code_fn):
+                        try:
+                            exc_code = code_fn()
+                        except Exception:  # noqa: BLE001 - defensive: code() should never raise
+                            exc_code = None
+                    if exc_code is not None and exc_code not in _TRANSIENT_GRPC_CODES:
+                        raise
                     logger.debug(
-                        "GetTransactionStatus attempt %s failed for %s on %s: %s",
+                        "GetTransactionStatus attempt %s failed for %s on %s (code=%s): %s",
                         attempt + 1,
                         tx_hash,
                         chain,
+                        exc_code,
                         exc,
                     )
                 await asyncio.sleep(2)
@@ -3718,7 +3857,21 @@ class StrategyRunner:
 
             return True
 
-        except Exception as e:
+        except grpc.RpcError as e:
+            # Only swallow gRPC transport errors here. This catches:
+            #  * Transient RPC errors re-raised after 30 attempts (timeout).
+            #  * Permanent RPC codes (UNAUTHENTICATED / PERMISSION_DENIED /
+            #    INVALID_ARGUMENT / ...) re-raised on the first attempt.
+            # Both are materialised into ``failed_step`` / ``error_message`` so
+            # ``_bridge_wait_finalize`` persists progress and fires the
+            # failure callback.
+            # Config defects (AttributeError / TypeError / ImportError /
+            # RuntimeError from the precheck) are NOT caught here. They
+            # propagate to ``_bridge_wait_process_intent`` where the
+            # post-submission guard around ``_bridge_wait_cross_chain``
+            # materialises them into bridge failure state so
+            # ``_bridge_wait_finalize`` runs and progress is persisted. See
+            # issue #1666 and PR #1676 review feedback.
             logger.error(f"Step {step_num}: Error verifying source TX: {e}")
             state.failed_step = f"step-{step_num}"
             state.error_message = f"Failed to verify source transaction: {e}"
