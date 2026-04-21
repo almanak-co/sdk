@@ -3596,10 +3596,48 @@ class IntentCompiler:
             )
             tj_adapter = TraderJoeV2Adapter(config)
 
-            # Get position to check if we have liquidity
-            t0 = time.perf_counter()
-            position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
-            logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")
+            protocol_params = getattr(intent, "protocol_params", None) or {}
+            known_bin_ids_raw = protocol_params.get("bin_ids") or []
+            known_bin_ids = [int(bin_id) for bin_id in known_bin_ids_raw]
+
+            position = None
+            used_targeted_position = False
+            if known_bin_ids:
+                t0 = time.perf_counter()
+                pool_addr = tj_adapter.sdk.get_pool_address(token_x_addr, token_y_addr, bin_step)
+                balances = tj_adapter.sdk.get_position_balances_for_ids(
+                    pool_addr,
+                    self.wallet_address,
+                    known_bin_ids,
+                )
+                logger.debug(
+                    "TraderJoe V2 targeted balance lookup (LP_CLOSE): %.2fs",
+                    time.perf_counter() - t0,
+                )
+                if balances:
+                    from almanak.framework.connectors.traderjoe_v2 import LiquidityPosition
+
+                    position = LiquidityPosition(
+                        pool_address=pool_addr,
+                        token_x=token_x_addr,
+                        token_y=token_y_addr,
+                        bin_step=bin_step,
+                        bin_ids=list(balances.keys()),
+                        balances=balances,
+                        amount_x=0,
+                        amount_y=0,
+                        active_bin=0,
+                    )
+                    used_targeted_position = True
+
+            if position is None:
+                # Fall back to full discovery when the strategy did not provide
+                # known bin IDs or the targeted lookup no longer finds liquidity.
+                # Note: we intentionally let build_remove_liquidity_transaction
+                # derive slippage-protected minimums for this path (below).
+                t0 = time.perf_counter()
+                position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
+                logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")
 
             if not position or not position.bin_ids:
                 warnings.append("No LP position found to close")
@@ -3636,11 +3674,16 @@ class IntentCompiler:
 
             # Build remove liquidity transaction - pass pre-fetched position to
             # avoid a redundant get_position() call (saves ~50 serial RPC calls)
+            # Only bypass slippage-derived minimums (pass explicit 0) when the
+            # targeted lookup actually produced the position. If we fell back
+            # to full discovery, let the adapter compute proper slippage mins.
             lp_tx = tj_adapter.build_remove_liquidity_transaction(
                 token_x=token_x_addr,
                 token_y=token_y_addr,
                 bin_step=bin_step,
                 position=position,
+                amount_x_min=0 if used_targeted_position else None,
+                amount_y_min=0 if used_targeted_position else None,
             )
 
             if lp_tx is None:

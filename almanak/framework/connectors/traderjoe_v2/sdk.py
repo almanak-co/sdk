@@ -836,6 +836,62 @@ class TraderJoeV2SDK:
 
         return balances
 
+    def get_position_balances_for_ids(
+        self,
+        pool_address: str,
+        wallet_address: str,
+        bin_ids: list[int],
+    ) -> dict[int, int]:
+        """Get LB token balances for a wallet in specific bins.
+
+        Use this when the caller already knows which bins matter and wants to
+        avoid the broader active-bin scan performed by get_position_balances().
+
+        Args:
+            pool_address: Address of the LBPair contract
+            wallet_address: Address to query balances for
+            bin_ids: Exact bin IDs to query
+
+        Returns:
+            Dict mapping bin ID to balance for bins with non-zero balance
+        """
+        pair = self.get_pair_contract(pool_address)
+        wallet = Web3.to_checksum_address(wallet_address)
+        balances: dict[int, int] = {}
+
+        t0 = time.perf_counter()
+        failed_queries = 0
+        for raw_bin_id in bin_ids:
+            bin_id = int(raw_bin_id)
+            try:
+                balance = pair.functions.balanceOf(wallet, bin_id).call()
+                if balance > 0:
+                    balances[bin_id] = balance
+            except Exception as exc:
+                # Log RPC/transport failures so they are not silently treated
+                # as "no position" by the caller. We keep the loop going
+                # because a single bin failure should not abort a teardown.
+                failed_queries += 1
+                logger.debug("balanceOf failed for bin_id=%s: %s", bin_id, exc)
+                continue
+        if failed_queries:
+            logger.warning(
+                "Targeted bin balance scan had %s/%s RPC failures (pool=%s wallet=%s); "
+                "empty balances may not mean 'no position'",
+                failed_queries,
+                len(bin_ids),
+                pool_address,
+                wallet_address,
+            )
+        logger.debug(
+            "Position balance targeted scan (%s bins, %s with balance): %.2fs",
+            len(bin_ids),
+            len(balances),
+            time.perf_counter() - t0,
+        )
+
+        return balances
+
     def get_total_position_value(
         self,
         pool_address: str,

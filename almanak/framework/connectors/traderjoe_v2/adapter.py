@@ -796,6 +796,8 @@ class TraderJoeV2Adapter:
         bin_step: int = 20,
         slippage_bps: int | None = None,
         position: LiquidityPosition | None = None,
+        amount_x_min: int | None = None,
+        amount_y_min: int | None = None,
     ) -> TransactionData | None:
         """Build a remove liquidity transaction for all positions.
 
@@ -807,6 +809,8 @@ class TraderJoeV2Adapter:
             position: Optional pre-fetched position. If provided, skips the
                 get_position() call (avoids redundant RPC round trips when the
                 caller already holds the position data).
+            amount_x_min: Optional explicit minimum output for token X.
+            amount_y_min: Optional explicit minimum output for token Y.
 
         Returns:
             TransactionData if position exists, None otherwise
@@ -818,11 +822,16 @@ class TraderJoeV2Adapter:
 
         token_x_addr = self.resolve_token_address(token_x)
         token_y_addr = self.resolve_token_address(token_y)
-        slippage = slippage_bps or self.config.default_slippage_bps
 
-        # Calculate minimums with slippage
-        amount_x_min = int(position.amount_x * (10000 - slippage) // 10000)
-        amount_y_min = int(position.amount_y * (10000 - slippage) // 10000)
+        if amount_x_min is None or amount_y_min is None:
+            slippage = slippage_bps or self.config.default_slippage_bps
+
+            # Calculate minimums independently so an explicit non-None value on
+            # one side is not overwritten when only the other side is missing.
+            if amount_x_min is None:
+                amount_x_min = int(position.amount_x * (10000 - slippage) // 10000)
+            if amount_y_min is None:
+                amount_y_min = int(position.amount_y * (10000 - slippage) // 10000)
 
         tx, gas = self.sdk.build_remove_liquidity(
             token_x=token_x_addr,

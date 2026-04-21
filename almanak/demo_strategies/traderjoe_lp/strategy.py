@@ -412,6 +412,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             pool=self.pool,
             collect_fees=True,
             protocol="traderjoe_v2",
+            protocol_params={"bin_ids": list(self._position_bin_ids)},
         )
 
     # =========================================================================
@@ -469,9 +470,15 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             result: Execution result
         """
         if success and intent.intent_type.value == "LP_OPEN":
-            # Result Enrichment: bin_ids is automatically extracted by the framework
-            # No manual parsing needed - data is attached directly to the result
-            bin_ids = result.bin_ids if result else None
+            # ResultEnricher stores protocol-specific fields in extracted_data.
+            # Some adapters also project them onto the result directly, but we
+            # cannot rely on that for TraderJoe V2 bin IDs.
+            bin_ids = None
+            if result is not None:
+                bin_ids = getattr(result, "bin_ids", None)
+                if not bin_ids:
+                    extracted = getattr(result, "extracted_data", None) or {}
+                    bin_ids = extracted.get("bin_ids")
 
             if bin_ids:
                 self._position_bin_ids = list(bin_ids)
@@ -492,6 +499,25 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         elif success and intent.intent_type.value == "LP_CLOSE":
             logger.info("TraderJoe LP position closed successfully")
             self._position_bin_ids = []
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        """Persist bin IDs so teardown can recover after process restarts."""
+        parent_get_state = getattr(super(), "get_persistent_state", None)
+        state = parent_get_state() if callable(parent_get_state) else {}
+        if self._position_bin_ids:
+            state["position_bin_ids"] = list(self._position_bin_ids)
+        return state
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        """Restore bin IDs saved by get_persistent_state()."""
+        parent_load_state = getattr(super(), "load_persistent_state", None)
+        if callable(parent_load_state):
+            parent_load_state(state)
+
+        raw_bin_ids = state.get("position_bin_ids", []) if state else []
+        self._position_bin_ids = [int(bin_id) for bin_id in raw_bin_ids]
+        if self._position_bin_ids:
+            logger.info("Restored TraderJoe LP bin_ids from state: %s...", self._position_bin_ids[:3])
 
     # =========================================================================
     # STATUS REPORTING
@@ -591,6 +617,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                     pool=self.pool,
                     collect_fees=True,
                     protocol="traderjoe_v2",
+                    protocol_params={"bin_ids": list(self._position_bin_ids)},
                 )
             )
 

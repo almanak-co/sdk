@@ -487,6 +487,9 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
                     details={"pool": self.pool, "position_id": str(position_id) if position_id else None},
                 )
             )
+        elif success and intent.intent_type.value == "LP_CLOSE":
+            logger.info("LP position closed successfully: clearing cached position_id=%s", self._current_position_id)
+            self._current_position_id = None
     
     def _load_position_from_state(self) -> None:
         """Load position ID from persistent state if available."""
