@@ -217,6 +217,14 @@ class MetricsInterceptor(grpc.aio.ServerInterceptor):
         async def wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
             start_time = time.perf_counter()
             ACTIVE_REQUESTS.labels(service=service).inc()
+            # VIB-3293: initialize status BEFORE any branch that can raise so
+            # the `finally` block never hits UnboundLocalError. Default to
+            # "error" because any escape that bypasses both the happy path
+            # and the `except Exception` block (e.g. asyncio.CancelledError
+            # from a DEADLINE_EXCEEDED upstream timeout, which is a
+            # BaseException subclass under Python 3.8+) means the handler
+            # did not complete successfully — it must NOT be labelled "ok".
+            status = "error"
 
             try:
                 response = await behavior(request, context)
@@ -246,11 +254,14 @@ class MetricsInterceptor(grpc.aio.ServerInterceptor):
         async def wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
             start_time = time.perf_counter()
             ACTIVE_REQUESTS.labels(service=service).inc()
-            status = "ok"
+            # VIB-3293: default to "error" so CancelledError / BaseException
+            # escapes are not silently mislabelled as successful.
+            status = "error"
 
             try:
                 async for response in behavior(request, context):
                     yield response
+                status = "ok"
             except Exception as e:
                 status = "error"
                 error_type = type(e).__name__
@@ -275,6 +286,11 @@ class MetricsInterceptor(grpc.aio.ServerInterceptor):
         async def wrapper(request_iterator: Any, context: grpc.aio.ServicerContext) -> Any:
             start_time = time.perf_counter()
             ACTIVE_REQUESTS.labels(service=service).inc()
+            # VIB-3293: initialize status before any awaitable branch so the
+            # `finally` cannot hit UnboundLocalError when the handler is
+            # cancelled (CancelledError is a BaseException subclass and
+            # bypasses `except Exception`).
+            status = "error"
 
             try:
                 response = await behavior(request_iterator, context)
@@ -304,11 +320,14 @@ class MetricsInterceptor(grpc.aio.ServerInterceptor):
         async def wrapper(request_iterator: Any, context: grpc.aio.ServicerContext) -> Any:
             start_time = time.perf_counter()
             ACTIVE_REQUESTS.labels(service=service).inc()
-            status = "ok"
+            # VIB-3293: default to "error" so CancelledError / BaseException
+            # escapes are not silently mislabelled as successful.
+            status = "error"
 
             try:
                 async for response in behavior(request_iterator, context):
                     yield response
+                status = "ok"
             except Exception as e:
                 status = "error"
                 error_type = type(e).__name__

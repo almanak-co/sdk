@@ -1,5 +1,6 @@
 """Tests for gateway metrics module."""
 
+import asyncio
 import socket
 import time
 
@@ -16,6 +17,7 @@ from almanak.gateway.metrics import (
     REQUEST_LATENCY,
     RPC_LATENCY,
     RPC_REQUESTS,
+    MetricsInterceptor,
     MetricsServer,
     _parse_method_name,
     record_integration_latency,
@@ -215,6 +217,244 @@ class TestMetricsServer:
                 server.stop()
         finally:
             blocker.close()
+
+
+class TestInterceptorWrapperErrorPaths:
+    """VIB-3293: verify interceptor wrappers never raise UnboundLocalError on
+    early-raise paths (especially asyncio.CancelledError, which is a
+    BaseException subclass under Python 3.8+ and bypasses `except Exception`).
+
+    The bug was observed in production when an upstream RPC DEADLINE_EXCEEDED
+    timeout cancelled the gRPC handler mid-await, leaving `status` unbound
+    when the `finally` block emitted metrics.
+    """
+
+    @pytest.fixture
+    def interceptor(self) -> MetricsInterceptor:
+        return MetricsInterceptor()
+
+    def _read_status_count(self, service: str, method: str, status: str) -> float:
+        return REQUEST_COUNT.labels(service=service, method=method, status=status)._value.get()
+
+    def test_unary_unary_cancelled_error_labels_as_error(self, interceptor):
+        """CancelledError bypasses `except Exception` — finally must still emit status='error'."""
+
+        async def behavior(request, context):
+            raise asyncio.CancelledError()
+
+        wrapped = interceptor._wrap_unary_unary(behavior, "RpcService", "Call")
+
+        service, method = "RpcService", "Call"
+        before_error = self._read_status_count(service, method, "error")
+        before_ok = self._read_status_count(service, method, "ok")
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(wrapped(object(), object()))
+
+        after_error = self._read_status_count(service, method, "error")
+        after_ok = self._read_status_count(service, method, "ok")
+
+        # Must be labelled as error, NOT silently mislabelled ok.
+        assert after_error == before_error + 1
+        assert after_ok == before_ok
+
+    def test_unary_unary_exception_labels_as_error(self, interceptor):
+        """Normal exception goes through `except Exception` and still labels as error."""
+
+        async def behavior(request, context):
+            raise RuntimeError("boom")
+
+        wrapped = interceptor._wrap_unary_unary(behavior, "RpcService", "Call")
+
+        service, method = "RpcService", "Call"
+        before = self._read_status_count(service, method, "error")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(wrapped(object(), object()))
+
+        assert self._read_status_count(service, method, "error") == before + 1
+
+    def test_unary_unary_success_labels_as_ok(self, interceptor):
+        """Happy path still labels as ok (did not regress the default)."""
+
+        async def behavior(request, context):
+            return "result"
+
+        wrapped = interceptor._wrap_unary_unary(behavior, "RpcService", "Call")
+
+        service, method = "RpcService", "Call"
+        before_ok = self._read_status_count(service, method, "ok")
+        before_err = self._read_status_count(service, method, "error")
+
+        result = asyncio.run(wrapped(object(), object()))
+        assert result == "result"
+
+        assert self._read_status_count(service, method, "ok") == before_ok + 1
+        assert self._read_status_count(service, method, "error") == before_err
+
+    def test_stream_unary_cancelled_error_labels_as_error(self, interceptor):
+        """Same guarantee for stream-unary path (e.g. ExecutionService.Execute
+        style handlers that consume a request stream)."""
+
+        async def behavior(request_iterator, context):
+            raise asyncio.CancelledError()
+
+        wrapped = interceptor._wrap_stream_unary(behavior, "ExecutionService", "Execute")
+
+        service, method = "ExecutionService", "Execute"
+        before_error = self._read_status_count(service, method, "error")
+        before_ok = self._read_status_count(service, method, "ok")
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(wrapped(object(), object()))
+
+        assert self._read_status_count(service, method, "error") == before_error + 1
+        assert self._read_status_count(service, method, "ok") == before_ok
+
+    def test_stream_unary_base_exception_labels_as_error(self, interceptor):
+        """A non-Exception BaseException (e.g. SystemExit from an upstream
+        watchdog) must still emit an 'error' metric, not crash the `finally`."""
+
+        class _FakeBaseException(BaseException):
+            pass
+
+        async def behavior(request_iterator, context):
+            raise _FakeBaseException("not an Exception subclass")
+
+        wrapped = interceptor._wrap_stream_unary(behavior, "ExecutionService", "Execute")
+
+        service, method = "ExecutionService", "Execute"
+        before_error = self._read_status_count(service, method, "error")
+
+        with pytest.raises(_FakeBaseException):
+            asyncio.run(wrapped(object(), object()))
+
+        assert self._read_status_count(service, method, "error") == before_error + 1
+
+    def test_unary_stream_cancelled_mid_stream_labels_as_error(self, interceptor):
+        """Cancellation after a few yields must NOT be silently labelled ok."""
+
+        async def behavior(request, context):
+            yield 1
+            yield 2
+            raise asyncio.CancelledError()
+
+        wrapped = interceptor._wrap_unary_stream(behavior, "MarketService", "StreamPrices")
+
+        service, method = "MarketService", "StreamPrices"
+        before_error = self._read_status_count(service, method, "error")
+        before_ok = self._read_status_count(service, method, "ok")
+
+        async def _drain():
+            collected = []
+            async for item in wrapped(object(), object()):
+                collected.append(item)
+            return collected
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(_drain())
+
+        assert self._read_status_count(service, method, "error") == before_error + 1
+        assert self._read_status_count(service, method, "ok") == before_ok
+
+    def test_unary_stream_clean_completion_labels_as_ok(self, interceptor):
+        """Stream that completes cleanly still labels as ok."""
+
+        async def behavior(request, context):
+            yield 1
+            yield 2
+
+        wrapped = interceptor._wrap_unary_stream(behavior, "MarketService", "StreamPrices")
+
+        service, method = "MarketService", "StreamPrices"
+        before_ok = self._read_status_count(service, method, "ok")
+
+        async def _drain():
+            collected = []
+            async for item in wrapped(object(), object()):
+                collected.append(item)
+            return collected
+
+        items = asyncio.run(_drain())
+        assert items == [1, 2]
+        assert self._read_status_count(service, method, "ok") == before_ok + 1
+
+    def test_stream_stream_cancelled_mid_stream_labels_as_error(self, interceptor):
+        """Bidirectional streams must label mid-stream cancellation as error."""
+
+        async def behavior(request_iterator, context):
+            yield 1
+            raise asyncio.CancelledError()
+
+        wrapped = interceptor._wrap_stream_stream(behavior, "ExecutionService", "Stream")
+
+        service, method = "ExecutionService", "Stream"
+        before_error = self._read_status_count(service, method, "error")
+        before_ok = self._read_status_count(service, method, "ok")
+
+        async def _drain():
+            items = []
+            async for item in wrapped(object(), object()):
+                items.append(item)
+            return items
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(_drain())
+
+        assert self._read_status_count(service, method, "error") == before_error + 1
+        assert self._read_status_count(service, method, "ok") == before_ok
+
+    def test_stream_stream_base_exception_labels_as_error(self, interceptor):
+        """Bidirectional streams must emit error metrics for BaseException paths."""
+
+        class _FakeBaseException(BaseException):
+            pass
+
+        async def behavior(request_iterator, context):
+            raise _FakeBaseException("not an Exception subclass")
+            yield
+
+        wrapped = interceptor._wrap_stream_stream(behavior, "ExecutionService", "Stream")
+
+        service, method = "ExecutionService", "Stream"
+        before_error = self._read_status_count(service, method, "error")
+        before_ok = self._read_status_count(service, method, "ok")
+
+        async def _drain():
+            items = []
+            async for item in wrapped(object(), object()):
+                items.append(item)
+            return items
+
+        with pytest.raises(_FakeBaseException):
+            asyncio.run(_drain())
+
+        assert self._read_status_count(service, method, "error") == before_error + 1
+        assert self._read_status_count(service, method, "ok") == before_ok
+
+    def test_stream_stream_clean_completion_labels_as_ok(self, interceptor):
+        """Bidirectional streams that complete cleanly still label as ok."""
+
+        async def behavior(request_iterator, context):
+            yield 1
+            yield 2
+
+        wrapped = interceptor._wrap_stream_stream(behavior, "ExecutionService", "Stream")
+
+        service, method = "ExecutionService", "Stream"
+        before_ok = self._read_status_count(service, method, "ok")
+        before_error = self._read_status_count(service, method, "error")
+
+        async def _drain():
+            items = []
+            async for item in wrapped(object(), object()):
+                items.append(item)
+            return items
+
+        items = asyncio.run(_drain())
+        assert items == [1, 2]
+        assert self._read_status_count(service, method, "ok") == before_ok + 1
+        assert self._read_status_count(service, method, "error") == before_error
 
 
 class TestMetricsRegistry:
