@@ -199,6 +199,18 @@ class TestDispatcher:
         assert result.status == CompilationStatus.FAILED
         assert "only available on Solana chains" in result.error
 
+    def test_kamino_on_non_solana_fails(self):
+        """Kamino dispatched on a non-Solana chain must fail-fast at compile time.
+
+        Symmetric to the jupiter_lend guard. Regression test for issue #1622.
+        """
+        compiler = _mock_compiler(chain="ethereum", is_solana=False)
+        intent = _borrow_intent(protocol="kamino")
+        result = cl.compile_borrow(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Protocol 'kamino' is only available on Solana chains." in result.error
+        compiler._compile_kamino_borrow.assert_not_called()
+
     def test_kamino_dispatches_to_helper(self):
         compiler = _mock_compiler(chain="solana", is_solana=True)
         expected = MagicMock(status=CompilationStatus.SUCCESS)

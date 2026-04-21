@@ -194,22 +194,17 @@ class TestDispatcher:
         assert result is expected
         compiler._compile_kamino_supply.assert_called_once_with(intent)
 
-    def test_kamino_dispatches_on_non_solana_too(self):
-        """When ``protocol == 'kamino'`` on a non-Solana chain, the dispatcher
-        still routes into ``_compile_kamino_supply`` (matches pre-refactor
-        behaviour — this is the path that issue #1622 tracks as a missing
-        fail-fast).
+    def test_kamino_on_non_solana_fails(self):
+        """Kamino dispatched on a non-Solana chain must fail-fast at compile time.
 
-        We only verify the *routing* here so that the eventual fail-fast fix
-        (#1622) does not register as a regression against this test. The
-        returned result is not asserted to be SUCCESS — whatever
-        ``_compile_kamino_supply`` decides to return is the helper's concern.
+        Symmetric to the jupiter_lend guard. Regression test for issue #1622.
         """
         compiler = _mock_compiler(chain="ethereum", is_solana=False)
-        compiler._compile_kamino_supply.return_value = MagicMock(status=CompilationStatus.SUCCESS)
         intent = _supply_intent(protocol="kamino")
-        cl.compile_supply(compiler, intent)
-        compiler._compile_kamino_supply.assert_called_once_with(intent)
+        result = cl.compile_supply(compiler, intent)
+        assert result.status == CompilationStatus.FAILED
+        assert "Protocol 'kamino' is only available on Solana chains." in result.error
+        compiler._compile_kamino_supply.assert_not_called()
 
     def test_non_solana_evm_protocol_on_solana_chain_rejected(self):
         """On a Solana chain, any non-morpho/morpho_blue/jupiter_lend protocol is rejected."""

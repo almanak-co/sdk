@@ -91,9 +91,15 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_borrow_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino" or (
-            compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
-        ):
+        if protocol_lower == "kamino":
+            if not compiler._is_solana_chain():
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    intent_id=intent.intent_id,
+                    error="Protocol 'kamino' is only available on Solana chains.",
+                )
+            return _compile_borrow_kamino(compiler, intent)
+        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
             return _compile_borrow_kamino(compiler, intent)
 
         # Resolve shared tokens and collateral amount for EVM protocols
@@ -1670,9 +1676,15 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_repay_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino" or (
-            compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
-        ):
+        if protocol_lower == "kamino":
+            if not compiler._is_solana_chain():
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    intent_id=intent.intent_id,
+                    error="Protocol 'kamino' is only available on Solana chains.",
+                )
+            return _compile_repay_kamino(compiler, intent)
+        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
             return _compile_repay_kamino(compiler, intent)
 
         # Resolve shared repay token and amount for EVM protocols.
@@ -3044,9 +3056,15 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_supply_jupiter_lend(compiler, intent)
-        if protocol_lower == "kamino" or (
-            compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
-        ):
+        if protocol_lower == "kamino":
+            if not compiler._is_solana_chain():
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    intent_id=intent.intent_id,
+                    error="Protocol 'kamino' is only available on Solana chains.",
+                )
+            return _compile_supply_kamino(compiler, intent)
+        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
             return _compile_supply_kamino(compiler, intent)
 
         # Resolve shared supply token and amount for EVM protocols.
@@ -4293,9 +4311,15 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_withdraw_jupiter_lend(compiler, intent)
-        elif protocol_lower == "kamino" or (
-            compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
-        ):
+        if protocol_lower == "kamino":
+            if not compiler._is_solana_chain():
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    intent_id=intent.intent_id,
+                    error="Protocol 'kamino' is only available on Solana chains.",
+                )
+            return _compile_withdraw_kamino(compiler, intent)
+        if compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend"):
             return _compile_withdraw_kamino(compiler, intent)
 
         # Resolve shared withdraw token and amount for EVM protocols.

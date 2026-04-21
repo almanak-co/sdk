@@ -198,17 +198,17 @@ class TestDispatcher:
         assert result is expected
         compiler._compile_kamino_withdraw.assert_called_once_with(intent)
 
-    def test_kamino_dispatches_on_non_solana_too(self):
-        """When explicitly using kamino protocol name on a non-Solana chain,
-        the dispatcher still routes through the Kamino helper (which then
-        delegates to the compiler - matches pre-refactor behaviour).
+    def test_kamino_on_non_solana_fails(self):
+        """Kamino dispatched on a non-Solana chain must fail-fast at compile time.
+
+        Symmetric to the jupiter_lend guard. Regression test for issue #1622.
         """
         compiler = _mock_compiler(chain="ethereum", is_solana=False)
-        expected = MagicMock(status=CompilationStatus.SUCCESS)
-        compiler._compile_kamino_withdraw.return_value = expected
         intent = _withdraw_intent(protocol="kamino")
         result = cl.compile_withdraw(compiler, intent)
-        assert result is expected
+        assert result.status == CompilationStatus.FAILED
+        assert "Protocol 'kamino' is only available on Solana chains." in result.error
+        compiler._compile_kamino_withdraw.assert_not_called()
 
     def test_non_solana_evm_protocol_on_solana_chain_rejected(self):
         """On a Solana chain, any non-morpho/morpho_blue/jupiter_lend protocol is rejected."""
