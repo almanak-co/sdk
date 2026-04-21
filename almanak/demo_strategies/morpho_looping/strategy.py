@@ -232,6 +232,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         self._total_collateral = Decimal("0")
         self._total_borrowed = Decimal("0")
         self._pending_swap_amount = Decimal("0")
+        self._pending_wallet_collateral = Decimal("0")
 
         # Health tracking
         self._current_health_factor = Decimal("0")
@@ -266,7 +267,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             market: MarketSnapshot containing prices, balances, etc.
 
         Returns:
-            Intent: SUPPLY_COLLATERAL, BORROW, SWAP, or HOLD
+            Intent: SUPPLY, BORROW, SWAP, or HOLD
         """
         # =================================================================
         # STEP 1: Get current market prices
@@ -570,7 +571,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         # For testing, always use repay_full=True to avoid share-to-asset conversion issues
         # Morpho Blue's repay with MAX_UINT256 shares handles exact debt repayment
         if amount is None:
-            logger.info(f"REPAY intent: repay_full=True (will repay exact debt amount)")
+            logger.info("REPAY intent: repay_full=True (will repay exact debt amount)")
             return Intent.repay(
                 protocol="morpho_blue",
                 token=self.borrow_token,
@@ -594,6 +595,25 @@ class MorphoLoopingStrategy(IntentStrategy):
     # LIFECYCLE HOOKS
     # =========================================================================
 
+    def _extract_swap_output_amount(self, result: Any) -> Decimal | None:
+        """Return the realized swap output amount in human units when available."""
+        if result is None:
+            return None
+
+        swap_amounts = getattr(result, "swap_amounts", None)
+        if swap_amounts is None:
+            extracted = getattr(result, "extracted_data", {}) or {}
+            swap_amounts = extracted.get("swap_amounts")
+
+        amount_out_decimal = getattr(swap_amounts, "amount_out_decimal", None)
+        if amount_out_decimal is None:
+            return None
+
+        amount_out = Decimal(str(amount_out_decimal))
+        if amount_out <= 0:
+            return None
+        return amount_out
+
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         """
         Called after an intent is executed.
@@ -603,7 +623,12 @@ class MorphoLoopingStrategy(IntentStrategy):
         intent_type = intent.intent_type.value
 
         if success:
-            if intent_type == "SUPPLY_COLLATERAL":
+            # The SDK's Intent.supply() produces IntentType.SUPPLY. For Morpho Blue,
+            # a successful SUPPLY always lands as collateral (Morpho has no non-collateral
+            # supply path in this strategy — see _create_supply_intent, use_as_collateral=True).
+            # Accept SUPPLY_COLLATERAL as well for forward compatibility if the intent
+            # vocabulary ever grows a dedicated collateral-supply type.
+            if intent_type in ("SUPPLY", "SUPPLY_COLLATERAL"):
                 self._loop_state = "supplied"
                 # Extract amount from intent
                 if hasattr(intent, "amount"):
@@ -647,25 +672,117 @@ class MorphoLoopingStrategy(IntentStrategy):
                 )
 
             elif intent_type == "SWAP":
+                swap_from_token = getattr(intent, "from_token", None)
+                swap_to_token = getattr(intent, "to_token", None)
+                raw_amount = getattr(intent, "amount", None)
+                is_wallet_collateral_swap = swap_from_token == self.collateral_token and swap_to_token == "USDC"
+                is_loop_swap = not is_wallet_collateral_swap
+                realized_swap_output = self._extract_swap_output_amount(result)
+                if is_wallet_collateral_swap:
+                    if raw_amount == "all":
+                        self._pending_wallet_collateral = Decimal("0")
+                    elif isinstance(raw_amount, Decimal):
+                        self._pending_wallet_collateral = max(
+                            Decimal("0"), self._pending_wallet_collateral - raw_amount
+                        )
                 self._loop_state = "swapped"
-                # Increment loop counters here (not in _handle_swapped_state) to prevent
-                # double-counting if a subsequent supply fails and reverts to "swapped"
-                self._loops_completed += 1
-                self._current_loop += 1
-                # The swap result should contain the output amount
-                # For now, estimate based on prices
-                logger.info(f"Swap successful - Loop {self._current_loop} swap complete")
+                if is_loop_swap:
+                    if realized_swap_output is not None:
+                        self._pending_swap_amount = realized_swap_output
+                    else:
+                        # Fail closed: if the executed collateral output is unavailable,
+                        # do not reuse the pre-swap borrowed-token amount for the next supply.
+                        self._pending_swap_amount = Decimal("0")
+                    # Increment loop counters here (not in _handle_swapped_state) to
+                    # prevent double-counting if a subsequent supply fails.
+                    self._loops_completed += 1
+                    self._current_loop += 1
+                    logger.info(
+                        f"Swap successful - Loop {self._current_loop} swap complete; "
+                        f"next collateral amount: {self._pending_swap_amount} {self.collateral_token}"
+                    )
+                else:
+                    logger.info(
+                        f"Swap successful - {swap_from_token} -> {swap_to_token}; "
+                        f"wallet pending swap: {self._pending_wallet_collateral} {self.collateral_token}"
+                    )
                 add_event(
                     TimelineEvent(
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.POSITION_MODIFIED,
-                        description=f"Swapped {self.borrow_token} to {self.collateral_token}",
+                        description=f"Swapped {swap_from_token} to {swap_to_token}",
                         strategy_id=self.strategy_id,
                         details={
                             "action": "swap",
-                            "from_token": self.borrow_token,
-                            "to_token": self.collateral_token,
-                            "loop": self._current_loop + 1,
+                            "from_token": swap_from_token,
+                            "to_token": swap_to_token,
+                            "loop": self._loops_completed,
+                            "pending_wallet_collateral": str(self._pending_wallet_collateral),
+                        },
+                    )
+                )
+
+            elif intent_type in ("WITHDRAW", "WITHDRAW_COLLATERAL"):
+                # Track withdrawn collateral separately from on-chain collateral so a
+                # restarted teardown can still schedule the final wallet->USDC swap.
+                withdraw_all = bool(getattr(intent, "withdraw_all", False))
+                raw_amount = getattr(intent, "amount", None)
+                withdrawn_amount = Decimal("0")
+                if withdraw_all or raw_amount == "all":
+                    withdrawn_amount = self._total_collateral
+                    self._total_collateral = Decimal("0")
+                elif isinstance(raw_amount, Decimal):
+                    withdrawn_amount = min(self._total_collateral, raw_amount)
+                    self._total_collateral = max(
+                        Decimal("0"), self._total_collateral - raw_amount
+                    )
+                self._pending_wallet_collateral += withdrawn_amount
+                logger.info(
+                    f"Withdraw successful - On-chain collateral: {self._total_collateral} {self.collateral_token}; "
+                    f"wallet pending swap: {self._pending_wallet_collateral} {self.collateral_token}"
+                )
+                add_event(
+                    TimelineEvent(
+                        timestamp=datetime.now(UTC),
+                        event_type=TimelineEventType.POSITION_MODIFIED,
+                        description=f"Withdrew {self.collateral_token} from Morpho Blue",
+                        strategy_id=self.strategy_id,
+                        details={
+                            "action": "withdraw_collateral",
+                            "token": self.collateral_token,
+                            "total_collateral": str(self._total_collateral),
+                            "pending_wallet_collateral": str(self._pending_wallet_collateral),
+                        },
+                    )
+                )
+
+            elif intent_type == "REPAY":
+                # Symmetric to BORROW. _create_repay_intent uses repay_full=True
+                # during teardown, which on-chain repays the exact outstanding
+                # debt. If repay_full is set we zero out; otherwise we subtract
+                # the explicit amount, clamped at 0 so double-calls or slight
+                # over-repayment never push the counter negative.
+                repay_full = bool(getattr(intent, "repay_full", False))
+                raw_amount = getattr(intent, "amount", None)
+                if repay_full or raw_amount == "all":
+                    self._total_borrowed = Decimal("0")
+                elif isinstance(raw_amount, Decimal):
+                    self._total_borrowed = max(
+                        Decimal("0"), self._total_borrowed - raw_amount
+                    )
+                logger.info(
+                    f"Repay successful - Total borrowed: {self._total_borrowed} {self.borrow_token}"
+                )
+                add_event(
+                    TimelineEvent(
+                        timestamp=datetime.now(UTC),
+                        event_type=TimelineEventType.POSITION_MODIFIED,
+                        description=f"Repaid {self.borrow_token} to Morpho Blue",
+                        strategy_id=self.strategy_id,
+                        details={
+                            "action": "repay",
+                            "token": self.borrow_token,
+                            "total_borrowed": str(self._total_borrowed),
                         },
                     )
                 )
@@ -722,6 +839,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                 "total_collateral": str(self._total_collateral),
                 "total_borrowed": str(self._total_borrowed),
                 "health_factor": str(self._current_health_factor),
+                "pending_wallet_collateral": str(self._pending_wallet_collateral),
             },
         }
 
@@ -739,6 +857,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             "total_collateral": str(self._total_collateral),
             "total_borrowed": str(self._total_borrowed),
             "pending_swap_amount": str(self._pending_swap_amount),
+            "pending_wallet_collateral": str(self._pending_wallet_collateral),
             "current_health_factor": str(self._current_health_factor),
         }
 
@@ -758,6 +877,8 @@ class MorphoLoopingStrategy(IntentStrategy):
             self._total_borrowed = Decimal(str(state["total_borrowed"]))
         if "pending_swap_amount" in state:
             self._pending_swap_amount = Decimal(str(state["pending_swap_amount"]))
+        if "pending_wallet_collateral" in state:
+            self._pending_wallet_collateral = Decimal(str(state["pending_wallet_collateral"]))
         if "current_health_factor" in state:
             self._current_health_factor = Decimal(str(state["current_health_factor"]))
 
@@ -871,8 +992,9 @@ class MorphoLoopingStrategy(IntentStrategy):
                 )
             )
 
-        # Step 3: Swap collateral to stable (USDC)
-        if self._total_collateral > 0:
+        # Step 3: Swap collateral already in the wallet, plus anything that will be
+        # withdrawn by the preceding WITHDRAW intent, back to USDC.
+        if self._pending_wallet_collateral > 0 or self._total_collateral > 0:
             intents.append(
                 Intent.swap(
                     from_token=self.collateral_token,
@@ -892,7 +1014,8 @@ class MorphoLoopingStrategy(IntentStrategy):
         logger.info(f"Teardown started in {mode_name} mode for Morpho Looping strategy")
         logger.info(
             f"Will repay {self._total_borrowed} {self.borrow_token} "
-            f"and withdraw {self._total_collateral} {self.collateral_token}"
+            f"and withdraw {self._total_collateral} {self.collateral_token}; "
+            f"wallet pending swap={self._pending_wallet_collateral} {self.collateral_token}"
         )
 
     def on_teardown_completed(self, success: bool, recovered_usd: Decimal) -> None:
@@ -906,6 +1029,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             self._total_collateral = Decimal("0")
             self._total_borrowed = Decimal("0")
             self._pending_swap_amount = Decimal("0")
+            self._pending_wallet_collateral = Decimal("0")
             self._current_health_factor = Decimal("0")
         else:
             logger.error("Teardown failed - manual intervention may be required")

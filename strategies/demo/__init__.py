@@ -1,0 +1,1 @@
+"""Canonical demo strategy tree."""
