@@ -325,6 +325,15 @@ class TestValidationSolanaAddresses:
 # =============================================================================
 
 
+def _cli_run_source() -> str:
+    """Concatenated source of all CLI run-path modules (split across files after Phase 4c refactor)."""
+    import inspect
+
+    from almanak.framework.cli import run, run_helpers
+
+    return inspect.getsource(run) + "\n" + inspect.getsource(run_helpers)
+
+
 class TestCLIBypassRemoved:
     """Prove the CLI run.py no longer bypasses the gateway for Solana."""
 
@@ -332,9 +341,7 @@ class TestCLIBypassRemoved:
         """PROOF: The Solana bypass block is gone from the CLI single-chain path."""
         import ast
 
-        from almanak.framework.cli import run
-
-        source = inspect.getsource(run)
+        source = _cli_run_source()
 
         # The old bypass had this exact pattern
         assert "SolanaOrchestratorAdapter(" not in source or \
@@ -346,9 +353,7 @@ class TestCLIBypassRemoved:
 
     def test_gateway_orchestrator_used_for_all_chains(self):
         """PROOF: GatewayExecutionOrchestrator is used unconditionally (no if/else on chain)."""
-        from almanak.framework.cli import run
-
-        source = inspect.getsource(run)
+        source = _cli_run_source()
 
         # Find the single-chain section - it should have GatewayExecutionOrchestrator
         # without being inside an else block conditioned on chain
@@ -360,9 +365,7 @@ class TestCLIBypassRemoved:
 
     def test_solana_test_validator_startup_preserved(self):
         """PROOF: solana-test-validator startup for --network anvil is still there."""
-        from almanak.framework.cli import run
-
-        source = inspect.getsource(run)
+        source = _cli_run_source()
         assert "SolanaForkManager" in source
         assert "solana-test-validator" in source
         print("\n  PROOF: SolanaForkManager / solana-test-validator startup preserved for anvil")

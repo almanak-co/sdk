@@ -77,3 +77,34 @@ class ResumeInfo:
     is_resume: bool
     version: int | None
     state_keys: list[str]
+
+
+@dataclass
+class ComponentBundle:
+    """Built components that phases 15/16 (execution) need to run iterations.
+
+    Populated by `_build_components` (Phase 4c). Runtime-handle fields typed
+    as ``Any = None`` because their concrete types pull in heavy imports and
+    the helper boundary avoids the circular-import risk that would arise from
+    typing (e.g.) `StrategyRunner` at module load time.
+    """
+
+    runner: Any = None  # StrategyRunner
+    state_manager: Any = None  # GatewayStateManager
+    execution_orchestrator: Any = None
+    price_oracle: Any = None
+    balance_provider: Any = None
+    ohlcv_provider: Any = None
+    solana_fork_mgr: Any = None  # optional, anvil+Solana only
+    cleanup_fn: Any = None  # Callable[[], Awaitable[None]] — untyped to avoid import cycles
+
+    # Copy-trading (optional, only if copy_trading in config)
+    copy_signal_engine: Any = None
+    copy_ledger: Any = None
+    copy_replay_runner: Any = None
+
+    # Other runtime handles strategies attach
+    circuit_breaker: Any = None
+    stuck_detector: Any = None
+    emergency_manager: Any = None
+    operator_card_generator: Any = None
