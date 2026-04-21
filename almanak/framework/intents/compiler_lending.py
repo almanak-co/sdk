@@ -80,41 +80,23 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
     Returns:
         CompilationResult with borrow ActionBundle
     """
-    from .compiler_adapters import AaveV3Adapter
-
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
         intent_id=intent.intent_id,
     )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = []
 
     try:
         protocol_lower = intent.protocol.lower()
 
-        # =================================================================
-        # SOLANA LENDING PATH (Kamino / Jupiter Lend)
-        # =================================================================
+        # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'jupiter_lend' is only available on Solana chains.",
-                )
-            return compiler._compile_jupiter_lend_borrow(intent)
+            return _compile_borrow_jupiter_lend(compiler, intent)
         if protocol_lower == "kamino" or (
             compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
         ):
-            if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error=f"Protocol '{intent.protocol}' is not supported for BORROW on Solana. Supported: kamino, jupiter_lend",
-                )
-            return compiler._compile_kamino_borrow(intent)
+            return _compile_borrow_kamino(compiler, intent)
 
-        # Step 1: Resolve token addresses (needed for both protocols)
+        # Resolve shared tokens and collateral amount for EVM protocols
         collateral_token = compiler._resolve_token(intent.collateral_token)
         borrow_token = compiler._resolve_token(intent.borrow_token)
 
@@ -131,7 +113,6 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
                 intent_id=intent.intent_id,
             )
 
-        # Step 2: Check for chained amount
         if intent.collateral_amount == "all":
             return CompilationResult(
                 status=CompilationStatus.FAILED,
@@ -140,1300 +121,1472 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
             )
         collateral_amount_decimal: Decimal = intent.collateral_amount  # type: ignore[assignment]
 
-        # =================================================================
-        # MORPHO BLUE PATH
-        # =================================================================
         if protocol_lower in ("morpho", "morpho_blue"):
-            # Validate market_id is provided
-            if not intent.market_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="market_id is required for Morpho Blue borrow",
-                    intent_id=intent.intent_id,
-                )
-
-            # Lazy import to avoid circular import
-            from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
-
-            # Create Morpho adapter
-            morpho_config = MorphoBlueConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-                gateway_client=compiler._gateway_client,
+            return _compile_borrow_morpho_blue(
+                compiler, intent, collateral_token, borrow_token, collateral_amount_decimal
             )
-            morpho_adapter = MorphoBlueAdapter(morpho_config)
-
-            # If collateral > 0, first supply collateral
-            if collateral_amount_decimal > 0:
-                # Build approve TX for Morpho Blue contract
-                approve_txs = compiler._build_approve_tx(
-                    collateral_token.address,
-                    morpho_adapter.morpho_address,
-                    int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                )
-                transactions.extend(approve_txs)
-
-                # Build supply collateral TX
-                supply_result: Any = morpho_adapter.supply_collateral(
-                    market_id=intent.market_id,
-                    amount=collateral_amount_decimal,
-                    on_behalf_of=compiler.wallet_address,
-                )
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Morpho Blue supply collateral failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=supply_result.tx_data["value"],
-                    data=supply_result.tx_data["data"],
-                    gas_estimate=supply_result.gas_estimate,
-                    description=supply_result.description
-                    or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral",
-                    tx_type="lending_supply_collateral",
-                )
-                transactions.append(supply_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Build borrow TX
-            borrow_result: Any = morpho_adapter.borrow(
-                market_id=intent.market_id,
-                amount=intent.borrow_amount,
-                on_behalf_of=compiler.wallet_address,
-                receiver=compiler.wallet_address,
-            )
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Morpho Blue borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=borrow_result.tx_data["value"],
-                data=borrow_result.tx_data["data"],
-                gas_estimate=borrow_result.gas_estimate,
-                description=borrow_result.description or f"Borrow {intent.borrow_amount} {borrow_token.symbol}",
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            # Build ActionBundle for Morpho
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "morpho_address": morpho_adapter.morpho_address,
-                    "market_id": intent.market_id,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> {intent.borrow_amount} {borrow_token.symbol} on Morpho Blue"
-            )
-            return result
-
-        # =================================================================
-        # CURVANCE PATH (Monad — per-market cToken / BorrowableCToken pairs)
-        # =================================================================
         if protocol_lower == "curvance":
-            if not intent.market_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="market_id is required for Curvance borrow (MarketManager address)",
-                    intent_id=intent.intent_id,
-                )
-
-            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
-
-            curvance_adapter = CurvanceAdapter(
-                CurvanceConfig(
-                    chain=compiler.chain,
-                    wallet_address=compiler.wallet_address,
-                    gateway_client=compiler._gateway_client,
-                )
+            return _compile_borrow_curvance(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+        if protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
+            return _compile_borrow_aave_compatible(
+                compiler, intent, collateral_token, borrow_token, collateral_amount_decimal
             )
-
-            mismatch = _validate_curvance_market_tokens(
-                curvance_adapter,
-                intent.market_id,
-                expected_collateral_symbol=collateral_token.symbol,
-                expected_debt_symbol=borrow_token.symbol,
+        if protocol_lower == "spark":
+            return _compile_borrow_spark(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+        if protocol_lower == "compound_v3":
+            return _compile_borrow_compound_v3(
+                compiler, intent, collateral_token, borrow_token, collateral_amount_decimal
             )
-            if mismatch:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=mismatch,
-                    intent_id=intent.intent_id,
-                )
-
-            # Step A: If collateral_amount > 0, approve + depositAsCollateral on the collateral cToken.
-            if collateral_amount_decimal > 0:
-                supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
-                approve_txs = compiler._build_approve_tx(
-                    collateral_token.address,
-                    supply_spender,
-                    int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                )
-                transactions.extend(approve_txs)
-
-                curvance_borrow_supply_result = curvance_adapter.supply_collateral(
-                    market_id=intent.market_id,
-                    amount=collateral_amount_decimal,
-                    on_behalf_of=compiler.wallet_address,
-                )
-                if not curvance_borrow_supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Curvance supply collateral failed: {curvance_borrow_supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-                assert curvance_borrow_supply_result.tx_data is not None
-                transactions.append(
-                    TransactionData(
-                        to=curvance_borrow_supply_result.tx_data["to"],
-                        value=curvance_borrow_supply_result.tx_data["value"],
-                        data=curvance_borrow_supply_result.tx_data["data"],
-                        gas_estimate=curvance_borrow_supply_result.gas_estimate,
-                        description=curvance_borrow_supply_result.description,
-                        tx_type="lending_supply_collateral",
-                    )
-                )
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Step B: borrow on the BorrowableCToken.
-            curvance_borrow_result = curvance_adapter.borrow(
-                market_id=intent.market_id,
-                amount=intent.borrow_amount,
-            )
-            if not curvance_borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curvance borrow failed: {curvance_borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-            assert curvance_borrow_result.tx_data is not None
-            transactions.append(
-                TransactionData(
-                    to=curvance_borrow_result.tx_data["to"],
-                    value=curvance_borrow_result.tx_data["value"],
-                    data=curvance_borrow_result.tx_data["data"],
-                    gas_estimate=curvance_borrow_result.gas_estimate,
-                    description=curvance_borrow_result.description,
-                    tx_type="lending_borrow",
-                )
-            )
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            market_info = curvance_adapter.get_market(intent.market_id)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": "curvance",
-                    "market_id": intent.market_id,
-                    "market_name": market_info.name,
-                    "collateral_ctoken": market_info.collateral_ctoken,
-                    "borrowable_ctoken": market_info.borrowable_ctoken,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-            logger.info(
-                f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> "
-                f"{intent.borrow_amount} {borrow_token.symbol} on Curvance {market_info.name}"
-            )
-            return result
-
-        # =================================================================
-        # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
-        # =================================================================
-        elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            # Get lending adapter
-            adapter = AaveV3Adapter(compiler.chain, protocol_lower)
-            pool_address = adapter.get_pool_address()
-
-            if pool_address == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"{intent.protocol} not available on chain: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-            borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
-
-            # Build approve TX and supply TX for collateral (if collateral > 0)
-            if collateral_amount > 0:
-                actual_collateral_address = collateral_token.address
-                supply_value = 0
-
-                if collateral_token.is_native:
-                    weth_address = compiler._get_wrapped_native_address()
-                    if weth_address:
-                        actual_collateral_address = weth_address
-                        warnings.append("Native token collateral: will wrap to WETH before supplying")
-                    else:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error="Cannot use native ETH as collateral - WETH address not found",
-                            intent_id=intent.intent_id,
-                        )
-
-                if not collateral_token.is_native:
-                    approve_txs = compiler._build_approve_tx(
-                        actual_collateral_address,
-                        pool_address,
-                        collateral_amount,
-                    )
-                    transactions.extend(approve_txs)
-
-                supply_calldata = adapter.get_supply_calldata(
-                    asset=actual_collateral_address,
-                    amount=collateral_amount,
-                    on_behalf_of=compiler.wallet_address,
-                )
-
-                supply_tx = TransactionData(
-                    to=pool_address,
-                    value=supply_value,
-                    data="0x" + supply_calldata.hex(),
-                    gas_estimate=adapter.estimate_supply_gas(),
-                    description=(
-                        f"Supply {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} as collateral"
-                    ),
-                    tx_type="lending_supply",
-                )
-                transactions.append(supply_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Resolve interest rate mode: use intent value or default to variable
-            # Note: stable rate is deprecated on Aave V3, rejected at intent layer
-            aave_borrow_rate_mode = AAVE_VARIABLE_RATE_MODE
-            borrow_rate_mode_label = "variable"
-
-            # Build borrow TX
-            borrow_calldata = adapter.get_borrow_calldata(
-                asset=borrow_token.address,
-                amount=borrow_amount,
-                interest_rate_mode=aave_borrow_rate_mode,
-                on_behalf_of=compiler.wallet_address,
-            )
-
-            borrow_tx = TransactionData(
-                to=pool_address,
-                value=0,
-                data="0x" + borrow_calldata.hex(),
-                gas_estimate=adapter.estimate_borrow_gas(),
-                description=(
-                    f"Borrow {compiler._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} ({borrow_rate_mode_label} rate)"
-                ),
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "pool_address": pool_address,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount),
-                    "borrow_amount": str(borrow_amount),
-                    "interest_rate_mode": aave_borrow_rate_mode,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(collateral_amount, collateral_token.symbol, collateral_token.decimals)
-            borrow_fmt = format_token_amount(borrow_amount, borrow_token.symbol, borrow_token.decimals)
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(f"   Protocol: {intent.protocol} | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-        # =================================================================
-        # SPARK PATH (Aave V3 fork with Spark-specific addresses)
-        # =================================================================
-        elif protocol_lower == "spark":
-            from ..connectors.spark import (
-                SPARK_POOL_ADDRESSES,
-                SPARK_VARIABLE_RATE_MODE,
-                SparkAdapter,
-                SparkConfig,
-            )
-
-            if compiler.chain not in SPARK_POOL_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            spark_config = SparkConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            spark_adapter = SparkAdapter(spark_config)
-            pool_address = spark_adapter.pool_address
-
-            collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-            borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
-
-            # Build approve TX and supply TX for collateral (if collateral > 0)
-            if collateral_amount > 0:
-                actual_collateral_address = collateral_token.address
-                supply_value = 0
-
-                if collateral_token.is_native:
-                    weth_address = compiler._get_wrapped_native_address()
-                    if weth_address:
-                        actual_collateral_address = weth_address
-                        # Wrap native ETH -> WETH
-                        wrap_tx = TransactionData(
-                            to=weth_address,
-                            value=collateral_amount,
-                            data="0xd0e30db0",  # WETH.deposit()
-                            gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
-                            description=f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} to WETH",
-                            tx_type="wrap",
-                        )
-                        transactions.append(wrap_tx)
-                        # Approve WETH for pool
-                        approve_txs = compiler._build_approve_tx(
-                            weth_address,
-                            pool_address,
-                            collateral_amount,
-                        )
-                        transactions.extend(approve_txs)
-                        warnings.append("Native token collateral: wrapped to WETH before supplying")
-                    else:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error="Cannot use native ETH as collateral - WETH address not found",
-                            intent_id=intent.intent_id,
-                        )
-                else:
-                    approve_txs = compiler._build_approve_tx(
-                        actual_collateral_address,
-                        pool_address,
-                        collateral_amount,
-                    )
-                    transactions.extend(approve_txs)
-
-                # Build supply TX via Spark adapter
-                supply_result = spark_adapter.supply(
-                    asset=actual_collateral_address,
-                    amount=collateral_amount_decimal,
-                    on_behalf_of=compiler.wallet_address,
-                )
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Spark supply collateral failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_data = supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_value = int(supply_result.tx_data.get("value", 0))
-
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=supply_value,
-                    data=supply_data,
-                    gas_estimate=supply_result.gas_estimate,
-                    description=(
-                        f"Supply {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} as collateral to Spark"
-                    ),
-                    tx_type="lending_supply",
-                )
-                transactions.append(supply_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Resolve interest rate mode: use intent value or default to variable
-            # Note: stable rate is deprecated on Spark, rejected at intent layer
-            spark_borrow_rate_mode = SPARK_VARIABLE_RATE_MODE
-            spark_borrow_rate_label = "variable"
-
-            # Build borrow TX via Spark adapter
-            borrow_result = spark_adapter.borrow(
-                asset=borrow_token.address,
-                amount=intent.borrow_amount,
-                interest_rate_mode=spark_borrow_rate_mode,
-                on_behalf_of=compiler.wallet_address,
-            )
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Spark borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_data = borrow_result.tx_data["data"]
-            if not borrow_data.startswith("0x"):
-                borrow_data = "0x" + borrow_data
-
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=0,
-                data=borrow_data,
-                gas_estimate=borrow_result.gas_estimate,
-                description=(
-                    f"Borrow {compiler._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} from Spark ({spark_borrow_rate_label} rate)"
-                ),
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "pool_address": pool_address,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount),
-                    "borrow_amount": str(borrow_amount),
-                    "interest_rate_mode": spark_borrow_rate_mode,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(collateral_amount, collateral_token.symbol, collateral_token.decimals)
-            borrow_fmt = format_token_amount(borrow_amount, borrow_token.symbol, borrow_token.decimals)
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(f"   Protocol: Spark | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-        # =================================================================
-        # COMPOUND V3 PATH
-        # =================================================================
-        elif protocol_lower == "compound_v3":
-            from ..connectors.compound_v3.adapter import (
-                COMPOUND_V3_COMET_ADDRESSES,
-                CompoundV3Adapter,
-                CompoundV3Config,
-            )
-
-            market = intent.market_id or "usdc"
-
-            if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-            if market not in available_markets:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            compound_config = CompoundV3Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-                market=market,
-                gateway_client=compiler._gateway_client,
-            )
-            compound_adapter = CompoundV3Adapter(compound_config)
-
-            # If collateral > 0, first supply collateral
-            if collateral_amount_decimal > 0:
-                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                # Build approve TX for Comet contract (collateral token)
-                approve_txs = compiler._build_approve_tx(
-                    collateral_token.address,
-                    compound_adapter.comet_address,
-                    collateral_amount_wei,
-                )
-                transactions.extend(approve_txs)
-
-                # Build supply collateral TX
-                # Determine collateral symbol for adapter
-                collateral_symbol = collateral_token.symbol.upper()
-                supply_result = compound_adapter.supply_collateral(
-                    asset=collateral_symbol,
-                    amount=collateral_amount_decimal,
-                )
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Compound V3 supply collateral failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_data = supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=int(supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=supply_result.gas_estimate,
-                    description=supply_result.description
-                    or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral to Compound V3",
-                    tx_type="lending_supply_collateral",
-                )
-                transactions.append(supply_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Build borrow TX
-            borrow_result = compound_adapter.borrow(amount=intent.borrow_amount)
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_data = borrow_result.tx_data["data"]
-            if not borrow_data.startswith("0x"):
-                borrow_data = "0x" + borrow_data
-
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=int(borrow_result.tx_data.get("value", 0)),
-                data=borrow_data,
-                gas_estimate=borrow_result.gas_estimate,
-                description=borrow_result.description
-                or f"Borrow {intent.borrow_amount} {borrow_token.symbol} from Compound V3",
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "comet_address": compound_adapter.comet_address,
-                    "market": market,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(
-                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                collateral_token.symbol,
-                collateral_token.decimals,
-            )
-            borrow_fmt = format_token_amount(
-                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                borrow_token.symbol,
-                borrow_token.decimals,
-            )
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(f"   Protocol: Compound V3 ({market} market) | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-        # =================================================================
-        # BENQI PATH (Compound V2 fork on Avalanche)
-        # =================================================================
-        elif protocol_lower == "benqi":
-            from ..connectors.benqi.adapter import (
-                BENQI_QI_TOKENS,
-                BenqiAdapter,
-                BenqiConfig,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            benqi_config = BenqiConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            benqi_adapter = BenqiAdapter(benqi_config)
-
-            # If collateral > 0, first supply collateral + enterMarkets
-            if collateral_amount_decimal > 0:
-                collateral_symbol = collateral_token.symbol.upper()
-                collateral_market = benqi_adapter.get_market_info(collateral_symbol)
-
-                if not collateral_market:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI does not support collateral asset: {collateral_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                # Build approve TX for qiToken (skip for native AVAX)
-                if not collateral_market.is_native:
-                    approve_txs = compiler._build_approve_tx(
-                        collateral_token.address,
-                        collateral_market.qi_token_address,
-                        collateral_amount_wei,
-                    )
-                    transactions.extend(approve_txs)
-
-                # Build supply (mint) TX
-                supply_result = benqi_adapter.supply(
-                    asset=collateral_symbol,
-                    amount=collateral_amount_decimal,
-                )
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI supply collateral failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_data = supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=int(supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=supply_result.gas_estimate,
-                    description=supply_result.description,
-                    tx_type="lending_supply_collateral",
-                )
-                transactions.append(supply_tx)
-
-                # Build enterMarkets TX to enable as collateral
-                enter_result = benqi_adapter.enter_markets([collateral_symbol])
-                if not enter_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"BENQI enterMarkets failed: {enter_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-                assert enter_result.tx_data is not None
-                enter_data = enter_result.tx_data["data"]
-                if not enter_data.startswith("0x"):
-                    enter_data = "0x" + enter_data
-                enter_tx = TransactionData(
-                    to=enter_result.tx_data["to"],
-                    value=0,
-                    data=enter_data,
-                    gas_estimate=enter_result.gas_estimate,
-                    description=enter_result.description,
-                    tx_type="lending_enter_markets",
-                )
-                transactions.append(enter_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Build borrow TX
-            borrow_symbol = borrow_token.symbol.upper()
-            borrow_result = benqi_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_data = borrow_result.tx_data["data"]
-            if not borrow_data.startswith("0x"):
-                borrow_data = "0x" + borrow_data
-
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=int(borrow_result.tx_data.get("value", 0)),
-                data=borrow_data,
-                gas_estimate=borrow_result.gas_estimate,
-                description=borrow_result.description,
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "comptroller_address": benqi_adapter.comptroller_address,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(
-                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                collateral_token.symbol,
-                collateral_token.decimals,
-            )
-            borrow_fmt = format_token_amount(
-                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                borrow_token.symbol,
-                borrow_token.decimals,
-            )
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(f"   Protocol: BENQI | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-        # =================================================================
-        # JOE LEND PATH (Compound V2 fork on Avalanche — Banker Joe)
-        # =================================================================
-        elif protocol_lower == "joelend":
-            from ..connectors.joelend.adapter import (
-                JOELEND_J_TOKENS,
-                JoeLendAdapter,
-                JoeLendConfig,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            joelend_config = JoeLendConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            joelend_adapter = JoeLendAdapter(joelend_config)
-
-            # If collateral > 0, first supply collateral + enterMarkets
-            if collateral_amount_decimal > 0:
-                collateral_symbol = collateral_token.symbol.upper()
-                jl_collateral_market = joelend_adapter.get_market_info(collateral_symbol)
-
-                if not jl_collateral_market:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Joe Lend does not support collateral asset: {collateral_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-                        intent_id=intent.intent_id,
-                    )
-
-                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                # If collateral is native AVAX, wrap to WAVAX first.
-                # jAVAX rejects raw native deposits ("only wrapped native contract
-                # could send native token") so we must go through WAVAX.
-                if collateral_token.is_native and jl_collateral_market.underlying_address:
-                    wavax_address = jl_collateral_market.underlying_address
-                    wrap_tx = TransactionData(
-                        to=wavax_address,
-                        value=collateral_amount_wei,
-                        data="0xd0e30db0",  # WAVAX deposit() selector
-                        gas_estimate=50_000,
-                        description=f"Wrap {collateral_amount_decimal} AVAX to WAVAX for Joe Lend collateral",
-                        tx_type="wrap_native",
-                    )
-                    transactions.append(wrap_tx)
-                    approve_token_address = wavax_address
-                else:
-                    approve_token_address = collateral_token.address
-
-                # Build approve TX for jToken
-                approve_txs = compiler._build_approve_tx(
-                    approve_token_address,
-                    jl_collateral_market.j_token_address,
-                    collateral_amount_wei,
-                )
-                transactions.extend(approve_txs)
-
-                # Build supply (mint) TX
-                jl_supply_result = joelend_adapter.supply(
-                    asset=collateral_symbol,
-                    amount=collateral_amount_decimal,
-                )
-
-                if not jl_supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Joe Lend supply collateral failed: {jl_supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert jl_supply_result.tx_data is not None
-                supply_data = jl_supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=jl_supply_result.tx_data["to"],
-                    value=int(jl_supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=jl_supply_result.gas_estimate,
-                    description=jl_supply_result.description,
-                    tx_type="lending_supply_collateral",
-                )
-                transactions.append(supply_tx)
-
-                # Build enterMarkets TX to enable as collateral
-                jl_enter_result = joelend_adapter.enter_markets([collateral_symbol])
-                if not jl_enter_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Joe Lend enterMarkets failed: {jl_enter_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-                assert jl_enter_result.tx_data is not None
-                enter_data = jl_enter_result.tx_data["data"]
-                if not enter_data.startswith("0x"):
-                    enter_data = "0x" + enter_data
-                enter_tx = TransactionData(
-                    to=jl_enter_result.tx_data["to"],
-                    value=0,
-                    data=enter_data,
-                    gas_estimate=jl_enter_result.gas_estimate,
-                    description=jl_enter_result.description,
-                    tx_type="lending_enter_markets",
-                )
-                transactions.append(enter_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Build borrow TX
-            borrow_symbol = borrow_token.symbol.upper()
-            borrow_result = joelend_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_data = borrow_result.tx_data["data"]
-            if not borrow_data.startswith("0x"):
-                borrow_data = "0x" + borrow_data
-
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=int(borrow_result.tx_data.get("value", 0)),
-                data=borrow_data,
-                gas_estimate=borrow_result.gas_estimate,
-                description=borrow_result.description,
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "joetroller_address": joelend_adapter.joetroller_address,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(
-                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                collateral_token.symbol,
-                collateral_token.decimals,
-            )
-            borrow_fmt = format_token_amount(
-                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                borrow_token.symbol,
-                borrow_token.decimals,
-            )
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(f"   Protocol: Joe Lend | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-        # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults + EVC)
-        # =================================================================
-        elif protocol_lower == "euler_v2":
-            from ..connectors.euler_v2.adapter import (
-                EulerV2Adapter,
-                EulerV2Config,
-            )
-
-            # Chain validation is handled by EulerV2Config.__post_init__
-            euler_config = EulerV2Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            euler_adapter = EulerV2Adapter(euler_config)
-
-            # Find collateral vault
-            collateral_vault = euler_adapter.find_vault_for_asset(collateral_token.symbol.upper())
-            if not collateral_vault:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 does not have a vault for collateral asset: {collateral_token.symbol}. Supported: {euler_adapter.get_supported_assets()}",
-                    intent_id=intent.intent_id,
-                )
-
-            # If collateral > 0, first supply collateral
-            if collateral_amount_decimal > 0:
-                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                # Build approve TX for vault
-                approve_txs = compiler._build_approve_tx(
-                    collateral_token.address,
-                    collateral_vault.vault_address,
-                    collateral_amount_wei,
-                )
-                transactions.extend(approve_txs)
-
-                # Build supply (deposit) TX
-                supply_result = euler_adapter.supply(
-                    asset=collateral_token.symbol.upper(),
-                    amount=collateral_amount_decimal,
-                    vault_symbol=collateral_vault.vault_symbol,
-                )
-
-                if not supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Euler V2 supply collateral failed: {supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert supply_result.tx_data is not None
-                supply_data = supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=supply_result.tx_data["to"],
-                    value=int(supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=supply_result.gas_estimate,
-                    description=supply_result.description,
-                    tx_type="lending_supply_collateral",
-                )
-                transactions.append(supply_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            # Build borrow TX (includes EVC enableCollateral + enableController + borrow)
-            borrow_result = euler_adapter.borrow(
-                borrow_asset=borrow_token.symbol.upper(),
-                borrow_amount=intent.borrow_amount,
-                collateral_vault_address=collateral_vault.vault_address,
-            )
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_data = borrow_result.tx_data["data"]
-            if not borrow_data.startswith("0x"):
-                borrow_data = "0x" + borrow_data
-
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=int(borrow_result.tx_data.get("value", 0)),
-                data=borrow_data,
-                gas_estimate=borrow_result.gas_estimate,
-                description=borrow_result.description,
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "evc_address": euler_adapter.evc_address,
-                    "collateral_vault": collateral_vault.vault_address,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(
-                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                collateral_token.symbol,
-                collateral_token.decimals,
-            )
-            borrow_fmt = format_token_amount(
-                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                borrow_token.symbol,
-                borrow_token.decimals,
-            )
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(f"   Protocol: Euler V2 | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-        # =================================================================
-        # SILO V2 PATH (Isolated lending on Avalanche)
-        # =================================================================
-        elif protocol_lower == "silo_v2":
-            from ..connectors.silo_v2.adapter import (
-                SILO_V2_MARKETS,
-                SiloV2Adapter,
-                SiloV2Config,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            silo_config = SiloV2Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            silo_adapter = SiloV2Adapter(silo_config)
-
-            collateral_symbol = collateral_token.symbol.upper()
-            borrow_symbol = borrow_token.symbol.upper()
-
-            sv2_market = silo_adapter.find_market(collateral_symbol, borrow_symbol)
-            if not sv2_market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Silo V2 market found for {collateral_symbol}/{borrow_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            # If collateral > 0, deposit into the collateral silo
-            if collateral_amount_decimal > 0:
-                collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-                sv2_silo_result = silo_adapter.find_silo_for_asset(collateral_symbol, sv2_market.market_name)
-                if not sv2_silo_result:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Cannot find silo for collateral {collateral_symbol} in market {sv2_market.market_name}",
-                        intent_id=intent.intent_id,
-                    )
-                _, collateral_silo_address, _ = sv2_silo_result
-
-                approve_txs = compiler._build_approve_tx(
-                    collateral_token.address,
-                    collateral_silo_address,
-                    collateral_amount_wei,
-                )
-                transactions.extend(approve_txs)
-
-                sv2_supply_result = silo_adapter.supply(
-                    asset=collateral_symbol,
-                    amount=collateral_amount_decimal,
-                    market_name=sv2_market.market_name,
-                )
-
-                if not sv2_supply_result.success:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Silo V2 deposit failed: {sv2_supply_result.error}",
-                        intent_id=intent.intent_id,
-                    )
-
-                assert sv2_supply_result.tx_data is not None
-                supply_data = sv2_supply_result.tx_data["data"]
-                if not supply_data.startswith("0x"):
-                    supply_data = "0x" + supply_data
-
-                supply_tx = TransactionData(
-                    to=sv2_supply_result.tx_data["to"],
-                    value=int(sv2_supply_result.tx_data.get("value", 0)),
-                    data=supply_data,
-                    gas_estimate=sv2_supply_result.gas_estimate,
-                    description=sv2_supply_result.description,
-                    tx_type="lending_supply_collateral",
-                )
-                transactions.append(supply_tx)
-            else:
-                warnings.append("No collateral supplied - borrowing against existing collateral")
-
-            borrow_result = silo_adapter.borrow(
-                collateral_asset=collateral_symbol,
-                borrow_asset=borrow_symbol,
-                borrow_amount=intent.borrow_amount,
-            )
-
-            if not borrow_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Silo V2 borrow failed: {borrow_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert borrow_result.tx_data is not None
-            borrow_data = borrow_result.tx_data["data"]
-            if not borrow_data.startswith("0x"):
-                borrow_data = "0x" + borrow_data
-
-            borrow_tx = TransactionData(
-                to=borrow_result.tx_data["to"],
-                value=int(borrow_result.tx_data.get("value", 0)),
-                data=borrow_data,
-                gas_estimate=borrow_result.gas_estimate,
-                description=borrow_result.description,
-                tx_type="lending_borrow",
-            )
-            transactions.append(borrow_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.BORROW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "silo_config": sv2_market.silo_config,
-                    "market_name": sv2_market.market_name,
-                    "collateral_token": collateral_token.to_dict(),
-                    "borrow_token": borrow_token.to_dict(),
-                    "collateral_amount": str(collateral_amount_decimal),
-                    "borrow_amount": str(intent.borrow_amount),
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            collateral_fmt = format_token_amount(
-                int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-                collateral_token.symbol,
-                collateral_token.decimals,
-            )
-            borrow_fmt = format_token_amount(
-                int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-                borrow_token.symbol,
-                borrow_token.decimals,
-            )
-
-            logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-            logger.info(
-                f"   Protocol: Silo V2 ({sv2_market.market_name}) | Txs: {len(transactions)} | Gas: {total_gas:,}"
-            )
-
-        # =================================================================
-        # UNSUPPORTED PROTOCOL
-        # =================================================================
-        else:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
-                intent_id=intent.intent_id,
-            )
+        if protocol_lower == "benqi":
+            return _compile_borrow_benqi(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+        if protocol_lower == "joelend":
+            return _compile_borrow_joelend(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+        if protocol_lower == "euler_v2":
+            return _compile_borrow_euler_v2(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+        if protocol_lower == "silo_v2":
+            return _compile_borrow_silo_v2(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            intent_id=intent.intent_id,
+        )
 
     except Exception as e:
         logger.exception(f"Failed to compile BORROW intent: {e}")
         result.status = CompilationStatus.FAILED
         result.error = str(e)
+
+    return result
+
+
+def _compile_borrow_jupiter_lend(compiler, intent: BorrowIntent) -> CompilationResult:
+    """Compile BORROW for Jupiter Lend (Solana only)."""
+    if not compiler._is_solana_chain():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error="Protocol 'jupiter_lend' is only available on Solana chains.",
+        )
+    return compiler._compile_jupiter_lend_borrow(intent)
+
+
+def _compile_borrow_kamino(compiler, intent: BorrowIntent) -> CompilationResult:
+    """Compile BORROW for Kamino (Solana) and the Solana-fallback path.
+
+    Handles the original branch that matched ``protocol_lower == "kamino"`` or
+    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
+    """
+    protocol_lower = intent.protocol.lower()
+    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=f"Protocol '{intent.protocol}' is not supported for BORROW on Solana. Supported: kamino, jupiter_lend",
+        )
+    return compiler._compile_kamino_borrow(intent)
+
+
+def _compile_borrow_morpho_blue(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    # Validate market_id is provided
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue borrow",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Create Morpho adapter
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # If collateral > 0, first supply collateral
+    if collateral_amount_decimal > 0:
+        # Build approve TX for Morpho Blue contract
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            morpho_adapter.morpho_address,
+            int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply collateral TX
+        supply_result: Any = morpho_adapter.supply_collateral(
+            market_id=intent.market_id,
+            amount=collateral_amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Morpho Blue supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=supply_result.tx_data["value"],
+            data=supply_result.tx_data["data"],
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description
+            or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral",
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_result: Any = morpho_adapter.borrow(
+        market_id=intent.market_id,
+        amount=intent.borrow_amount,
+        on_behalf_of=compiler.wallet_address,
+        receiver=compiler.wallet_address,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=borrow_result.tx_data["value"],
+        data=borrow_result.tx_data["data"],
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description or f"Borrow {intent.borrow_amount} {borrow_token.symbol}",
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle for Morpho
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> {intent.borrow_amount} {borrow_token.symbol} on Morpho Blue"
+    )
+    return result
+
+
+def _compile_borrow_curvance(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Curvance (Monad — per-market cToken / BorrowableCToken pairs)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance borrow (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_collateral_symbol=collateral_token.symbol,
+        expected_debt_symbol=borrow_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Step A: If collateral_amount > 0, approve + depositAsCollateral on the collateral cToken.
+    if collateral_amount_decimal > 0:
+        supply_spender = curvance_adapter.get_supply_spender(intent.market_id)
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            supply_spender,
+            int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        )
+        transactions.extend(approve_txs)
+
+        curvance_borrow_supply_result = curvance_adapter.supply_collateral(
+            market_id=intent.market_id,
+            amount=collateral_amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+        if not curvance_borrow_supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Curvance supply collateral failed: {curvance_borrow_supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+        assert curvance_borrow_supply_result.tx_data is not None
+        transactions.append(
+            TransactionData(
+                to=curvance_borrow_supply_result.tx_data["to"],
+                value=curvance_borrow_supply_result.tx_data["value"],
+                data=curvance_borrow_supply_result.tx_data["data"],
+                gas_estimate=curvance_borrow_supply_result.gas_estimate,
+                description=curvance_borrow_supply_result.description,
+                tx_type="lending_supply_collateral",
+            )
+        )
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Step B: borrow on the BorrowableCToken.
+    curvance_borrow_result = curvance_adapter.borrow(
+        market_id=intent.market_id,
+        amount=intent.borrow_amount,
+    )
+    if not curvance_borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance borrow failed: {curvance_borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_borrow_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_borrow_result.tx_data["to"],
+            value=curvance_borrow_result.tx_data["value"],
+            data=curvance_borrow_result.tx_data["data"],
+            gas_estimate=curvance_borrow_result.gas_estimate,
+            description=curvance_borrow_result.description,
+            tx_type="lending_borrow",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    market_info = curvance_adapter.get_market(intent.market_id)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "collateral_ctoken": market_info.collateral_ctoken,
+            "borrowable_ctoken": market_info.borrowable_ctoken,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(
+        f"Compiled BORROW: {collateral_amount_decimal} {collateral_token.symbol} collateral -> "
+        f"{intent.borrow_amount} {borrow_token.symbol} on Curvance {market_info.name}"
+    )
+    return result
+
+
+def _compile_borrow_aave_compatible(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Aave V3 and Aave-compatible forks (Radiant V2)."""
+    from .compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    protocol_lower = intent.protocol.lower()
+
+    # Get lending adapter
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+    borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
+
+    # Build approve TX and supply TX for collateral (if collateral > 0)
+    if collateral_amount > 0:
+        actual_collateral_address = collateral_token.address
+        supply_value = 0
+
+        if collateral_token.is_native:
+            weth_address = compiler._get_wrapped_native_address()
+            if weth_address:
+                actual_collateral_address = weth_address
+                warnings.append("Native token collateral: will wrap to WETH before supplying")
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Cannot use native ETH as collateral - WETH address not found",
+                    intent_id=intent.intent_id,
+                )
+
+        if not collateral_token.is_native:
+            approve_txs = compiler._build_approve_tx(
+                actual_collateral_address,
+                pool_address,
+                collateral_amount,
+            )
+            transactions.extend(approve_txs)
+
+        supply_calldata = adapter.get_supply_calldata(
+            asset=actual_collateral_address,
+            amount=collateral_amount,
+            on_behalf_of=compiler.wallet_address,
+        )
+
+        supply_tx = TransactionData(
+            to=pool_address,
+            value=supply_value,
+            data="0x" + supply_calldata.hex(),
+            gas_estimate=adapter.estimate_supply_gas(),
+            description=(
+                f"Supply {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} as collateral"
+            ),
+            tx_type="lending_supply",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Aave V3, rejected at intent layer
+    aave_borrow_rate_mode = AAVE_VARIABLE_RATE_MODE
+    borrow_rate_mode_label = "variable"
+
+    # Build borrow TX
+    borrow_calldata = adapter.get_borrow_calldata(
+        asset=borrow_token.address,
+        amount=borrow_amount,
+        interest_rate_mode=aave_borrow_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    borrow_tx = TransactionData(
+        to=pool_address,
+        value=0,
+        data="0x" + borrow_calldata.hex(),
+        gas_estimate=adapter.estimate_borrow_gas(),
+        description=(
+            f"Borrow {compiler._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} ({borrow_rate_mode_label} rate)"
+        ),
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount),
+            "borrow_amount": str(borrow_amount),
+            "interest_rate_mode": aave_borrow_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(collateral_amount, collateral_token.symbol, collateral_token.decimals)
+    borrow_fmt = format_token_amount(borrow_amount, borrow_token.symbol, borrow_token.decimals)
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: {intent.protocol} | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_spark(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Spark (Aave V3 fork with Spark-specific addresses)."""
+    from ..connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SPARK_VARIABLE_RATE_MODE,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+    borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
+
+    # Build approve TX and supply TX for collateral (if collateral > 0)
+    if collateral_amount > 0:
+        actual_collateral_address = collateral_token.address
+        supply_value = 0
+
+        if collateral_token.is_native:
+            weth_address = compiler._get_wrapped_native_address()
+            if weth_address:
+                actual_collateral_address = weth_address
+                # Wrap native ETH -> WETH
+                wrap_tx = TransactionData(
+                    to=weth_address,
+                    value=collateral_amount,
+                    data="0xd0e30db0",  # WETH.deposit()
+                    gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+                    description=f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} to WETH",
+                    tx_type="wrap",
+                )
+                transactions.append(wrap_tx)
+                # Approve WETH for pool
+                approve_txs = compiler._build_approve_tx(
+                    weth_address,
+                    pool_address,
+                    collateral_amount,
+                )
+                transactions.extend(approve_txs)
+                warnings.append("Native token collateral: wrapped to WETH before supplying")
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Cannot use native ETH as collateral - WETH address not found",
+                    intent_id=intent.intent_id,
+                )
+        else:
+            approve_txs = compiler._build_approve_tx(
+                actual_collateral_address,
+                pool_address,
+                collateral_amount,
+            )
+            transactions.extend(approve_txs)
+
+        # Build supply TX via Spark adapter
+        supply_result = spark_adapter.supply(
+            asset=actual_collateral_address,
+            amount=collateral_amount_decimal,
+            on_behalf_of=compiler.wallet_address,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Spark supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_value = int(supply_result.tx_data.get("value", 0))
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=supply_value,
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=(
+                f"Supply {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} as collateral to Spark"
+            ),
+            tx_type="lending_supply",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Spark, rejected at intent layer
+    spark_borrow_rate_mode = SPARK_VARIABLE_RATE_MODE
+    spark_borrow_rate_label = "variable"
+
+    # Build borrow TX via Spark adapter
+    borrow_result = spark_adapter.borrow(
+        asset=borrow_token.address,
+        amount=intent.borrow_amount,
+        interest_rate_mode=spark_borrow_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=0,
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=(
+            f"Borrow {compiler._format_amount(borrow_amount, borrow_token.decimals)} {borrow_token.symbol} from Spark ({spark_borrow_rate_label} rate)"
+        ),
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount),
+            "borrow_amount": str(borrow_amount),
+            "interest_rate_mode": spark_borrow_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(collateral_amount, collateral_token.symbol, collateral_token.decimals)
+    borrow_fmt = format_token_amount(borrow_amount, borrow_token.symbol, borrow_token.decimals)
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Spark | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_compound_v3(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Compound V3."""
+    from ..connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    market = intent.market_id or "usdc"
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    # If collateral > 0, first supply collateral
+    if collateral_amount_decimal > 0:
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        # Build approve TX for Comet contract (collateral token)
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            compound_adapter.comet_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply collateral TX
+        # Determine collateral symbol for adapter
+        collateral_symbol = collateral_token.symbol.upper()
+        supply_result = compound_adapter.supply_collateral(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Compound V3 supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=int(supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description
+            or f"Supply {collateral_amount_decimal} {collateral_token.symbol} as collateral to Compound V3",
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_result = compound_adapter.borrow(amount=intent.borrow_amount)
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description
+        or f"Borrow {intent.borrow_amount} {borrow_token.symbol} from Compound V3",
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Compound V3 ({market} market) | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_benqi(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for BENQI (Compound V2 fork on Avalanche)."""
+    from ..connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    # If collateral > 0, first supply collateral + enterMarkets
+    if collateral_amount_decimal > 0:
+        collateral_symbol = collateral_token.symbol.upper()
+        collateral_market = benqi_adapter.get_market_info(collateral_symbol)
+
+        if not collateral_market:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI does not support collateral asset: {collateral_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+                intent_id=intent.intent_id,
+            )
+
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        # Build approve TX for qiToken (skip for native AVAX)
+        if not collateral_market.is_native:
+            approve_txs = compiler._build_approve_tx(
+                collateral_token.address,
+                collateral_market.qi_token_address,
+                collateral_amount_wei,
+            )
+            transactions.extend(approve_txs)
+
+        # Build supply (mint) TX
+        supply_result = benqi_adapter.supply(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=int(supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+
+        # Build enterMarkets TX to enable as collateral
+        enter_result = benqi_adapter.enter_markets([collateral_symbol])
+        if not enter_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"BENQI enterMarkets failed: {enter_result.error}",
+                intent_id=intent.intent_id,
+            )
+        assert enter_result.tx_data is not None
+        enter_data = enter_result.tx_data["data"]
+        if not enter_data.startswith("0x"):
+            enter_data = "0x" + enter_data
+        enter_tx = TransactionData(
+            to=enter_result.tx_data["to"],
+            value=0,
+            data=enter_data,
+            gas_estimate=enter_result.gas_estimate,
+            description=enter_result.description,
+            tx_type="lending_enter_markets",
+        )
+        transactions.append(enter_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_symbol = borrow_token.symbol.upper()
+    borrow_result = benqi_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: BENQI | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_joelend(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Joe Lend (Compound V2 fork on Avalanche — Banker Joe)."""
+    from ..connectors.joelend.adapter import (
+        JOELEND_J_TOKENS,
+        JoeLendAdapter,
+        JoeLendConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    joelend_config = JoeLendConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    joelend_adapter = JoeLendAdapter(joelend_config)
+
+    # If collateral > 0, first supply collateral + enterMarkets
+    if collateral_amount_decimal > 0:
+        collateral_symbol = collateral_token.symbol.upper()
+        jl_collateral_market = joelend_adapter.get_market_info(collateral_symbol)
+
+        if not jl_collateral_market:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Joe Lend does not support collateral asset: {collateral_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
+                intent_id=intent.intent_id,
+            )
+
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        # If collateral is native AVAX, wrap to WAVAX first.
+        # jAVAX rejects raw native deposits ("only wrapped native contract
+        # could send native token") so we must go through WAVAX.
+        if collateral_token.is_native and jl_collateral_market.underlying_address:
+            wavax_address = jl_collateral_market.underlying_address
+            wrap_tx = TransactionData(
+                to=wavax_address,
+                value=collateral_amount_wei,
+                data="0xd0e30db0",  # WAVAX deposit() selector
+                gas_estimate=50_000,
+                description=f"Wrap {collateral_amount_decimal} AVAX to WAVAX for Joe Lend collateral",
+                tx_type="wrap_native",
+            )
+            transactions.append(wrap_tx)
+            approve_token_address = wavax_address
+        else:
+            approve_token_address = collateral_token.address
+
+        # Build approve TX for jToken
+        approve_txs = compiler._build_approve_tx(
+            approve_token_address,
+            jl_collateral_market.j_token_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply (mint) TX
+        jl_supply_result = joelend_adapter.supply(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+        )
+
+        if not jl_supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Joe Lend supply collateral failed: {jl_supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert jl_supply_result.tx_data is not None
+        supply_data = jl_supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=jl_supply_result.tx_data["to"],
+            value=int(jl_supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=jl_supply_result.gas_estimate,
+            description=jl_supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+
+        # Build enterMarkets TX to enable as collateral
+        jl_enter_result = joelend_adapter.enter_markets([collateral_symbol])
+        if not jl_enter_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Joe Lend enterMarkets failed: {jl_enter_result.error}",
+                intent_id=intent.intent_id,
+            )
+        assert jl_enter_result.tx_data is not None
+        enter_data = jl_enter_result.tx_data["data"]
+        if not enter_data.startswith("0x"):
+            enter_data = "0x" + enter_data
+        enter_tx = TransactionData(
+            to=jl_enter_result.tx_data["to"],
+            value=0,
+            data=enter_data,
+            gas_estimate=jl_enter_result.gas_estimate,
+            description=jl_enter_result.description,
+            tx_type="lending_enter_markets",
+        )
+        transactions.append(enter_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX
+    borrow_symbol = borrow_token.symbol.upper()
+    borrow_result = joelend_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    # Build ActionBundle
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "joetroller_address": joelend_adapter.joetroller_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Joe Lend | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_euler_v2(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Euler V2 (ERC-4626 vaults + EVC)."""
+    from ..connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    # Find collateral vault
+    collateral_vault = euler_adapter.find_vault_for_asset(collateral_token.symbol.upper())
+    if not collateral_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for collateral asset: {collateral_token.symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    # If collateral > 0, first supply collateral
+    if collateral_amount_decimal > 0:
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        # Build approve TX for vault
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            collateral_vault.vault_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        # Build supply (deposit) TX
+        supply_result = euler_adapter.supply(
+            asset=collateral_token.symbol.upper(),
+            amount=collateral_amount_decimal,
+            vault_symbol=collateral_vault.vault_symbol,
+        )
+
+        if not supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Euler V2 supply collateral failed: {supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert supply_result.tx_data is not None
+        supply_data = supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=supply_result.tx_data["to"],
+            value=int(supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=supply_result.gas_estimate,
+            description=supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    # Build borrow TX (includes EVC enableCollateral + enableController + borrow)
+    borrow_result = euler_adapter.borrow(
+        borrow_asset=borrow_token.symbol.upper(),
+        borrow_amount=intent.borrow_amount,
+        collateral_vault_address=collateral_vault.vault_address,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "evc_address": euler_adapter.evc_address,
+            "collateral_vault": collateral_vault.vault_address,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Euler V2 | Txs: {len(transactions)} | Gas: {total_gas:,}")
+
+    return result
+
+
+def _compile_borrow_silo_v2(
+    compiler,
+    intent: BorrowIntent,
+    collateral_token: Any,
+    borrow_token: Any,
+    collateral_amount_decimal: Decimal,
+) -> CompilationResult:
+    """Compile BORROW for Silo V2 (isolated lending on Avalanche)."""
+    from ..connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = []
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    collateral_symbol = collateral_token.symbol.upper()
+    borrow_symbol = borrow_token.symbol.upper()
+
+    sv2_market = silo_adapter.find_market(collateral_symbol, borrow_symbol)
+    if not sv2_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for {collateral_symbol}/{borrow_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # If collateral > 0, deposit into the collateral silo
+    if collateral_amount_decimal > 0:
+        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
+        sv2_silo_result = silo_adapter.find_silo_for_asset(collateral_symbol, sv2_market.market_name)
+        if not sv2_silo_result:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Cannot find silo for collateral {collateral_symbol} in market {sv2_market.market_name}",
+                intent_id=intent.intent_id,
+            )
+        _, collateral_silo_address, _ = sv2_silo_result
+
+        approve_txs = compiler._build_approve_tx(
+            collateral_token.address,
+            collateral_silo_address,
+            collateral_amount_wei,
+        )
+        transactions.extend(approve_txs)
+
+        sv2_supply_result = silo_adapter.supply(
+            asset=collateral_symbol,
+            amount=collateral_amount_decimal,
+            market_name=sv2_market.market_name,
+        )
+
+        if not sv2_supply_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Silo V2 deposit failed: {sv2_supply_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        assert sv2_supply_result.tx_data is not None
+        supply_data = sv2_supply_result.tx_data["data"]
+        if not supply_data.startswith("0x"):
+            supply_data = "0x" + supply_data
+
+        supply_tx = TransactionData(
+            to=sv2_supply_result.tx_data["to"],
+            value=int(sv2_supply_result.tx_data.get("value", 0)),
+            data=supply_data,
+            gas_estimate=sv2_supply_result.gas_estimate,
+            description=sv2_supply_result.description,
+            tx_type="lending_supply_collateral",
+        )
+        transactions.append(supply_tx)
+    else:
+        warnings.append("No collateral supplied - borrowing against existing collateral")
+
+    borrow_result = silo_adapter.borrow(
+        collateral_asset=collateral_symbol,
+        borrow_asset=borrow_symbol,
+        borrow_amount=intent.borrow_amount,
+    )
+
+    if not borrow_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 borrow failed: {borrow_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert borrow_result.tx_data is not None
+    borrow_data = borrow_result.tx_data["data"]
+    if not borrow_data.startswith("0x"):
+        borrow_data = "0x" + borrow_data
+
+    borrow_tx = TransactionData(
+        to=borrow_result.tx_data["to"],
+        value=int(borrow_result.tx_data.get("value", 0)),
+        data=borrow_data,
+        gas_estimate=borrow_result.gas_estimate,
+        description=borrow_result.description,
+        tx_type="lending_borrow",
+    )
+    transactions.append(borrow_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.BORROW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "collateral_token": collateral_token.to_dict(),
+            "borrow_token": borrow_token.to_dict(),
+            "collateral_amount": str(collateral_amount_decimal),
+            "borrow_amount": str(intent.borrow_amount),
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    collateral_fmt = format_token_amount(
+        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
+        collateral_token.symbol,
+        collateral_token.decimals,
+    )
+    borrow_fmt = format_token_amount(
+        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
+        borrow_token.symbol,
+        borrow_token.decimals,
+    )
+
+    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
+    logger.info(f"   Protocol: Silo V2 ({sv2_market.market_name}) | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
     return result
 
