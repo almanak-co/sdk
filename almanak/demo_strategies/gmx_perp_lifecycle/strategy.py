@@ -63,6 +63,28 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             f"force_action={self.force_action}"
         )
 
+    # ------------------------------------------------------------------
+    # Token tracking — override the default config-derived tracker.
+    # The perp market is configured as a quoted pair (e.g. "ETH/USD"), and
+    # the default ``_derive_tokens_from_config`` helper splits that on "/" so
+    # the tracked set ends up containing the literal "USD" string. "USD" is
+    # not a token and has no entry in the token resolver; the runner's
+    # price pre-warm then logs a TokenNotFoundError on every tick. Track only
+    # the real symbols: the index token (base of the pair) and the
+    # collateral token.
+    # ------------------------------------------------------------------
+    def _get_tracked_tokens(self) -> list[str]:
+        index_token = self.market.split("/")[0].strip() if "/" in self.market else self.market.strip()
+        collateral = (self.collateral_token or "").strip()
+
+        tokens: list[str] = []
+        for sym in (index_token, collateral):
+            # Skip empty values and the USD denomination sentinel so the runner
+            # never asks the resolver for a token called "USD".
+            if sym and sym.upper() != "USD" and sym not in tokens:
+                tokens.append(sym)
+        return tokens
+
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """Main decision: open or close a perp position based on state.
 
@@ -184,21 +206,45 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         )
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
-        """Advance state machine on successful execution."""
+        """Advance state machine on successful execution.
+
+        Transitions are driven by the executed intent type, not by the current
+        ``_loop_state`` value. This matters for teardown: the framework emits a
+        PERP_CLOSE while the strategy is still in ``"open"`` (teardown bypasses
+        the normal ``open -> closing -> closed`` cycle). A state-driven
+        condition would silently skip the transition, leaving
+        ``get_open_positions()`` reporting a stale synthetic position and
+        failing post-teardown verification.
+        """
         intent_type = intent.intent_type.value if hasattr(intent, "intent_type") else str(intent)
 
-        if success:
-            logger.info(f"Intent {intent_type} executed successfully")
-            if self._loop_state == "opening":
-                self._loop_state = "open"
-                logger.info("State: opening -> open")
-            elif self._loop_state == "closing":
-                self._loop_state = "closed"
-                self._position_size_usd = Decimal("0")
-                logger.info("State: closing -> closed")
-        else:
+        if not success:
             logger.warning(f"Intent {intent_type} failed, reverting to {self._previous_stable_state}")
             self._loop_state = self._previous_stable_state
+            return
+
+        logger.info(f"Intent {intent_type} executed successfully")
+
+        if intent_type == "PERP_OPEN":
+            prior_state = self._loop_state
+            self._loop_state = "open"
+            # Promote the stable-state marker so a later failed close reverts
+            # to "open" (the current truth), not whatever was last recorded by
+            # decide() — typically "idle" when decide() opened the position,
+            # which would silently hide a live position from
+            # get_open_positions() after a failed teardown.
+            self._previous_stable_state = "open"
+            if prior_state != "open":
+                logger.info(f"State: {prior_state} -> open")
+        elif intent_type == "PERP_CLOSE":
+            prior_state = self._loop_state
+            self._loop_state = "closed"
+            self._previous_stable_state = "closed"
+            # Clear the synthetic position size so get_open_positions() no
+            # longer reports this position as open. Idempotent on repeat calls.
+            self._position_size_usd = Decimal("0")
+            if prior_state != "closed":
+                logger.info(f"State: {prior_state} -> closed")
 
     # --- State persistence (required so teardown survives restarts) ---
 
