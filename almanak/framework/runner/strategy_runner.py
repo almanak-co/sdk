@@ -553,8 +553,9 @@ class StrategyRunner:
             if early is not None:
                 return early
 
-            # Step 0a/0b/0c/0.5: teardown detection, circuit-breaker pre-gate,
-            # stuck execution resume (multi-chain), and teardown routing.
+            # Step 0a/0c/0b/0.5: teardown detection, multi-chain stuck
+            # execution resume (pre-CB, #1665), circuit-breaker pre-gate,
+            # and teardown routing.
             early = await self._step_teardown_and_cb_gate(state)
             if early is not None:
                 return early
@@ -659,13 +660,20 @@ class StrategyRunner:
         return None
 
     async def _step_teardown_and_cb_gate(self, state: RunIterationState) -> IterationResult | None:
-        """Teardown detection, early CB gate, and stuck-execution recovery.
+        """Teardown detection, stuck-execution recovery, and early CB gate.
 
-        Covers the original Step 0a (teardown detection), Step 0b (circuit
-        breaker early check, skipped during teardown), Step 0c (stuck
-        execution resumption for multi-chain), and Step 0.5 (teardown
-        dispatch). These are coupled because the teardown mode gates the
-        CB check and the CB check must precede the stuck-resume call.
+        Covers the original Step 0a (teardown detection), Step 0c (stuck
+        execution resumption for multi-chain, #1665: runs BEFORE the CB
+        gate so an open/paused breaker cannot strand saved mid-sequence
+        progress), Step 0b (circuit breaker early check, skipped during
+        teardown or when resume fired), and Step 0.5 (teardown dispatch).
+
+        Ordering rationale (issue #1665): resuming a saved multi-chain
+        flow is continuation of already-started work. It must not be
+        blocked by a tripped breaker, for the same reason teardowns
+        bypass the CB — both are about finishing work that is already
+        in flight. The CB gate still applies to NEW work and to the
+        single-chain path unchanged.
         """
         strategy = state.strategy
         strategy_id = state.strategy_id
@@ -676,6 +684,20 @@ class StrategyRunner:
         # (acknowledge_teardown_request has side effects).
         teardown_mode = self._check_teardown_requested(strategy)
         state.teardown_mode = teardown_mode
+
+        # Step 0c (pre-CB for multi-chain, #1665): Check for stuck execution
+        # that needs resumption BEFORE the circuit-breaker gate. A tripped
+        # breaker must not strand partial bridge/cross-chain flows with
+        # saved progress -- finishing in-flight work is independent of
+        # whether NEW work is allowed. If resume fires, return directly;
+        # the CB gate below only applies to NEW work.
+        if self._is_multi_chain:
+            stuck_result = await self._check_and_resume_stuck_execution(
+                strategy=strategy,
+                start_time=start_time,
+            )
+            if stuck_result is not None:
+                return stuck_result
 
         # Step 0b: Circuit breaker check — block execution if breaker is OPEN/PAUSED
         # Skip when a teardown is pending — teardown must always be allowed to run
@@ -706,16 +728,6 @@ class StrategyRunner:
                     strategy_id=strategy_id,
                     duration_ms=self._calculate_duration_ms(start_time),
                 )
-
-        # Step 0c: Check for stuck execution that needs resumption (multi-chain only)
-        # This MUST happen before decide() to prevent lost progress when state changes
-        if self._is_multi_chain:
-            stuck_result = await self._check_and_resume_stuck_execution(
-                strategy=strategy,
-                start_time=start_time,
-            )
-            if stuck_result is not None:
-                return stuck_result
 
         # Step 0.5: Check for teardown request (reuses result from Step 0a)
         # If teardown is requested, intercept the iteration and execute teardown.
