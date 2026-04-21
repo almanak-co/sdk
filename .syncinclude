@@ -1,0 +1,113 @@
+# Paths published to the public almanak-sdk mirror (allowlist).
+# One path per line. Directories should end with /
+# Blank lines and comments (starting with #) are ignored.
+# Paths NOT listed here are NEVER published.
+#
+# This is an ALLOWLIST. It is intentionally explicit so that any new top-level
+# file or directory added to the private repo does NOT leak to the public
+# mirror unless it is also added here.
+
+# --- Top-level metadata ---
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+PYPI.md
+LICENSE
+
+# --- Build and packaging ---
+pyproject.toml
+pytest.ini
+Makefile
+uv.lock
+MANIFEST.in
+
+# --- Docs site config ---
+mkdocs.yml
+mkdocs-llms.yml
+vercel.json
+.coderabbit.yaml
+
+# --- Docker ---
+Dockerfile
+docker-compose.backtest.yml
+.dockerignore
+
+# --- Repo and tooling config ---
+.gitignore
+.python-version
+.almanak-code-version
+.env.example
+
+# --- Sync infrastructure (publish the allowlist itself for transparency) ---
+.syncinclude
+
+# --- Core SDK package ---
+almanak/
+
+# --- Examples, skills, config ---
+examples/
+skills/
+config/
+
+# --- Tests (tests/reports/ intentionally NOT listed) ---
+tests/__init__.py
+tests/conftest.py
+tests/conftest_gateway.py
+tests/e2e_safe_lp_test.py
+tests/benchmark/
+tests/bt-trust/
+tests/connectors/
+tests/e2e/
+tests/fixtures/
+tests/framework/
+tests/gateway/
+tests/golden_tests/
+tests/integration/
+tests/intents/
+tests/performance/
+tests/scripts/
+tests/skills/
+tests/trust/
+tests/unit/
+tests/validation/
+tests/visual/
+
+# --- Public docs (docs/internal/ intentionally NOT listed) ---
+docs/agent-skills.md
+docs/agent-skills.es.md
+docs/agent-skills.fr.md
+docs/agent-skills.zh.md
+docs/environment-variables.md
+docs/environment-variables.es.md
+docs/environment-variables.fr.md
+docs/environment-variables.zh.md
+docs/getting-started.md
+docs/getting-started.es.md
+docs/getting-started.fr.md
+docs/getting-started.zh.md
+docs/index.md
+docs/index.es.md
+docs/index.fr.md
+docs/index.zh.md
+docs/solana.md
+docs/agentic/
+docs/api/
+docs/assets/
+docs/cli/
+docs/gateway/
+docs/overrides/
+docs/stylesheets/
+
+# --- Strategies (strategies/incubating/ intentionally NOT listed) ---
+strategies/__init__.py
+strategies/archived/
+strategies/demo/
+strategies/experiments/
+strategies/probes/
+strategies/reference/
+strategies/test/
+strategies/tests/
+strategies/vaults/
+strategies/xlayer/
