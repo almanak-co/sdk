@@ -811,6 +811,28 @@ def _compile_borrow_compound_v3(
     )
     compound_adapter = CompoundV3Adapter(compound_config)
 
+    # Validate that the intent's borrow token matches the market's base asset.
+    # Compound V3 markets are single-asset: borrow() can only draw the base
+    # token. Calling comet.withdraw(non_base_address, amount) reverts on-chain
+    # with an opaque error, so we fail fast at compile time.
+    base_token_address = compound_adapter.market_config.get("base_token_address")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+    if borrow_token.address.lower() != base_token_address.lower():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Compound V3 {market} market expects base asset {base_token_address}, "
+                f"got {borrow_token.address} ({borrow_token.symbol}). "
+                f"Compound V3 markets are single-asset - the borrow token must match the market's base asset."
+            ),
+            intent_id=intent.intent_id,
+        )
+
     # If collateral > 0, first supply collateral
     if collateral_amount_decimal > 0:
         collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
@@ -2256,6 +2278,28 @@ def _compile_repay_compound_v3(
         gateway_client=compiler._gateway_client,
     )
     compound_adapter = CompoundV3Adapter(compound_config)
+
+    # Validate that the intent's repay token matches the market's base asset.
+    # Compound V3 repay is implemented as comet.supply(baseToken, amount) which
+    # only accepts the base asset. Supplying any other token would either revert
+    # or be treated as collateral supply (not a repayment), so fail fast.
+    base_token_address = compound_adapter.market_config.get("base_token_address")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+    if repay_token.address.lower() != base_token_address.lower():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Compound V3 {market} market expects base asset {base_token_address}, "
+                f"got {repay_token.address} ({repay_token.symbol}). "
+                f"Compound V3 markets are single-asset - the repay token must match the market's base asset."
+            ),
+            intent_id=intent.intent_id,
+        )
 
     # Build approve TX for Comet contract (repay token -> Comet)
     if repay_amount_decimal is not None:

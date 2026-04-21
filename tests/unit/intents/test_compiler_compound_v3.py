@@ -518,6 +518,7 @@ class TestCompoundV3Borrow:
     def test_borrow_success(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply collateral WETH")
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow 500 USDC from Compound V3")
         mock_adapter_cls.return_value = mock_adapter
@@ -545,6 +546,7 @@ class TestCompoundV3Borrow:
         """Test borrow with collateral_token triggers supply_collateral first."""
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply collateral WETH")
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow 500 USDC")
         mock_adapter_cls.return_value = mock_adapter
@@ -570,6 +572,7 @@ class TestCompoundV3Borrow:
     def test_borrow_adapter_failure(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply collateral WETH")
         mock_adapter.borrow.return_value = _mock_failed_result("Insufficient collateral")
         mock_adapter_cls.return_value = mock_adapter
@@ -586,6 +589,34 @@ class TestCompoundV3Borrow:
 
         assert result.status == CompilationStatus.FAILED
         assert "Compound V3 borrow failed" in result.error
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_borrow_non_base_asset_rejected(self, mock_adapter_cls, mock_config_cls, compiler):
+        """Borrowing a non-base asset (e.g. WETH from USDC market) fails at compile time (#1620)."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = BorrowIntent(
+            collateral_token="WBTC",
+            collateral_amount=Decimal("0.1"),
+            borrow_token="WETH",  # Not the USDC market's base asset.
+            borrow_amount=Decimal("1"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 usdc market expects base asset" in result.error
+        assert "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" in result.error
+        assert "WETH" in result.error
+        mock_adapter.borrow.assert_not_called()
+        mock_adapter.supply_collateral.assert_not_called()
 
     @patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_COMET}}})
     def test_borrow_unsupported_chain(self):
@@ -620,6 +651,7 @@ class TestCompoundV3Repay:
     def test_repay_success(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.repay.return_value = _mock_tx_result("Repay 200 USDC to Compound V3")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -646,6 +678,7 @@ class TestCompoundV3Repay:
     def test_repay_full_debt(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.repay.return_value = _mock_tx_result("Repay full debt to Compound V3")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -673,6 +706,7 @@ class TestCompoundV3Repay:
     def test_repay_adapter_failure(self, mock_adapter_cls, mock_config_cls, compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter.repay.return_value = _mock_failed_result("No outstanding debt")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -686,6 +720,31 @@ class TestCompoundV3Repay:
 
         assert result.status == CompilationStatus.FAILED
         assert "Compound V3 repay failed" in result.error
+
+    @patch(COMET_ADDRESSES, MOCK_CHAIN_ADDRESSES)
+    @patch(CONFIG_CLS)
+    @patch(ADAPTER_CLS)
+    def test_repay_non_base_asset_rejected(self, mock_adapter_cls, mock_config_cls, compiler):
+        """Repaying with a non-base asset (e.g. WETH against USDC market) fails at compile time (#1620)."""
+        mock_adapter = MagicMock()
+        mock_adapter.comet_address = TEST_COMET
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = RepayIntent(
+            token="WETH",  # Not the USDC market's base asset.
+            amount=Decimal("1"),
+            protocol="compound_v3",
+            market_id="usdc",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 usdc market expects base asset" in result.error
+        assert "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" in result.error
+        assert "WETH" in result.error
+        mock_adapter.repay.assert_not_called()
 
     @patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_COMET}}})
     def test_repay_unsupported_chain(self):
@@ -815,6 +874,7 @@ class TestCompoundV3Optimism:
     def test_borrow_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["optimism"]["usdc"]
         mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply WETH collateral")
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow 300 USDC on Optimism")
         mock_adapter_cls.return_value = mock_adapter
@@ -844,6 +904,7 @@ class TestCompoundV3Optimism:
     def test_repay_optimism(self, mock_adapter_cls, mock_config_cls, optimism_compiler):
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_OPTIMISM
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["optimism"]["usdc"]
         mock_adapter.repay.return_value = _mock_tx_result("Repay 300 USDC on Optimism")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -993,6 +1054,7 @@ class TestCompoundV3Polygon:
         """Test borrow with WETH collateral (80% CF) on Polygon."""
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["polygon"]["usdc_e"]
         mock_adapter.supply_collateral.return_value = _mock_tx_result("Supply WETH collateral on Polygon")
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow USDC.e on Polygon")
         mock_adapter_cls.return_value = mock_adapter
@@ -1023,6 +1085,7 @@ class TestCompoundV3Polygon:
         """Test standard repay on Polygon."""
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["polygon"]["usdc_e"]
         mock_adapter.repay.return_value = _mock_tx_result("Repay 500 USDC.e on Polygon")
         mock_adapter_cls.return_value = mock_adapter
 
@@ -1073,6 +1136,7 @@ class TestCompoundV3Polygon:
         """Test repay_full on Polygon."""
         mock_adapter = MagicMock()
         mock_adapter.comet_address = TEST_COMET_POLYGON
+        mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["polygon"]["usdc_e"]
         mock_adapter.repay.return_value = _mock_tx_result("Repay full debt on Polygon")
         mock_adapter_cls.return_value = mock_adapter
 

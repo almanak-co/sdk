@@ -758,6 +758,7 @@ class TestCompoundV3Helper:
 
     def test_success_with_collateral(self):
         compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         with (
             patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_POOL}}}),
             patch(COMPOUND_ADAPTER) as mock_adapter_cls,
@@ -765,18 +766,24 @@ class TestCompoundV3Helper:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = TEST_POOL
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
             mock_adapter.supply_collateral.return_value = _mock_tx_result()
             mock_adapter.borrow.return_value = _mock_tx_result()
             mock_adapter_cls.return_value = mock_adapter
             intent = _borrow_intent(protocol="compound_v3")
             result = cl._compile_borrow_compound_v3(
-                compiler, intent, _mock_token("WETH", decimals=18), _mock_token("USDC"), Decimal("1")
+                compiler,
+                intent,
+                _mock_token("WETH", decimals=18),
+                _mock_token("USDC", address=usdc_addr),
+                Decimal("1"),
             )
         assert result.status == CompilationStatus.SUCCESS
         assert result.action_bundle.metadata["market"] == "usdc"
 
     def test_supply_collateral_failure(self):
         compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         with (
             patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_POOL}}}),
             patch(COMPOUND_ADAPTER) as mock_adapter_cls,
@@ -784,16 +791,105 @@ class TestCompoundV3Helper:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = TEST_POOL
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
             mock_adapter.supply_collateral.return_value = _mock_failed_result("asset unsupported")
             mock_adapter_cls.return_value = mock_adapter
             intent = _borrow_intent(protocol="compound_v3")
             result = cl._compile_borrow_compound_v3(
-                compiler, intent, _mock_token("WETH", decimals=18), _mock_token("USDC"), Decimal("1")
+                compiler,
+                intent,
+                _mock_token("WETH", decimals=18),
+                _mock_token("USDC", address=usdc_addr),
+                Decimal("1"),
             )
         assert result.status == CompilationStatus.FAILED
         assert "Compound V3 supply collateral failed" in result.error
 
     def test_borrow_failure(self):
+        compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        with (
+            patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_POOL}}}),
+            patch(COMPOUND_ADAPTER) as mock_adapter_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = TEST_POOL
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
+            mock_adapter.supply_collateral.return_value = _mock_tx_result()
+            mock_adapter.borrow.return_value = _mock_failed_result("insufficient liquidity")
+            mock_adapter_cls.return_value = mock_adapter
+            intent = _borrow_intent(protocol="compound_v3")
+            result = cl._compile_borrow_compound_v3(
+                compiler,
+                intent,
+                _mock_token("WETH", decimals=18),
+                _mock_token("USDC", address=usdc_addr),
+                Decimal("1"),
+            )
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 borrow failed" in result.error
+
+    def test_non_base_asset_rejected(self):
+        """Borrowing a non-base asset (collateral) must fail fast at compile time (#1620)."""
+        compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        weth_addr = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        with (
+            patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_POOL}}}),
+            patch(COMPOUND_ADAPTER) as mock_adapter_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = TEST_POOL
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
+            mock_adapter_cls.return_value = mock_adapter
+            # Intent tries to borrow WETH from the USDC market - must be rejected.
+            intent = _borrow_intent(protocol="compound_v3", borrow_token="WETH")
+            result = cl._compile_borrow_compound_v3(
+                compiler,
+                intent,
+                _mock_token("WBTC", address="0x" + "11" * 20, decimals=8),
+                _mock_token("WETH", address=weth_addr, decimals=18),
+                Decimal("1"),
+            )
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 usdc market expects base asset" in result.error
+        assert usdc_addr in result.error
+        assert weth_addr in result.error
+        assert "single-asset" in result.error
+        # Ensure we never reached the adapter borrow call.
+        mock_adapter.borrow.assert_not_called()
+        mock_adapter.supply_collateral.assert_not_called()
+
+    def test_case_insensitive_base_asset_match(self):
+        """Base token comparison is case-insensitive - lowercase addresses still match."""
+        compiler = _mock_compiler(chain="ethereum")
+        usdc_addr_mixed = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        usdc_addr_lower = usdc_addr_mixed.lower()
+        with (
+            patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_POOL}}}),
+            patch(COMPOUND_ADAPTER) as mock_adapter_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = TEST_POOL
+            mock_adapter.market_config = {"base_token_address": usdc_addr_mixed, "base_token": "USDC"}
+            mock_adapter.supply_collateral.return_value = _mock_tx_result()
+            mock_adapter.borrow.return_value = _mock_tx_result()
+            mock_adapter_cls.return_value = mock_adapter
+            intent = _borrow_intent(protocol="compound_v3")
+            result = cl._compile_borrow_compound_v3(
+                compiler,
+                intent,
+                _mock_token("WETH", decimals=18),
+                _mock_token("USDC", address=usdc_addr_lower),
+                Decimal("1"),
+            )
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_missing_base_token_address_fails(self):
+        """If the adapter's market_config is missing base_token_address, fail with a clear error."""
         compiler = _mock_compiler(chain="ethereum")
         with (
             patch(COMET_ADDRESSES, {"ethereum": {"usdc": {"comet_address": TEST_POOL}}}),
@@ -802,15 +898,14 @@ class TestCompoundV3Helper:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = TEST_POOL
-            mock_adapter.supply_collateral.return_value = _mock_tx_result()
-            mock_adapter.borrow.return_value = _mock_failed_result("insufficient liquidity")
+            mock_adapter.market_config = {}  # No base_token_address.
             mock_adapter_cls.return_value = mock_adapter
             intent = _borrow_intent(protocol="compound_v3")
             result = cl._compile_borrow_compound_v3(
                 compiler, intent, _mock_token("WETH", decimals=18), _mock_token("USDC"), Decimal("1")
             )
         assert result.status == CompilationStatus.FAILED
-        assert "Compound V3 borrow failed" in result.error
+        assert "missing base_token_address" in result.error
 
 
 # ---------------------------------------------------------------------------

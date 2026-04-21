@@ -679,6 +679,7 @@ class TestCompoundV3Helper:
 
     def test_success(self):
         compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         with (
             patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
             patch(COMPOUND_ADAPTER) as mock_cls,
@@ -686,15 +687,19 @@ class TestCompoundV3Helper:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
             mock_adapter.repay.return_value = _mock_tx_result()
             mock_cls.return_value = mock_adapter
             intent = _repay_intent(protocol="compound_v3")
-            result = cl._compile_repay_compound_v3(compiler, intent, _mock_token("USDC"), Decimal("100"), "100", [])
+            result = cl._compile_repay_compound_v3(
+                compiler, intent, _mock_token("USDC", address=usdc_addr), Decimal("100"), "100", []
+            )
         assert result.status == CompilationStatus.SUCCESS
         assert result.action_bundle.metadata["market"] == "usdc"
 
     def test_repay_full_approves_max_uint(self):
         compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         with (
             patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
             patch(COMPOUND_ADAPTER) as mock_cls,
@@ -702,16 +707,20 @@ class TestCompoundV3Helper:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
             mock_adapter.repay.return_value = _mock_tx_result()
             mock_cls.return_value = mock_adapter
             intent = _repay_intent(protocol="compound_v3", repay_full=True, amount=Decimal("0"))
-            result = cl._compile_repay_compound_v3(compiler, intent, _mock_token("USDC"), None, "full debt", [])
+            result = cl._compile_repay_compound_v3(
+                compiler, intent, _mock_token("USDC", address=usdc_addr), None, "full debt", []
+            )
         assert result.status == CompilationStatus.SUCCESS
         args, _ = compiler._build_approve_tx.call_args
         assert args[2] == cl.MAX_UINT256
 
     def test_repay_failure(self):
         compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         with (
             patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
             patch(COMPOUND_ADAPTER) as mock_cls,
@@ -719,12 +728,81 @@ class TestCompoundV3Helper:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
             mock_adapter.repay.return_value = _mock_failed_result("oracle stale")
+            mock_cls.return_value = mock_adapter
+            intent = _repay_intent(protocol="compound_v3")
+            result = cl._compile_repay_compound_v3(
+                compiler, intent, _mock_token("USDC", address=usdc_addr), Decimal("100"), "100", []
+            )
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 repay failed" in result.error
+
+    def test_non_base_asset_rejected(self):
+        """Repaying with a non-base asset (e.g. collateral token) must fail fast at compile time (#1620)."""
+        compiler = _mock_compiler(chain="ethereum")
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        weth_addr = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        with (
+            patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
+            patch(COMPOUND_ADAPTER) as mock_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
+            mock_cls.return_value = mock_adapter
+            # Intent tries to repay WETH against the USDC market - must be rejected.
+            intent = _repay_intent(protocol="compound_v3", token="WETH")
+            result = cl._compile_repay_compound_v3(
+                compiler, intent, _mock_token("WETH", address=weth_addr, decimals=18), Decimal("1"), "1", []
+            )
+        assert result.status == CompilationStatus.FAILED
+        assert "Compound V3 usdc market expects base asset" in result.error
+        assert usdc_addr in result.error
+        assert weth_addr in result.error
+        assert "single-asset" in result.error
+        # Ensure we never reached the adapter repay or approve call.
+        mock_adapter.repay.assert_not_called()
+        compiler._build_approve_tx.assert_not_called()
+
+    def test_case_insensitive_base_asset_match(self):
+        """Base token comparison is case-insensitive - a lowercase token address matches mixed-case market address."""
+        compiler = _mock_compiler(chain="ethereum")
+        usdc_addr_mixed = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        usdc_addr_lower = usdc_addr_mixed.lower()
+        with (
+            patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
+            patch(COMPOUND_ADAPTER) as mock_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": usdc_addr_mixed, "base_token": "USDC"}
+            mock_adapter.repay.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+            intent = _repay_intent(protocol="compound_v3")
+            result = cl._compile_repay_compound_v3(
+                compiler, intent, _mock_token("USDC", address=usdc_addr_lower), Decimal("100"), "100", []
+            )
+        assert result.status == CompilationStatus.SUCCESS
+
+    def test_missing_base_token_address_fails(self):
+        """If the adapter's market_config is missing base_token_address, fail with a clear error."""
+        compiler = _mock_compiler(chain="ethereum")
+        with (
+            patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
+            patch(COMPOUND_ADAPTER) as mock_cls,
+            patch(COMPOUND_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {}  # No base_token_address.
             mock_cls.return_value = mock_adapter
             intent = _repay_intent(protocol="compound_v3")
             result = cl._compile_repay_compound_v3(compiler, intent, _mock_token("USDC"), Decimal("100"), "100", [])
         assert result.status == CompilationStatus.FAILED
-        assert "Compound V3 repay failed" in result.error
+        assert "missing base_token_address" in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1233,8 @@ class TestDispatcherRouting:
 
     def test_compound_v3_routes_through_dispatcher(self):
         compiler = _mock_compiler(chain="ethereum")
-        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+        usdc_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t, address=usdc_addr)
         with (
             patch(COMPOUND_MARKETS, {"ethereum": {"usdc": "0xc"}}),
             patch(COMPOUND_ADAPTER) as mock_cls,
@@ -1163,6 +1242,7 @@ class TestDispatcherRouting:
         ):
             mock_adapter = MagicMock()
             mock_adapter.comet_address = "0xcomet"
+            mock_adapter.market_config = {"base_token_address": usdc_addr, "base_token": "USDC"}
             mock_adapter.repay.return_value = _mock_tx_result()
             mock_cls.return_value = mock_adapter
 
