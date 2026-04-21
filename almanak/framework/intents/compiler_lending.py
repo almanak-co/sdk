@@ -488,15 +488,38 @@ def _compile_borrow_aave_compatible(
             weth_address = compiler._get_wrapped_native_address()
             if weth_address:
                 actual_collateral_address = weth_address
-                warnings.append("Native token collateral: will wrap to WETH before supplying")
+                # Wrap native -> wrapped native (deposit() selector is the same
+                # across WETH/WAVAX/WBNB/etc.)
+                wrap_tx = TransactionData(
+                    to=weth_address,
+                    value=collateral_amount,
+                    data="0xd0e30db0",  # wrapped-native deposit()
+                    gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+                    description=(
+                        f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} "
+                        f"{collateral_token.symbol} to wrapped native token"
+                    ),
+                    tx_type="wrap",
+                )
+                transactions.append(wrap_tx)
+                # Approve wrapped native for pool
+                approve_txs = compiler._build_approve_tx(
+                    weth_address,
+                    pool_address,
+                    collateral_amount,
+                )
+                transactions.extend(approve_txs)
+                warnings.append(f"Native {collateral_token.symbol} collateral: wrapped before supplying")
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error="Cannot use native ETH as collateral - WETH address not found",
+                    error=(
+                        f"Cannot use native {collateral_token.symbol} as collateral - "
+                        f"wrapped native token address not found on {compiler.chain}"
+                    ),
                     intent_id=intent.intent_id,
                 )
-
-        if not collateral_token.is_native:
+        else:
             approve_txs = compiler._build_approve_tx(
                 actual_collateral_address,
                 pool_address,
@@ -629,28 +652,35 @@ def _compile_borrow_spark(
             weth_address = compiler._get_wrapped_native_address()
             if weth_address:
                 actual_collateral_address = weth_address
-                # Wrap native ETH -> WETH
+                # Wrap native -> wrapped native (deposit() selector is the same
+                # across WETH/WAVAX/WBNB/etc.)
                 wrap_tx = TransactionData(
                     to=weth_address,
                     value=collateral_amount,
-                    data="0xd0e30db0",  # WETH.deposit()
+                    data="0xd0e30db0",  # wrapped-native deposit()
                     gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
-                    description=f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} {collateral_token.symbol} to WETH",
+                    description=(
+                        f"Wrap {compiler._format_amount(collateral_amount, collateral_token.decimals)} "
+                        f"{collateral_token.symbol} to wrapped native token"
+                    ),
                     tx_type="wrap",
                 )
                 transactions.append(wrap_tx)
-                # Approve WETH for pool
+                # Approve wrapped native for pool
                 approve_txs = compiler._build_approve_tx(
                     weth_address,
                     pool_address,
                     collateral_amount,
                 )
                 transactions.extend(approve_txs)
-                warnings.append("Native token collateral: wrapped to WETH before supplying")
+                warnings.append(f"Native {collateral_token.symbol} collateral: wrapped before supplying")
             else:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error="Cannot use native ETH as collateral - WETH address not found",
+                    error=(
+                        f"Cannot use native {collateral_token.symbol} as collateral - "
+                        f"wrapped native token address not found on {compiler.chain}"
+                    ),
                     intent_id=intent.intent_id,
                 )
         else:
@@ -3298,16 +3328,38 @@ def _compile_supply_aave_compatible(
         weth_address = compiler._get_wrapped_native_address()
         if weth_address:
             actual_supply_address = weth_address
-            warnings.append("Native token supply: will wrap to WETH before supplying")
+            # Wrap native -> wrapped native (deposit() selector is the same
+            # across WETH/WAVAX/WBNB/etc.)
+            wrap_tx = TransactionData(
+                to=weth_address,
+                value=supply_amount,
+                data="0xd0e30db0",  # wrapped-native deposit()
+                gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+                description=(
+                    f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
+                    f"{supply_token.symbol} to wrapped native token"
+                ),
+                tx_type="wrap",
+            )
+            transactions.append(wrap_tx)
+            # Approve wrapped native for pool
+            approve_txs = compiler._build_approve_tx(
+                weth_address,
+                pool_address,
+                supply_amount,
+            )
+            transactions.extend(approve_txs)
+            warnings.append(f"Native {supply_token.symbol} supply: wrapped before supplying")
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error="Cannot supply native ETH - WETH address not found",
+                error=(
+                    f"Cannot supply native {supply_token.symbol} - "
+                    f"wrapped native token address not found on {compiler.chain}"
+                ),
                 intent_id=intent.intent_id,
             )
-
-    # Build approve TX (skip for native token scenarios)
-    if not supply_token.is_native:
+    else:
         approve_txs = compiler._build_approve_tx(
             actual_supply_address,
             pool_address,
@@ -3425,28 +3477,35 @@ def _compile_supply_spark(
         weth_address = compiler._get_wrapped_native_address()
         if weth_address:
             actual_supply_address = weth_address
-            # Wrap native ETH -> WETH
+            # Wrap native -> wrapped native (deposit() selector is the same
+            # across WETH/WAVAX/WBNB/etc.)
             wrap_tx = TransactionData(
                 to=weth_address,
                 value=supply_amount,
-                data="0xd0e30db0",  # WETH.deposit()
+                data="0xd0e30db0",  # wrapped-native deposit()
                 gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
-                description=f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} {supply_token.symbol} to WETH",
+                description=(
+                    f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
+                    f"{supply_token.symbol} to wrapped native token"
+                ),
                 tx_type="wrap",
             )
             transactions.append(wrap_tx)
-            # Approve WETH for pool
+            # Approve wrapped native for pool
             approve_txs = compiler._build_approve_tx(
                 weth_address,
                 pool_address,
                 supply_amount,
             )
             transactions.extend(approve_txs)
-            warnings.append("Native token supply: wrapped to WETH before supplying")
+            warnings.append(f"Native {supply_token.symbol} supply: wrapped before supplying")
         else:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error="Cannot supply native ETH - WETH address not found",
+                error=(
+                    f"Cannot supply native {supply_token.symbol} - "
+                    f"wrapped native token address not found on {compiler.chain}"
+                ),
                 intent_id=intent.intent_id,
             )
     else:

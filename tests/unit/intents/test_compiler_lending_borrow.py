@@ -566,7 +566,31 @@ class TestAaveCompatibleHelper:
             Decimal("1"),
         )
         assert result.status == CompilationStatus.SUCCESS
-        assert any("wrap" in w.lower() for w in result.warnings)
+        assert any("wrapped before supplying" in w for w in result.warnings)
+        # Regression: helper must emit a wrap tx, an approve tx for the wrapped
+        # token, and a supply tx with value=0 (calldata carries the wrapped
+        # asset address). Without the wrap tx the on-chain approve would fail
+        # because the wallet would have zero wrapped-native balance.
+        assert result.transactions[0].tx_type == "wrap"
+        # Decimal("1") with 18 decimals -> exactly 10**18 wei wrapped
+        assert result.transactions[0].value == 10**18
+        assert result.transactions[0].data == "0xd0e30db0"
+        tx_types = [tx.tx_type for tx in result.transactions]
+        assert "approve" in tx_types
+        # Wrap must precede approve and approve must precede supply so the
+        # pool can actually pull the wrapped token from the wallet.
+        wrap_idx = tx_types.index("wrap")
+        approve_idx = tx_types.index("approve")
+        supply_idx = tx_types.index("lending_supply")
+        assert wrap_idx < approve_idx < supply_idx
+        supply_txs = [tx for tx in result.transactions if tx.tx_type == "lending_supply"]
+        assert len(supply_txs) == 1
+        assert supply_txs[0].value == 0
+        # Approve must target the wrapped-native address (WETH), not native ETH,
+        # so the on-chain approve has a real token balance to allow.
+        compiler._build_approve_tx.assert_called_once()
+        approve_args = compiler._build_approve_tx.call_args.args
+        assert approve_args[0] == "0xweth00000000000000000000000000000000eeee"
 
     @patch(AAVE_ADAPTER_CLS)
     def test_native_collateral_without_weth_address_fails(self, mock_adapter_cls):
@@ -585,7 +609,7 @@ class TestAaveCompatibleHelper:
             Decimal("1"),
         )
         assert result.status == CompilationStatus.FAILED
-        assert "WETH address not found" in result.error
+        assert "wrapped native token address not found" in result.error
 
     @patch(AAVE_ADAPTER_CLS)
     def test_zero_collateral_warns_and_only_borrows(self, mock_adapter_cls):
@@ -670,7 +694,7 @@ class TestSparkHelper:
                 Decimal("1"),
             )
         assert result.status == CompilationStatus.SUCCESS
-        assert any("wrapped to WETH" in w for w in result.warnings)
+        assert any("wrapped before supplying" in w for w in result.warnings)
         # Wrap tx should be the first transaction
         assert result.transactions[0].tx_type == "wrap"
 
@@ -691,7 +715,7 @@ class TestSparkHelper:
                 Decimal("1"),
             )
         assert result.status == CompilationStatus.FAILED
-        assert "WETH address not found" in result.error
+        assert "wrapped native token address not found" in result.error
 
     def test_supply_failure(self):
         compiler = _mock_compiler(chain="ethereum")
