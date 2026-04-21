@@ -51,7 +51,7 @@ SWEEPABLE PARAMETERS:
 STRATEGY LOGIC:
 ---------------
 Each tick:
-  1. If idle and supply rate > supply_rate_threshold -> supply WETH
+  1. If idle and supply rate > supply_rate_threshold -> supply wstETH
   2. If supplied and borrow rate < borrow_rate_threshold -> borrow USDC
   3. If borrowed and borrow rate > borrow_rate_threshold * 1.5 -> repay
   4. Track cycle count against max_borrow_cycles
@@ -96,7 +96,7 @@ class AaveSweepLendingStrategy(IntentStrategy):
     ``--param "name:val1,val2,val3"`` on the CLI.
 
     Configuration (config.json):
-        supply_token: Token to supply as collateral (default: "WETH")
+        supply_token: Token to supply as collateral (default: "wstETH")
         borrow_token: Token to borrow (default: "USDC")
         supply_amount: Amount of supply_token to deposit (sweepable, default: "0.5")
         supply_rate_threshold: Supply rate % to trigger supply (sweepable, default: 4.0)
@@ -109,7 +109,11 @@ class AaveSweepLendingStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         # Token configuration
-        self.supply_token = str(self.get_config("supply_token", "WETH"))
+        # Default is wstETH rather than WETH because Aave V3 governance froze
+        # the WETH reserve on Arbitrum on 2026-04-20 (LTV=0, frozen=true),
+        # making supply() revert. wstETH is an active ETH-correlated asset.
+        # Tracked under VIB-3294.
+        self.supply_token = str(self.get_config("supply_token", "wstETH"))
         self.borrow_token = str(self.get_config("borrow_token", "USDC"))
 
         # Sweepable parameters
@@ -457,8 +461,6 @@ class AaveSweepLendingStrategy(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
-        from almanak.framework.teardown import TeardownMode
-
         intents = []
         # Repay borrow first, then withdraw supply
         if self._borrowed_amount > 0:

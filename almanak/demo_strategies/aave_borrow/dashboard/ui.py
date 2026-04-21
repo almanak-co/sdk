@@ -10,6 +10,27 @@ from typing import Any
 
 import streamlit as st
 
+# Placeholder USD prices per collateral token, lowercase keyed. Real dashboards
+# should source these from oracles / reserve data -- these values are only used
+# to estimate demo UI numbers. wstETH / weETH / rETH / cbETH carry their
+# respective premium/discount over ETH as of recent mainnet quotes.
+_PLACEHOLDER_TOKEN_PRICES_USD: dict[str, Decimal] = {
+    "eth": Decimal("3400"),
+    "weth": Decimal("3400"),
+    "wsteth": Decimal("3875"),
+    "weeth": Decimal("3605"),
+    "reth": Decimal("3790"),
+    "cbeth": Decimal("3640"),
+}
+
+
+def _placeholder_token_price(token_key: str) -> Decimal:
+    """Return placeholder USD price for a lowercase token symbol.
+
+    Falls back to 1 USD for unknown tokens (sensible default for stables).
+    """
+    return _PLACEHOLDER_TOKEN_PRICES_USD.get(token_key, Decimal("1"))
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -29,7 +50,10 @@ def render_custom_dashboard(
     st.title("Aave Borrow Strategy Dashboard")
 
     # Extract config values with defaults
-    collateral_token = strategy_config.get("collateral_token", "WETH")
+    # Default is wstETH rather than WETH because Aave V3 governance froze the
+    # WETH reserve on Arbitrum on 2026-04-20 (VIB-3294); wstETH is the default
+    # supply asset in config.json.
+    collateral_token = strategy_config.get("collateral_token", "wstETH")
     borrow_token = strategy_config.get("borrow_token", "USDC")
     collateral_amount = Decimal(str(strategy_config.get("collateral_amount", "1")))
     target_ltv_pct = Decimal(str(strategy_config.get("target_ltv_pct", "60")))
@@ -78,9 +102,13 @@ def _render_position_overview(
     session_state.get("collateral_value_usd", "0")
     session_state.get("borrowed_amount", "0")
 
-    # Estimate collateral value (would be from oracle in production)
-    eth_price = Decimal("3400")  # Placeholder
-    estimated_collateral_usd = collateral_amount * eth_price if collateral_token == "WETH" else collateral_amount
+    # Estimate collateral value (would be from oracle in production).
+    # Per-token placeholder prices keep ETH-correlated collaterals close to their
+    # real-world quote (wstETH/weETH trade above 1 ETH). Stables and unknown
+    # tokens fall through to a 1:1 USD assumption (price=1).
+    collateral_key = collateral_token.lower()
+    placeholder_collateral_price = _placeholder_token_price(collateral_key)
+    estimated_collateral_usd = collateral_amount * placeholder_collateral_price
 
     col1, col2, col3 = st.columns(3)
 
@@ -218,8 +246,20 @@ def _render_interest_rates(session_state: dict[str, Any], borrow_token: str) -> 
 
 def _render_liquidation_risk(session_state: dict[str, Any], collateral_token: str) -> None:
     """Render liquidation threshold and price levels."""
-    liquidation_threshold = Decimal("82.5")  # WETH on Aave V3 Arbitrum
-    current_price = Decimal("3400")  # Placeholder
+    collateral_key = collateral_token.lower()
+    # Placeholder liquidation thresholds by token (matches Aave V3 Arbitrum).
+    # Real values should come from reserve config + oracles in production —
+    # this is only shown in the demo dashboard.
+    placeholder_liquidation_thresholds = {
+        "wsteth": Decimal("78.5"),
+        "weth": Decimal("83"),
+        "weeth": Decimal("75"),
+        "reth": Decimal("74"),
+        "cbeth": Decimal("74"),
+        "eth": Decimal("83"),
+    }
+    liquidation_threshold = placeholder_liquidation_thresholds.get(collateral_key, Decimal("80"))
+    current_price = _placeholder_token_price(collateral_key)
     health_factor = Decimal(str(session_state.get("health_factor", "2.5")))
 
     # Calculate liquidation price

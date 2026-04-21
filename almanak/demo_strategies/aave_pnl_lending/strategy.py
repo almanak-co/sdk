@@ -1,10 +1,10 @@
-"""Aave V3 PnL Lending Strategy - Supply WETH, Borrow USDC on Dips.
+"""Aave V3 PnL Lending Strategy - Supply wstETH, Borrow USDC on Dips.
 
 This strategy is designed specifically to exercise the PnL backtester with
 lending intents. Unlike the simple aave_borrow demo (which supplies and borrows
 once), this strategy makes ongoing decisions across multiple ticks:
 
-1. Supplies WETH collateral on the first tick
+1. Supplies wstETH collateral on the first tick
 2. Borrows USDC when ETH price drops (buy-the-dip thesis)
 3. Repays USDC when ETH price rises (take profit on borrow)
 4. Holds otherwise
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 @almanak_strategy(
     name="demo_aave_pnl_lending",
-    description="Aave V3 lending strategy for PnL backtesting - supply WETH, borrow USDC on dips",
+    description="Aave V3 lending strategy for PnL backtesting - supply wstETH, borrow USDC on dips",
     version="1.0.0",
     author="Almanak",
     tags=["demo", "backtesting", "lending", "aave-v3", "pnl"],
@@ -47,7 +47,7 @@ class AavePnLLendingStrategy(IntentStrategy):
     """Aave V3 lending strategy that makes multi-tick decisions for PnL backtesting.
 
     Configuration Parameters (from config.json):
-        supply_token: Token to supply as collateral (default: "WETH")
+        supply_token: Token to supply as collateral (default: "wstETH")
         borrow_token: Token to borrow (default: "USDC")
         supply_amount: Amount of supply_token to deposit (default: "0.5")
         ltv_target: Target LTV for borrows (default: 0.4 = 40%)
@@ -58,7 +58,11 @@ class AavePnLLendingStrategy(IntentStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.supply_token = self.get_config("supply_token", "WETH")
+        # Default is wstETH rather than WETH because Aave V3 governance froze
+        # the WETH reserve on Arbitrum on 2026-04-20 (LTV=0, frozen=true),
+        # making supply() revert. wstETH is an active ETH-correlated asset.
+        # Tracked under VIB-3294.
+        self.supply_token = self.get_config("supply_token", "wstETH")
         self.borrow_token = self.get_config("borrow_token", "USDC")
         self.supply_amount = Decimal(str(self.get_config("supply_amount", "0.5")))
         self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.4")))

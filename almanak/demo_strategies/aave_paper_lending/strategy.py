@@ -41,7 +41,7 @@ USAGE:
 STRATEGY LOGIC:
 ---------------
 Each tick:
-  1. If idle -> supply WETH as collateral
+  1. If idle -> supply wstETH as collateral
   2. If supplied and price dropped -> borrow USDC (leverage on dip)
   3. If borrowed and price risen -> repay USDC (de-leverage on recovery)
   4. After max borrow cycles -> hold (preserve capital)
@@ -90,7 +90,7 @@ class AavePaperLendingStrategy(IntentStrategy):
     health factor tracking.
 
     Configuration (config.json):
-        supply_token: Token to supply as collateral (default: "WETH")
+        supply_token: Token to supply as collateral (default: "wstETH")
         borrow_token: Token to borrow (default: "USDC")
         supply_amount: Amount of supply_token to deposit (default: "0.01")
         ltv_target: Target LTV ratio for borrows (default: 0.4 = 40%)
@@ -107,7 +107,11 @@ class AavePaperLendingStrategy(IntentStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.supply_token = self.get_config("supply_token", "WETH")
+        # Default is wstETH rather than WETH because Aave V3 governance froze
+        # the WETH reserve on Arbitrum on 2026-04-20 (LTV=0, frozen=true),
+        # making supply() revert. wstETH is an active ETH-correlated asset.
+        # Tracked under VIB-3294.
+        self.supply_token = self.get_config("supply_token", "wstETH")
         self.borrow_token = self.get_config("borrow_token", "USDC")
         self.supply_amount = Decimal(str(self.get_config("supply_amount", "0.01")))
         self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.4")))

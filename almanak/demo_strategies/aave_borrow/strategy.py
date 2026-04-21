@@ -8,7 +8,7 @@ using Aave V3's lending protocol.
 
 WHAT THIS STRATEGY DOES:
 ------------------------
-1. Supplies collateral (e.g., WETH) to Aave V3
+1. Supplies collateral (e.g., wstETH) to Aave V3
 2. Borrows against it (e.g., USDC) at a target LTV
 
 This is a simple supply-and-borrow strategy, NOT a looping strategy.
@@ -117,7 +117,7 @@ class AaveBorrowStrategy(IntentStrategy):
 
     Configuration Parameters (from config.json):
     --------------------------------------------
-    - collateral_token: Token to use as collateral (default: "WETH")
+    - collateral_token: Token to use as collateral (default: "wstETH")
     - collateral_amount: Amount to supply (default: "0.1")
     - borrow_token: Token to borrow (default: "USDC")
     - ltv_target: Target LTV ratio (default: 0.5 = 50%)
@@ -127,7 +127,7 @@ class AaveBorrowStrategy(IntentStrategy):
     Example Config:
     ---------------
     {
-        "collateral_token": "WETH",
+        "collateral_token": "wstETH",
         "collateral_amount": "0.1",
         "borrow_token": "USDC",
         "ltv_target": 0.5,
@@ -155,7 +155,12 @@ class AaveBorrowStrategy(IntentStrategy):
         # =====================================================================
 
         # Collateral configuration
-        self.collateral_token = self.get_config("collateral_token", "WETH")
+        # Default is wstETH rather than WETH because Aave V3 governance froze
+        # the WETH reserve on Arbitrum on 2026-04-20 (LTV=0, frozen=true),
+        # which makes supply() revert with RESERVE_FROZEN. wstETH remains an
+        # active ETH-correlated collateral asset on Arbitrum Aave V3.
+        # Tracked under VIB-3294.
+        self.collateral_token = self.get_config("collateral_token", "wstETH")
         self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "0.1")))
 
         # Borrow configuration

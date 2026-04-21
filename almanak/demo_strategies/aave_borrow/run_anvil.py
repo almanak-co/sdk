@@ -9,9 +9,9 @@ This script demonstrates how to test an Aave borrow strategy on Anvil.
 WHAT THIS SCRIPT DOES:
 ----------------------
 1. Starts an Anvil fork of Arbitrum mainnet
-2. Funds the test wallet with WETH
+2. Funds the test wallet with wstETH
 3. Runs the strategy via the CLI runner
-4. The strategy supplies WETH as collateral and borrows USDC
+4. The strategy supplies wstETH as collateral and borrows USDC
 
 PREREQUISITES:
 --------------
@@ -28,6 +28,14 @@ USAGE:
     # Force specific action:
     python strategies/demo/aave_borrow/run_anvil.py --action supply
     python strategies/demo/aave_borrow/run_anvil.py --action borrow
+
+NOTE (VIB-3294, 2026-04-21):
+---------------------------
+Aave V3 governance froze the WETH reserve on Arbitrum on 2026-04-20
+(supply() now reverts with RESERVE_FROZEN). This tutorial therefore
+funds the test wallet directly with wstETH and passes
+collateral_token="wstETH", which remains an active ETH-correlated
+collateral asset on recent forks.
 
 ===============================================================================
 """
@@ -58,14 +66,14 @@ ANVIL_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 ANVIL_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 # Arbitrum token addresses
-WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+WSTETH_ADDRESS = "0x5979D7b546E38E414F7E9822514be443A4800529"
 USDC_ADDRESS = "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"  # USDC.e
 
 # Aave V3 addresses on Arbitrum
 AAVE_POOL = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
 
 # Amounts to fund
-FUND_AMOUNT_WETH = Decimal("0.5")  # 0.5 WETH for collateral
+FUND_AMOUNT_WSTETH = Decimal("0.5")  # 0.5 wstETH for collateral
 
 # Anvil settings
 ANVIL_PORT = 8545
@@ -154,13 +162,13 @@ def run_cast(args: list[str], check: bool = True) -> str:
     return result.stdout.strip()
 
 
-def fund_wallet_with_weth(wallet: str, amount_weth: Decimal) -> bool:
-    """Fund wallet with WETH by wrapping ETH."""
+def fund_wallet_with_wsteth(wallet: str, amount_wsteth: Decimal) -> bool:
+    """Fund wallet with wstETH via direct storage patching on the fork."""
     print(f"\n{'=' * 60}")
-    print(f"FUNDING WALLET WITH {amount_weth} WETH")
+    print(f"FUNDING WALLET WITH {amount_wsteth} wstETH")
     print(f"{'=' * 60}")
 
-    amount_wei = int(amount_weth * 10**18)
+    amount_wei = int(amount_wsteth * 10**18)
 
     try:
         # Ensure wallet has ETH
@@ -176,17 +184,24 @@ def fund_wallet_with_weth(wallet: str, amount_weth: Decimal) -> bool:
             check=False,
         )
 
-        # Wrap ETH to WETH
+        storage_slot = run_cast(
+            [
+                "index",
+                "address",
+                wallet,
+                "1",
+            ]
+        )
+
+        # Patch wstETH balance directly on the fork. Arbitrum wstETH uses
+        # balance mapping slot 1 (same slot registered in fork_manager.py).
         run_cast(
             [
-                "send",
-                WETH_ADDRESS,
-                "--value",
-                str(amount_wei),
-                "--from",
-                wallet,
-                "--private-key",
-                ANVIL_PRIVATE_KEY,
+                "rpc",
+                "anvil_setStorageAt",
+                WSTETH_ADDRESS,
+                storage_slot,
+                f"0x{amount_wei:064x}",
                 "--rpc-url",
                 ANVIL_RPC,
             ]
@@ -196,16 +211,16 @@ def fund_wallet_with_weth(wallet: str, amount_weth: Decimal) -> bool:
         balance = run_cast(
             [
                 "call",
-                WETH_ADDRESS,
+                WSTETH_ADDRESS,
                 "balanceOf(address)(uint256)",
                 wallet,
                 "--rpc-url",
                 ANVIL_RPC,
             ]
         )
-        weth_balance = int(balance.split()[0].replace(",", ""))
-        print(f"Wallet WETH balance: {weth_balance / 10**18:.6f}")
-        return weth_balance >= amount_wei
+        wsteth_balance = int(balance.split()[0].replace(",", ""))
+        print(f"Wallet wstETH balance: {wsteth_balance / 10**18:.6f}")
+        return wsteth_balance >= amount_wei
 
     except Exception as e:
         print(f"ERROR: Failed to fund wallet: {e}")
@@ -242,7 +257,7 @@ def run_strategy_via_cli(force_action: str = "supply") -> int:
     config = {
         "strategy_id": "demo_aave_borrow",
         "strategy_name": "demo_aave_borrow",
-        "collateral_token": "WETH",
+        "collateral_token": "wstETH",
         "collateral_amount": "0.1",
         "borrow_token": "USDC",
         "ltv_target": 0.5,
@@ -317,9 +332,9 @@ def main():
     print("=" * 60)
     print("\nThis test runs the AaveBorrowStrategy through the full stack:")
     print("  1. Anvil fork of Arbitrum")
-    print("  2. Fund wallet with WETH")
+    print("  2. Fund wallet with wstETH")
     print("  3. Run strategy via CLI runner")
-    print("  4. Strategy supplies WETH as collateral and borrows USDC")
+    print("  4. Strategy supplies wstETH as collateral and borrows USDC")
     print(f"\nAction: {args.action.upper()}")
     print("")
 
@@ -337,9 +352,9 @@ def main():
         sys.exit(1)
 
     try:
-        # Fund wallet with WETH
-        if not fund_wallet_with_weth(ANVIL_WALLET, FUND_AMOUNT_WETH):
-            print("Failed to fund wallet with WETH")
+        # Fund wallet with wstETH
+        if not fund_wallet_with_wsteth(ANVIL_WALLET, FUND_AMOUNT_WSTETH):
+            print("Failed to fund wallet with wstETH")
             sys.exit(1)
 
         # Run strategy via CLI

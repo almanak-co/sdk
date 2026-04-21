@@ -1,6 +1,6 @@
 # Aave Pnl Lending (Demo)
 
-Aave V3 lending strategy for PnL backtesting - supply WETH, borrow USDC on dips
+Aave V3 lending strategy for PnL backtesting - supply wstETH, borrow USDC on dips
 
 ## Chain
 

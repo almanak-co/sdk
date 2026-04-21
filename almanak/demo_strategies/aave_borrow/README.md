@@ -4,7 +4,7 @@ A tutorial strategy demonstrating how to supply collateral and borrow on Aave V3
 
 ## What This Strategy Does
 
-1. **Supply collateral** (e.g., WETH) to Aave V3
+1. **Supply collateral** (e.g., wstETH) to Aave V3
 2. **Borrow** against it (e.g., USDC) at a target LTV
 
 This is a simple supply-and-borrow strategy. For a full looping strategy that swaps borrowed tokens back to collateral and re-supplies, see the `leverage_loop_cross_chain` example.
@@ -50,7 +50,7 @@ python strategies/demo/aave_borrow/run_anvil.py
 >
 > If using Claude Code, ask it to fund your wallet with the required tokens:
 > ```
-> "cast send 0.1 WETH to Anvil wallet on Arbitrum"
+> "cast send 0.1 wstETH to Anvil wallet on Arbitrum"
 > ```
 > Claude Code will use `anvil_setStorageAt` to set token balances for testing.
 
@@ -75,7 +75,7 @@ Edit `config.json` to customize:
 
 ```json
 {
-    "collateral_token": "WETH",        // Token to supply as collateral
+    "collateral_token": "wstETH",      // Token to supply as collateral
     "collateral_amount": "0.002",      // Amount to supply
     "borrow_token": "USDC",            // Token to borrow
     "ltv_target": 0.5,                 // Target LTV (50%)
@@ -102,7 +102,7 @@ State is persisted, so the strategy can resume after crash/restart.
 def _create_supply_intent(self):
     return Intent.supply(
         protocol="aave_v3",
-        token="WETH",
+        token="wstETH",
         amount=Decimal("0.002"),
         use_as_collateral=True,
         chain="arbitrum",
@@ -119,7 +119,7 @@ def _create_borrow_intent(self, collateral_price, borrow_price):
 
     return Intent.borrow(
         protocol="aave_v3",
-        collateral_token="WETH",
+        collateral_token="wstETH",
         collateral_amount=Decimal("0"),  # Already supplied
         borrow_token="USDC",
         borrow_amount=borrow_amount,

@@ -9,14 +9,14 @@
             "amount_type": "usd"
         },
         {
-            "symbol": "WETH",
-            "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "symbol": "wstETH",
+            "address": "0x5979D7b546E38E414F7E9822514be443A4800529",
             "chain": "arbitrum",
             "amount": "0.005",
             "amount_type": "token"
         }
     ],
-    "collateral_token": "WETH",
+    "collateral_token": "wstETH",
     "collateral_amount": "0.002",
     "borrow_token": "USDC",
     "ltv_target": 0.5,
@@ -24,7 +24,7 @@
     "interest_rate_mode": "variable",
     "anvil_funding": {
         "ETH": 100,
-        "WETH": 1,
+        "wstETH": 1,
         "USDC": 10000
     }
 }
