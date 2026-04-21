@@ -1607,41 +1607,23 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
     Returns:
         CompilationResult with repay ActionBundle
     """
-    from .compiler_adapters import AaveV3Adapter
-
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
         intent_id=intent.intent_id,
     )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = []
 
     try:
         protocol_lower = intent.protocol.lower()
 
-        # =================================================================
-        # SOLANA LENDING PATH (Kamino / Jupiter Lend)
-        # =================================================================
+        # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'jupiter_lend' is only available on Solana chains.",
-                )
-            return compiler._compile_jupiter_lend_repay(intent)
+            return _compile_repay_jupiter_lend(compiler, intent)
         if protocol_lower == "kamino" or (
             compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
         ):
-            if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error=f"Protocol '{intent.protocol}' is not supported for REPAY on Solana. Supported: kamino, jupiter_lend",
-                )
-            return compiler._compile_kamino_repay(intent)
+            return _compile_repay_kamino(compiler, intent)
 
-        # Step 1: Resolve token address
+        # Resolve shared repay token and amount for EVM protocols.
         repay_token = compiler._resolve_token(intent.token)
         if repay_token is None:
             return CompilationResult(
@@ -1650,12 +1632,12 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
                 intent_id=intent.intent_id,
             )
 
-        # Step 2: Calculate repay amount
+        initial_warnings: list[str] = []
         repay_amount_decimal: Decimal | None
         if intent.repay_full:
             repay_amount_decimal = None  # Will use shares-based repay for Morpho
             amount_description = "full debt"
-            warnings.append("Repaying full debt - ensure sufficient balance to cover interest")
+            initial_warnings.append("Repaying full debt - ensure sufficient balance to cover interest")
         elif intent.amount == "all":
             # amount="all" was not resolved by the amount resolver — fall back to repay_full
             logger.info(
@@ -1665,1059 +1647,1243 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
             repay_amount_decimal = None
             intent = intent.model_copy(update={"repay_full": True})
             amount_description = "full debt"
-            warnings.append("Repaying full debt (amount='all' fallback)")
+            initial_warnings.append("Repaying full debt (amount='all' fallback)")
         else:
             repay_amount_decimal = intent.amount  # type: ignore[assignment]
             amount_description = str(repay_amount_decimal)
 
-        # =================================================================
-        # MORPHO BLUE PATH
-        # =================================================================
         if protocol_lower in ("morpho", "morpho_blue"):
-            if not intent.market_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="market_id is required for Morpho Blue repay",
-                    intent_id=intent.intent_id,
-                )
-
-            # Lazy import to avoid circular import
-            from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
-
-            # Use _get_chain_rpc_url() (not compiler.rpc_url) so Anvil fork URL is detected via
-            # ANVIL_{CHAIN}_PORT env var when running on a fork. compiler.rpc_url is always None
-            # in gateway mode, which caused the SDK to use Alchemy mainnet RPC even on Anvil,
-            # returning borrow_shares=0 and breaking repay_full=True (VIB-587).
-            morpho_rpc_url = compiler._get_chain_rpc_url()
-
-            morpho_config = MorphoBlueConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-                rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
-                gateway_client=compiler._gateway_client,
+            return _compile_repay_morpho_blue(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
             )
-            morpho_adapter = MorphoBlueAdapter(morpho_config)
-
-            # Build approve TX for Morpho Blue contract
-            if repay_amount_decimal is not None:
-                approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-            else:
-                approve_amount = MAX_UINT256  # Approve max for full repay
-
-            approve_txs = compiler._build_approve_tx(
-                repay_token.address,
-                morpho_adapter.morpho_address,
-                approve_amount,
-            )
-            transactions.extend(approve_txs)
-
-            # Build repay TX
-            repay_result: Any = morpho_adapter.repay(
-                market_id=intent.market_id,
-                amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
-                on_behalf_of=compiler.wallet_address,
-                repay_all=intent.repay_full,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Morpho Blue repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=repay_result.tx_data["value"],
-                data=repay_result.tx_data["data"],
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description or f"Repay {amount_description} {repay_token.symbol}",
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "morpho_address": morpho_adapter.morpho_address,
-                    "market_id": intent.market_id,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Morpho Blue")
-            return result
-
-        # =================================================================
-        # CURVANCE PATH (Monad — repay to BorrowableCToken)
-        # =================================================================
         if protocol_lower == "curvance":
-            if not intent.market_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="market_id is required for Curvance repay (MarketManager address)",
-                    intent_id=intent.intent_id,
-                )
-
-            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
-
-            curvance_adapter = CurvanceAdapter(
-                CurvanceConfig(
-                    chain=compiler.chain,
-                    wallet_address=compiler.wallet_address,
-                    gateway_client=compiler._gateway_client,
-                )
+            return _compile_repay_curvance(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
+            return _compile_repay_aave_compatible(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower == "spark":
+            return _compile_repay_spark(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower == "compound_v3":
+            return _compile_repay_compound_v3(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower == "benqi":
+            return _compile_repay_benqi(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower == "joelend":
+            return _compile_repay_joelend(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower == "euler_v2":
+            return _compile_repay_euler_v2(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
+            )
+        if protocol_lower == "silo_v2":
+            return _compile_repay_silo_v2(
+                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
             )
 
-            mismatch = _validate_curvance_market_tokens(
-                curvance_adapter,
-                intent.market_id,
-                expected_debt_symbol=repay_token.symbol,
-            )
-            if mismatch:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=mismatch,
-                    intent_id=intent.intent_id,
-                )
-
-            # Approve the BorrowableCToken to pull the repayment.
-            approve_amount = (
-                MAX_UINT256
-                if intent.repay_full or repay_amount_decimal is None
-                else int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-            )
-            approve_txs = compiler._build_approve_tx(
-                repay_token.address,
-                curvance_adapter.get_repay_spender(intent.market_id),
-                approve_amount,
-            )
-            transactions.extend(approve_txs)
-
-            # Build the repay tx.
-            curvance_repay_result = curvance_adapter.repay(
-                market_id=intent.market_id,
-                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-                repay_full=intent.repay_full,
-            )
-            if not curvance_repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curvance repay failed: {curvance_repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-            assert curvance_repay_result.tx_data is not None
-            transactions.append(
-                TransactionData(
-                    to=curvance_repay_result.tx_data["to"],
-                    value=curvance_repay_result.tx_data["value"],
-                    data=curvance_repay_result.tx_data["data"],
-                    gas_estimate=curvance_repay_result.gas_estimate,
-                    description=curvance_repay_result.description,
-                    tx_type="lending_repay",
-                )
-            )
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            market_info = curvance_adapter.get_market(intent.market_id)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": "curvance",
-                    "market_id": intent.market_id,
-                    "market_name": market_info.name,
-                    "borrowable_ctoken": market_info.borrowable_ctoken,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-            logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Curvance {market_info.name}")
-            return result
-
-        # =================================================================
-        # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
-        # =================================================================
-        elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            adapter = AaveV3Adapter(compiler.chain, protocol_lower)
-            pool_address = adapter.get_pool_address()
-
-            if pool_address == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"{intent.protocol} not available on chain: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            if intent.repay_full:
-                # Query wallet balance to use as repay amount — avoids InsufficientFunds()
-                # when accrued interest causes debt to exceed the borrowed principal.
-                # Aave accepts any amount up to the debt; we repay as much as the wallet holds.
-                wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
-                if wallet_balance is None:
-                    repay_amount = MAX_UINT256
-                    logger.warning(
-                        f"repay_full: could not query wallet balance for {repay_token.symbol}, "
-                        f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
-                    )
-                else:
-                    repay_amount = wallet_balance
-                    logger.debug(
-                        f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}"
-                    )
-            else:
-                assert repay_amount_decimal is not None
-                repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-
-            approve_amount = repay_amount
-
-            if not repay_token.is_native:
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    pool_address,
-                    approve_amount,
-                )
-                transactions.extend(approve_txs)
-            else:
-                weth_address = compiler._get_wrapped_native_address()
-                if weth_address:
-                    approve_txs = compiler._build_approve_tx(
-                        weth_address,
-                        pool_address,
-                        approve_amount,
-                    )
-                    transactions.extend(approve_txs)
-                    warnings.append("Native token debt: using WETH for repayment")
-
-            actual_repay_address = repay_token.address
-            if repay_token.is_native:
-                weth_address = compiler._get_wrapped_native_address()
-                if weth_address:
-                    actual_repay_address = weth_address
-
-            # Resolve interest rate mode: use intent value or default to variable
-            # Note: stable rate is deprecated on Aave V3, rejected at intent layer
-            aave_rate_mode = AAVE_VARIABLE_RATE_MODE
-            rate_mode_label = "variable"
-
-            repay_calldata = adapter.get_repay_calldata(
-                asset=actual_repay_address,
-                amount=repay_amount,
-                interest_rate_mode=aave_rate_mode,
-                on_behalf_of=compiler.wallet_address,
-            )
-
-            repay_tx = TransactionData(
-                to=pool_address,
-                value=0,
-                data="0x" + repay_calldata.hex(),
-                gas_estimate=adapter.estimate_repay_gas(),
-                description=(f"Repay {amount_description} {repay_token.symbol} ({rate_mode_label} rate)"),
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "pool_address": pool_address,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": str(repay_amount),
-                    "repay_full": intent.repay_full,
-                    "interest_rate_mode": aave_rate_mode,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {repay_token.symbol}, full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        # SPARK PATH (Aave V3 fork with Spark-specific addresses)
-        # =================================================================
-        elif protocol_lower == "spark":
-            from ..connectors.spark import (
-                SPARK_POOL_ADDRESSES,
-                SPARK_VARIABLE_RATE_MODE,
-                SparkAdapter,
-                SparkConfig,
-            )
-
-            if compiler.chain not in SPARK_POOL_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            spark_config = SparkConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            spark_adapter = SparkAdapter(spark_config)
-            pool_address = spark_adapter.pool_address
-
-            if intent.repay_full:
-                # Same as Aave path: query wallet balance to avoid InsufficientFunds()
-                # if accrued interest exceeds original principal in the wallet.
-                wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
-                if wallet_balance is None:
-                    repay_amount = MAX_UINT256
-                    logger.warning(
-                        f"repay_full: could not query wallet balance for {repay_token.symbol}, "
-                        f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
-                    )
-                else:
-                    repay_amount = wallet_balance
-                    logger.debug(
-                        f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}"
-                    )
-            else:
-                assert repay_amount_decimal is not None
-                repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-
-            approve_amount = repay_amount
-
-            actual_repay_address = repay_token.address
-            if not repay_token.is_native:
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    pool_address,
-                    approve_amount,
-                )
-                transactions.extend(approve_txs)
-            else:
-                weth_address = compiler._get_wrapped_native_address()
-                if weth_address:
-                    actual_repay_address = weth_address
-                    approve_txs = compiler._build_approve_tx(
-                        weth_address,
-                        pool_address,
-                        approve_amount,
-                    )
-                    transactions.extend(approve_txs)
-                    warnings.append("Native token debt: using WETH for repayment")
-
-            # Resolve interest rate mode: use intent value or default to variable
-            # Note: stable rate is deprecated on Spark, rejected at intent layer
-            spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
-            spark_repay_rate_label = "variable"
-
-            # Build repay TX via Spark adapter.
-            # When we have a concrete wallet balance, pass repay_all=False so the
-            # adapter uses the exact amount instead of overriding with MAX_UINT256.
-            spark_use_repay_all = repay_amount == MAX_UINT256
-            spark_amount = (
-                Decimal(repay_amount) / Decimal(10**repay_token.decimals)
-                if not spark_use_repay_all
-                else (repay_amount_decimal or Decimal("0"))
-            )
-            repay_result = spark_adapter.repay(
-                asset=actual_repay_address,
-                amount=spark_amount,
-                interest_rate_mode=spark_repay_rate_mode,
-                on_behalf_of=compiler.wallet_address,
-                repay_all=spark_use_repay_all,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Spark repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_data = repay_result.tx_data["data"]
-            if not repay_data.startswith("0x"):
-                repay_data = "0x" + repay_data
-
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=0,
-                data=repay_data,
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description
-                or f"Repay {amount_description} {repay_token.symbol} to Spark ({spark_repay_rate_label} rate)",
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "pool_address": pool_address,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": str(repay_amount),
-                    "repay_full": intent.repay_full,
-                    "interest_rate_mode": spark_repay_rate_mode,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {repay_token.symbol}, full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas (Spark)"
-            )
-
-        # =================================================================
-        # COMPOUND V3 PATH
-        # =================================================================
-        elif protocol_lower == "compound_v3":
-            from ..connectors.compound_v3.adapter import (
-                COMPOUND_V3_COMET_ADDRESSES,
-                CompoundV3Adapter,
-                CompoundV3Config,
-            )
-
-            market = intent.market_id or "usdc"
-
-            if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-            if market not in available_markets:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            compound_config = CompoundV3Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-                market=market,
-                gateway_client=compiler._gateway_client,
-            )
-            compound_adapter = CompoundV3Adapter(compound_config)
-
-            # Build approve TX for Comet contract (repay token -> Comet)
-            if repay_amount_decimal is not None:
-                approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-            else:
-                approve_amount = MAX_UINT256  # Approve max for full repay
-
-            approve_txs = compiler._build_approve_tx(
-                repay_token.address,
-                compound_adapter.comet_address,
-                approve_amount,
-            )
-            transactions.extend(approve_txs)
-
-            # Build repay TX via Compound V3 adapter
-            repay_result = compound_adapter.repay(
-                amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
-                on_behalf_of=compiler.wallet_address,
-                repay_all=intent.repay_full,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_data = repay_result.tx_data["data"]
-            if not repay_data.startswith("0x"):
-                repay_data = "0x" + repay_data
-
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=int(repay_result.tx_data.get("value", 0)),
-                data=repay_data,
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description
-                or f"Repay {amount_description} {repay_token.symbol} to Compound V3",
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "comet_address": compound_adapter.comet_address,
-                    "market": market,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {amount_description} {repay_token.symbol} to Compound V3 {market}, "
-                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        # BENQI PATH (Compound V2 fork on Avalanche)
-        # =================================================================
-        elif protocol_lower == "benqi":
-            from ..connectors.benqi.adapter import (
-                BENQI_QI_TOKENS,
-                BenqiAdapter,
-                BenqiConfig,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            benqi_config = BenqiConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            benqi_adapter = BenqiAdapter(benqi_config)
-
-            repay_symbol = repay_token.symbol.upper()
-            repay_market = benqi_adapter.get_market_info(repay_symbol)
-
-            if not repay_market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI does not support asset: {repay_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build approve TX for qiToken (skip for native AVAX)
-            if not repay_market.is_native and not intent.repay_full:
-                if repay_amount_decimal is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="BENQI repay requires an explicit amount (or use repay_full=True)",
-                        intent_id=intent.intent_id,
-                    )
-                repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    repay_market.qi_token_address,
-                    repay_amount_wei,
-                )
-                transactions.extend(approve_txs)
-            elif not repay_market.is_native and intent.repay_full:
-                # For repay_full, approve MAX_UINT256
-                from ..connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
-
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    repay_market.qi_token_address,
-                    BENQI_MAX_UINT256,
-                )
-                transactions.extend(approve_txs)
-
-            # Build repay TX
-            repay_result = benqi_adapter.repay(
-                asset=repay_symbol,
-                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-                repay_all=intent.repay_full,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_data = repay_result.tx_data["data"]
-            if not repay_data.startswith("0x"):
-                repay_data = "0x" + repay_data
-
-            amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
-
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=int(repay_result.tx_data.get("value", 0)),
-                data=repay_data,
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description,
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "comptroller_address": benqi_adapter.comptroller_address,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {amount_description} {repay_token.symbol} to BENQI, "
-                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        # JOE LEND PATH (Compound V2 fork on Avalanche — Banker Joe)
-        # =================================================================
-        elif protocol_lower == "joelend":
-            from ..connectors.joelend.adapter import (
-                JOELEND_J_TOKENS,
-                JoeLendAdapter,
-                JoeLendConfig,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            joelend_config = JoeLendConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            joelend_adapter = JoeLendAdapter(joelend_config)
-
-            repay_symbol = repay_token.symbol.upper()
-            jl_repay_market = joelend_adapter.get_market_info(repay_symbol)
-
-            if not jl_repay_market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend does not support asset: {repay_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            # If repaying native AVAX, wrap to WAVAX first.
-            # jAVAX rejects raw native deposits so we must go through WAVAX.
-            if repay_token.is_native and jl_repay_market.underlying_address:
-                # For native AVAX repay_full, recover an explicit amount because
-                # we need a concrete value for the wrap TX.
-                if intent.repay_full and not repay_amount_decimal:
-                    if intent.amount is not None and intent.amount != "all" and Decimal(str(intent.amount)) > 0:
-                        repay_amount_decimal = Decimal(str(intent.amount))
-                        logger.info(
-                            "Recovered repay amount %s from intent for native AVAX repay_full",
-                            repay_amount_decimal,
-                        )
-                    else:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error="Joe Lend native AVAX repay_full requires an explicit positive repay amount (query debt balance first)",
-                            intent_id=intent.intent_id,
-                        )
-
-                if not intent.repay_full:
-                    if repay_amount_decimal is None:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
-                            intent_id=intent.intent_id,
-                        )
-
-                assert repay_amount_decimal is not None  # guaranteed by branches above
-                wavax_address = jl_repay_market.underlying_address
-                wrap_amount = repay_amount_decimal
-                if intent.repay_full:
-                    # Add 0.1% buffer to account for interest accrual between
-                    # debt query and execution (matches the old native repay path).
-                    wrap_amount = repay_amount_decimal * Decimal("1.001")
-                repay_amount_wei = int(wrap_amount * Decimal(10**repay_token.decimals))
-                wrap_tx = TransactionData(
-                    to=wavax_address,
-                    value=repay_amount_wei,
-                    data="0xd0e30db0",  # WAVAX deposit() selector
-                    gas_estimate=50_000,
-                    description=f"Wrap {wrap_amount} AVAX to WAVAX for Joe Lend repay",
-                    tx_type="wrap_native",
-                )
-                transactions.append(wrap_tx)
-                approve_token_address = wavax_address
-            else:
-                approve_token_address = repay_token.address
-
-            # Build approve TX for jToken
-            if not intent.repay_full:
-                if repay_amount_decimal is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
-                        intent_id=intent.intent_id,
-                    )
-                repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-                approve_txs = compiler._build_approve_tx(
-                    approve_token_address,
-                    jl_repay_market.j_token_address,
-                    repay_amount_wei,
-                )
-                transactions.extend(approve_txs)
-            else:
-                # For repay_full, approve MAX_UINT256
-                from ..connectors.joelend.adapter import MAX_UINT256 as JOELEND_MAX_UINT256
-
-                approve_txs = compiler._build_approve_tx(
-                    approve_token_address,
-                    jl_repay_market.j_token_address,
-                    JOELEND_MAX_UINT256,
-                )
-                transactions.extend(approve_txs)
-
-            # Build repay TX
-            repay_result = joelend_adapter.repay(
-                asset=repay_symbol,
-                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-                repay_all=intent.repay_full,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_data = repay_result.tx_data["data"]
-            if not repay_data.startswith("0x"):
-                repay_data = "0x" + repay_data
-
-            amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
-
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=int(repay_result.tx_data.get("value", 0)),
-                data=repay_data,
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description,
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "joetroller_address": joelend_adapter.joetroller_address,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {amount_description} {repay_token.symbol} to Joe Lend, "
-                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults + EVC)
-        # =================================================================
-        elif protocol_lower == "euler_v2":
-            from ..connectors.euler_v2.adapter import (
-                MAX_UINT256 as EULER_MAX_UINT256,
-            )
-            from ..connectors.euler_v2.adapter import (
-                EulerV2Adapter,
-                EulerV2Config,
-            )
-
-            # Chain validation is handled by EulerV2Config.__post_init__
-            euler_config = EulerV2Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            euler_adapter = EulerV2Adapter(euler_config)
-
-            repay_symbol = repay_token.symbol.upper()
-            repay_vault = euler_adapter.find_vault_for_asset(repay_symbol)
-
-            if not repay_vault:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 does not have a vault for asset: {repay_symbol}. Supported: {euler_adapter.get_supported_assets()}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build approve TX for vault
-            if not intent.repay_full:
-                if repay_amount_decimal is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="Euler V2 repay requires an explicit amount (or use repay_full=True)",
-                        intent_id=intent.intent_id,
-                    )
-                repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    repay_vault.vault_address,
-                    repay_amount_wei,
-                )
-                transactions.extend(approve_txs)
-            else:
-                # For repay_full, approve MAX_UINT256
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    repay_vault.vault_address,
-                    EULER_MAX_UINT256,
-                )
-                transactions.extend(approve_txs)
-
-            # Build repay TX
-            repay_result = euler_adapter.repay(
-                asset=repay_symbol,
-                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-                repay_all=intent.repay_full,
-                vault_symbol=repay_vault.vault_symbol,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_data = repay_result.tx_data["data"]
-            if not repay_data.startswith("0x"):
-                repay_data = "0x" + repay_data
-
-            amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
-
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=int(repay_result.tx_data.get("value", 0)),
-                data=repay_data,
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description,
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "vault_address": repay_vault.vault_address,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {amount_description} {repay_token.symbol} to Euler V2, "
-                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        elif protocol_lower == "silo_v2":
-            from ..connectors.silo_v2.adapter import (
-                MAX_UINT256 as SILO_MAX_UINT256,
-            )
-            from ..connectors.silo_v2.adapter import (
-                SILO_V2_MARKETS,
-                SiloV2Adapter,
-                SiloV2Config,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            silo_config = SiloV2Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            silo_adapter = SiloV2Adapter(silo_config)
-
-            repay_symbol = repay_token.symbol.upper()
-            sv2_silo_result = silo_adapter.find_silo_for_asset(repay_symbol)
-
-            if not sv2_silo_result:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Silo V2 market found for asset: {repay_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            sv2_market, silo_address, _ = sv2_silo_result
-
-            # Build approve TX for the silo
-            if not intent.repay_full:
-                if repay_amount_decimal is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="Silo V2 repay requires an explicit amount (or use repay_full=True)",
-                        intent_id=intent.intent_id,
-                    )
-                repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    silo_address,
-                    repay_amount_wei,
-                )
-                transactions.extend(approve_txs)
-            else:
-                # For repay_full, approve MAX_UINT256
-                approve_txs = compiler._build_approve_tx(
-                    repay_token.address,
-                    silo_address,
-                    SILO_MAX_UINT256,
-                )
-                transactions.extend(approve_txs)
-
-            # Build repay TX
-            repay_result = silo_adapter.repay(
-                asset=repay_symbol,
-                amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-                market_name=sv2_market.market_name,
-                repay_all=intent.repay_full,
-            )
-
-            if not repay_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Silo V2 repay failed: {repay_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            assert repay_result.tx_data is not None
-            repay_data = repay_result.tx_data["data"]
-            if not repay_data.startswith("0x"):
-                repay_data = "0x" + repay_data
-
-            amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
-
-            repay_tx = TransactionData(
-                to=repay_result.tx_data["to"],
-                value=int(repay_result.tx_data.get("value", 0)),
-                data=repay_data,
-                gas_estimate=repay_result.gas_estimate,
-                description=repay_result.description,
-                tx_type="lending_repay",
-            )
-            transactions.append(repay_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.REPAY.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "silo_config": sv2_market.silo_config,
-                    "market_name": sv2_market.market_name,
-                    "repay_token": repay_token.to_dict(),
-                    "repay_amount": amount_description,
-                    "repay_full": intent.repay_full,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled REPAY: {amount_description} {repay_token.symbol} to Silo V2 ({sv2_market.market_name}), "
-                f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        # UNSUPPORTED PROTOCOL
-        # =================================================================
-        else:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
-                intent_id=intent.intent_id,
-            )
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            intent_id=intent.intent_id,
+        )
 
     except Exception as e:
         logger.exception(f"Failed to compile REPAY intent: {e}")
         result.status = CompilationStatus.FAILED
         result.error = str(e)
 
+    return result
+
+
+def _compile_repay_jupiter_lend(compiler, intent: RepayIntent) -> CompilationResult:
+    """Compile REPAY for Jupiter Lend (Solana only)."""
+    if not compiler._is_solana_chain():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error="Protocol 'jupiter_lend' is only available on Solana chains.",
+        )
+    return compiler._compile_jupiter_lend_repay(intent)
+
+
+def _compile_repay_kamino(compiler, intent: RepayIntent) -> CompilationResult:
+    """Compile REPAY for Kamino (Solana) and the Solana-fallback path.
+
+    Handles the original branch that matched ``protocol_lower == "kamino"`` or
+    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
+    """
+    protocol_lower = intent.protocol.lower()
+    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=f"Protocol '{intent.protocol}' is not supported for REPAY on Solana. Supported: kamino, jupiter_lend",
+        )
+    return compiler._compile_kamino_repay(intent)
+
+
+def _compile_repay_morpho_blue(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue repay",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Use _get_chain_rpc_url() (not compiler.rpc_url) so Anvil fork URL is detected via
+    # ANVIL_{CHAIN}_PORT env var when running on a fork. compiler.rpc_url is always None
+    # in gateway mode, which caused the SDK to use Alchemy mainnet RPC even on Anvil,
+    # returning borrow_shares=0 and breaking repay_full=True (VIB-587).
+    morpho_rpc_url = compiler._get_chain_rpc_url()
+
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # Build approve TX for Morpho Blue contract
+    if repay_amount_decimal is not None:
+        approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+    else:
+        approve_amount = MAX_UINT256  # Approve max for full repay
+
+    approve_txs = compiler._build_approve_tx(
+        repay_token.address,
+        morpho_adapter.morpho_address,
+        approve_amount,
+    )
+    transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result: Any = morpho_adapter.repay(
+        market_id=intent.market_id,
+        amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
+        on_behalf_of=compiler.wallet_address,
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=repay_result.tx_data["value"],
+        data=repay_result.tx_data["data"],
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description or f"Repay {amount_description} {repay_token.symbol}",
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Morpho Blue")
+    return result
+
+
+def _compile_repay_curvance(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Curvance (Monad — repay to BorrowableCToken)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance repay (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_debt_symbol=repay_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Approve the BorrowableCToken to pull the repayment.
+    approve_amount = (
+        MAX_UINT256
+        if intent.repay_full or repay_amount_decimal is None
+        else int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+    )
+    approve_txs = compiler._build_approve_tx(
+        repay_token.address,
+        curvance_adapter.get_repay_spender(intent.market_id),
+        approve_amount,
+    )
+    transactions.extend(approve_txs)
+
+    # Build the repay tx.
+    curvance_repay_result = curvance_adapter.repay(
+        market_id=intent.market_id,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_full=intent.repay_full,
+    )
+    if not curvance_repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance repay failed: {curvance_repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_repay_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_repay_result.tx_data["to"],
+            value=curvance_repay_result.tx_data["value"],
+            data=curvance_repay_result.tx_data["data"],
+            gas_estimate=curvance_repay_result.gas_estimate,
+            description=curvance_repay_result.description,
+            tx_type="lending_repay",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    market_info = curvance_adapter.get_market(intent.market_id)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "borrowable_ctoken": market_info.borrowable_ctoken,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(f"Compiled REPAY: {amount_description} {repay_token.symbol} on Curvance {market_info.name}")
+    return result
+
+
+def _compile_repay_aave_compatible(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    from .compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+    protocol_lower = intent.protocol.lower()
+
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    if intent.repay_full:
+        # Query wallet balance to use as repay amount — avoids InsufficientFunds()
+        # when accrued interest causes debt to exceed the borrowed principal.
+        # Aave accepts any amount up to the debt; we repay as much as the wallet holds.
+        wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
+        if wallet_balance is None:
+            repay_amount = MAX_UINT256
+            logger.warning(
+                f"repay_full: could not query wallet balance for {repay_token.symbol}, "
+                f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
+            )
+        else:
+            repay_amount = wallet_balance
+            logger.debug(f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}")
+    else:
+        assert repay_amount_decimal is not None
+        repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+
+    approve_amount = repay_amount
+
+    if not repay_token.is_native:
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            pool_address,
+            approve_amount,
+        )
+        transactions.extend(approve_txs)
+    else:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            approve_txs = compiler._build_approve_tx(
+                weth_address,
+                pool_address,
+                approve_amount,
+            )
+            transactions.extend(approve_txs)
+            warnings.append("Native token debt: using WETH for repayment")
+
+    actual_repay_address = repay_token.address
+    if repay_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_repay_address = weth_address
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Aave V3, rejected at intent layer
+    aave_rate_mode = AAVE_VARIABLE_RATE_MODE
+    rate_mode_label = "variable"
+
+    repay_calldata = adapter.get_repay_calldata(
+        asset=actual_repay_address,
+        amount=repay_amount,
+        interest_rate_mode=aave_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+    )
+
+    repay_tx = TransactionData(
+        to=pool_address,
+        value=0,
+        data="0x" + repay_calldata.hex(),
+        gas_estimate=adapter.estimate_repay_gas(),
+        description=(f"Repay {amount_description} {repay_token.symbol} ({rate_mode_label} rate)"),
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": str(repay_amount),
+            "repay_full": intent.repay_full,
+            "interest_rate_mode": aave_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {repay_token.symbol}, full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_spark(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Spark (Aave V3 fork with Spark-specific addresses)."""
+    from ..connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SPARK_VARIABLE_RATE_MODE,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    if intent.repay_full:
+        # Same as Aave path: query wallet balance to avoid InsufficientFunds()
+        # if accrued interest exceeds original principal in the wallet.
+        wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
+        if wallet_balance is None:
+            repay_amount = MAX_UINT256
+            logger.warning(
+                f"repay_full: could not query wallet balance for {repay_token.symbol}, "
+                f"falling back to MAX_UINT256 (may fail if interest accrued exceeds balance)"
+            )
+        else:
+            repay_amount = wallet_balance
+            logger.debug(f"repay_full: using on-chain wallet balance {repay_amount} wei for {repay_token.symbol}")
+    else:
+        assert repay_amount_decimal is not None
+        repay_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+
+    approve_amount = repay_amount
+
+    actual_repay_address = repay_token.address
+    if not repay_token.is_native:
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            pool_address,
+            approve_amount,
+        )
+        transactions.extend(approve_txs)
+    else:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_repay_address = weth_address
+            approve_txs = compiler._build_approve_tx(
+                weth_address,
+                pool_address,
+                approve_amount,
+            )
+            transactions.extend(approve_txs)
+            warnings.append("Native token debt: using WETH for repayment")
+
+    # Resolve interest rate mode: use intent value or default to variable
+    # Note: stable rate is deprecated on Spark, rejected at intent layer
+    spark_repay_rate_mode = SPARK_VARIABLE_RATE_MODE
+    spark_repay_rate_label = "variable"
+
+    # Build repay TX via Spark adapter.
+    # When we have a concrete wallet balance, pass repay_all=False so the
+    # adapter uses the exact amount instead of overriding with MAX_UINT256.
+    spark_use_repay_all = repay_amount == MAX_UINT256
+    spark_amount = (
+        Decimal(repay_amount) / Decimal(10**repay_token.decimals)
+        if not spark_use_repay_all
+        else (repay_amount_decimal or Decimal("0"))
+    )
+    repay_result = spark_adapter.repay(
+        asset=actual_repay_address,
+        amount=spark_amount,
+        interest_rate_mode=spark_repay_rate_mode,
+        on_behalf_of=compiler.wallet_address,
+        repay_all=spark_use_repay_all,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=0,
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description
+        or f"Repay {amount_description} {repay_token.symbol} to Spark ({spark_repay_rate_label} rate)",
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": str(repay_amount),
+            "repay_full": intent.repay_full,
+            "interest_rate_mode": spark_repay_rate_mode,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {repay_token.symbol}, full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas (Spark)"
+    )
+    return result
+
+
+def _compile_repay_compound_v3(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Compound V3."""
+    from ..connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    market = intent.market_id or "usdc"
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    # Build approve TX for Comet contract (repay token -> Comet)
+    if repay_amount_decimal is not None:
+        approve_amount = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+    else:
+        approve_amount = MAX_UINT256  # Approve max for full repay
+
+    approve_txs = compiler._build_approve_tx(
+        repay_token.address,
+        compound_adapter.comet_address,
+        approve_amount,
+    )
+    transactions.extend(approve_txs)
+
+    # Build repay TX via Compound V3 adapter
+    repay_result = compound_adapter.repay(
+        amount=repay_amount_decimal if repay_amount_decimal else Decimal("0"),
+        on_behalf_of=compiler.wallet_address,
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description or f"Repay {amount_description} {repay_token.symbol} to Compound V3",
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Compound V3 {market}, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_benqi(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for BENQI (Compound V2 fork on Avalanche)."""
+    from ..connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    repay_market = benqi_adapter.get_market_info(repay_symbol)
+
+    if not repay_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI does not support asset: {repay_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build approve TX for qiToken (skip for native AVAX)
+    if not repay_market.is_native and not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="BENQI repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_market.qi_token_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    elif not repay_market.is_native and intent.repay_full:
+        # For repay_full, approve MAX_UINT256
+        from ..connectors.benqi.adapter import MAX_UINT256 as BENQI_MAX_UINT256
+
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_market.qi_token_address,
+            BENQI_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = benqi_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to BENQI, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_joelend(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Joe Lend (Compound V2 fork on Avalanche — Banker Joe)."""
+    from ..connectors.joelend.adapter import (
+        JOELEND_J_TOKENS,
+        JoeLendAdapter,
+        JoeLendConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    joelend_config = JoeLendConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    joelend_adapter = JoeLendAdapter(joelend_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    jl_repay_market = joelend_adapter.get_market_info(repay_symbol)
+
+    if not jl_repay_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend does not support asset: {repay_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # If repaying native AVAX, wrap to WAVAX first.
+    # jAVAX rejects raw native deposits so we must go through WAVAX.
+    if repay_token.is_native and jl_repay_market.underlying_address:
+        # For native AVAX repay_full, recover an explicit amount because
+        # we need a concrete value for the wrap TX.
+        if intent.repay_full and not repay_amount_decimal:
+            if intent.amount is not None and intent.amount != "all" and Decimal(str(intent.amount)) > 0:
+                repay_amount_decimal = Decimal(str(intent.amount))
+                logger.info(
+                    "Recovered repay amount %s from intent for native AVAX repay_full",
+                    repay_amount_decimal,
+                )
+            else:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Joe Lend native AVAX repay_full requires an explicit positive repay amount (query debt balance first)",
+                    intent_id=intent.intent_id,
+                )
+
+        if not intent.repay_full:
+            if repay_amount_decimal is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
+                    intent_id=intent.intent_id,
+                )
+
+        assert repay_amount_decimal is not None  # guaranteed by branches above
+        wavax_address = jl_repay_market.underlying_address
+        wrap_amount = repay_amount_decimal
+        if intent.repay_full:
+            # Add 0.1% buffer to account for interest accrual between
+            # debt query and execution (matches the old native repay path).
+            wrap_amount = repay_amount_decimal * Decimal("1.001")
+        repay_amount_wei = int(wrap_amount * Decimal(10**repay_token.decimals))
+        wrap_tx = TransactionData(
+            to=wavax_address,
+            value=repay_amount_wei,
+            data="0xd0e30db0",  # WAVAX deposit() selector
+            gas_estimate=50_000,
+            description=f"Wrap {wrap_amount} AVAX to WAVAX for Joe Lend repay",
+            tx_type="wrap_native",
+        )
+        transactions.append(wrap_tx)
+        approve_token_address = wavax_address
+    else:
+        approve_token_address = repay_token.address
+
+    # Build approve TX for jToken
+    if not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            approve_token_address,
+            jl_repay_market.j_token_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    else:
+        # For repay_full, approve MAX_UINT256
+        from ..connectors.joelend.adapter import MAX_UINT256 as JOELEND_MAX_UINT256
+
+        approve_txs = compiler._build_approve_tx(
+            approve_token_address,
+            jl_repay_market.j_token_address,
+            JOELEND_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = joelend_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "joetroller_address": joelend_adapter.joetroller_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Joe Lend, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_euler_v2(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Euler V2 (ERC-4626 vaults + EVC)."""
+    from ..connectors.euler_v2.adapter import (
+        MAX_UINT256 as EULER_MAX_UINT256,
+    )
+    from ..connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    repay_vault = euler_adapter.find_vault_for_asset(repay_symbol)
+
+    if not repay_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for asset: {repay_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build approve TX for vault
+    if not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Euler V2 repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_vault.vault_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    else:
+        # For repay_full, approve MAX_UINT256
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            repay_vault.vault_address,
+            EULER_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = euler_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        repay_all=intent.repay_full,
+        vault_symbol=repay_vault.vault_symbol,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "vault_address": repay_vault.vault_address,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Euler V2, "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_repay_silo_v2(
+    compiler,
+    intent: RepayIntent,
+    repay_token: Any,
+    repay_amount_decimal: Decimal | None,
+    amount_description: str,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile REPAY for Silo V2 (Avalanche)."""
+    from ..connectors.silo_v2.adapter import (
+        MAX_UINT256 as SILO_MAX_UINT256,
+    )
+    from ..connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    repay_symbol = repay_token.symbol.upper()
+    sv2_silo_result = silo_adapter.find_silo_for_asset(repay_symbol)
+
+    if not sv2_silo_result:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for asset: {repay_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    sv2_market, silo_address, _ = sv2_silo_result
+
+    # Build approve TX for the silo
+    if not intent.repay_full:
+        if repay_amount_decimal is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Silo V2 repay requires an explicit amount (or use repay_full=True)",
+                intent_id=intent.intent_id,
+            )
+        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            silo_address,
+            repay_amount_wei,
+        )
+        transactions.extend(approve_txs)
+    else:
+        # For repay_full, approve MAX_UINT256
+        approve_txs = compiler._build_approve_tx(
+            repay_token.address,
+            silo_address,
+            SILO_MAX_UINT256,
+        )
+        transactions.extend(approve_txs)
+
+    # Build repay TX
+    repay_result = silo_adapter.repay(
+        asset=repay_symbol,
+        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
+        market_name=sv2_market.market_name,
+        repay_all=intent.repay_full,
+    )
+
+    if not repay_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 repay failed: {repay_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    assert repay_result.tx_data is not None
+    repay_data = repay_result.tx_data["data"]
+    if not repay_data.startswith("0x"):
+        repay_data = "0x" + repay_data
+
+    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
+
+    repay_tx = TransactionData(
+        to=repay_result.tx_data["to"],
+        value=int(repay_result.tx_data.get("value", 0)),
+        data=repay_data,
+        gas_estimate=repay_result.gas_estimate,
+        description=repay_result.description,
+        tx_type="lending_repay",
+    )
+    transactions.append(repay_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.REPAY.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "repay_token": repay_token.to_dict(),
+            "repay_amount": amount_description,
+            "repay_full": intent.repay_full,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Silo V2 ({sv2_market.market_name}), "
+        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
+    )
     return result
 
 
