@@ -211,6 +211,76 @@ class TestExecuteSimulationFailure:
 
 
 # =============================================================================
+# _emit_event guards against explicit None optional-string details (#1657)
+# =============================================================================
+
+
+class TestEmitEventNoneDetails:
+    """Regression for #1657.
+
+    ``dict.get(k, default)`` returns ``None`` when the key is present with
+    value ``None``, so the original ``[:N]`` slicing raised ``TypeError``.
+    The fix uses ``(event_details.get(k) or default)`` so the fallback
+    triggers for both missing keys *and* explicit ``None`` values.
+
+    Each case asserts both (a) no exception is raised and (b) the emitted
+    ``TimelineEvent`` description contains the expected fallback text — the
+    behavioural pin that keeps the regression honest.
+    """
+
+    @pytest.mark.parametrize(
+        ("event_type", "details", "expected_fragment"),
+        [
+            (
+                ExecutionEventType.SIMULATION_FAILED,
+                {"revert_reason": None},
+                "Simulation failed: Unknown",
+            ),
+            (
+                ExecutionEventType.TX_REVERTED,
+                {"revert_reason": None},
+                "Transaction reverted: Unknown reason",
+            ),
+            (
+                ExecutionEventType.EXECUTION_FAILED,
+                {"error": None},
+                "failed: Unknown error",
+            ),
+            (
+                ExecutionEventType.TX_CONFIRMED,
+                {"tx_hash": None},
+                "Transaction confirmed (...)",
+            ),
+            (
+                ExecutionEventType.TX_SENT,
+                {"tx_hash": None},
+                "Transaction sent (...)",
+            ),
+            (
+                ExecutionEventType.RISK_BLOCKED,
+                {"violations": None},
+                "Risk blocked:",
+            ),
+        ],
+    )
+    def test_emit_event_with_explicit_none_details_uses_fallback(
+        self,
+        orchestrator,
+        event_type,
+        details,
+        expected_fragment,
+    ):
+        ctx = ExecutionContext(strategy_id="t", correlation_id="corr")
+        with patch("almanak.framework.execution.orchestrator.add_event") as add_event_mock:
+            orchestrator._emit_event(event_type, ctx, details)
+
+        add_event_mock.assert_called_once()
+        timeline_event = add_event_mock.call_args.args[0]
+        assert expected_fragment in timeline_event.description
+        assert timeline_event.details["execution_event"] == event_type.value
+
+
+# =============================================================================
 # Signer failure
 # =============================================================================
 

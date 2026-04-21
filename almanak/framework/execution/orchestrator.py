@@ -913,16 +913,16 @@ class ExecutionOrchestrator:
         if event_type == ExecutionEventType.EXECUTION_SUCCESS:
             description = f"✓ {intent_desc}"
         elif event_type == ExecutionEventType.EXECUTION_FAILED:
-            error_msg = event_details.get("error", "Unknown error")
-            description = f"✗ {intent_desc} failed: {error_msg[:50]}"
+            error_msg = (event_details.get("error") or "Unknown error")[:50]
+            description = f"✗ {intent_desc} failed: {error_msg}"
         elif event_type == ExecutionEventType.TX_CONFIRMED:
-            tx_hash = event_details.get("tx_hash", "")[:10]
+            tx_hash = (event_details.get("tx_hash") or "")[:10]
             description = f"✓ Transaction confirmed ({tx_hash}...)"
         elif event_type == ExecutionEventType.TX_REVERTED:
             reason = (event_details.get("revert_reason") or "Unknown reason")[:40]
             description = f"✗ Transaction reverted: {reason}"
         elif event_type == ExecutionEventType.TX_SENT:
-            tx_hash = event_details.get("tx_hash", "")[:10]
+            tx_hash = (event_details.get("tx_hash") or "")[:10]
             description = f"→ Transaction sent ({tx_hash}...)"
         elif event_type == ExecutionEventType.VALIDATING:
             description = f"Validating: {intent_desc}"
@@ -937,10 +937,10 @@ class ExecutionOrchestrator:
         elif event_type == ExecutionEventType.WAITING:
             description = "Waiting for confirmation..."
         elif event_type == ExecutionEventType.RISK_BLOCKED:
-            violations = event_details.get("violations", [])
+            violations = event_details.get("violations") or []
             description = f"⚠ Risk blocked: {'; '.join(violations[:2])}"
         elif event_type == ExecutionEventType.SIMULATION_FAILED:
-            reason = event_details.get("revert_reason", "Unknown")[:40]
+            reason = (event_details.get("revert_reason") or "Unknown")[:40]
             description = f"Simulation failed: {reason}"
         else:
             description = f"{intent_desc}"
