@@ -1060,9 +1060,12 @@ class TestBuildComponents:
             )
         assert exc_info.value.code == 1
 
-    def test_dry_run_vault_placeholder_exits_cleanly_with_code_0(
+    def test_dry_run_vault_placeholder_raises_early_exit_with_components(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Dry-run + placeholder vault raises `_DryRunVaultEarlyExit` carrying
+        the partial component bundle so the `run()` driver can still run
+        `cleanup_fn` before exiting 0 (see #1682)."""
         mocks = _patch_component_factories(monkeypatch)
         mocks["_has_placeholder_vault_address"].return_value = True
 
@@ -1074,7 +1077,7 @@ class TestBuildComponents:
         }
 
         runner = CliRunner()
-        with runner.isolation(), pytest.raises(SystemExit) as exc_info:
+        with runner.isolation(), pytest.raises(run_helpers._DryRunVaultEarlyExit) as exc_info:
             run_helpers._build_components(
                 strategy_instance=strategy_instance,
                 strategy_config=strategy_config,
@@ -1085,7 +1088,7 @@ class TestBuildComponents:
                 gateway_client=MagicMock(),
                 chain_wallets={},
                 interval=60,
-                effective_dry_run=True,  # dry-run + placeholder -> exit 0
+                effective_dry_run=True,  # dry-run + placeholder -> raises for cleanup
                 strategy_id="dryrun",
                 normalized_copy_mode=None,
                 copy_replay_file=None,
@@ -1093,4 +1096,7 @@ class TestBuildComponents:
                 copy_strict=False,
                 config_chain="arbitrum",
             )
-        assert exc_info.value.code == 0
+        # Partial component bundle is attached so cleanup_fn can still close
+        # providers/gateway even though runner was never constructed.
+        assert exc_info.value.components is not None
+        assert exc_info.value.components.runner is None

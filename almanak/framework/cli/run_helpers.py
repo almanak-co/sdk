@@ -56,6 +56,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _DryRunVaultEarlyExit(Exception):
+    """Signal an intentional exit-0 from `_maybe_auto_deploy_vault`.
+
+    Raised when `--dry-run --network anvil` is used against a strategy with
+    a placeholder vault address: we skip auto-deploy but still want `run()`
+    to unwind `cleanup_fn` (closing providers, gateway, Solana fork manager)
+    before exiting 0. See #1682.
+
+    The partial `ComponentBundle` built so far is attached so the caller can
+    feed it to `_build_cleanup_fn` (runner is None at this point; cleanup
+    only touches providers + gateway + Solana fork).
+    """
+
+    def __init__(self, components: ComponentBundle | None = None) -> None:
+        super().__init__("--dry-run: placeholder vault on Anvil")
+        self.components = components
+
+
 def _normalize_quick_chains(raw: Any) -> list[str]:
     """Normalize a quick-config ``chains`` value into a list of chain names.
 
@@ -1503,13 +1521,16 @@ def _build_runtime_config(
         _existing_norm = _existing.strip().lower() if isinstance(_existing, str) else ""
         if _existing_norm != env_chain:
             strategy_config["chain"] = env_chain
-    if "wallet_address" not in strategy_config:
-        # Use per-chain wallet from registry if available, else fall back to runtime_config
-        if chain_wallets:
-            primary = strategy_chains[0] if multi_chain else str(config_chain)
-            strategy_config["wallet_address"] = chain_wallets.get(primary, runtime_config.execution_address)
-        else:
-            strategy_config["wallet_address"] = runtime_config.execution_address
+    # Runtime-resolved wallet wins (see #1684). A stale `wallet_address` left in
+    # config.json must not drive deployment_id when the runtime signs from a
+    # different wallet -- state would attach to the wrong identity.
+    if chain_wallets:
+        primary = strategy_chains[0] if multi_chain else str(config_chain)
+        resolved_wallet = chain_wallets.get(primary, runtime_config.execution_address)
+    else:
+        resolved_wallet = runtime_config.execution_address
+    if resolved_wallet:
+        strategy_config["wallet_address"] = resolved_wallet
 
     return runtime_config, chain_wallets
 
@@ -1788,10 +1809,17 @@ def _init_copy_trading(
 
     Runs only in single-chain mode (mirroring the original code placement).
     """
-    if multi_chain:
-        return  # Copy trading is configured only on single-chain runs today.
     if not strategy_config.get("copy_trading"):
         return
+    if multi_chain:
+        # Defense-in-depth guard. `_build_components` pre-validates this same
+        # combination BEFORE building any providers, so direct callers of
+        # `_init_copy_trading` still get a clear failure instead of a silent
+        # skip (see #1683).
+        raise click.ClickException(
+            "copy_trading is not yet supported for multi-chain strategies. "
+            "Remove the copy_trading block or configure the strategy as single-chain."
+        )
 
     from decimal import Decimal
 
@@ -1978,7 +2006,8 @@ def _maybe_auto_deploy_vault(
                 fg="yellow",
             )
             click.echo("  Deploy manually or run without --dry-run on Anvil")
-            sys.exit(0)
+            # Bubble up to `run()` so cleanup_fn runs before exit-0 (see #1682).
+            raise _DryRunVaultEarlyExit()
 
         click.echo("  Placeholder vault address detected -- auto-deploying on Anvil...")
         vault_raw = _auto_deploy_lagoon_vault(
@@ -2143,6 +2172,17 @@ def _build_components(
     """
     components = ComponentBundle()
 
+    # Pre-flight validation: fail BEFORE building any gateway-backed resources
+    # so a rejected config doesn't leak providers / orchestrators / sockets.
+    # This mirrors the defence-in-depth check inside `_init_copy_trading` but
+    # runs at a point where no cleanup_fn has been constructed yet (see #1683
+    # and CR comment on PR #1689).
+    if multi_chain and strategy_config.get("copy_trading"):
+        raise click.ClickException(
+            "copy_trading is not yet supported for multi-chain strategies. "
+            "Remove the copy_trading block or configure the strategy as single-chain."
+        )
+
     try:
         click.echo("Initializing components...")
 
@@ -2216,9 +2256,13 @@ def _build_components(
         # Preserve explicit ClickException (e.g., missing wallet address)
         # so the caller sees the same message as the original code.
         raise
+    except _DryRunVaultEarlyExit as e:
+        # Attach the partial component bundle so the caller can still run
+        # cleanup_fn before exiting 0 (see #1682).
+        e.components = components
+        raise
     except SystemExit:
-        # Preserve the exit-0 from the dry-run vault placeholder branch and
-        # any other sys.exit() inside the helpers.
+        # Preserve any sys.exit() inside the helpers.
         raise
     except Exception as e:
         click.echo(f"Error initializing components: {e}", err=True)
@@ -2435,7 +2479,7 @@ def _run_once(
     import asyncio
 
     # Lazy-import so tests that monkeypatch these modules observe the fakes.
-    from ..runner import IterationResult, IterationStatus
+    from ..runner import IterationStatus
 
     # Runtime-local reference for format_iteration_result (lives in run.py to
     # avoid moving unrelated code; deferred import breaks the cycle).
@@ -2507,12 +2551,6 @@ def _run_once(
                 teardown_result = await runner.run_iteration(strategy_instance)
                 runner._emit_iteration_summary(teardown_result, chain=getattr(strategy_instance, "chain", None))
                 click.echo(format_iteration_result(teardown_result))
-            elif teardown_after:
-                teardown_result = IterationResult(
-                    status=IterationStatus.EXECUTION_FAILED,
-                    error="--teardown-after requested but strategy does not support teardown",
-                )
-                click.echo(teardown_result.error, err=True)
 
             # Persist copy trading cursor state
             if activity_provider is not None:

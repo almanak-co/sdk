@@ -1273,6 +1273,7 @@ def run(
         _configure_logging_and_validate,
         _detect_state_resume,
         _discover_and_load_config,
+        _DryRunVaultEarlyExit,
         _handle_list_all,
         _handle_standalone_dashboard,
         _instantiate_strategy,
@@ -1492,24 +1493,45 @@ def run(
     # Build components (phase 13 helper): orchestrator + providers + copy-trading +
     # state manager + vault auto-deploy + StrategyRunner. Ordering is load-bearing;
     # see `_build_components` docstring.
-    components = _build_components(
-        strategy_instance=strategy_instance,
-        strategy_config=strategy_config,
-        runtime_config=runtime_config,
-        strategy_chains=strategy_chains,
-        multi_chain=multi_chain,
-        resolved_network=resolved_network,
-        gateway_client=gateway_client,
-        chain_wallets=chain_wallets,
-        interval=interval,
-        effective_dry_run=effective_dry_run,
-        strategy_id=strategy_id,
-        normalized_copy_mode=normalized_copy_mode,
-        copy_replay_file=copy_replay_file,
-        copy_shadow=copy_shadow,
-        copy_strict=copy_strict,
-        config_chain=config_chain,
-    )
+    try:
+        components = _build_components(
+            strategy_instance=strategy_instance,
+            strategy_config=strategy_config,
+            runtime_config=runtime_config,
+            strategy_chains=strategy_chains,
+            multi_chain=multi_chain,
+            resolved_network=resolved_network,
+            gateway_client=gateway_client,
+            chain_wallets=chain_wallets,
+            interval=interval,
+            effective_dry_run=effective_dry_run,
+            strategy_id=strategy_id,
+            normalized_copy_mode=normalized_copy_mode,
+            copy_replay_file=copy_replay_file,
+            copy_shadow=copy_shadow,
+            copy_strict=copy_strict,
+            config_chain=config_chain,
+        )
+    except _DryRunVaultEarlyExit as early:
+        # --dry-run + placeholder vault on Anvil: skip runner construction but
+        # still unwind providers/gateway/Solana-fork via cleanup_fn (see #1682).
+        import asyncio as _asyncio
+
+        from ._run_context import ComponentBundle as _ComponentBundle
+
+        partial_components = early.components or _ComponentBundle()
+        early_cleanup = _build_cleanup_fn(
+            gateway_client=gateway_client,
+            managed_gateway=managed_gateway,
+            keep_anvil=keep_anvil,
+            components=partial_components,
+        )
+        try:
+            _asyncio.run(early_cleanup())
+        except Exception:  # pragma: no cover - cleanup best-effort
+            logger.exception("Cleanup failed during dry-run vault early exit")
+        _stop_dashboard(dashboard_process)
+        sys.exit(0)
     runner = components.runner
     state_manager = components.state_manager
 
