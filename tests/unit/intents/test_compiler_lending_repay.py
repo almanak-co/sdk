@@ -633,6 +633,86 @@ class TestSparkHelper:
         assert result.status == CompilationStatus.SUCCESS
         assert any("WETH for repayment" in w for w in result.warnings)
 
+        # Fix for issue #1621: verify wrap -> approve -> repay ordering.
+        tx_types = [tx.tx_type for tx in result.transactions]
+        assert tx_types == ["wrap", "approve", "lending_repay"]
+
+        # Wrap tx targets the wrapped-native address with native value and the
+        # WETH.deposit() selector 0xd0e30db0.
+        wrap_tx = result.transactions[0]
+        expected_weth = "0xweth00000000000000000000000000000000eeee"
+        assert wrap_tx.to == expected_weth
+        assert wrap_tx.value == int(Decimal("1") * Decimal(10**18))
+        assert wrap_tx.data == "0xd0e30db0"
+
+    def test_native_repay_without_wrapped_native_fails_fast(self):
+        """Fix for issue #1621 (primary): when the wrapped-native address is
+        unavailable we must fail compilation instead of silently building an
+        approve tx against the native sentinel address."""
+        compiler = _mock_compiler(chain="ethereum")
+        compiler._get_wrapped_native_address.return_value = None
+
+        with (
+            patch(SPARK_POOL_ADDRESSES, {"ethereum": "0xspark"}),
+            patch(SPARK_ADAPTER) as mock_cls,
+            patch(SPARK_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.pool_address = TEST_POOL
+            mock_adapter.repay.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+            intent = _repay_intent(protocol="spark", token="ETH")
+            result = cl._compile_repay_spark(
+                compiler,
+                intent,
+                _mock_token("ETH", decimals=18, is_native=True),
+                Decimal("1"),
+                "1",
+                [],
+            )
+
+        assert result.status == CompilationStatus.FAILED
+        assert "Wrapped native token address not available" in result.error
+        assert "ethereum" in result.error
+        # Must not have built an approve tx against the native sentinel.
+        compiler._build_approve_tx.assert_not_called()
+
+    def test_native_repay_full_fails_fast(self):
+        """Addresses Codex P1 review on PR #1634: repay_full on a native token
+        would wrap the wallet's entire native balance, leaving nothing to pay
+        gas for the wrap tx itself (or the subsequent approve/repay). Compile
+        must refuse and require an explicit repay_amount that reserves gas.
+        """
+        compiler = _mock_compiler(chain="ethereum")
+        # Gateway could have returned the full balance, but even a successful
+        # query makes the wrap unfundable on non-zero gas-price networks.
+        compiler._query_erc20_balance.return_value = 5 * 10**18
+
+        with (
+            patch(SPARK_POOL_ADDRESSES, {"ethereum": "0xspark"}),
+            patch(SPARK_ADAPTER) as mock_cls,
+            patch(SPARK_CONFIG),
+        ):
+            mock_adapter = MagicMock()
+            mock_adapter.pool_address = TEST_POOL
+            mock_cls.return_value = mock_adapter
+            intent = _repay_intent(protocol="spark", token="ETH", repay_full=True, amount=Decimal("0"))
+            result = cl._compile_repay_spark(
+                compiler,
+                intent,
+                _mock_token("ETH", decimals=18, is_native=True),
+                None,
+                "full debt",
+                [],
+            )
+
+        assert result.status == CompilationStatus.FAILED
+        assert "repay_full is not supported for native" in result.error
+        assert "reserves gas" in result.error
+        # Helper must bail before querying balance or building any txs.
+        compiler._build_approve_tx.assert_not_called()
+        mock_adapter.repay.assert_not_called()
+
     def test_repay_failure(self):
         compiler = _mock_compiler(chain="ethereum")
         with (

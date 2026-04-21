@@ -2152,6 +2152,22 @@ def _compile_repay_spark(
     pool_address = spark_adapter.pool_address
 
     if intent.repay_full:
+        # repay_full on a native token is unsafe: we would wrap the wallet's
+        # entire native balance, leaving nothing to pay gas for the wrap tx
+        # itself (and the subsequent approve/repay txs). Reject at compile
+        # time and require the caller to supply an explicit amount that
+        # reserves gas.
+        if repay_token.is_native:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"repay_full is not supported for native {repay_token.symbol} on Spark: "
+                    "wrapping the full balance would leave no native token to pay gas. "
+                    "Provide an explicit repay_amount that reserves gas."
+                ),
+                intent_id=intent.intent_id,
+            )
+
         # Same as Aave path: query wallet balance to avoid InsufficientFunds()
         # if accrued interest exceeds original principal in the wallet.
         wallet_balance = compiler._query_erc20_balance(repay_token.address, compiler.wallet_address)
@@ -2180,15 +2196,55 @@ def _compile_repay_spark(
         transactions.extend(approve_txs)
     else:
         weth_address = compiler._get_wrapped_native_address()
-        if weth_address:
-            actual_repay_address = weth_address
-            approve_txs = compiler._build_approve_tx(
-                weth_address,
-                pool_address,
-                approve_amount,
+        if not weth_address:
+            # Fail fast: without a wrapped-native address we cannot approve or
+            # repay native ETH debt. Previously control fell through silently
+            # and a later _build_approve_tx call was built against the native
+            # sentinel address, producing invalid transactions.
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(f"Wrapped native token address not available on {compiler.chain} for native repayment"),
+                intent_id=intent.intent_id,
             )
-            transactions.extend(approve_txs)
-            warnings.append("Native token debt: using WETH for repayment")
+
+        # Native debt requires wrapping ETH -> WETH before approve/repay.
+        # If repay_full fell back to MAX_UINT256 (wallet balance query failed),
+        # we cannot know how much ETH to wrap: fail fast with a clear error
+        # instead of emitting an unfundable wrap transaction.
+        if repay_amount == MAX_UINT256:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Cannot repay native debt with unknown wallet balance: wrap amount "
+                    "is undetermined. Either provide an explicit repay amount or ensure "
+                    "the gateway can report the wallet's native token balance."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        actual_repay_address = weth_address
+
+        # Wrap native ETH -> WETH so the pool can pull WETH during repay.
+        # Matches the pattern used by _compile_supply_spark and _compile_borrow_spark.
+        wrap_tx = TransactionData(
+            to=weth_address,
+            value=repay_amount,
+            data="0xd0e30db0",  # WETH.deposit()
+            gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+            description=(
+                f"Wrap {compiler._format_amount(repay_amount, repay_token.decimals)} {repay_token.symbol} to WETH"
+            ),
+            tx_type="wrap",
+        )
+        transactions.append(wrap_tx)
+
+        approve_txs = compiler._build_approve_tx(
+            weth_address,
+            pool_address,
+            approve_amount,
+        )
+        transactions.extend(approve_txs)
+        warnings.append("Native token debt: wrapped to WETH for repayment")
 
     # Resolve interest rate mode: use intent value or default to variable
     # Note: stable rate is deprecated on Spark, rejected at intent layer
