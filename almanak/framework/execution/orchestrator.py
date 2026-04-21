@@ -74,7 +74,7 @@ from .interfaces import (
     UnsignedTransaction,
     _sanitize_logs,
 )
-from .revert_diagnostics import build_verbose_revert_report
+from .revert_diagnostics import VerboseRevertReport, build_verbose_revert_report
 from .session import (
     ExecutionPhase as SessionPhase,
 )
@@ -1656,20 +1656,14 @@ class ExecutionOrchestrator:
         reverted = [tr for tr in result.transaction_results if not tr.success]
         if reverted:
             first_reverted = reverted[0]
-            result.error_phase = ExecutionPhase.CONFIRMATION
 
-            # Build and log verbose revert report for debugging
-            verbose_report = build_verbose_revert_report(
-                context=context,
-                action_bundle=action_bundle,
-                transaction_results=result.transaction_results,
-                intent=getattr(action_bundle, "intent", None),
+            # Build verbose revert report, record on result, and close the session.
+            verbose_report = self._build_and_record_revert_report(
+                state,
                 raw_error=first_reverted.error,
-                started_at=result.started_at,
+                error_phase=ExecutionPhase.CONFIRMATION,
             )
 
-            result.error = f"{verbose_report.format()}"
-            self._complete_session(session, success=False, error=result.error)
             self._emit_event(
                 ExecutionEventType.EXECUTION_FAILED,
                 context,
@@ -1732,6 +1726,46 @@ class ExecutionOrchestrator:
         return result
 
     # -------------------------------------------------------------------------
+    # Revert report helper
+    # -------------------------------------------------------------------------
+
+    def _build_and_record_revert_report(
+        self,
+        state: ExecutionPipelineState,
+        *,
+        raw_error: str | None,
+        error_phase: ExecutionPhase,
+    ) -> VerboseRevertReport:
+        """Build the verbose revert report, record it on the result, and close the session.
+
+        Centralises the revert-reporting side effects that are shared between
+        ``_phase_enrich`` (post-receipt revert detection) and
+        ``_handle_execution_exception`` (``TransactionRevertedError``):
+
+        1. Build a ``VerboseRevertReport`` from the current pipeline state.
+        2. Populate ``state.result.error`` with the formatted report.
+        3. Set ``state.result.error_phase`` to the provided phase.
+        4. Mark the associated session as failed with the formatted error.
+
+        Returns the ``VerboseRevertReport`` so callers can shape their own
+        ``EXECUTION_FAILED`` / ``TX_REVERTED`` event payloads (the two sites
+        emit different event types with different extra fields, but both
+        include ``verbose_report.to_dict()``).
+        """
+        report = build_verbose_revert_report(
+            context=state.context,
+            action_bundle=state.action_bundle,
+            transaction_results=state.result.transaction_results,
+            intent=getattr(state.action_bundle, "intent", None),
+            raw_error=raw_error,
+            started_at=state.result.started_at,
+        )
+        state.result.error = report.format()
+        state.result.error_phase = error_phase
+        self._complete_session(state.session, success=False, error=state.result.error)
+        return report
+
+    # -------------------------------------------------------------------------
     # Exception consolidation
     # -------------------------------------------------------------------------
 
@@ -1784,20 +1818,12 @@ class ExecutionOrchestrator:
             return result
 
         if isinstance(exc, TransactionRevertedError):
-            result.error_phase = ExecutionPhase.CONFIRMATION
-
-            # Build and log verbose revert report for debugging
-            verbose_report = build_verbose_revert_report(
-                context=context,
-                action_bundle=action_bundle,
-                transaction_results=result.transaction_results,
-                intent=getattr(action_bundle, "intent", None),
+            # Build verbose revert report, record on result, and close the session.
+            verbose_report = self._build_and_record_revert_report(
+                state,
                 raw_error=str(exc),
-                started_at=result.started_at,
+                error_phase=ExecutionPhase.CONFIRMATION,
             )
-
-            result.error = f"{verbose_report.format()}"
-            self._complete_session(session, success=False, error=result.error)
 
             self._emit_event(
                 ExecutionEventType.TX_REVERTED,

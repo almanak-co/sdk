@@ -808,6 +808,97 @@ class TestHandleExecutionExceptionExtended:
 
 
 # =============================================================================
+# _build_and_record_revert_report
+# =============================================================================
+
+
+class TestBuildAndRecordRevertReport:
+    """Dedup helper shared by ``_phase_enrich`` and ``_handle_execution_exception``.
+
+    Regression tests for issue #1663: verifies the helper's side effects
+    (``result.error``, ``result.error_phase``, session completion) and that
+    it returns the ``VerboseRevertReport`` object so callers can build
+    differentiated event payloads.
+    """
+
+    def test_helper_sets_error_and_error_phase_and_returns_report(self, orchestrator):
+        state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
+        state.result.transaction_results = [
+            TransactionResult(tx_hash="0xdead", success=False, error="execution reverted: bad math")
+        ]
+        # Track _complete_session calls
+        orchestrator._complete_session = MagicMock()
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "FORMATTED REPORT TEXT"
+            mock_report.to_dict.return_value = {"k": "v"}
+            mock_build.return_value = mock_report
+
+            returned = orchestrator._build_and_record_revert_report(
+                state,
+                raw_error="execution reverted: bad math",
+                error_phase=ExecutionPhase.CONFIRMATION,
+            )
+
+        # 1. Report builder called with the expected kwargs
+        mock_build.assert_called_once_with(
+            context=state.context,
+            action_bundle=state.action_bundle,
+            transaction_results=state.result.transaction_results,
+            intent=getattr(state.action_bundle, "intent", None),
+            raw_error="execution reverted: bad math",
+            started_at=state.result.started_at,
+        )
+        # 2. result.error populated with formatted report (no f-string wrapping)
+        assert state.result.error == "FORMATTED REPORT TEXT"
+        # 3. error_phase set from the parameter
+        assert state.result.error_phase == ExecutionPhase.CONFIRMATION
+        # 4. Session completion called with the formatted error
+        orchestrator._complete_session.assert_called_once_with(
+            state.session, success=False, error="FORMATTED REPORT TEXT"
+        )
+        # 5. Returns the report object so callers can still build payloads
+        assert returned is mock_report
+        assert returned.to_dict() == {"k": "v"}
+
+    def test_helper_passes_none_raw_error_through(self, orchestrator):
+        """first_reverted.error may be None; the helper must forward it unchanged."""
+        state = _make_state(orchestrator)
+        orchestrator._complete_session = MagicMock()
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_report = MagicMock()
+            mock_report.format.return_value = "empty-error report"
+            mock_build.return_value = mock_report
+
+            orchestrator._build_and_record_revert_report(
+                state,
+                raw_error=None,
+                error_phase=ExecutionPhase.CONFIRMATION,
+            )
+
+        assert mock_build.call_args.kwargs["raw_error"] is None
+        assert state.result.error == "empty-error report"
+
+    def test_helper_honours_custom_error_phase(self, orchestrator):
+        """Helper accepts any ExecutionPhase; not hardcoded to CONFIRMATION."""
+        state = _make_state(orchestrator)
+        orchestrator._complete_session = MagicMock()
+
+        with patch("almanak.framework.execution.orchestrator.build_verbose_revert_report") as mock_build:
+            mock_build.return_value = MagicMock(format=MagicMock(return_value="r"))
+
+            orchestrator._build_and_record_revert_report(
+                state,
+                raw_error="oops",
+                error_phase=ExecutionPhase.SUBMISSION,
+            )
+
+        assert state.result.error_phase == ExecutionPhase.SUBMISSION
+
+
+# =============================================================================
 # Pipeline state invariants
 # =============================================================================
 
