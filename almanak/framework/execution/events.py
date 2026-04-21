@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, NotRequired, Required, TypedDict
 
 # =============================================================================
 # ExecutionEventType Enum
@@ -396,6 +396,93 @@ class ExecutionFailedPayload:
 
 
 # =============================================================================
+# TX_REVERTED Payload Schema
+# =============================================================================
+
+
+# Keys that MUST be present on every TX_REVERTED payload, even if the value
+# is ``None`` because the field was unavailable at emit time.  Keeping this
+# list as the single source of truth keeps downstream consumers honest: a
+# receipt-level revert and an exception-path revert will both surface the
+# same set of keys, just with ``None`` where appropriate.
+TX_REVERTED_REQUIRED_KEYS: tuple[str, ...] = (
+    "tx_hash",
+    "block_number",
+    "gas_used",
+    "revert_reason",
+    "error",
+    "verbose_report",
+)
+
+
+class TxRevertedPayload(TypedDict):
+    """Canonical schema for ``ExecutionEventType.TX_REVERTED`` event payloads.
+
+    Emitted from two sites inside ``ExecutionOrchestrator``:
+
+    1. Receipt-level revert: after a confirmed receipt with ``status == 0``.
+    2. Exception-path revert: on ``TransactionRevertedError`` raised during
+       confirmation polling, before a full receipt is available.
+
+    The two sites historically emitted inconsistent shapes. This schema is the
+    superset of fields every consumer may read; emit sites must populate every
+    required key and fall back to ``None`` for values unavailable in that path.
+
+    Required keys (always present, use ``None`` for unavailable values):
+        tx_hash: Transaction hash (``None`` only if exception reported none).
+        block_number: Block containing the reverted tx, ``None`` at exception
+            time when no confirmed receipt exists yet.
+        gas_used: Gas consumed before revert, ``None`` if unknown.
+        revert_reason: Decoded revert reason, ``None`` if not decoded.
+        error: Human-readable error string (e.g. ``TransactionResult.error``
+            from the receipt path, or ``str(exc)`` from the exception path).
+            ``None`` if no additional error context is available.
+        verbose_report: Dict form of the verbose revert report if built at
+            this emit site, ``None`` if not built.
+
+    Optional keys:
+        correlation_id: Added by ``_emit_event`` for every event type.
+    """
+
+    tx_hash: Required[str | None]
+    block_number: Required[int | None]
+    gas_used: Required[int | None]
+    revert_reason: Required[str | None]
+    error: Required[str | None]
+    verbose_report: Required[dict[str, Any] | None]
+    # Injected by ``_emit_event`` for all event types; optional here to keep
+    # the builder helpers focused on the revert-specific fields.
+    correlation_id: NotRequired[str]
+
+
+def build_tx_reverted_payload(
+    *,
+    tx_hash: str | None = None,
+    block_number: int | None = None,
+    gas_used: int | None = None,
+    revert_reason: str | None = None,
+    error: str | None = None,
+    verbose_report: dict[str, Any] | None = None,
+) -> TxRevertedPayload:
+    """Build a ``TX_REVERTED`` payload with every required key set.
+
+    Callers should pass ``None`` for any field unavailable in their path; the
+    helper guarantees the key is still present on the returned payload. This
+    keeps downstream consumers safe from ``KeyError`` regardless of which
+    emit site produced the payload.
+    """
+    payload: TxRevertedPayload = {
+        "tx_hash": tx_hash,
+        "block_number": block_number,
+        "gas_used": gas_used,
+        "revert_reason": revert_reason,
+        "error": error,
+        "verbose_report": verbose_report,
+    }
+    return payload
+
+
+# =============================================================================
 # Execution Event Wrapper
 # =============================================================================
 
@@ -531,6 +618,10 @@ __all__ = [
     "TransactionConfirmedPayload",
     "SwapResultPayload",
     "ExecutionFailedPayload",
+    # TX_REVERTED schema
+    "TxRevertedPayload",
+    "TX_REVERTED_REQUIRED_KEYS",
+    "build_tx_reverted_payload",
     # Event wrapper
     "ExecutionEvent",
     # Integration maps

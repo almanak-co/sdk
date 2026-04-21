@@ -34,7 +34,7 @@ Example:
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -95,7 +95,7 @@ logger = logging.getLogger(__name__)
 
 
 # Import ExecutionEventType from events module (canonical source)
-from .events import ExecutionEventType
+from .events import ExecutionEventType, build_tx_reverted_payload
 
 
 class ExecutionPhase(StrEnum):
@@ -878,16 +878,20 @@ class ExecutionOrchestrator:
         self,
         event_type: ExecutionEventType,
         context: ExecutionContext,
-        details: dict[str, Any] | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit an execution event.
 
         Args:
             event_type: Type of event
             context: Execution context
-            details: Additional event details
+            details: Additional event details. Accepts any ``Mapping`` so
+                both plain ``dict`` and ``TypedDict`` payloads (e.g.
+                ``TxRevertedPayload``) can be passed without casting.
         """
-        event_details = details or {}
+        # Copy into a local mutable dict so we never mutate a caller-owned
+        # mapping (TypedDict payloads are read-only at the call site).
+        event_details: dict[str, Any] = dict(details) if details else {}
         event_details["correlation_id"] = context.correlation_id
 
         # Map execution event type to timeline event type
@@ -1642,14 +1646,26 @@ class ExecutionOrchestrator:
                     },
                 )
             else:
+                # Receipt-level revert: full confirmed receipt available, but
+                # no decoded revert_reason/verbose_report at this per-tx point
+                # (the verbose report is built once below for the batch).
+                # ``tx_result.error`` is unset in the receipt loop (see the
+                # TransactionResult construction above), so fall back to a
+                # non-null sentinel so downstream consumers using
+                # ``payload.get("error", <default>)`` do not surface a literal
+                # ``None`` error string. Full revert detail is surfaced in the
+                # batch-level EXECUTION_FAILED event below.
                 self._emit_event(
                     ExecutionEventType.TX_REVERTED,
                     context,
-                    {
-                        "tx_hash": receipt.tx_hash,
-                        "block_number": receipt.block_number,
-                        "gas_used": receipt.gas_used,
-                    },
+                    build_tx_reverted_payload(
+                        tx_hash=receipt.tx_hash,
+                        block_number=receipt.block_number,
+                        gas_used=receipt.gas_used,
+                        revert_reason=None,
+                        error=tx_result.error or "Transaction reverted",
+                        verbose_report=None,
+                    ),
                 )
 
         # Check for any reverted transactions
@@ -1825,14 +1841,21 @@ class ExecutionOrchestrator:
                 error_phase=ExecutionPhase.CONFIRMATION,
             )
 
+            # Exception-path revert: no confirmed receipt, so block_number
+            # may be ``None``. ``TransactionRevertedError`` always declares
+            # ``block_number`` / ``gas_used`` attributes (``None`` default), so
+            # direct attribute access is safe here.
             self._emit_event(
                 ExecutionEventType.TX_REVERTED,
                 context,
-                {
-                    "tx_hash": exc.tx_hash,
-                    "revert_reason": exc.revert_reason,
-                    "verbose_report": verbose_report.to_dict(),
-                },
+                build_tx_reverted_payload(
+                    tx_hash=exc.tx_hash,
+                    block_number=exc.block_number,
+                    gas_used=exc.gas_used,
+                    revert_reason=exc.revert_reason,
+                    error=str(exc),
+                    verbose_report=verbose_report.to_dict(),
+                ),
             )
 
             # Log user-friendly failure summary
