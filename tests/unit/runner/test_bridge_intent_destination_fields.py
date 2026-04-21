@@ -20,6 +20,7 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from almanak.gateway.proto import gateway_pb2
 
 
 def _make_runner() -> StrategyRunner:
@@ -50,8 +51,9 @@ def _make_orchestrator(tx_hash: str = "0x" + "ab" * 32) -> MagicMock:
     orch = MagicMock()
     orch.wallet_address = "0x" + "a1" * 20
     orch.primary_chain = "base"
-    # Provide rpc_urls so _execute_with_bridge_waiting's Web3 fallback doesn't
-    # short-circuit with "No RPC URL configured".
+    # rpc_urls is retained only for EnsoStateProvider wiring — the runner no
+    # longer falls back to direct Web3 for source-TX verification; the gateway
+    # client is mocked into the verification path instead.
     orch._config = SimpleNamespace(rpc_urls={"base": "http://mock.rpc"})
 
     result = MagicMock()
@@ -63,6 +65,14 @@ def _make_orchestrator(tx_hash: str = "0x" + "ab" * 32) -> MagicMock:
     )
     orch.execute = AsyncMock(return_value=result)
     return orch
+
+
+def _make_gateway_client_confirmed() -> MagicMock:
+    """Return a mock gateway client whose GetTransactionStatus reports confirmed."""
+    client = MagicMock()
+    status_response = SimpleNamespace(status="confirmed", block_number=123)
+    client.execution.GetTransactionStatus = MagicMock(return_value=status_response)
+    return client
 
 
 class TestBridgeIntentDestinationFields:
@@ -87,27 +97,21 @@ class TestBridgeIntentDestinationFields:
             return_value={"status": "completed", "balance_increase": 0}
         )
 
-        # Mock Web3 so source-TX verification succeeds immediately with status=1.
-        mock_web3_instance = MagicMock()
-        mock_web3_instance.eth.get_transaction_receipt.return_value = {
-            "status": 1,
-            "blockNumber": 123,
-        }
-        mock_web3_class = MagicMock(return_value=mock_web3_instance)
-        mock_web3_class.HTTPProvider = MagicMock()
+        # Gateway-only boundary: source-TX verification goes through
+        # gateway.execution.GetTransactionStatus. No direct Web3 is permitted.
+        gateway_client = _make_gateway_client_confirmed()
 
         with (
             patch.object(runner, "_load_execution_progress", new_callable=AsyncMock, return_value=None),
             patch.object(runner, "_save_execution_progress", new_callable=AsyncMock),
             patch.object(runner, "_clear_execution_progress", new_callable=AsyncMock),
-            patch.object(runner, "_get_gateway_client", return_value=None),
+            patch.object(runner, "_get_gateway_client", return_value=gateway_client),
             patch.object(runner, "_record_success"),
             patch.object(runner, "_calculate_duration_ms", return_value=100),
             patch(
                 "almanak.framework.runner.strategy_runner.EnsoStateProvider",
                 return_value=mock_state_provider,
             ),
-            patch("web3.Web3", mock_web3_class),
         ):
             await runner._execute_with_bridge_waiting(
                 strategy=strategy,
@@ -131,3 +135,70 @@ class TestBridgeIntentDestinationFields:
         assert call_kwargs["token_symbol"] == "USDC", (
             "token_symbol should come from BridgeIntent.token (not to_token)"
         )
+
+        # Gateway-only boundary pin: source-TX verification MUST go through the
+        # gateway's GetTransactionStatus RPC with the correct tx_hash and source
+        # chain. If this call ever disappears (e.g. the verification becomes a
+        # no-op), the register_bridge_transfer assertion above would still pass
+        # but we would have silently dropped the trust boundary check.
+        assert gateway_client.execution.GetTransactionStatus.called, (
+            "Source-TX verification must call gateway.execution.GetTransactionStatus; "
+            "without it, the gateway-only boundary is not actually exercised."
+        )
+        status_request = gateway_client.execution.GetTransactionStatus.call_args.args[0]
+        assert isinstance(status_request, gateway_pb2.TxStatusRequest)
+        assert status_request.tx_hash == "0x" + "ab" * 32
+        assert status_request.chain == "base"
+
+
+class TestBridgeWaitFailsFastWithoutGateway:
+    """Fix #1647: missing gateway_client must fail-fast BEFORE any TX is submitted.
+
+    Prior behaviour constructed a raw ``Web3(HTTPProvider(url))`` and polled
+    directly when ``state.gateway_client`` was ``None``. That bypassed the
+    gateway-only trust boundary documented in
+    ``blueprints/20-gateway-security-architecture.md``. The fix raises
+    ``RuntimeError`` at ``_init_bridge_wait_state`` time so the runner never
+    submits a cross-chain source transaction it cannot later verify.
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_gateway_client_raises_before_execute(self):
+        runner = _make_runner()
+        strategy = _make_strategy()
+        orchestrator = _make_orchestrator()
+
+        intent = BridgeIntent(
+            token="USDC",
+            amount=Decimal("100"),
+            from_chain="base",
+            to_chain="arbitrum",
+        )
+
+        mock_state_provider = MagicMock()
+
+        with (
+            patch.object(runner, "_load_execution_progress", new_callable=AsyncMock, return_value=None),
+            patch.object(runner, "_save_execution_progress", new_callable=AsyncMock),
+            patch.object(runner, "_clear_execution_progress", new_callable=AsyncMock),
+            patch.object(runner, "_get_gateway_client", return_value=None),
+            patch(
+                "almanak.framework.runner.strategy_runner.EnsoStateProvider",
+                return_value=mock_state_provider,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="Gateway client required"):
+                await runner._execute_with_bridge_waiting(
+                    strategy=strategy,
+                    intents=[intent],
+                    orchestrator=orchestrator,
+                    start_time=datetime.now(UTC),
+                )
+
+        # Critical: no source transaction may be submitted when the gateway
+        # client is missing. The fail-fast guard must run BEFORE any call to
+        # ``orchestrator.execute``, otherwise we would broadcast funds we
+        # cannot verify.
+        orchestrator.execute.assert_not_called()
+        # And the bridge tracker must never be wired up either.
+        mock_state_provider.register_bridge_transfer.assert_not_called()

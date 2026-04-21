@@ -306,10 +306,15 @@ class TestBridgeWaitingCrossChainFailureCallbacks:
         result_obj = orchestrator.execute.return_value
         result_obj.tx_result = SimpleNamespace(actual_amount_received=Decimal("100"), tx_hash=None)
 
+        # Gateway client mock required for cross-chain path (fix #1647); the
+        # behaviour being tested here is "no tx_hash in result fires the
+        # failure callback", which is separate from the gateway-only guard.
+        gateway_client = MagicMock()
+
         with (
             patch.object(runner, "_load_execution_progress", new_callable=AsyncMock, return_value=None),
             patch.object(runner, "_save_execution_progress", new_callable=AsyncMock),
-            patch.object(runner, "_get_gateway_client", return_value=None),
+            patch.object(runner, "_get_gateway_client", return_value=gateway_client),
             patch.object(runner, "_calculate_duration_ms", return_value=100),
             patch("almanak.framework.runner.strategy_runner.is_cross_chain_intent", return_value=True),
             patch("almanak.framework.runner.strategy_runner.Intent") as mock_intent_cls,

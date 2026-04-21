@@ -186,6 +186,101 @@ class RunIterationState:
     intent_tokens: list[str] = field(default_factory=list)
 
 
+@dataclass
+class SingleChainExecutionState:
+    """Mutable bag threaded through ``_execute_single_chain``'s step helpers.
+
+    Phase 3c splits ``_execute_single_chain`` (CC=118, 751 lines) into a thin
+    driver plus per-phase step helpers. Those helpers receive this state
+    object, mutate it, and return either ``None`` (continue) or an
+    ``IterationResult`` early-exit. The dataclass is internal to the runner
+    and is **not** part of the public API.
+
+    Lifecycle:
+      - ``_init_single_chain_state`` populates the setup fields
+        (compiler, state machine, clob client, bundle metadata, pre-snapshot).
+      - ``_single_chain_state_machine_loop`` drives the state machine and
+        records the last execution result/context and last bundle metadata.
+      - ``_single_chain_handle_success`` / ``_single_chain_handle_failure``
+        read the accumulated state to build the final ``IterationResult``.
+    """
+
+    # --- Inputs ---
+    strategy: "StrategyProtocol"
+    intent: "AnyIntent"
+    start_time: datetime
+    total_intents: int = 1
+    market: Any | None = None
+    record_metrics: bool = True
+
+    # --- Derived runtime handles (populated by init) ---
+    # Fields populated unconditionally by ``_init_single_chain_state`` are
+    # typed as ``Any`` (not ``Any | None``) so mypy does not complain about
+    # ``union-attr`` at read sites after init has run. The runtime default is
+    # still ``None`` -- the contract is "readers only touch these after init".
+    strategy_id: str = ""
+    gateway_client: Any = None
+    rpc_url: str | None = None
+    price_oracle: dict | None = None
+    polymarket_config: Any = None
+    clob_handler: Any = None
+    clob_client: Any = None
+    compiler: Any = None
+    state_machine: Any = None
+    pre_snapshot: Any | None = None
+
+    # --- Running bookkeeping (updated by state-machine loop) ---
+    last_execution_result: Any | None = None
+    last_execution_context: Any | None = None
+    last_bundle_metadata: dict[str, Any] | None = None
+
+
+@dataclass
+class BridgeWaitState:
+    """Mutable bag threaded through ``_execute_with_bridge_waiting``'s helpers.
+
+    Phase 3c splits the cross-chain bridge-waiting path (CC=79, 534 lines) into
+    a per-intent loop driver plus step helpers for source-TX verification,
+    bridge polling, and finalization. Each helper mutates this state and
+    either returns ``None`` to continue or records a failure that the loop
+    picks up via the ``failed_step`` sentinel.
+    """
+
+    # --- Inputs ---
+    strategy: "StrategyProtocol"
+    intents: list["AnyIntent"]
+    orchestrator: "MultiChainOrchestrator"
+    start_time: datetime
+    resume_progress: "ExecutionProgress | None" = None
+    price_map: dict[str, str] | None = None
+    price_oracle: dict | None = None
+
+    # --- Derived (populated by init) ---
+    # Fields populated unconditionally by ``_init_bridge_wait_state`` use
+    # ``Any`` (not ``Any | None``) so mypy does not warn about ``union-attr``
+    # at read sites. The contract is "readers only touch these after init".
+    strategy_id: str = ""
+    first_intent: "AnyIntent | None" = None
+    wallet_address: str = ""
+    rpc_urls: dict[str, str] = field(default_factory=dict)
+    gateway_client: Any = None
+    state_provider: Any = None
+    start_step_index: int = 0
+    previous_amount_received: Decimal | None = None
+    progress: "ExecutionProgress | None" = None
+
+    # --- Running bookkeeping (updated while iterating intents) ---
+    successful_count: int = 0
+    failed_step: str | None = None
+    error_message: str | None = None
+    failed_result: Any | None = None
+    callback_fired: bool = False
+    # Tracks the intent currently being processed so the finalization block
+    # can fire ``on_intent_executed`` for break-exit paths that did not fire
+    # the callback inline.
+    current_intent: "AnyIntent | None" = None
+
+
 # =============================================================================
 # Strategy Runner
 # =============================================================================
@@ -1981,6 +2076,10 @@ class StrategyRunner:
         Retries occur automatically per state machine configuration (default 3).
         Operator escalation only happens after state machine reaches FAILED state.
 
+        Phase 3c: This is now a thin driver that sets up a
+        ``SingleChainExecutionState`` and threads it through per-phase step
+        helpers. Behaviour is identical to the pre-refactor inline code.
+
         Args:
             strategy: The strategy being executed
             intent: The intent to execute
@@ -1993,134 +2092,142 @@ class StrategyRunner:
         Returns:
             IterationResult with execution details
         """
-        strategy_id = strategy.strategy_id
-
         if total_intents > 1:
             logger.debug(f"Executing intent as part of a {total_intents}-intent sequence")
 
-        # Create compiler and state machine with retry configuration
+        state = SingleChainExecutionState(
+            strategy=strategy,
+            intent=intent,
+            start_time=start_time,
+            total_intents=total_intents,
+            market=market,
+            record_metrics=record_metrics,
+            strategy_id=strategy.strategy_id,
+        )
+
+        # Setup: build compiler, state machine, pre-balance snapshot. If a
+        # setup step returns an early-exit result (currently only dry-run is
+        # possible later), propagate it.
+        try:
+            await self._init_single_chain_state(state)
+        except Exception:
+            if state.clob_client is not None:
+                state.clob_client.close()
+            raise
+
+        # Drive the state-machine loop. Dry-run short-circuits return an
+        # IterationResult early.
+        early = await self._single_chain_state_machine_loop(state)
+        if early is not None:
+            return early
+
+        # Close ClobClient to release httpx connection pool resources
+        if state.clob_client is not None:
+            try:
+                state.clob_client.close()
+            except Exception:
+                logger.debug("Failed to close ClobClient", exc_info=True)
+
+        # Always invalidate balance cache after execution (success or failure)
+        # to prevent stale reads on the next decide() cycle.
+        self.balance_provider.invalidate_cache()
+
+        if state.state_machine.success:
+            return await self._single_chain_handle_success(state)
+        return await self._single_chain_handle_failure(state)
+
+    # -------------------------------------------------------------------------
+    # _execute_single_chain step helpers (Phase 3c)
+    # -------------------------------------------------------------------------
+    #
+    # Each helper takes the ``SingleChainExecutionState`` for the current
+    # execution, mutates it, and either returns ``None`` (continue to the
+    # next step) or an ``IterationResult`` early-exit. The helper names are
+    # not load-bearing -- they are descriptive boundaries around pieces of
+    # the original inline code.
+
+    async def _init_single_chain_state(self, state: SingleChainExecutionState) -> None:
+        """Populate runtime handles on ``state`` (compiler, state machine, etc.).
+
+        Builds: gateway_client / rpc_url, price_oracle, polymarket config,
+        clob handler, IntentCompiler, IntentStateMachine, pre-execution
+        balance snapshot. Emits the COMPILE phase event.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        strategy_id = state.strategy_id
+
         # Detect gateway orchestrator and use its gateway client for RPC
         from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
-        gateway_client = None
-        rpc_url = None
-
         if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
             # Use gateway client for RPC queries (preferred mode)
-            gateway_client = self.execution_orchestrator._client
+            state.gateway_client = self.execution_orchestrator._client
             logger.debug("Using GatewayExecutionOrchestrator - RPC queries go through gateway")
         else:
             # Fallback to direct RPC (deprecated for production)
-            rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
-            if rpc_url:
+            state.rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
+            if state.rpc_url:
                 logger.warning("Using direct RPC URL - this is deprecated for production use")
 
         # Extract real prices from market snapshot for accurate slippage calculations
         # Without this, IntentCompiler uses hardcoded default prices which causes
         # min_output calculations to be wrong (e.g., ETH at $2000 vs real $3117)
-        price_oracle = None
-        if market is not None and hasattr(market, "get_price_oracle_dict"):
-            price_oracle = market.get_price_oracle_dict()
-            # Pre-fetch prices for intent tokens that aren't already in the oracle.
-            # This covers two cases:
-            # 1. Oracle is empty (strategy didn't call market.price() in decide())
-            # 2. Oracle has some tokens but FlashLoanIntent callbacks reference
-            #    additional tokens (e.g., WETH) not fetched by decide().
-            if hasattr(market, "price"):
-                intent_tokens = _extract_tokens_from_intent(intent)
-                missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
-                if missing_tokens:
-                    for token in missing_tokens:
-                        try:
-                            market.price(token)
-                        except Exception:
-                            pass  # Token price unavailable, compiler will use placeholder
-                    price_oracle = market.get_price_oracle_dict()
-                    if price_oracle:
-                        logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
-            if price_oracle is None:
-                pass  # No oracle available
-            elif not price_oracle:
-                # Oracle exists but empty after pre-fetch — no usable prices
-                price_oracle = None
-            else:
-                logger.debug(f"Using real prices from market snapshot: {list(price_oracle.keys())}")
+        state.price_oracle = self._build_single_chain_price_oracle(state.market, intent)
 
         # Initialize Polymarket config for Polygon chain (prediction market support)
-        polymarket_config = None
-        if strategy.chain.lower() == "polygon":
-            try:
-                from ..connectors.polymarket import PolymarketConfig
-
-                polymarket_config = PolymarketConfig.from_env()
-                logger.info(
-                    f"PolymarketConfig loaded for wallet={polymarket_config.wallet_address[:10]}... "
-                    "(prediction market intents enabled)"
-                )
-            except (ImportError, ValueError) as e:
-                logger.debug(
-                    f"PolymarketConfig not available: {e}. "
-                    "Prediction market intents will not be available for this strategy."
-                )
+        state.polymarket_config = self._build_polymarket_config(strategy.chain)
 
         # Build CLOB handler for Polymarket prediction market execution
-        clob_handler = None
-        clob_client = None
-        if polymarket_config is not None:
+        if state.polymarket_config is not None:
             from ..connectors.polymarket.clob_client import ClobClient
             from ..execution.clob_handler import ClobActionHandler
 
-            clob_client = ClobClient(polymarket_config)
-            clob_handler = ClobActionHandler(clob_client=clob_client)
+            state.clob_client = ClobClient(state.polymarket_config)
+            state.clob_handler = ClobActionHandler(clob_client=state.clob_client)
 
-        # Build compiler and state machine. If setup fails, ensure ClobClient cleanup.
-        try:
-            # Build compiler config
-            # Allow placeholder prices when no real prices are available (empty oracle).
-            # This happens legitimately when the strategy uses indicators (RSI, BB)
-            # instead of calling market.price() directly.  Placeholder prices are only
-            # used as fallback for tokens not in the oracle dict, so an empty oracle
-            # with placeholders enabled is safe -- the compiler will use conservative
-            # hardcoded estimates for slippage calculations.
-            if price_oracle is None:
-                logger.debug(
-                    "No prices in market snapshot -- compiler will use placeholder prices. "
-                    "This is normal for strategies that use indicators instead of market.price()."
-                )
-            compiler_config = IntentCompilerConfig(
-                allow_placeholder_prices=price_oracle is None,
-                polymarket_config=polymarket_config,
+        # Build compiler config
+        # Allow placeholder prices when no real prices are available (empty oracle).
+        # This happens legitimately when the strategy uses indicators (RSI, BB)
+        # instead of calling market.price() directly.  Placeholder prices are only
+        # used as fallback for tokens not in the oracle dict, so an empty oracle
+        # with placeholders enabled is safe -- the compiler will use conservative
+        # hardcoded estimates for slippage calculations.
+        if state.price_oracle is None:
+            logger.debug(
+                "No prices in market snapshot -- compiler will use placeholder prices. "
+                "This is normal for strategies that use indicators instead of market.price()."
             )
+        compiler_config = IntentCompilerConfig(
+            allow_placeholder_prices=state.price_oracle is None,
+            polymarket_config=state.polymarket_config,
+        )
 
-            compiler = IntentCompiler(
-                chain=strategy.chain,
-                wallet_address=strategy.wallet_address,
-                rpc_url=rpc_url,
-                price_oracle=price_oracle,
-                config=compiler_config,
-                gateway_client=gateway_client,
-                chain_wallets=getattr(strategy, "_chain_wallets", None),
-            )
+        state.compiler = IntentCompiler(
+            chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
+            rpc_url=state.rpc_url,
+            price_oracle=state.price_oracle,
+            config=compiler_config,
+            gateway_client=state.gateway_client,
+            chain_wallets=getattr(strategy, "_chain_wallets", None),
+        )
 
-            state_machine_config = StateMachineConfig(
-                retry_config=RetryConfig(
-                    max_retries=self.config.max_retries,
-                    initial_delay_seconds=self.config.initial_retry_delay,
-                    max_delay_seconds=self.config.max_retry_delay,
-                ),
-                emit_metrics=True,
-            )
+        state_machine_config = StateMachineConfig(
+            retry_config=RetryConfig(
+                max_retries=self.config.max_retries,
+                initial_delay_seconds=self.config.initial_retry_delay,
+                max_delay_seconds=self.config.max_retry_delay,
+            ),
+            emit_metrics=True,
+        )
 
-            state_machine = IntentStateMachine(
-                intent=intent,
-                compiler=compiler,
-                config=state_machine_config,
-                on_sadflow_enter=self._on_sadflow_enter,
-            )
-        except Exception:
-            if clob_client is not None:
-                clob_client.close()
-            raise
+        state.state_machine = IntentStateMachine(
+            intent=intent,
+            compiler=state.compiler,
+            config=state_machine_config,
+            on_sadflow_enter=self._on_sadflow_enter,
+        )
 
         logger.info(
             f"Created IntentStateMachine for {strategy_id} "
@@ -2138,21 +2245,81 @@ class StrategyRunner:
             chain=strategy.chain,
         )
 
-        # Track the last execution result and context for final reporting
-        last_execution_result: ExecutionResult | None = None
-        last_execution_context: ExecutionContext | None = None
-
-        # VIB-3203: Capture the ActionBundle metadata from the step that actually
-        # carried a bundle, not from whichever step_result happens to be terminal.
-        # The terminal step may be an idle/no-op tick that lacks action_bundle, in
-        # which case the realized-slippage plumbing would silently degrade.
-        last_bundle_metadata: dict[str, Any] | None = None
-
         # Capture pre-execution balance snapshot for real reconciliation (VIB-3158).
         # Non-fatal: on failure we fall back to the legacy post-only mode.
-        pre_snapshot = await self._snapshot_balances_for_intent(intent)
+        state.pre_snapshot = await self._snapshot_balances_for_intent(intent)
 
-        # Execute through state machine loop
+    @staticmethod
+    def _build_single_chain_price_oracle(market: Any | None, intent: AnyIntent) -> dict | None:
+        """Extract and normalize the price oracle dict from a market snapshot.
+
+        Pre-fetches prices for tokens named by the intent that aren't already
+        in the oracle. Returns ``None`` when no oracle is available or the
+        oracle is empty after pre-fetch (so the compiler falls back to
+        placeholder prices).
+        """
+        if market is None or not hasattr(market, "get_price_oracle_dict"):
+            return None
+
+        price_oracle: dict | None = market.get_price_oracle_dict()
+        # Pre-fetch prices for intent tokens that aren't already in the oracle.
+        # This covers two cases:
+        # 1. Oracle is empty (strategy didn't call market.price() in decide())
+        # 2. Oracle has some tokens but FlashLoanIntent callbacks reference
+        #    additional tokens (e.g., WETH) not fetched by decide().
+        if hasattr(market, "price"):
+            intent_tokens = _extract_tokens_from_intent(intent)
+            missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
+            if missing_tokens:
+                for token in missing_tokens:
+                    try:
+                        market.price(token)
+                    except Exception:
+                        pass  # Token price unavailable, compiler will use placeholder
+                price_oracle = market.get_price_oracle_dict()
+                if price_oracle:
+                    logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
+        if price_oracle is None:
+            return None
+        if not price_oracle:
+            # Oracle exists but empty after pre-fetch -- no usable prices
+            return None
+        logger.debug(f"Using real prices from market snapshot: {list(price_oracle.keys())}")
+        return price_oracle
+
+    @staticmethod
+    def _build_polymarket_config(chain: str) -> Any | None:
+        """Load PolymarketConfig from env when chain is Polygon, else None."""
+        if chain.lower() != "polygon":
+            return None
+        try:
+            from ..connectors.polymarket import PolymarketConfig
+
+            polymarket_config = PolymarketConfig.from_env()
+            logger.info(
+                f"PolymarketConfig loaded for wallet={polymarket_config.wallet_address[:10]}... "
+                "(prediction market intents enabled)"
+            )
+            return polymarket_config
+        except (ImportError, ValueError) as e:
+            logger.debug(
+                f"PolymarketConfig not available: {e}. "
+                "Prediction market intents will not be available for this strategy."
+            )
+            return None
+
+    async def _single_chain_state_machine_loop(self, state: SingleChainExecutionState) -> IterationResult | None:
+        """Drive the IntentStateMachine until it reaches a terminal state.
+
+        Handles retry delays, dry-run short-circuit, and per-step execution
+        (including the pre-retry "previously-submitted tx" check, CLOB vs
+        on-chain routing, receipt conversion, phase-event emission, and
+        cache invalidation on failure). Returns an IterationResult only when
+        the loop terminates early via dry-run; otherwise returns None and
+        lets the caller inspect ``state.state_machine.success``.
+        """
+        state_machine = state.state_machine
+
         while not state_machine.is_complete:
             step_result = state_machine.step()
 
@@ -2167,248 +2334,15 @@ class StrategyRunner:
 
             # If we need to execute an action bundle
             if step_result.needs_execution and step_result.action_bundle:
-                # VIB-3203: Persist this step's metadata at the moment of
-                # execution so enrichment below can access
-                # ``expected_output_human`` even if a later no-op step is
-                # terminal.
-                last_bundle_metadata = getattr(step_result.action_bundle, "metadata", None)
-                # Dry run mode - skip actual execution
-                if self.config.dry_run:
-                    logger.info(
-                        f"Dry run mode - skipping execution for {strategy_id}. "
-                        f"Would execute {len(step_result.action_bundle.transactions)} transactions."
-                    )
-                    if clob_client is not None:
-                        clob_client.close()
-                    if record_metrics:
-                        self._record_success()
-                    return IterationResult(
-                        status=IterationStatus.DRY_RUN,
-                        intent=intent,
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
+                early = await self._single_chain_execute_step(state, step_result)
+                if early is not None:
+                    return early
+                continue
 
-                # Execute the action bundle through orchestrator
-                # Resolve protocol for result enrichment (intent is frozen, so we pass via context)
-                resolved_protocol = getattr(intent, "protocol", None) or compiler.default_protocol
-                from almanak.framework.observability.context import get_cycle_id
-
-                execution_context = ExecutionContext(
-                    strategy_id=strategy_id,
-                    chain=strategy.chain,
-                    wallet_address=strategy.wallet_address,
-                    correlation_id=intent.intent_id,
-                    cycle_id=get_cycle_id() or "",
-                    protocol=resolved_protocol,
-                )
-                last_execution_context = execution_context
-
-                try:
-                    # Execute through orchestrator (single-chain path)
-                    # Note: _is_multi_chain flag guarantees this is ExecutionOrchestrator
-                    # but we use cast for type checker since orchestrator is Union type
-                    single_chain_orch = cast(ExecutionOrchestrator, self.execution_orchestrator)
-
-                    # Pre-retry check: if previous attempt timed out and we have
-                    # submitted tx_hashes, check if they've since confirmed to avoid
-                    # duplicate swaps from retrying already-confirmed transactions.
-                    if (
-                        state_machine.retry_count > 0
-                        and last_execution_result
-                        and last_execution_result.transaction_results
-                        and last_execution_result.error
-                        and "timeout" in last_execution_result.error.lower()
-                    ):
-                        prev_hashes = [tr.tx_hash for tr in last_execution_result.transaction_results if tr.tx_hash]
-                        if prev_hashes:
-                            logger.info(
-                                f"Pre-retry check: verifying {len(prev_hashes)} previously-submitted "
-                                f"tx(es) before retrying"
-                            )
-                            all_confirmed = True
-                            prev_receipts: list[FullTransactionReceipt] = []
-                            for prev_hash in prev_hashes:
-                                try:
-                                    prev_receipt = await single_chain_orch.submitter.get_receipt(
-                                        prev_hash, timeout=30.0
-                                    )
-                                    prev_receipts.append(prev_receipt)
-                                    if prev_receipt.success:
-                                        logger.info(f"Previously-submitted tx {prev_hash[:10]}... confirmed")
-                                    else:
-                                        logger.warning(f"Previously-submitted tx {prev_hash[:10]}... reverted")
-                                        all_confirmed = False
-                                except Exception:
-                                    logger.warning(
-                                        f"Could not get receipt for {prev_hash[:10]}..., proceeding with retry"
-                                    )
-                                    all_confirmed = False
-
-                            if all_confirmed and prev_receipts:
-                                logger.info(
-                                    "All previously-submitted transactions confirmed -- "
-                                    "skipping retry, treating as success"
-                                )
-                                # Update last_execution_result so downstream consumers
-                                # (timeline, callbacks, IterationResult) see a successful
-                                # result instead of the stale timeout failure.
-                                # Preserve receipt data so ResultEnricher can extract
-                                # swap amounts, position IDs, and other enriched data.
-                                last_execution_result = ExecutionResult(
-                                    success=True,
-                                    phase=ExecutionPhase.COMPLETE,
-                                    transaction_results=[
-                                        TransactionResult(
-                                            tx_hash=r.tx_hash,
-                                            success=r.success,
-                                            receipt=r,
-                                            gas_used=r.gas_used,
-                                            gas_cost_wei=r.gas_cost_wei,
-                                            logs=r.logs,
-                                        )
-                                        for r in prev_receipts
-                                    ],
-                                    total_gas_used=sum(r.gas_used for r in prev_receipts),
-                                    total_gas_cost_wei=sum(r.gas_cost_wei for r in prev_receipts),
-                                    completed_at=datetime.now(UTC),
-                                )
-                                # Convert to simplified receipt for state machine
-                                state_machine.set_receipt(
-                                    TransactionReceipt(
-                                        success=True,
-                                        tx_hash=prev_receipts[0].tx_hash,
-                                        gas_used=sum(r.gas_used for r in prev_receipts),
-                                    )
-                                )
-                                continue
-
-                    # Route CLOB bundles to ClobActionHandler (off-chain orders),
-                    # all other bundles to the on-chain ExecutionOrchestrator.
-                    if clob_handler and clob_handler.can_handle(step_result.action_bundle):
-                        clob_result = await clob_handler.execute(step_result.action_bundle)
-                        execution_result = ExecutionResult(
-                            success=clob_result.success,
-                            phase=ExecutionPhase.COMPLETE,
-                            completed_at=datetime.now(UTC),
-                            error=clob_result.error,
-                        )
-                        execution_result.extracted_data = {
-                            "clob_status": clob_result.status.value,
-                        }
-                        if clob_result.order_id:
-                            execution_result.extracted_data["order_id"] = clob_result.order_id
-                        # VIB-3218: attach PredictionFill so strategies can
-                        # distinguish "order accepted" from "order filled"
-                        # without reaching into clob_handler internals.
-                        # requested_size may be absent (e.g. SELL "all") --
-                        # skip PredictionFill if we don't have it; strategies
-                        # should then rely on post-execution balance reads.
-                        prediction_fill = clob_result.to_prediction_fill()
-                        if prediction_fill is not None:
-                            execution_result.prediction_fill = prediction_fill
-                        last_execution_result = execution_result
-                    else:
-                        # Update native token price for USD-denominated risk guards
-                        # (max_value_usd, max_gas_cost_usd).
-                        # tx_risk_config only exists on local ExecutionOrchestrator,
-                        # not GatewayExecutionOrchestrator. Reset BEFORE the fetch
-                        # attempt so a missed/failed oracle reliably trips fail-closed
-                        # in the validator instead of reusing the prior cycle's price.
-                        tx_risk_cfg = getattr(single_chain_orch, "tx_risk_config", None)
-                        if tx_risk_cfg is not None and (
-                            tx_risk_cfg.max_gas_cost_usd > 0 or tx_risk_cfg.max_value_usd > 0
-                        ):
-                            tx_risk_cfg.native_token_price_usd = 0.0
-                            if price_oracle:
-                                from almanak.gateway.data.balance.web3_provider import (
-                                    NATIVE_TOKEN_SYMBOLS,
-                                )
-
-                                native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
-                                native_price = price_oracle.get(native_symbol, 0)
-                                if native_price:
-                                    tx_risk_cfg.native_token_price_usd = float(native_price)
-
-                        execution_result = await single_chain_orch.execute(
-                            action_bundle=step_result.action_bundle,
-                            context=execution_context,
-                        )
-                        last_execution_result = execution_result
-
-                    # Convert ExecutionResult to TransactionReceipt for state machine
-                    tx_hash = ""
-                    if execution_result.transaction_results:
-                        tx_hash = execution_result.transaction_results[0].tx_hash
-
-                    receipt = TransactionReceipt(
-                        success=execution_result.success,
-                        tx_hash=tx_hash,
-                        gas_used=execution_result.total_gas_used,
-                        error=execution_result.error,
-                    )
-
-                    # Set receipt for state machine validation
-                    state_machine.set_receipt(receipt)
-
-                    emit_phase_event(
-                        strategy_id=strategy_id,
-                        phase=StrategyPhase.EXECUTE,
-                        event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
-                        description=f"Execution {'succeeded' if execution_result.success else 'failed'} "
-                        f"(gas={execution_result.total_gas_used})",
-                        chain=strategy.chain,
-                        tx_hash=tx_hash,
-                        details={
-                            "success": execution_result.success,
-                            "gas_used": execution_result.total_gas_used,
-                            "tx_count": len(execution_result.transaction_results),
-                            "error": execution_result.error or "",
-                        },
-                    )
-
-                    if execution_result.success:
-                        logger.info(
-                            f"Execution successful for {strategy_id}: "
-                            f"gas_used={execution_result.total_gas_used}, "
-                            f"tx_count={len(execution_result.transaction_results)}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Execution failed for {strategy_id}: {execution_result.error} "
-                            f"(retry {state_machine.retry_count}/{self.config.max_retries})"
-                        )
-                        # On timeout, approvals likely succeeded -- keep cache valid.
-                        # On other failures, clear cache since approvals may not have
-                        # succeeded or may have been consumed.
-                        is_timeout = execution_result.error and "timeout" in execution_result.error.lower()
-                        if not is_timeout:
-                            compiler.clear_allowance_cache()
-                        else:
-                            logger.info("Timeout error -- preserving allowance cache for retry")
-                        # Reset nonce cache on failure to force fresh on-chain
-                        # query on retry. Prevents nonce drift. (VIB-1449)
-                        if hasattr(self.execution_orchestrator, "reset_nonce_cache"):
-                            self.execution_orchestrator.reset_nonce_cache()
-
-                except Exception as e:
-                    logger.error(f"Execution error: {e}", exc_info=True)
-                    # On timeout exceptions, approvals likely succeeded -- keep cache.
-                    is_timeout = "timeout" in str(e).lower()
-                    if not is_timeout:
-                        compiler.clear_allowance_cache()
-                    # Set failed receipt to trigger sadflow
-                    state_machine.set_receipt(
-                        TransactionReceipt(
-                            success=False,
-                            error=str(e),
-                        )
-                    )
-
-            elif step_result.error and not step_result.is_complete:
+            if step_result.error and not step_result.is_complete:
                 # If execution already logged this exact error, keep this line at debug
                 # to avoid duplicate warning spam in the same retry cycle.
-                if last_execution_result and last_execution_result.error == step_result.error:
+                if state.last_execution_result and state.last_execution_result.error == step_result.error:
                     logger.debug(
                         f"Step error (already logged): {step_result.error} "
                         f"(retry {state_machine.retry_count}/{self.config.max_retries})"
@@ -2418,301 +2352,649 @@ class StrategyRunner:
                         f"Step error: {step_result.error} (retry {state_machine.retry_count}/{self.config.max_retries})"
                     )
 
-        # Close ClobClient to release httpx connection pool resources
-        if clob_client is not None:
-            try:
-                clob_client.close()
-            except Exception:
-                logger.debug("Failed to close ClobClient", exc_info=True)
+        return None
 
-        # Always invalidate balance cache after execution (success or failure)
-        # to prevent stale reads on the next decide() cycle.
-        self.balance_provider.invalidate_cache()
+    async def _single_chain_execute_step(
+        self, state: SingleChainExecutionState, step_result: Any
+    ) -> IterationResult | None:
+        """Execute one action bundle step from the state machine loop.
 
-        # State machine completed - check final result
-        if state_machine.success:
-            # Enrich result with intent-specific extracted data
-            if last_execution_result and last_execution_context:
-                try:
-                    enricher = ResultEnricher()
-                    # VIB-3203: thread compiler bundle metadata so swap_amounts
-                    # extractors can compute realized slippage_bps from the
-                    # persisted expected_output_human quote. We use the
-                    # metadata snapshot captured inside the state-machine loop
-                    # at execution time, not the terminal step_result (which
-                    # may be a COMPLETE state with no action_bundle).
-                    last_execution_result = enricher.enrich(
-                        last_execution_result,
-                        intent,
-                        last_execution_context,
-                        bundle_metadata=last_bundle_metadata,
-                    )
-                except Exception as e:
-                    logger.warning(f"Result enrichment failed: {e}")
+        Returns an IterationResult only for dry-run short-circuit; otherwise
+        mutates ``state.last_execution_result`` / ``last_execution_context``
+        / ``last_bundle_metadata`` and returns ``None`` so the loop advances
+        to the next state-machine step.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        strategy_id = state.strategy_id
+        state_machine = state.state_machine
+        compiler = state.compiler
 
-            # Slippage circuit breaker: check actual slippage against max_slippage_bps
-            # tx_risk_config only exists on local ExecutionOrchestrator, not GatewayExecutionOrchestrator
-            if last_execution_result and last_execution_result.swap_amounts:
-                tx_risk_cfg = getattr(self.execution_orchestrator, "tx_risk_config", None)
-                if tx_risk_cfg:
-                    max_slippage = tx_risk_cfg.max_slippage_bps
-                else:
-                    intent_slippage = getattr(intent, "max_slippage", None)
-                    if isinstance(intent_slippage, int | float | Decimal):
-                        max_slippage = int(Decimal(str(intent_slippage)) * 10000)
-                    else:
-                        max_slippage = 0
-                actual_slippage = last_execution_result.swap_amounts.slippage_bps
-                if max_slippage > 0 and actual_slippage is not None and actual_slippage > max_slippage:
-                    slippage_error = (
-                        f"Slippage circuit breaker: actual slippage {actual_slippage} bps "
-                        f"exceeds limit {max_slippage} bps "
-                        f"(swap: {last_execution_result.swap_amounts.token_in} -> "
-                        f"{last_execution_result.swap_amounts.token_out})"
-                    )
-                    logger.error(slippage_error)
+        # VIB-3203: Persist this step's metadata at the moment of
+        # execution so enrichment below can access ``expected_output_human``
+        # even if a later no-op step is terminal.
+        state.last_bundle_metadata = getattr(step_result.action_bundle, "metadata", None)
 
-                    # Emit timeline event for failed execution
-                    self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
-
-                    # Notify strategy of failure due to slippage breach
-                    # Attach slippage error to result so strategy authors can access it
-                    last_execution_result.error = slippage_error
-                    if hasattr(strategy, "on_intent_executed"):
-                        try:
-                            strategy.on_intent_executed(intent, success=False, result=last_execution_result)
-                        except Exception as e:
-                            logger.warning(f"Error in on_intent_executed callback: {e}")
-                    self._invoke_optional_hook(
-                        strategy,
-                        "on_copy_execution_result",
-                        intent,
-                        False,
-                        last_execution_result,
-                    )
-
-                    # Record slippage-breach trade in ledger (VIB-2402)
-                    await self._write_ledger_entry(
-                        strategy, intent, result=last_execution_result, success=False, error=slippage_error
-                    )
-
-                    # Persist state even when circuit breaker fails; on-chain state already changed.
-                    if hasattr(strategy, "save_state"):
-                        try:
-                            strategy.save_state()
-                        except Exception as e:
-                            logger.warning(f"Error saving strategy state: {e}")
-
-                    return IterationResult(
-                        status=IterationStatus.EXECUTION_FAILED,
-                        intent=intent,
-                        execution_result=last_execution_result,
-                        error=slippage_error,
-                        strategy_id=strategy_id,
-                        duration_ms=self._calculate_duration_ms(start_time),
-                    )
-
-            # Post-execution balance reconciliation (VIB-3158).
-            # Run BEFORE we commit the iteration as a success so an incident
-            # (pre/post delta outside the intent's expected range) can steer
-            # the iteration into the failure path — triggering circuit-breaker
-            # recording, consecutive-error alerting, and a non-success status
-            # downstream. Without this gate, operators would see a green
-            # iteration summary while the strategy confidently traded on
-            # corrupted accounting.
-            recon = await self._reconcile_post_execution_balances(
-                strategy, intent, last_execution_result, pre_snapshot=pre_snapshot
+        # Dry run mode - skip actual execution
+        if self.config.dry_run:
+            logger.info(
+                f"Dry run mode - skipping execution for {strategy_id}. "
+                f"Would execute {len(step_result.action_bundle.transactions)} transactions."
             )
-            recon_incident = bool(recon and recon.get("incident"))
-
-            if recon_incident:
-                recon_error = self._format_reconciliation_error(recon)
-                logger.error(
-                    "Reconciliation enforcement tripped for %s: %s",
-                    strategy_id,
-                    recon_error,
-                )
-
-                # Attach error to the execution result FIRST so the timeline
-                # event and downstream consumers (alerts, operator cards,
-                # ledger) see the reconciliation error rather than the stale
-                # execution-level error.
-                if last_execution_result is not None:
-                    last_execution_result.error = recon_error
-
-                # Emit timeline event as a failure so the strategy timeline
-                # reflects the accounting breach, not a clean success.
-                self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
-
-                # Notify strategy of the failed outcome so it does not treat
-                # the execution as clean.
-                if hasattr(strategy, "on_intent_executed"):
-                    try:
-                        strategy.on_intent_executed(intent, success=False, result=last_execution_result)
-                    except Exception as e:
-                        logger.warning(f"Error in on_intent_executed callback: {e}")
-                self._invoke_optional_hook(
-                    strategy,
-                    "on_copy_execution_result",
-                    intent,
-                    False,
-                    last_execution_result,
-                )
-
-                # Record failed trade in ledger (VIB-2402) — on-chain state
-                # changed, but the accounting outcome is a failure.
-                await self._write_ledger_entry(
-                    strategy, intent, result=last_execution_result, success=False, error=recon_error
-                )
-
-                # Persist strategy state even on reconciliation failure: the
-                # on-chain state has already moved, so any internal bookkeeping
-                # the strategy captured pre-reconciliation must not be lost.
-                if hasattr(strategy, "save_state"):
-                    try:
-                        strategy.save_state()
-                    except Exception as e:
-                        logger.warning(f"Error saving strategy state: {e}")
-
-                # Operator-facing alert on this single incident (independent
-                # of the consecutive-errors alert that the outer run loop
-                # fires on threshold).
-                if last_execution_result is not None:
-                    try:
-                        await self._handle_execution_error(strategy, last_execution_result)
-                    except Exception as e:
-                        logger.debug("reconciliation alert dispatch failed: %s", e)
-
-                return IterationResult(
-                    status=IterationStatus.RECONCILIATION_FAILED,
-                    intent=intent,
-                    execution_result=last_execution_result,
-                    error=recon_error,
-                    strategy_id=strategy_id,
-                    duration_ms=self._calculate_duration_ms(start_time),
-                    balance_reconciliation=recon,
-                )
-
-            # Clean reconciliation → commit the success path.
-            # Emit timeline event for successful execution
-            self._emit_execution_timeline_event(strategy, intent, success=True, result=last_execution_result)
-            # Write structured trade record to transaction ledger (VIB-2402)
-            await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=True)
-            if record_metrics:
-                self._record_success(execution_proved=True)
-
-            # Notify strategy of successful execution
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=True, result=last_execution_result)
-                except Exception as e:
-                    logger.warning(f"Error in on_intent_executed callback: {e}")
-            self._invoke_optional_hook(
-                strategy,
-                "on_copy_execution_result",
-                intent,
-                True,
-                last_execution_result,
-            )
-
-            if state_machine.retry_count > 0:
-                logger.info(f"Intent succeeded after {state_machine.retry_count} retries")
-
-            # Save strategy state after successful execution
-            if hasattr(strategy, "save_state"):
-                try:
-                    strategy.save_state()
-                except Exception as e:
-                    logger.warning(f"Error saving strategy state: {e}")
-
+            if state.clob_client is not None:
+                state.clob_client.close()
+            if state.record_metrics:
+                self._record_success()
             return IterationResult(
-                status=IterationStatus.SUCCESS,
+                status=IterationStatus.DRY_RUN,
                 intent=intent,
-                execution_result=last_execution_result,
                 strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-                balance_reconciliation=recon,
-            )
-        else:
-            # State machine reached FAILED state - escalate to operator
-            error_msg = state_machine.error or "Unknown error after retries exhausted"
-            logger.error(f"Intent failed after {state_machine.retry_count} retries: {error_msg}")
-
-            # Emit timeline event for failed execution
-            timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
-            self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
-            # Write failed trade to transaction ledger (VIB-2402)
-            await self._write_ledger_entry(
-                strategy, intent, result=last_execution_result, success=False, error=error_msg
+                duration_ms=self._calculate_duration_ms(state.start_time),
             )
 
-            # Run revert diagnostics only for on-chain execution failures.
-            # Skip when no execution was attempted (compilation failure, validation
-            # error, or other pre-execution issue) where balance checks and approval
-            # suggestions are irrelevant.
-            execution_was_attempted = last_execution_result is not None
-            if not execution_was_attempted:
-                logger.error(
-                    f"PRE-EXECUTION FAILURE: {error_msg}\n"
-                    f"  Intent: {intent.intent_type.value} | Chain: {strategy.chain}\n"
-                    f"  No on-chain transaction was attempted (compilation or validation error)."
+        # Execute the action bundle through orchestrator
+        # Resolve protocol for result enrichment (intent is frozen, so we pass via context)
+        resolved_protocol = getattr(intent, "protocol", None) or compiler.default_protocol
+        from almanak.framework.observability.context import get_cycle_id
+
+        execution_context = ExecutionContext(
+            strategy_id=strategy_id,
+            chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
+            correlation_id=intent.intent_id,
+            cycle_id=get_cycle_id() or "",
+            protocol=resolved_protocol,
+        )
+        state.last_execution_context = execution_context
+
+        try:
+            # Execute through orchestrator (single-chain path)
+            # Note: _is_multi_chain flag guarantees this is ExecutionOrchestrator
+            # but we use cast for type checker since orchestrator is Union type
+            single_chain_orch = cast(ExecutionOrchestrator, self.execution_orchestrator)
+
+            # Pre-retry check: if previous attempt timed out and we have
+            # submitted tx_hashes, check if they've since confirmed to avoid
+            # duplicate swaps from retrying already-confirmed transactions.
+            if await self._single_chain_pre_retry_confirmed(state, single_chain_orch):
+                return None  # Treated as success; continue state-machine loop
+
+            # Route CLOB bundles to ClobActionHandler (off-chain orders),
+            # all other bundles to the on-chain ExecutionOrchestrator.
+            if state.clob_handler and state.clob_handler.can_handle(step_result.action_bundle):
+                execution_result = await self._single_chain_execute_clob(state, step_result)
+            else:
+                execution_result = await self._single_chain_execute_onchain(
+                    state, step_result, execution_context, single_chain_orch
+                )
+
+            # Convert ExecutionResult to TransactionReceipt for state machine
+            tx_hash = ""
+            if execution_result.transaction_results:
+                tx_hash = execution_result.transaction_results[0].tx_hash
+
+            receipt = TransactionReceipt(
+                success=execution_result.success,
+                tx_hash=tx_hash,
+                gas_used=execution_result.total_gas_used,
+                error=execution_result.error,
+            )
+
+            # Set receipt for state machine validation
+            state_machine.set_receipt(receipt)
+
+            from almanak.framework.observability.emitter import emit_phase_event
+            from almanak.framework.observability.events import StrategyPhase
+
+            emit_phase_event(
+                strategy_id=strategy_id,
+                phase=StrategyPhase.EXECUTE,
+                event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
+                description=f"Execution {'succeeded' if execution_result.success else 'failed'} "
+                f"(gas={execution_result.total_gas_used})",
+                chain=strategy.chain,
+                tx_hash=tx_hash,
+                details={
+                    "success": execution_result.success,
+                    "gas_used": execution_result.total_gas_used,
+                    "tx_count": len(execution_result.transaction_results),
+                    "error": execution_result.error or "",
+                },
+            )
+
+            if execution_result.success:
+                logger.info(
+                    f"Execution successful for {strategy_id}: "
+                    f"gas_used={execution_result.total_gas_used}, "
+                    f"tx_count={len(execution_result.transaction_results)}"
                 )
             else:
-                try:
-                    gas_warnings = None
-                    if last_execution_result is not None and hasattr(last_execution_result, "gas_warnings"):
-                        gas_warnings = last_execution_result.gas_warnings or None
+                logger.warning(
+                    f"Execution failed for {strategy_id}: {execution_result.error} "
+                    f"(retry {state_machine.retry_count}/{self.config.max_retries})"
+                )
+                # On timeout, approvals likely succeeded -- keep cache valid.
+                # On other failures, clear cache since approvals may not have
+                # succeeded or may have been consumed.
+                is_timeout = execution_result.error and "timeout" in execution_result.error.lower()
+                if not is_timeout:
+                    compiler.clear_allowance_cache()
+                else:
+                    logger.info("Timeout error -- preserving allowance cache for retry")
+                # Reset nonce cache on failure to force fresh on-chain
+                # query on retry. Prevents nonce drift. (VIB-1449)
+                if hasattr(self.execution_orchestrator, "reset_nonce_cache"):
+                    self.execution_orchestrator.reset_nonce_cache()
 
-                    diagnostic = await diagnose_revert(
-                        intent=intent,
-                        chain=strategy.chain,
-                        wallet=strategy.wallet_address,
-                        web3_provider=self.balance_provider,
-                        raw_error=error_msg,
-                        gas_warnings=gas_warnings,
-                    )
-                    logger.error(diagnostic.format())
-                except Exception as diag_error:
-                    logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Execution error: {e}", exc_info=True)
+            # On timeout exceptions, approvals likely succeeded -- keep cache.
+            is_timeout = "timeout" in str(e).lower()
+            if not is_timeout:
+                compiler.clear_allowance_cache()
+            # Set failed receipt to trigger sadflow
+            state_machine.set_receipt(
+                TransactionReceipt(
+                    success=False,
+                    error=str(e),
+                )
+            )
 
-            # Only alert/escalate after state machine has exhausted all retries
-            if last_execution_result:
+        return None
+
+    async def _single_chain_pre_retry_confirmed(
+        self, state: SingleChainExecutionState, single_chain_orch: ExecutionOrchestrator
+    ) -> bool:
+        """Check whether the previous timed-out attempt has since confirmed.
+
+        On a retry after a timeout, poll receipts for the previously-submitted
+        tx hashes. If every one confirms, synthesise a success
+        ``ExecutionResult`` into ``state.last_execution_result`` and push a
+        success receipt into the state machine so the loop treats this as a
+        success without re-submitting. Returns ``True`` when the retry was
+        short-circuited, ``False`` otherwise.
+        """
+        state_machine = state.state_machine
+        last = state.last_execution_result
+        if not (
+            state_machine.retry_count > 0
+            and last
+            and last.transaction_results
+            and last.error
+            and "timeout" in last.error.lower()
+        ):
+            return False
+
+        prev_hashes = [tr.tx_hash for tr in last.transaction_results if tr.tx_hash]
+        if not prev_hashes:
+            return False
+
+        logger.info(f"Pre-retry check: verifying {len(prev_hashes)} previously-submitted tx(es) before retrying")
+        all_confirmed = True
+        prev_receipts: list[FullTransactionReceipt] = []
+        for prev_hash in prev_hashes:
+            try:
+                prev_receipt = await single_chain_orch.submitter.get_receipt(prev_hash, timeout=30.0)
+                prev_receipts.append(prev_receipt)
+                if prev_receipt.success:
+                    logger.info(f"Previously-submitted tx {prev_hash[:10]}... confirmed")
+                else:
+                    logger.warning(f"Previously-submitted tx {prev_hash[:10]}... reverted")
+                    all_confirmed = False
+            except Exception:
+                logger.warning(f"Could not get receipt for {prev_hash[:10]}..., proceeding with retry")
+                all_confirmed = False
+
+        if not (all_confirmed and prev_receipts):
+            return False
+
+        logger.info("All previously-submitted transactions confirmed -- skipping retry, treating as success")
+        # Update last_execution_result so downstream consumers
+        # (timeline, callbacks, IterationResult) see a successful
+        # result instead of the stale timeout failure.
+        # Preserve receipt data so ResultEnricher can extract
+        # swap amounts, position IDs, and other enriched data.
+        state.last_execution_result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            transaction_results=[
+                TransactionResult(
+                    tx_hash=r.tx_hash,
+                    success=r.success,
+                    receipt=r,
+                    gas_used=r.gas_used,
+                    gas_cost_wei=r.gas_cost_wei,
+                    logs=r.logs,
+                )
+                for r in prev_receipts
+            ],
+            total_gas_used=sum(r.gas_used for r in prev_receipts),
+            total_gas_cost_wei=sum(r.gas_cost_wei for r in prev_receipts),
+            completed_at=datetime.now(UTC),
+        )
+        # Convert to simplified receipt for state machine
+        state_machine.set_receipt(
+            TransactionReceipt(
+                success=True,
+                tx_hash=prev_receipts[0].tx_hash,
+                gas_used=sum(r.gas_used for r in prev_receipts),
+            )
+        )
+        return True
+
+    async def _single_chain_execute_clob(self, state: SingleChainExecutionState, step_result: Any) -> ExecutionResult:
+        """Execute a Polymarket CLOB bundle via the ClobActionHandler."""
+        clob_result = await state.clob_handler.execute(step_result.action_bundle)
+        execution_result = ExecutionResult(
+            success=clob_result.success,
+            phase=ExecutionPhase.COMPLETE,
+            completed_at=datetime.now(UTC),
+            error=clob_result.error,
+        )
+        execution_result.extracted_data = {
+            "clob_status": clob_result.status.value,
+        }
+        if clob_result.order_id:
+            execution_result.extracted_data["order_id"] = clob_result.order_id
+        # VIB-3218: attach PredictionFill so strategies can
+        # distinguish "order accepted" from "order filled"
+        # without reaching into clob_handler internals.
+        # requested_size may be absent (e.g. SELL "all") --
+        # skip PredictionFill if we don't have it; strategies
+        # should then rely on post-execution balance reads.
+        prediction_fill = clob_result.to_prediction_fill()
+        if prediction_fill is not None:
+            execution_result.prediction_fill = prediction_fill
+        state.last_execution_result = execution_result
+        return execution_result
+
+    async def _single_chain_execute_onchain(
+        self,
+        state: SingleChainExecutionState,
+        step_result: Any,
+        execution_context: ExecutionContext,
+        single_chain_orch: ExecutionOrchestrator,
+    ) -> ExecutionResult:
+        """Execute an on-chain bundle through the single-chain orchestrator.
+
+        Refreshes the tx-risk config's native token price before calling
+        ``single_chain_orch.execute``. Populates
+        ``state.last_execution_result`` with the result.
+        """
+        strategy = state.strategy
+        # Update native token price for USD-denominated risk guards
+        # (max_value_usd, max_gas_cost_usd).
+        # tx_risk_config only exists on local ExecutionOrchestrator,
+        # not GatewayExecutionOrchestrator. Reset BEFORE the fetch
+        # attempt so a missed/failed oracle reliably trips fail-closed
+        # in the validator instead of reusing the prior cycle's price.
+        tx_risk_cfg = getattr(single_chain_orch, "tx_risk_config", None)
+        if tx_risk_cfg is not None and (tx_risk_cfg.max_gas_cost_usd > 0 or tx_risk_cfg.max_value_usd > 0):
+            tx_risk_cfg.native_token_price_usd = 0.0
+            if state.price_oracle:
+                from almanak.gateway.data.balance.web3_provider import (
+                    NATIVE_TOKEN_SYMBOLS,
+                )
+
+                native_symbol = NATIVE_TOKEN_SYMBOLS.get(strategy.chain.lower(), "ETH")
+                native_price = state.price_oracle.get(native_symbol, 0)
+                if native_price:
+                    tx_risk_cfg.native_token_price_usd = float(native_price)
+
+        execution_result = await single_chain_orch.execute(
+            action_bundle=step_result.action_bundle,
+            context=execution_context,
+        )
+        state.last_execution_result = execution_result
+        return execution_result
+
+    async def _single_chain_handle_success(self, state: SingleChainExecutionState) -> IterationResult:
+        """Enrich, slippage-check, reconcile, and commit the success path.
+
+        Runs ResultEnricher, then the slippage circuit breaker, then the
+        post-execution balance reconciliation. Any of those may steer into
+        the failure path (with its own IterationResult). On a clean path
+        emits the success timeline event, writes the ledger entry, fires
+        on_intent_executed(success=True), saves strategy state, and returns
+        IterationStatus.SUCCESS.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        strategy_id = state.strategy_id
+        state_machine = state.state_machine
+
+        # Enrich result with intent-specific extracted data
+        if state.last_execution_result and state.last_execution_context:
+            try:
+                enricher = ResultEnricher()
+                # VIB-3203: thread compiler bundle metadata so swap_amounts
+                # extractors can compute realized slippage_bps from the
+                # persisted expected_output_human quote. We use the
+                # metadata snapshot captured inside the state-machine loop
+                # at execution time, not the terminal step_result (which
+                # may be a COMPLETE state with no action_bundle).
+                state.last_execution_result = enricher.enrich(
+                    state.last_execution_result,
+                    intent,
+                    state.last_execution_context,
+                    bundle_metadata=state.last_bundle_metadata,
+                )
+            except Exception as e:
+                logger.warning(f"Result enrichment failed: {e}")
+
+        # Slippage circuit breaker: check actual slippage against max_slippage_bps
+        slippage_early = await self._single_chain_slippage_guard(state)
+        if slippage_early is not None:
+            return slippage_early
+
+        # Post-execution balance reconciliation (VIB-3158).
+        # Run BEFORE we commit the iteration as a success so an incident
+        # (pre/post delta outside the intent's expected range) can steer
+        # the iteration into the failure path -- triggering circuit-breaker
+        # recording, consecutive-error alerting, and a non-success status
+        # downstream. Without this gate, operators would see a green
+        # iteration summary while the strategy confidently traded on
+        # corrupted accounting.
+        recon = await self._reconcile_post_execution_balances(
+            strategy, intent, state.last_execution_result, pre_snapshot=state.pre_snapshot
+        )
+        recon_incident = bool(recon and recon.get("incident"))
+
+        if recon_incident:
+            return await self._single_chain_handle_recon_incident(state, recon)
+
+        # Clean reconciliation -> commit the success path.
+        # Emit timeline event for successful execution
+        self._emit_execution_timeline_event(strategy, intent, success=True, result=state.last_execution_result)
+        # Write structured trade record to transaction ledger (VIB-2402)
+        await self._write_ledger_entry(strategy, intent, result=state.last_execution_result, success=True)
+        if state.record_metrics:
+            self._record_success(execution_proved=True)
+
+        # Notify strategy of successful execution
+        if hasattr(strategy, "on_intent_executed"):
+            try:
+                strategy.on_intent_executed(intent, success=True, result=state.last_execution_result)
+            except Exception as e:
+                logger.warning(f"Error in on_intent_executed callback: {e}")
+        self._invoke_optional_hook(
+            strategy,
+            "on_copy_execution_result",
+            intent,
+            True,
+            state.last_execution_result,
+        )
+
+        if state_machine.retry_count > 0:
+            logger.info(f"Intent succeeded after {state_machine.retry_count} retries")
+
+        # Save strategy state after successful execution
+        if hasattr(strategy, "save_state"):
+            try:
+                strategy.save_state()
+            except Exception as e:
+                logger.warning(f"Error saving strategy state: {e}")
+
+        return IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=intent,
+            execution_result=state.last_execution_result,
+            strategy_id=strategy_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
+            balance_reconciliation=recon,
+        )
+
+    async def _single_chain_slippage_guard(self, state: SingleChainExecutionState) -> IterationResult | None:
+        """Fail the iteration when realized slippage breaches the limit.
+
+        Returns an EXECUTION_FAILED IterationResult when the actual slippage
+        exceeds the configured ``max_slippage_bps``; otherwise returns None.
+        On breach: emits a failure timeline event, fires on_intent_executed
+        with success=False, writes the ledger entry, and saves state.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        last_execution_result = state.last_execution_result
+
+        # tx_risk_config only exists on local ExecutionOrchestrator, not GatewayExecutionOrchestrator
+        if not (last_execution_result and last_execution_result.swap_amounts):
+            return None
+
+        tx_risk_cfg = getattr(self.execution_orchestrator, "tx_risk_config", None)
+        if tx_risk_cfg:
+            max_slippage = tx_risk_cfg.max_slippage_bps
+        else:
+            intent_slippage = getattr(intent, "max_slippage", None)
+            if isinstance(intent_slippage, int | float | Decimal):
+                max_slippage = int(Decimal(str(intent_slippage)) * 10000)
+            else:
+                max_slippage = 0
+        actual_slippage = last_execution_result.swap_amounts.slippage_bps
+        if not (max_slippage > 0 and actual_slippage is not None and actual_slippage > max_slippage):
+            return None
+
+        slippage_error = (
+            f"Slippage circuit breaker: actual slippage {actual_slippage} bps "
+            f"exceeds limit {max_slippage} bps "
+            f"(swap: {last_execution_result.swap_amounts.token_in} -> "
+            f"{last_execution_result.swap_amounts.token_out})"
+        )
+        logger.error(slippage_error)
+
+        # Attach slippage error to result FIRST so the timeline event and
+        # downstream consumers (UI, operator cards, Slack alerts) see the
+        # real slippage-breach reason rather than "Unknown" (issue #1649).
+        last_execution_result.error = slippage_error
+
+        # Emit timeline event for failed execution
+        self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
+
+        # Notify strategy of failure due to slippage breach so strategy
+        # authors can access the error on the result.
+        if hasattr(strategy, "on_intent_executed"):
+            try:
+                strategy.on_intent_executed(intent, success=False, result=last_execution_result)
+            except Exception as e:
+                logger.warning(f"Error in on_intent_executed callback: {e}")
+        self._invoke_optional_hook(
+            strategy,
+            "on_copy_execution_result",
+            intent,
+            False,
+            last_execution_result,
+        )
+
+        # Record slippage-breach trade in ledger (VIB-2402)
+        await self._write_ledger_entry(
+            strategy, intent, result=last_execution_result, success=False, error=slippage_error
+        )
+
+        # Persist state even when circuit breaker fails; on-chain state already changed.
+        if hasattr(strategy, "save_state"):
+            try:
+                strategy.save_state()
+            except Exception as e:
+                logger.warning(f"Error saving strategy state: {e}")
+
+        return IterationResult(
+            status=IterationStatus.EXECUTION_FAILED,
+            intent=intent,
+            execution_result=last_execution_result,
+            error=slippage_error,
+            strategy_id=state.strategy_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
+        )
+
+    async def _single_chain_handle_recon_incident(
+        self, state: SingleChainExecutionState, recon: dict[str, Any]
+    ) -> IterationResult:
+        """Finalize a reconciliation-failure iteration.
+
+        Attaches the recon error to the execution result, emits a failure
+        timeline event, fires on_intent_executed(success=False), writes the
+        ledger entry, saves state, and dispatches an operator-facing alert.
+        Returns IterationStatus.RECONCILIATION_FAILED.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        last_execution_result = state.last_execution_result
+
+        recon_error = self._format_reconciliation_error(recon)
+        logger.error(
+            "Reconciliation enforcement tripped for %s: %s",
+            state.strategy_id,
+            recon_error,
+        )
+
+        # Attach error to the execution result FIRST so the timeline
+        # event and downstream consumers (alerts, operator cards,
+        # ledger) see the reconciliation error rather than the stale
+        # execution-level error.
+        if last_execution_result is not None:
+            last_execution_result.error = recon_error
+
+        # Emit timeline event as a failure so the strategy timeline
+        # reflects the accounting breach, not a clean success.
+        self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
+
+        # Notify strategy of the failed outcome so it does not treat
+        # the execution as clean.
+        if hasattr(strategy, "on_intent_executed"):
+            try:
+                strategy.on_intent_executed(intent, success=False, result=last_execution_result)
+            except Exception as e:
+                logger.warning(f"Error in on_intent_executed callback: {e}")
+        self._invoke_optional_hook(
+            strategy,
+            "on_copy_execution_result",
+            intent,
+            False,
+            last_execution_result,
+        )
+
+        # Record failed trade in ledger (VIB-2402) -- on-chain state
+        # changed, but the accounting outcome is a failure.
+        await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=False, error=recon_error)
+
+        # Persist strategy state even on reconciliation failure: the
+        # on-chain state has already moved, so any internal bookkeeping
+        # the strategy captured pre-reconciliation must not be lost.
+        if hasattr(strategy, "save_state"):
+            try:
+                strategy.save_state()
+            except Exception as e:
+                logger.warning(f"Error saving strategy state: {e}")
+
+        # Operator-facing alert on this single incident (independent
+        # of the consecutive-errors alert that the outer run loop
+        # fires on threshold).
+        if last_execution_result is not None:
+            try:
                 await self._handle_execution_error(strategy, last_execution_result)
+            except Exception as e:
+                logger.debug("reconciliation alert dispatch failed: %s", e)
 
-            # Notify strategy of failed execution
-            # Ensure the result always carries the error message so strategy authors
-            # can access it via result.error or str(result) instead of getting None.
-            callback_result = last_execution_result or SimpleNamespace(error=error_msg)
-            if last_execution_result and not last_execution_result.error:
-                last_execution_result.error = error_msg
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=callback_result)
-                except Exception as e:
-                    logger.warning(f"Error in on_intent_executed callback: {e}")
-            self._invoke_optional_hook(
-                strategy,
-                "on_copy_execution_result",
-                intent,
-                False,
-                callback_result,
+        return IterationResult(
+            status=IterationStatus.RECONCILIATION_FAILED,
+            intent=intent,
+            execution_result=last_execution_result,
+            error=recon_error,
+            strategy_id=state.strategy_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
+            balance_reconciliation=recon,
+        )
+
+    async def _single_chain_handle_failure(self, state: SingleChainExecutionState) -> IterationResult:
+        """Finalize the state-machine-FAILED path: diagnostics, alert, result.
+
+        Emits the failure timeline event, writes the ledger entry, runs
+        revert diagnostics (only when execution was actually attempted),
+        dispatches the operator alert, fires on_intent_executed with
+        success=False, and returns IterationStatus.EXECUTION_FAILED.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        strategy_id = state.strategy_id
+        state_machine = state.state_machine
+        last_execution_result = state.last_execution_result
+
+        # State machine reached FAILED state - escalate to operator
+        error_msg = state_machine.error or "Unknown error after retries exhausted"
+        logger.error(f"Intent failed after {state_machine.retry_count} retries: {error_msg}")
+
+        # Emit timeline event for failed execution
+        timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
+        self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
+        # Write failed trade to transaction ledger (VIB-2402)
+        await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=False, error=error_msg)
+
+        # Run revert diagnostics only for on-chain execution failures.
+        # Skip when no execution was attempted (compilation failure, validation
+        # error, or other pre-execution issue) where balance checks and approval
+        # suggestions are irrelevant.
+        execution_was_attempted = last_execution_result is not None
+        if not execution_was_attempted:
+            logger.error(
+                f"PRE-EXECUTION FAILURE: {error_msg}\n"
+                f"  Intent: {intent.intent_type.value} | Chain: {strategy.chain}\n"
+                f"  No on-chain transaction was attempted (compilation or validation error)."
             )
+        else:
+            try:
+                gas_warnings = None
+                if last_execution_result is not None and hasattr(last_execution_result, "gas_warnings"):
+                    gas_warnings = last_execution_result.gas_warnings or None
 
-            # Save strategy state after failed execution (state may have changed)
-            if hasattr(strategy, "save_state"):
-                try:
-                    strategy.save_state()
-                except Exception as e:
-                    logger.warning(f"Error saving strategy state: {e}")
+                diagnostic = await diagnose_revert(
+                    intent=intent,
+                    chain=strategy.chain,
+                    wallet=strategy.wallet_address,
+                    web3_provider=self.balance_provider,
+                    raw_error=error_msg,
+                    gas_warnings=gas_warnings,
+                )
+                logger.error(diagnostic.format())
+            except Exception as diag_error:
+                logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
 
-            return IterationResult(
-                status=IterationStatus.EXECUTION_FAILED,
-                intent=intent,
-                execution_result=last_execution_result,
-                error=error_msg,
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
+        # Only alert/escalate after state machine has exhausted all retries
+        if last_execution_result:
+            await self._handle_execution_error(strategy, last_execution_result)
+
+        # Notify strategy of failed execution
+        # Ensure the result always carries the error message so strategy authors
+        # can access it via result.error or str(result) instead of getting None.
+        callback_result = last_execution_result or SimpleNamespace(error=error_msg)
+        if last_execution_result and not last_execution_result.error:
+            last_execution_result.error = error_msg
+        if hasattr(strategy, "on_intent_executed"):
+            try:
+                strategy.on_intent_executed(intent, success=False, result=callback_result)
+            except Exception as e:
+                logger.warning(f"Error in on_intent_executed callback: {e}")
+        self._invoke_optional_hook(
+            strategy,
+            "on_copy_execution_result",
+            intent,
+            False,
+            callback_result,
+        )
+
+        # Save strategy state after failed execution (state may have changed)
+        if hasattr(strategy, "save_state"):
+            try:
+                strategy.save_state()
+            except Exception as e:
+                logger.warning(f"Error saving strategy state: {e}")
+
+        return IterationResult(
+            status=IterationStatus.EXECUTION_FAILED,
+            intent=intent,
+            execution_result=last_execution_result,
+            error=error_msg,
+            strategy_id=strategy_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
+        )
 
     async def _check_and_resume_stuck_execution(
         self,
@@ -3017,6 +3299,11 @@ class StrategyRunner:
         was confirmed on-chain and didn't revert BEFORE starting to poll
         the destination chain for the bridged assets.
 
+        Phase 3c: This is now a thin driver that sets up a ``BridgeWaitState``
+        and threads it through per-intent and per-phase step helpers. The
+        original sequential loop, source-TX verification, and bridge-polling
+        logic all live in those helpers with identical behaviour.
+
         Args:
             strategy: The strategy being executed
             intents: List of intents to execute
@@ -3027,43 +3314,78 @@ class StrategyRunner:
         Returns:
             IterationResult with execution details
         """
+        state = BridgeWaitState(
+            strategy=strategy,
+            intents=intents,
+            orchestrator=orchestrator,
+            start_time=start_time,
+            resume_progress=resume_progress,
+            price_map=price_map,
+            price_oracle=price_oracle,
+            strategy_id=strategy.strategy_id,
+            first_intent=intents[0] if intents else None,
+        )
+
+        await self._init_bridge_wait_state(state)
+
+        # Walk each intent; each iteration either succeeds, sets
+        # state.failed_step and breaks, or continues to the next intent.
+        for i, intent in enumerate(intents):
+            state.current_intent = intent
+            should_break = await self._bridge_wait_process_intent(state, i)
+            if should_break:
+                break
+
+        return await self._bridge_wait_finalize(state)
+
+    # -------------------------------------------------------------------------
+    # _execute_with_bridge_waiting step helpers (Phase 3c)
+    # -------------------------------------------------------------------------
+
+    async def _init_bridge_wait_state(self, state: BridgeWaitState) -> None:
+        """Populate state_provider, progress, and starting step index.
+
+        Resolves wallet address, RPC URLs, gateway client, and
+        EnsoStateProvider. Determines the ``start_step_index`` and
+        ``previous_amount_received`` from either ``resume_progress`` (stuck
+        retry) or ``_load_execution_progress`` (restart resume). If no saved
+        progress matches the current intents hash, starts fresh and persists
+        the initial progress so stuck-execution recovery has serialized
+        intents to work with.
+        """
         import uuid
 
-        from web3 import Web3
-
-        strategy_id = strategy.strategy_id
-        first_intent = intents[0] if intents else None
+        orchestrator = state.orchestrator
+        intents = state.intents
+        strategy_id = state.strategy_id
 
         # Get wallet address from orchestrator (works for both config and gateway modes)
-        wallet_address = orchestrator.wallet_address
+        state.wallet_address = orchestrator.wallet_address
 
         # Get RPC URLs for EnsoStateProvider - gateway mode doesn't have _config
         if hasattr(orchestrator, "_config") and orchestrator._config is not None:
-            rpc_urls = orchestrator._config.rpc_urls
+            state.rpc_urls = orchestrator._config.rpc_urls
         else:
-            rpc_urls = {}
+            state.rpc_urls = {}
 
         # Create state provider for bridge tracking
         # In gateway mode, pass gateway_client so it can use gateway RPC instead of direct Web3
-        gateway_client = self._get_gateway_client()
-        state_provider = EnsoStateProvider(
-            rpc_urls=rpc_urls,
-            wallet_address=wallet_address,
-            gateway_client=gateway_client,
+        state.gateway_client = self._get_gateway_client()
+        state.state_provider = EnsoStateProvider(
+            rpc_urls=state.rpc_urls,
+            wallet_address=state.wallet_address,
+            gateway_client=state.gateway_client,
         )
 
         # Determine execution progress
-        start_step_index = 0
-        previous_amount_received: Decimal | None = None
-
-        if resume_progress is not None:
+        if state.resume_progress is not None:
             # Resuming from a stuck execution (passed from _check_and_resume_stuck_execution)
-            start_step_index = resume_progress.next_step_to_execute
-            previous_amount_received = resume_progress.previous_amount_received
-            progress = resume_progress
+            state.start_step_index = state.resume_progress.next_step_to_execute
+            state.previous_amount_received = state.resume_progress.previous_amount_received
+            state.progress = state.resume_progress
             logger.info(
-                f"Resuming stuck execution from step {start_step_index + 1}/{len(intents)} "
-                f"(execution_id={progress.execution_id})"
+                f"Resuming stuck execution from step {state.start_step_index + 1}/{len(intents)} "
+                f"(execution_id={state.progress.execution_id})"
             )
         else:
             # Check for saved execution progress (resumption after restart)
@@ -3072,13 +3394,13 @@ class StrategyRunner:
 
             if saved_progress and saved_progress.intents_hash == intents_hash:
                 # Resume from last completed step
-                start_step_index = saved_progress.next_step_to_execute
-                previous_amount_received = saved_progress.previous_amount_received
+                state.start_step_index = saved_progress.next_step_to_execute
+                state.previous_amount_received = saved_progress.previous_amount_received
                 logger.info(
-                    f"Resuming execution from step {start_step_index + 1}/{len(intents)} "
+                    f"Resuming execution from step {state.start_step_index + 1}/{len(intents)} "
                     f"(execution_id={saved_progress.execution_id})"
                 )
-                progress = saved_progress
+                state.progress = saved_progress
             else:
                 # Start fresh execution
                 if saved_progress:
@@ -3088,7 +3410,7 @@ class StrategyRunner:
                 # Serialize intents for stuck execution recovery
                 serialized_intents = [intent.serialize() for intent in intents]
 
-                progress = ExecutionProgress(
+                state.progress = ExecutionProgress(
                     execution_id=str(uuid.uuid4())[:8],
                     strategy_id=strategy_id,
                     intents_hash=intents_hash,
@@ -3096,423 +3418,501 @@ class StrategyRunner:
                     serialized_intents=serialized_intents,
                 )
                 # Save initial progress with serialized intents
-                await self._save_execution_progress(strategy_id, progress)
+                await self._save_execution_progress(strategy_id, state.progress)
 
         logger.info(
             f"Executing {len(intents)} intents with bridge waiting for {strategy_id} "
-            f"(starting from step {start_step_index + 1})"
+            f"(starting from step {state.start_step_index + 1})"
         )
 
-        # Track execution results
-        successful_count = start_step_index  # Count already-completed steps
-        failed_step: str | None = None
-        error_message: str | None = None
-        failed_result = None  # Explicitly track the result of the failed step
-        callback_fired = False  # Track whether on_intent_executed was called for the failing step
+        # Start the successful-count at whatever was already completed so the
+        # final summary line reports the full count, not just newly-executed
+        # steps.
+        state.successful_count = state.start_step_index
 
-        for i, intent in enumerate(intents):
-            # Skip already-completed steps when resuming
-            if i < start_step_index:
-                logger.debug(f"Skipping already-completed step {i + 1}")
-                continue
+    async def _bridge_wait_process_intent(self, state: BridgeWaitState, i: int) -> bool:
+        """Execute one intent + optional bridge wait. Returns True to break.
 
-            step_num = i + 1
-            intent_type = intent.intent_type.value
-            chain = getattr(intent, "chain", None) or orchestrator.primary_chain
-            is_cross_chain = is_cross_chain_intent(intent)
+        Mirrors the per-iteration body of the original for-loop: skip already-
+        completed steps, log, resolve amount="all", validate cross-chain
+        metadata, execute the intent, verify source TX + poll bridge
+        completion if cross-chain, then persist progress. Any failure records
+        the failure on ``state`` (``failed_step``, ``error_message``,
+        ``failed_result``, ``callback_fired``) and returns True so the caller
+        breaks out of the loop.
+        """
+        strategy = state.strategy
+        intents = state.intents
+        intent = intents[i]
+        orchestrator = state.orchestrator
+        strategy_id = state.strategy_id
 
-            logger.info(
-                f"Step {step_num}/{len(intents)}: {intent_type} on {chain}"
-                + (" (cross-chain)" if is_cross_chain else "")
-            )
+        # Skip already-completed steps when resuming
+        if i < state.start_step_index:
+            logger.debug(f"Skipping already-completed step {i + 1}")
+            return False
 
-            # Resolve amount="all" if needed
-            intent_to_execute = intent
-            if Intent.has_chained_amount(intent) and previous_amount_received is not None:
-                logger.info(f"Resolving amount='all' to {previous_amount_received}")
-                intent_to_execute = Intent.set_resolved_amount(intent, previous_amount_received)
+        step_num = i + 1
+        intent_type = intent.intent_type.value
+        chain = getattr(intent, "chain", None) or orchestrator.primary_chain
+        is_cross_chain = is_cross_chain_intent(intent)
 
-            # Get expected output for cross-chain tracking (before execution)
-            expected_amount: int | None = None
-            token_symbol: str | None = None
-            dest_chain: str | None = None
+        logger.info(
+            f"Step {step_num}/{len(intents)}: {intent_type} on {chain}" + (" (cross-chain)" if is_cross_chain else "")
+        )
 
-            if is_cross_chain:
-                dest_chain = get_intent_destination_chain(intent)
-                token_symbol = get_intent_destination_token(intent)
-                # Defense-in-depth (VIB-3223): a cross-chain intent with no
-                # resolvable destination chain/token is the exact failure mode
-                # VIB-3223 fixed — fail loudly instead of silently skipping.
-                if not dest_chain or not token_symbol:
-                    logger.error(
-                        f"Step {step_num}: cross-chain intent missing destination fields "
-                        f"(dest_chain={dest_chain!r}, token_symbol={token_symbol!r}). "
-                        f"Cannot track bridge completion."
-                    )
-                    failed_step = f"step-{step_num}"
-                    error_message = (
-                        "Cross-chain intent missing destination_chain/to_chain or "
-                        "to_token/token field; cannot wait for bridge completion."
-                    )
-                    break
-                # Set expected_amount=0 to accept ANY balance increase as completion
-                # The actual received amount will be tracked and used for chaining
-                expected_amount = 0
+        # Resolve amount="all" if needed
+        intent_to_execute = intent
+        if Intent.has_chained_amount(intent) and state.previous_amount_received is not None:
+            logger.info(f"Resolving amount='all' to {state.previous_amount_received}")
+            intent_to_execute = Intent.set_resolved_amount(intent, state.previous_amount_received)
 
-            # Execute the intent
-            try:
-                result = await orchestrator.execute(intent_to_execute, price_map=price_map, price_oracle=price_oracle)
-            except Exception as e:
-                logger.error(f"Step {step_num} execution failed: {e}")
-                # Notify strategy of failed execution (mirrors _execute_single_chain)
-                if hasattr(strategy, "on_intent_executed"):
-                    try:
-                        strategy.on_intent_executed(intent, success=False, result=None)
-                    except Exception as cb_err:
-                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
-                callback_fired = True
-                failed_step = f"step-{step_num}"
-                error_message = str(e)
-                break
+        # Get expected output for cross-chain tracking (before execution)
+        dest_chain: str | None = None
+        token_symbol: str | None = None
 
-            if not result.success:
-                logger.error(f"Step {step_num} failed: {result.error}")
-                # Notify strategy of failed execution (mirrors _execute_single_chain)
-                if hasattr(strategy, "on_intent_executed"):
-                    try:
-                        strategy.on_intent_executed(intent, success=False, result=result)
-                    except Exception as cb_err:
-                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
-                callback_fired = True
-                failed_result = result
-                failed_step = f"step-{step_num}"
-                error_message = result.error
-                break
-
-            successful_count += 1
-
-            # Track amount received for chaining
-            if result.tx_result and hasattr(result.tx_result, "actual_amount_received"):
-                previous_amount_received = result.tx_result.actual_amount_received
-            else:
-                # Fallback to intent amount
-                amount_field = Intent.get_amount_field(intent_to_execute)
-                if amount_field is not None and isinstance(amount_field, Decimal):
-                    previous_amount_received = amount_field
-
-            # For cross-chain swaps, verify source TX and wait for bridge completion
-            if is_cross_chain and dest_chain and token_symbol:
-                # Get tx hash from result
-                tx_hash = None
-                if result.tx_result:
-                    tx_hash = getattr(result.tx_result, "tx_hash", None)
-
-                if not tx_hash:
-                    logger.error(f"Step {step_num}: No tx_hash in result, cannot track bridge")
-                    failed_step = f"step-{step_num}"
-                    error_message = "No transaction hash returned from execution"
-                    break
-
-                # Normalize tx_hash to include 0x prefix (some execution paths return bare hex)
-                if not tx_hash.startswith("0x"):
-                    tx_hash = f"0x{tx_hash}"
-
-                # CRITICAL: Verify source TX actually succeeded on-chain before polling destination
-                # This prevents polling for bridged assets when the source TX reverted
-                logger.info(f"Verifying source TX confirmation on {chain}: {tx_hash}")
-
-                try:
-                    tx_verified = False
-
-                    if gateway_client is not None:
-                        # Use gateway's GetTransactionStatus RPC (no direct Web3)
-                        from almanak.gateway.proto import gateway_pb2
-
-                        for attempt in range(30):  # Max 30 attempts, ~1 minute
-                            try:
-                                status_response = gateway_client.execution.GetTransactionStatus(
-                                    gateway_pb2.TxStatusRequest(tx_hash=tx_hash, chain=chain),
-                                    timeout=15.0,
-                                )
-                                if status_response.status == "confirmed":
-                                    logger.info(
-                                        f"Source TX confirmed successfully on {chain}: {tx_hash}, "
-                                        f"block={status_response.block_number}"
-                                    )
-                                    tx_verified = True
-                                    break
-                                elif status_response.status in ("failed", "reverted", "invalid"):
-                                    logger.error(
-                                        f"Step {step_num}: Source TX {status_response.status} on {chain}: {tx_hash}"
-                                    )
-                                    failed_step = f"step-{step_num}"
-                                    error_message = f"Transaction {status_response.status} on {chain}: {tx_hash}"
-                                    break
-                            except Exception as exc:
-                                logger.debug(
-                                    "GetTransactionStatus attempt %s failed for %s on %s: %s",
-                                    attempt + 1,
-                                    tx_hash,
-                                    chain,
-                                    exc,
-                                )
-                            await asyncio.sleep(2)
-                    else:
-                        # Fallback to direct Web3 if no gateway client
-                        source_rpc_url = rpc_urls.get(chain)
-                        if not source_rpc_url:
-                            logger.error(f"No RPC URL for source chain {chain}")
-                            failed_step = f"step-{step_num}"
-                            error_message = f"No RPC URL configured for chain {chain}"
-                            break
-
-                        source_web3 = Web3(Web3.HTTPProvider(source_rpc_url))
-
-                        for attempt in range(30):
-                            try:
-                                receipt = source_web3.eth.get_transaction_receipt(
-                                    tx_hash,  # type: ignore[arg-type]
-                                )
-                                if receipt:
-                                    tx_status = receipt.get("status", 0)
-                                    if tx_status == 0:
-                                        logger.error(f"Step {step_num}: Source TX REVERTED on {chain}: {tx_hash}")
-                                        failed_step = f"step-{step_num}"
-                                        error_message = f"Transaction reverted on {chain}: {tx_hash}"
-                                    else:
-                                        logger.info(
-                                            f"Source TX confirmed successfully on {chain}: {tx_hash}, "
-                                            f"block={receipt.get('blockNumber')}"
-                                        )
-                                        tx_verified = True
-                                    break
-                            except Exception as exc:
-                                logger.debug(
-                                    "Receipt poll attempt %s failed for %s on %s: %s",
-                                    attempt + 1,
-                                    tx_hash,
-                                    chain,
-                                    exc,
-                                )
-                            await asyncio.sleep(2)
-
-                    if failed_step:
-                        break
-
-                    if not tx_verified:
-                        logger.error(f"Step {step_num}: Could not get receipt for {tx_hash}")
-                        failed_step = f"step-{step_num}"
-                        error_message = f"Timeout waiting for transaction receipt: {tx_hash}"
-                        break
-
-                except Exception as e:
-                    logger.error(f"Step {step_num}: Error verifying source TX: {e}")
-                    failed_step = f"step-{step_num}"
-                    error_message = f"Failed to verify source transaction: {e}"
-                    break
-
-                # Source TX confirmed - now wait for bridge completion
-                logger.info(f"Waiting for bridge completion: {chain} -> {dest_chain}, token={token_symbol}")
-
-                # Register and wait for bridge transfer
-                # expected_amount=0 means accept any positive balance increase
-                deposit_id = state_provider.register_bridge_transfer(
-                    source_chain=chain,
-                    destination_chain=dest_chain,
-                    source_tx_hash=tx_hash,
-                    token_symbol=token_symbol,
-                    expected_amount=expected_amount if expected_amount is not None else 0,
+        if is_cross_chain:
+            # Gateway-only boundary (fix #1647): cross-chain bridge source-TX
+            # verification runs exclusively through the gateway's
+            # GetTransactionStatus RPC. A missing gateway client is a
+            # configuration defect; fail-fast BEFORE submitting the source
+            # transaction so we never leave funds broadcast on-chain with no
+            # way to verify them. See
+            # ``blueprints/20-gateway-security-architecture.md``.
+            if state.gateway_client is None:
+                raise RuntimeError(
+                    "Gateway client required for cross-chain bridge source-TX verification; "
+                    "direct Web3 fallback is forbidden by gateway-only architecture. "
+                    "See blueprints/20-gateway-security-architecture.md"
                 )
 
-                try:
-                    bridge_status = await state_provider.wait_for_bridge_completion(
-                        deposit_id=deposit_id,
-                        timeout_seconds=300,  # 5 minute timeout
-                        poll_interval_seconds=10,
-                    )
+            dest_chain = get_intent_destination_chain(intent)
+            token_symbol = get_intent_destination_token(intent)
+            # Defense-in-depth (VIB-3223): a cross-chain intent with no
+            # resolvable destination chain/token is the exact failure mode
+            # VIB-3223 fixed -- fail loudly instead of silently skipping.
+            if not dest_chain or not token_symbol:
+                logger.error(
+                    f"Step {step_num}: cross-chain intent missing destination fields "
+                    f"(dest_chain={dest_chain!r}, token_symbol={token_symbol!r}). "
+                    f"Cannot track bridge completion."
+                )
+                state.failed_step = f"step-{step_num}"
+                state.error_message = (
+                    "Cross-chain intent missing destination_chain/to_chain or "
+                    "to_token/token field; cannot wait for bridge completion."
+                )
+                return True
 
-                    if bridge_status["status"] == "completed":
-                        # Update amount received with actual bridge output
-                        # Balance increase is in wei - normalize using TokenResolver metadata
-                        actual_received_wei = bridge_status.get("balance_increase")
-                        if actual_received_wei is not None:
-                            from ..data.tokens.exceptions import TokenNotFoundError
-
-                            try:
-                                normalized_amount, normalization_metadata = self._normalize_bridge_balance_increase(
-                                    balance_increase_wei=actual_received_wei,
-                                    destination_chain=dest_chain,
-                                    token_symbol=token_symbol,
-                                    bridge_status=bridge_status,
-                                )
-                            except TokenNotFoundError as exc:
-                                logger.error(
-                                    "Bridge normalization failed due to unresolved token metadata: %s",
-                                    exc,
-                                )
-                                # Notify strategy of bridge failure (source tx succeeded but bridge normalization failed)
-                                if hasattr(strategy, "on_intent_executed"):
-                                    try:
-                                        strategy.on_intent_executed(intent, success=False, result=result)
-                                    except Exception as cb_err:
-                                        logger.warning(f"Error in on_intent_executed callback: {cb_err}")
-                                callback_fired = True
-                                failed_step = f"step-{step_num}-bridge"
-                                error_message = str(exc)
-                                break
-
-                            if normalized_amount is not None:
-                                previous_amount_received = normalized_amount
-                                logger.info(
-                                    "Bridge completed: received %s %s on %s (%s wei, decimals=%s, token_hint=%s)",
-                                    previous_amount_received,
-                                    token_symbol,
-                                    dest_chain,
-                                    normalization_metadata["raw_wei"],
-                                    normalization_metadata["decimals"],
-                                    normalization_metadata.get("resolved_from"),
-                                )
-                            else:
-                                logger.warning(
-                                    "Unable to normalize bridge amount. Preserving raw wei metadata: %s",
-                                    normalization_metadata,
-                                )
-                    else:
-                        logger.error(f"Bridge failed: {bridge_status}")
-                        # Notify strategy of bridge failure (source tx succeeded but bridge failed)
-                        if hasattr(strategy, "on_intent_executed"):
-                            try:
-                                strategy.on_intent_executed(intent, success=False, result=result)
-                            except Exception as cb_err:
-                                logger.warning(f"Error in on_intent_executed callback: {cb_err}")
-                        callback_fired = True
-                        failed_step = f"step-{step_num}-bridge"
-                        error_message = f"Bridge transfer failed: {bridge_status.get('error', 'Unknown')}"
-                        break
-
-                except TimeoutError as e:
-                    logger.error(f"Bridge timeout: {e}")
-                    # Notify strategy of bridge timeout (source tx succeeded but bridge timed out)
-                    if hasattr(strategy, "on_intent_executed"):
-                        try:
-                            strategy.on_intent_executed(intent, success=False, result=result)
-                        except Exception as cb_err:
-                            logger.warning(f"Error in on_intent_executed callback: {cb_err}")
-                    callback_fired = True
-                    failed_step = f"step-{step_num}-bridge"
-                    error_message = "Bridge transfer timed out after 5 minutes"
-                    break
-
-            # Notify strategy of successful execution (mirrors _execute_single_chain lines 2459-2478)
+        # Execute the intent
+        try:
+            result = await orchestrator.execute(
+                intent_to_execute, price_map=state.price_map, price_oracle=state.price_oracle
+            )
+        except Exception as e:
+            logger.error(f"Step {step_num} execution failed: {e}")
+            # Notify strategy of failed execution (mirrors _execute_single_chain)
             if hasattr(strategy, "on_intent_executed"):
                 try:
-                    strategy.on_intent_executed(intent, success=True, result=result)
-                except Exception as e:
-                    logger.warning(f"Error in on_intent_executed callback: {e}")
+                    strategy.on_intent_executed(intent, success=False, result=None)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            state.callback_fired = True
+            state.failed_step = f"step-{step_num}"
+            state.error_message = str(e)
+            return True
 
-            # Save strategy state after successful execution
-            if hasattr(strategy, "save_state"):
+        if not result.success:
+            logger.error(f"Step {step_num} failed: {result.error}")
+            # Notify strategy of failed execution (mirrors _execute_single_chain)
+            if hasattr(strategy, "on_intent_executed"):
                 try:
-                    strategy.save_state()
-                except Exception as e:
-                    logger.warning(f"Error saving strategy state: {e}")
+                    strategy.on_intent_executed(intent, success=False, result=result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            state.callback_fired = True
+            state.failed_result = result
+            state.failed_step = f"step-{step_num}"
+            state.error_message = result.error
+            return True
 
-            # Save progress after each step completes successfully
-            progress.completed_step_index = i
-            progress.previous_amount_received = previous_amount_received
-            await self._save_execution_progress(strategy_id, progress)
-            logger.info(f"Step {step_num}/{len(intents)} completed, progress saved")
+        state.successful_count += 1
+
+        # Track amount received for chaining
+        if result.tx_result and hasattr(result.tx_result, "actual_amount_received"):
+            state.previous_amount_received = result.tx_result.actual_amount_received
+        else:
+            # Fallback to intent amount
+            amount_field = Intent.get_amount_field(intent_to_execute)
+            if amount_field is not None and isinstance(amount_field, Decimal):
+                state.previous_amount_received = amount_field
+
+        # For cross-chain swaps, verify source TX and wait for bridge completion
+        if is_cross_chain and dest_chain and token_symbol:
+            bridge_break = await self._bridge_wait_cross_chain(
+                state, result=result, step_num=step_num, chain=chain, dest_chain=dest_chain, token_symbol=token_symbol
+            )
+            if bridge_break:
+                return True
+
+        # Notify strategy of successful execution (mirrors _execute_single_chain lines 2459-2478)
+        if hasattr(strategy, "on_intent_executed"):
+            try:
+                strategy.on_intent_executed(intent, success=True, result=result)
+            except Exception as e:
+                logger.warning(f"Error in on_intent_executed callback: {e}")
+
+        # Save strategy state after successful execution
+        if hasattr(strategy, "save_state"):
+            try:
+                strategy.save_state()
+            except Exception as e:
+                logger.warning(f"Error saving strategy state: {e}")
+
+        # Save progress after each step completes successfully.
+        # progress is always populated by ``_init_bridge_wait_state`` before
+        # any step helper runs; the assert narrows the type for mypy.
+        assert state.progress is not None
+        state.progress.completed_step_index = i
+        state.progress.previous_amount_received = state.previous_amount_received
+        await self._save_execution_progress(strategy_id, state.progress)
+        logger.info(f"Step {step_num}/{len(intents)} completed, progress saved")
+
+        return False
+
+    async def _bridge_wait_cross_chain(
+        self,
+        state: BridgeWaitState,
+        *,
+        result: Any,
+        step_num: int,
+        chain: str,
+        dest_chain: str,
+        token_symbol: str,
+    ) -> bool:
+        """Verify source TX + poll bridge for a cross-chain step. True breaks.
+
+        Extracts the tx hash, verifies the source TX confirmed on-chain via
+        the gateway ``GetTransactionStatus`` RPC, and then delegates to
+        ``_bridge_wait_poll_completion`` for the destination-chain balance
+        polling + amount normalization. Any failure mutates ``state`` and
+        returns True so the outer loop breaks.
+        """
+        # Get tx hash from result
+        tx_hash = None
+        if result.tx_result:
+            tx_hash = getattr(result.tx_result, "tx_hash", None)
+
+        if not tx_hash:
+            logger.error(f"Step {step_num}: No tx_hash in result, cannot track bridge")
+            state.failed_step = f"step-{step_num}"
+            state.error_message = "No transaction hash returned from execution"
+            return True
+
+        # Normalize tx_hash to include 0x prefix (some execution paths return bare hex)
+        if not tx_hash.startswith("0x"):
+            tx_hash = f"0x{tx_hash}"
+
+        verified = await self._bridge_wait_verify_source_tx(state, tx_hash=tx_hash, chain=chain, step_num=step_num)
+        if not verified:
+            return True
+
+        # Source TX confirmed - now wait for bridge completion
+        logger.info(f"Waiting for bridge completion: {chain} -> {dest_chain}, token={token_symbol}")
+        return await self._bridge_wait_poll_completion(
+            state,
+            result=result,
+            tx_hash=tx_hash,
+            chain=chain,
+            dest_chain=dest_chain,
+            token_symbol=token_symbol,
+            step_num=step_num,
+        )
+
+    async def _bridge_wait_verify_source_tx(
+        self, state: BridgeWaitState, *, tx_hash: str, chain: str, step_num: int
+    ) -> bool:
+        """Poll until the source TX is confirmed (or failed/timed out).
+
+        Uses the gateway ``GetTransactionStatus`` RPC exclusively. On a
+        terminal failed status (reverted/failed/invalid) or the 30-attempt
+        timeout, mutates ``state.failed_step`` / ``error_message`` and
+        returns False. Returns True when the TX is confirmed.
+
+        Raises:
+            RuntimeError: If ``state.gateway_client`` is None. Direct Web3
+                fallback is forbidden by the gateway-only architecture
+                (see ``blueprints/20-gateway-security-architecture.md``).
+                This must fail loud so misconfigured hosted deployments do
+                not silently fall back to an egress path that has no secrets,
+                rate limits, or auth.
+        """
+        # Gateway-only boundary: no direct Web3 fallback. If the gateway
+        # client is missing at this point, something is misconfigured and we
+        # must fail loudly rather than opening an unmediated egress path.
+        if state.gateway_client is None:
+            raise RuntimeError(
+                "Gateway client required for bridge source-TX verification; "
+                "direct Web3 fallback is forbidden by gateway-only architecture. "
+                "See blueprints/20-gateway-security-architecture.md"
+            )
+
+        # CRITICAL: Verify source TX actually succeeded on-chain before polling destination
+        # This prevents polling for bridged assets when the source TX reverted
+        logger.info(f"Verifying source TX confirmation on {chain}: {tx_hash}")
+
+        try:
+            tx_verified = False
+
+            # Use gateway's GetTransactionStatus RPC (no direct Web3)
+            from almanak.gateway.proto import gateway_pb2
+
+            for attempt in range(30):  # Max 30 attempts, ~1 minute
+                try:
+                    status_response = state.gateway_client.execution.GetTransactionStatus(
+                        gateway_pb2.TxStatusRequest(tx_hash=tx_hash, chain=chain),
+                        timeout=15.0,
+                    )
+                    if status_response.status == "confirmed":
+                        logger.info(
+                            f"Source TX confirmed successfully on {chain}: {tx_hash}, "
+                            f"block={status_response.block_number}"
+                        )
+                        tx_verified = True
+                        break
+                    elif status_response.status in ("failed", "reverted", "invalid"):
+                        logger.error(f"Step {step_num}: Source TX {status_response.status} on {chain}: {tx_hash}")
+                        state.failed_step = f"step-{step_num}"
+                        state.error_message = f"Transaction {status_response.status} on {chain}: {tx_hash}"
+                        break
+                except Exception as exc:
+                    logger.debug(
+                        "GetTransactionStatus attempt %s failed for %s on %s: %s",
+                        attempt + 1,
+                        tx_hash,
+                        chain,
+                        exc,
+                    )
+                await asyncio.sleep(2)
+
+            if state.failed_step:
+                return False
+
+            if not tx_verified:
+                logger.error(f"Step {step_num}: Could not get receipt for {tx_hash}")
+                state.failed_step = f"step-{step_num}"
+                state.error_message = f"Timeout waiting for transaction receipt: {tx_hash}"
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Step {step_num}: Error verifying source TX: {e}")
+            state.failed_step = f"step-{step_num}"
+            state.error_message = f"Failed to verify source transaction: {e}"
+            return False
+
+    async def _bridge_wait_poll_completion(
+        self,
+        state: BridgeWaitState,
+        *,
+        result: Any,
+        tx_hash: str,
+        chain: str,
+        dest_chain: str,
+        token_symbol: str,
+        step_num: int,
+    ) -> bool:
+        """Register + poll the bridge, normalize the received amount.
+
+        Returns True when the caller must break out of the intent loop
+        (bridge failed, timed out, or the destination-token metadata cannot
+        be resolved for amount normalization). Returns False on successful
+        completion (``state.previous_amount_received`` updated so the next
+        intent can chain the received amount). Failure paths set
+        ``state.failed_step`` / ``error_message`` and fire the strategy
+        callback so the finalization block doesn't double-fire it.
+        """
+        strategy = state.strategy
+        intent = state.current_intent
+
+        # Register and wait for bridge transfer
+        # expected_amount=0 means accept any positive balance increase
+        deposit_id = state.state_provider.register_bridge_transfer(
+            source_chain=chain,
+            destination_chain=dest_chain,
+            source_tx_hash=tx_hash,
+            token_symbol=token_symbol,
+            expected_amount=0,
+        )
+
+        try:
+            bridge_status = await state.state_provider.wait_for_bridge_completion(
+                deposit_id=deposit_id,
+                timeout_seconds=300,  # 5 minute timeout
+                poll_interval_seconds=10,
+            )
+
+            if bridge_status["status"] == "completed":
+                return await self._bridge_wait_apply_completion(
+                    state,
+                    result=result,
+                    bridge_status=bridge_status,
+                    dest_chain=dest_chain,
+                    token_symbol=token_symbol,
+                    step_num=step_num,
+                )
+
+            logger.error(f"Bridge failed: {bridge_status}")
+            # Notify strategy of bridge failure (source tx succeeded but bridge failed)
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=False, result=result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            state.callback_fired = True
+            state.failed_step = f"step-{step_num}-bridge"
+            state.error_message = f"Bridge transfer failed: {bridge_status.get('error', 'Unknown')}"
+            return True
+
+        except TimeoutError as e:
+            logger.error(f"Bridge timeout: {e}")
+            # Notify strategy of bridge timeout (source tx succeeded but bridge timed out)
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=False, result=result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            state.callback_fired = True
+            state.failed_step = f"step-{step_num}-bridge"
+            state.error_message = "Bridge transfer timed out after 5 minutes"
+            return True
+
+        except Exception as e:
+            # Any non-timeout exception from wait_for_bridge_completion (connection errors,
+            # protocol errors, malformed responses, etc.) must still drive the failure
+            # pipeline: strategy callback, state.callback_fired, and ultimately the
+            # timeline failure event via _bridge_wait_finalize. Without this branch the
+            # exception would propagate up, the strategy would never be notified, and the
+            # orchestrator view of the in-flight bridge would diverge from reality.
+            # Note: `except Exception` intentionally does not catch KeyboardInterrupt /
+            # SystemExit (those inherit from BaseException).
+            logger.error(
+                "Bridge wait failed with %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=False, result=result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            state.callback_fired = True
+            state.failed_step = f"step-{step_num}-bridge"
+            state.error_message = f"Bridge wait failed ({type(e).__name__}): {e}"
+            return True
+
+    async def _bridge_wait_apply_completion(
+        self,
+        state: BridgeWaitState,
+        *,
+        result: Any,
+        bridge_status: dict[str, Any],
+        dest_chain: str,
+        token_symbol: str,
+        step_num: int,
+    ) -> bool:
+        """Handle a "completed" bridge status: normalize + chain amount.
+
+        Normalizes the wei balance increase to a human-readable Decimal via
+        ``_normalize_bridge_balance_increase``. On ``TokenNotFoundError``,
+        fails the step and fires the strategy callback (returning True so
+        the outer loop breaks). On success, updates
+        ``state.previous_amount_received`` so the next intent can chain the
+        received amount. When normalization returns ``None`` (token decimals
+        not resolvable), logs a warning and leaves
+        ``previous_amount_received`` untouched -- matching the pre-refactor
+        behaviour.
+        """
+        strategy = state.strategy
+        intent = state.current_intent
+
+        # Update amount received with actual bridge output
+        # Balance increase is in wei - normalize using TokenResolver metadata
+        actual_received_wei = bridge_status.get("balance_increase")
+        if actual_received_wei is None:
+            return False
+
+        from ..data.tokens.exceptions import TokenNotFoundError
+
+        try:
+            normalized_amount, normalization_metadata = self._normalize_bridge_balance_increase(
+                balance_increase_wei=actual_received_wei,
+                destination_chain=dest_chain,
+                token_symbol=token_symbol,
+                bridge_status=bridge_status,
+            )
+        except TokenNotFoundError as exc:
+            logger.error(
+                "Bridge normalization failed due to unresolved token metadata: %s",
+                exc,
+            )
+            # Notify strategy of bridge failure (source tx succeeded but bridge normalization failed)
+            if hasattr(strategy, "on_intent_executed"):
+                try:
+                    strategy.on_intent_executed(intent, success=False, result=result)
+                except Exception as cb_err:
+                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            state.callback_fired = True
+            state.failed_step = f"step-{step_num}-bridge"
+            state.error_message = str(exc)
+            return True
+
+        if normalized_amount is not None:
+            state.previous_amount_received = normalized_amount
+            logger.info(
+                "Bridge completed: received %s %s on %s (%s wei, decimals=%s, token_hint=%s)",
+                state.previous_amount_received,
+                token_symbol,
+                dest_chain,
+                normalization_metadata["raw_wei"],
+                normalization_metadata["decimals"],
+                normalization_metadata.get("resolved_from"),
+            )
+        else:
+            logger.warning(
+                "Unable to normalize bridge amount. Preserving raw wei metadata: %s",
+                normalization_metadata,
+            )
+        return False
+
+    async def _bridge_wait_finalize(self, state: BridgeWaitState) -> IterationResult:
+        """Build the final IterationResult after the intent loop terminates.
+
+        Handles: callback-dispatch for failure exits that did not fire the
+        callback inline, progress persistence on failure, revert diagnostics
+        for on-chain failures (skipping bridge + pre-execution failures),
+        balance-cache invalidation, and the SUCCESS path (clear progress,
+        record success metric).
+        """
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        intents = state.intents
 
         # Ensure strategy is notified of failure even for paths that didn't fire the callback
         # inline (e.g. source TX verification failures, no-tx_hash, no-RPC-URL).
         # This single finalization block covers all break exits without per-exit patching.
-        if failed_step and not callback_fired:
+        if state.failed_step and not state.callback_fired:
             if hasattr(strategy, "on_intent_executed"):
                 try:
-                    strategy.on_intent_executed(intent, success=False, result=failed_result)
+                    strategy.on_intent_executed(state.current_intent, success=False, result=state.failed_result)
                 except Exception as cb_err:
                     logger.warning(f"Error in on_intent_executed callback: {cb_err}")
 
         # Build result
-        if failed_step:
-            logger.error(f"Multi-chain execution failed at {failed_step}: {error_message}")
-
-            # Mark the failed step in progress so we can retry on next iteration
-            # Parse failed step index from "step-N" or "step-N-bridge" format
-            try:
-                step_part = failed_step.split("-")[1]
-                failed_intent_index = int(step_part) - 1  # Convert to 0-indexed
-            except (IndexError, ValueError):
-                failed_intent_index = 0
-
-            # Save failure state for retry on next iteration
-            progress.failed_at_step_index = failed_intent_index
-            progress.failure_error = error_message
-            progress.last_updated = datetime.now(UTC)
-            await self._save_execution_progress(strategy_id, progress)
-            logger.info(f"Saved failure state for retry: step {failed_intent_index + 1}, error: {error_message}")
-
-            # Run diagnostics on the failed intent to help identify the cause
-            try:
-                if 0 <= failed_intent_index < len(intents):
-                    failed_intent = intents[failed_intent_index]
-                    failed_chain = getattr(failed_intent, "chain", strategy.chain)
-
-                    # Create a chain-specific balance provider for diagnostics
-                    from almanak.gateway.data.balance import Web3BalanceProvider
-
-                    chain_rpc = rpc_urls.get(failed_chain)
-                    if chain_rpc:
-                        chain_balance_provider = Web3BalanceProvider(
-                            rpc_url=chain_rpc,
-                            wallet_address=strategy.wallet_address,
-                            chain=failed_chain,
-                        )
-
-                        # Skip revert diagnostics when no execution result is available.
-                        # This covers compilation failures AND bridge failures (where the
-                        # execution itself succeeded but the bridge transfer failed).
-                        is_bridge_failure = "-bridge" in (failed_step or "")
-                        if failed_result is None and not is_bridge_failure:
-                            logger.error(
-                                f"PRE-EXECUTION FAILURE: {error_message}\n"
-                                f"  Intent: {failed_intent.intent_type.value} | Chain: {failed_chain}\n"
-                                f"  No on-chain transaction was attempted (compilation or validation error)."
-                            )
-                        elif is_bridge_failure:
-                            logger.error(
-                                f"BRIDGE FAILURE: {error_message}\n"
-                                f"  Intent: {failed_intent.intent_type.value} | Chain: {failed_chain}\n"
-                                f"  The on-chain transaction succeeded but the bridge transfer failed."
-                            )
-                        else:
-                            cross_chain_gas_warnings = None
-                            if failed_result is not None and hasattr(failed_result, "gas_warnings"):
-                                cross_chain_gas_warnings = failed_result.gas_warnings or None
-
-                            diagnostic = await diagnose_revert(
-                                intent=failed_intent,
-                                chain=failed_chain,
-                                wallet=strategy.wallet_address,
-                                web3_provider=chain_balance_provider,
-                                raw_error=error_message,
-                                gas_warnings=cross_chain_gas_warnings,
-                            )
-                            logger.error(diagnostic.format())
-            except Exception as diag_error:
-                logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
-
-            # Always invalidate balance cache after execution (success or failure)
-            # to prevent stale reads on the next decide() cycle.
-            self.balance_provider.invalidate_cache()
-
-            return IterationResult(
-                status=IterationStatus.EXECUTION_FAILED,
-                intent=first_intent,
-                error=f"{failed_step}: {error_message}",
-                strategy_id=strategy_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
+        if state.failed_step:
+            return await self._bridge_wait_build_failed_result(state)
 
         # Always invalidate balance cache after execution (success or failure)
         # to prevent stale reads on the next decide() cycle.
@@ -3520,7 +3920,7 @@ class StrategyRunner:
 
         logger.info(
             f"Multi-chain execution with bridge waiting successful for {strategy_id}: "
-            f"{successful_count}/{len(intents)} succeeded"
+            f"{state.successful_count}/{len(intents)} succeeded"
         )
 
         # Clear execution progress on successful completion
@@ -3529,9 +3929,100 @@ class StrategyRunner:
         self._record_success(execution_proved=True)
         return IterationResult(
             status=IterationStatus.SUCCESS,
-            intent=first_intent,
+            intent=state.first_intent,
             strategy_id=strategy_id,
-            duration_ms=self._calculate_duration_ms(start_time),
+            duration_ms=self._calculate_duration_ms(state.start_time),
+        )
+
+    async def _bridge_wait_build_failed_result(self, state: BridgeWaitState) -> IterationResult:
+        """Persist failure progress, run diagnostics, return failed result."""
+        strategy = state.strategy
+        strategy_id = state.strategy_id
+        intents = state.intents
+        # Precondition: callers only invoke this when state.failed_step is set
+        # and state.progress has been populated by ``_init_bridge_wait_state``.
+        assert state.failed_step is not None
+        assert state.progress is not None
+        failed_step = state.failed_step
+        error_message = state.error_message
+
+        logger.error(f"Multi-chain execution failed at {failed_step}: {error_message}")
+
+        # Mark the failed step in progress so we can retry on next iteration
+        # Parse failed step index from "step-N" or "step-N-bridge" format
+        try:
+            step_part = failed_step.split("-")[1]
+            failed_intent_index = int(step_part) - 1  # Convert to 0-indexed
+        except (IndexError, ValueError):
+            failed_intent_index = 0
+
+        # Save failure state for retry on next iteration
+        state.progress.failed_at_step_index = failed_intent_index
+        state.progress.failure_error = error_message
+        state.progress.last_updated = datetime.now(UTC)
+        await self._save_execution_progress(strategy_id, state.progress)
+        logger.info(f"Saved failure state for retry: step {failed_intent_index + 1}, error: {error_message}")
+
+        # Run diagnostics on the failed intent to help identify the cause
+        try:
+            if 0 <= failed_intent_index < len(intents):
+                failed_intent = intents[failed_intent_index]
+                failed_chain = getattr(failed_intent, "chain", strategy.chain)
+
+                # Create a chain-specific balance provider for diagnostics
+                from almanak.gateway.data.balance import Web3BalanceProvider
+
+                chain_rpc = state.rpc_urls.get(failed_chain)
+                if chain_rpc:
+                    chain_balance_provider = Web3BalanceProvider(
+                        rpc_url=chain_rpc,
+                        wallet_address=strategy.wallet_address,
+                        chain=failed_chain,
+                    )
+
+                    # Skip revert diagnostics when no execution result is available.
+                    # This covers compilation failures AND bridge failures (where the
+                    # execution itself succeeded but the bridge transfer failed).
+                    is_bridge_failure = "-bridge" in (failed_step or "")
+                    if state.failed_result is None and not is_bridge_failure:
+                        logger.error(
+                            f"PRE-EXECUTION FAILURE: {error_message}\n"
+                            f"  Intent: {failed_intent.intent_type.value} | Chain: {failed_chain}\n"
+                            f"  No on-chain transaction was attempted (compilation or validation error)."
+                        )
+                    elif is_bridge_failure:
+                        logger.error(
+                            f"BRIDGE FAILURE: {error_message}\n"
+                            f"  Intent: {failed_intent.intent_type.value} | Chain: {failed_chain}\n"
+                            f"  The on-chain transaction succeeded but the bridge transfer failed."
+                        )
+                    else:
+                        cross_chain_gas_warnings = None
+                        if state.failed_result is not None and hasattr(state.failed_result, "gas_warnings"):
+                            cross_chain_gas_warnings = state.failed_result.gas_warnings or None
+
+                        diagnostic = await diagnose_revert(
+                            intent=failed_intent,
+                            chain=failed_chain,
+                            wallet=strategy.wallet_address,
+                            web3_provider=chain_balance_provider,
+                            raw_error=error_message,
+                            gas_warnings=cross_chain_gas_warnings,
+                        )
+                        logger.error(diagnostic.format())
+        except Exception as diag_error:
+            logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
+
+        # Always invalidate balance cache after execution (success or failure)
+        # to prevent stale reads on the next decide() cycle.
+        self.balance_provider.invalidate_cache()
+
+        return IterationResult(
+            status=IterationStatus.EXECUTION_FAILED,
+            intent=state.first_intent,
+            error=f"{failed_step}: {error_message}",
+            strategy_id=strategy_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
         )
 
     # -------------------------------------------------------------------------
