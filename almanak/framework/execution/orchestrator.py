@@ -1084,8 +1084,9 @@ class ExecutionOrchestrator:
         Returns:
             ExecutionResult with complete execution details
         """
-        state = self._init_pipeline_state(action_bundle, context)
+        state: ExecutionPipelineState | None = None
         try:
+            state = self._init_pipeline_state(action_bundle, context)
             phases: tuple[Callable[[ExecutionPipelineState], Any], ...] = (
                 self._phase_build,
                 self._phase_validate,
@@ -1101,6 +1102,35 @@ class ExecutionOrchestrator:
                     return early
             return state.result
         except Exception as exc:
+            if state is None:
+                # Init failed (e.g., intent-description generation, session
+                # creation, session-store persistence). Return a minimal
+                # failure result rather than letting the exception escape.
+                # Preserve observability: log the traceback, keep the
+                # caller-provided correlation_id, and emit EXECUTION_FAILED
+                # so timeline/event-callback consumers still see the failure.
+                logger.exception(f"Pipeline initialization failed: {exc}")
+                fallback_context = (
+                    context
+                    if context is not None
+                    else ExecutionContext(
+                        wallet_address=self.signer.address,
+                        chain=self.chain,
+                    )
+                )
+                result = ExecutionResult(
+                    success=False,
+                    phase=ExecutionPhase.VALIDATION,
+                    correlation_id=fallback_context.correlation_id,
+                )
+                result.error = f"Unexpected error: {exc}"
+                result.error_phase = ExecutionPhase.VALIDATION
+                self._emit_event(
+                    ExecutionEventType.EXECUTION_FAILED,
+                    fallback_context,
+                    {"error": str(exc), "error_type": type(exc).__name__},
+                )
+                return result
             return self._handle_execution_exception(state, exc)
 
     # -------------------------------------------------------------------------
