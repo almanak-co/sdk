@@ -4112,10 +4112,9 @@ def _compile_supply_silo_v2(
 def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
     """Compile a WITHDRAW intent into an ActionBundle.
 
-    This method:
-    1. Resolves token address
-    2. Converts amount to wei (or uses MAX_UINT256 for withdraw all)
-    3. Builds withdraw TX
+    Thin dispatcher: resolves shared EVM state (withdraw token, amount, initial
+    warnings), then delegates to the per-protocol helper. Solana helpers receive
+    only ``(compiler, intent)`` and do their own chain check.
 
     Args:
         compiler: IntentCompiler instance
@@ -4124,41 +4123,23 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
     Returns:
         CompilationResult with withdraw ActionBundle
     """
-    from .compiler_adapters import AaveV3Adapter
-
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
         intent_id=intent.intent_id,
     )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = []
 
     try:
         protocol_lower = intent.protocol.lower()
 
-        # =================================================================
-        # SOLANA LENDING PATH (Kamino / Jupiter Lend)
-        # =================================================================
+        # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
-            if not compiler._is_solana_chain():
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error="Protocol 'jupiter_lend' is only available on Solana chains.",
-                )
-            return compiler._compile_jupiter_lend_withdraw(intent)
-        if protocol_lower == "kamino" or (
+            return _compile_withdraw_jupiter_lend(compiler, intent)
+        elif protocol_lower == "kamino" or (
             compiler._is_solana_chain() and protocol_lower not in ("morpho", "morpho_blue", "jupiter_lend")
         ):
-            if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    intent_id=intent.intent_id,
-                    error=f"Protocol '{intent.protocol}' is not supported for WITHDRAW on Solana. Supported: kamino, jupiter_lend",
-                )
-            return compiler._compile_kamino_withdraw(intent)
+            return _compile_withdraw_kamino(compiler, intent)
 
-        # Step 1: Resolve token address
+        # Resolve shared withdraw token and amount for EVM protocols.
         withdraw_token = compiler._resolve_token(intent.token)
         if withdraw_token is None:
             return CompilationResult(
@@ -4167,937 +4148,1120 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
                 intent_id=intent.intent_id,
             )
 
-        # Step 2: Calculate amount
+        initial_warnings: list[str] = []
         withdraw_amount_decimal: Decimal | None
         if intent.withdraw_all:
             withdraw_amount_decimal = None  # Will use withdraw_all flag
-            warnings.append("Withdrawing all available balance")
+            initial_warnings.append("Withdrawing all available balance")
         elif intent.amount == "all":
             # amount="all" was not resolved by the amount resolver (no RPC, no reader, etc.)
-            # Fall back to withdraw_all=True — let the adapter handle it.
+            # Fall back to withdraw_all=True - let the adapter handle it.
             logger.info(
-                "amount='all' reached compiler unresolved for %s — using withdraw_all path",
+                "amount='all' reached compiler unresolved for %s - using withdraw_all path",
                 intent.protocol,
             )
             withdraw_amount_decimal = None
             intent = intent.model_copy(update={"withdraw_all": True})
-            warnings.append("Withdrawing all available balance (amount='all' fallback)")
+            initial_warnings.append("Withdrawing all available balance (amount='all' fallback)")
         else:
             withdraw_amount_decimal = intent.amount  # type: ignore[assignment]
 
-        # =================================================================
-        # MORPHO BLUE PATH
-        # =================================================================
         if protocol_lower in ("morpho", "morpho_blue"):
-            if not intent.market_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="market_id is required for Morpho Blue withdraw",
-                    intent_id=intent.intent_id,
-                )
-
-            # Lazy import to avoid circular import
-            from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
-
-            # Resolve RPC URL with compiler's chain-aware fallback logic
-            # (explicit rpc_url -> managed Anvil fork -> configured provider)
-            morpho_rpc_url = compiler._get_chain_rpc_url()
-
-            morpho_config = MorphoBlueConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-                rpc_url=morpho_rpc_url,  # DEPRECATED — only used when gateway_client is None
-                gateway_client=compiler._gateway_client,
+            return _compile_withdraw_morpho_blue(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
-            morpho_adapter = MorphoBlueAdapter(morpho_config)
-
-            # Morpho Blue has two withdraw paths (mirrors supply):
-            # - withdraw_collateral() for collateral withdrawals
-            # - withdraw() for loan-token withdrawals (lender reclaiming supplied funds)
-            # Route based on is_collateral flag (default True for backward compat)
-            amount_for_adapter = withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0")
-            if intent.is_collateral:
-                withdraw_result: Any = morpho_adapter.withdraw_collateral(
-                    market_id=intent.market_id,
-                    amount=amount_for_adapter,
-                    receiver=compiler.wallet_address,
-                    on_behalf_of=compiler.wallet_address,
-                    withdraw_all=intent.withdraw_all,
-                )
-                tx_type_label = "lending_withdraw_collateral"
-                description_suffix = "collateral"
-            else:
-                withdraw_result = morpho_adapter.withdraw(
-                    market_id=intent.market_id,
-                    amount=amount_for_adapter,
-                    receiver=compiler.wallet_address,
-                    on_behalf_of=compiler.wallet_address,
-                    withdraw_all=intent.withdraw_all,
-                )
-                tx_type_label = "lending_withdraw"
-                description_suffix = "loan token"
-
-            if not withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Morpho Blue withdraw failed: {withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-            assert withdraw_result.tx_data is not None
-            withdraw_tx = TransactionData(
-                to=withdraw_result.tx_data["to"],
-                value=withdraw_result.tx_data["value"],
-                data=withdraw_result.tx_data["data"],
-                gas_estimate=withdraw_result.gas_estimate,
-                description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} {description_suffix} from Morpho Blue",
-                tx_type=tx_type_label,
+        elif protocol_lower == "curvance":
+            return _compile_withdraw_curvance(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "morpho_address": morpho_adapter.morpho_address,
-                    "market_id": intent.market_id,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Morpho Blue")
-            return result
-
-        # =================================================================
-        # CURVANCE PATH (Monad — withdraw from collateral cToken)
-        # =================================================================
-        if protocol_lower == "curvance":
-            if not intent.market_id:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="market_id is required for Curvance withdraw (MarketManager address)",
-                    intent_id=intent.intent_id,
-                )
-
-            from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
-
-            curvance_adapter = CurvanceAdapter(
-                CurvanceConfig(
-                    chain=compiler.chain,
-                    wallet_address=compiler.wallet_address,
-                    gateway_client=compiler._gateway_client,
-                )
-            )
-
-            mismatch = _validate_curvance_market_tokens(
-                curvance_adapter,
-                intent.market_id,
-                expected_collateral_symbol=withdraw_token.symbol,
-            )
-            if mismatch:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=mismatch,
-                    intent_id=intent.intent_id,
-                )
-
-            # Curvance-side asset amount. ChainedAmount (``"all"``) is already
-            # rejected upstream for lending intents; the else-branch is therefore
-            # a concrete Decimal.
-            market_info = curvance_adapter.get_market(intent.market_id)
-            share_balance: int | None = None
-            if intent.withdraw_all:
-                curvance_withdraw_amount = Decimal("0")
-                # withdraw_all calls redeemCollateral(shares, receiver, owner)
-                # which has no MAX_UINT256 sentinel — we MUST read the cToken
-                # share balance and pass it explicitly or the adapter raises.
-                share_balance = compiler._query_erc20_balance(
-                    market_info.collateral_ctoken,
-                    compiler.wallet_address,
-                )
-                if share_balance is None or share_balance <= 0:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            "Curvance withdraw_all requires reading the cToken share balance "
-                            f"({market_info.collateral_ctoken}) for {compiler.wallet_address}; "
-                            "balance query returned no value or zero."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-            else:
-                assert isinstance(intent.amount, Decimal), "amount must be Decimal at this point"
-                curvance_withdraw_amount = intent.amount
-            amount_display = "all" if intent.withdraw_all else str(curvance_withdraw_amount)
-            curvance_withdraw_result = curvance_adapter.withdraw_collateral(
-                market_id=intent.market_id,
-                amount=curvance_withdraw_amount,
-                withdraw_all=intent.withdraw_all,
-                receiver=compiler.wallet_address,
-                share_balance=share_balance,
-            )
-            if not curvance_withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curvance withdraw failed: {curvance_withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-            assert curvance_withdraw_result.tx_data is not None
-            transactions.append(
-                TransactionData(
-                    to=curvance_withdraw_result.tx_data["to"],
-                    value=curvance_withdraw_result.tx_data["value"],
-                    data=curvance_withdraw_result.tx_data["data"],
-                    gas_estimate=curvance_withdraw_result.gas_estimate,
-                    description=curvance_withdraw_result.description,
-                    tx_type="lending_withdraw",
-                )
-            )
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": "curvance",
-                    "market_id": intent.market_id,
-                    "market_name": market_info.name,
-                    "collateral_ctoken": market_info.collateral_ctoken,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-            logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Curvance {market_info.name}")
-            return result
-
-        # =================================================================
-        # AAVE-COMPATIBLE PATH (Aave V3 + Radiant V2)
-        # =================================================================
         elif protocol_lower in AAVE_COMPATIBLE_PROTOCOLS:
-            adapter = AaveV3Adapter(compiler.chain, protocol_lower)
-            pool_address = adapter.get_pool_address()
-
-            if pool_address == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"{intent.protocol} not available on chain: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            if intent.withdraw_all:
-                withdraw_amount = MAX_UINT256
-            else:
-                assert withdraw_amount_decimal is not None
-                withdraw_amount = int(withdraw_amount_decimal * Decimal(10**withdraw_token.decimals))
-
-            actual_withdraw_address = withdraw_token.address
-
-            if withdraw_token.is_native:
-                weth_address = compiler._get_wrapped_native_address()
-                if weth_address:
-                    actual_withdraw_address = weth_address
-                    warnings.append("Native token withdraw: will receive WETH (unwrap separately if needed)")
-                else:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="Cannot withdraw native ETH - WETH address not found",
-                        intent_id=intent.intent_id,
-                    )
-
-            withdraw_calldata = adapter.get_withdraw_calldata(
-                asset=actual_withdraw_address,
-                amount=withdraw_amount,
-                to=compiler.wallet_address,
+            return _compile_withdraw_aave_compatible(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
-
-            amount_display = (
-                "all" if intent.withdraw_all else compiler._format_amount(withdraw_amount, withdraw_token.decimals)
-            )
-
-            withdraw_tx = TransactionData(
-                to=pool_address,
-                value=0,
-                data="0x" + withdraw_calldata.hex(),
-                gas_estimate=adapter.estimate_withdraw_gas(),
-                description=(f"Withdraw {amount_display} {withdraw_token.symbol} from {intent.protocol}"),
-                tx_type="lending_withdraw",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "pool_address": pool_address,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": str(withdraw_amount),
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas"
-            )
-
-        # =================================================================
-        # SPARK PATH (Aave V3 fork with Spark-specific addresses)
-        # =================================================================
         elif protocol_lower == "spark":
-            from ..connectors.spark import (
-                SPARK_POOL_ADDRESSES,
-                SparkAdapter,
-                SparkConfig,
-            )
-
-            if compiler.chain not in SPARK_POOL_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            spark_config = SparkConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            spark_adapter = SparkAdapter(spark_config)
-            pool_address = spark_adapter.pool_address
-
-            if intent.withdraw_all:
-                withdraw_amount = MAX_UINT256
-            else:
-                assert withdraw_amount_decimal is not None
-                withdraw_amount = int(withdraw_amount_decimal * Decimal(10**withdraw_token.decimals))
-
-            actual_withdraw_address = withdraw_token.address
-
-            if withdraw_token.is_native:
-                weth_address = compiler._get_wrapped_native_address()
-                if weth_address:
-                    actual_withdraw_address = weth_address
-                    warnings.append("Native token withdraw: will receive WETH (unwrap separately if needed)")
-                else:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="Cannot withdraw native ETH - WETH address not found",
-                        intent_id=intent.intent_id,
-                    )
-
-            # Build withdraw TX via Spark adapter
-            withdraw_result = spark_adapter.withdraw(
-                asset=actual_withdraw_address,
-                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                to=compiler.wallet_address,
-                withdraw_all=intent.withdraw_all,
-            )
-
-            if not withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Spark withdraw failed: {withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = (
-                "all" if intent.withdraw_all else compiler._format_amount(withdraw_amount, withdraw_token.decimals)
-            )
-
-            assert withdraw_result.tx_data is not None
-            withdraw_data = withdraw_result.tx_data["data"]
-            if not withdraw_data.startswith("0x"):
-                withdraw_data = "0x" + withdraw_data
-
-            withdraw_tx = TransactionData(
-                to=withdraw_result.tx_data["to"],
-                value=0,
-                data=withdraw_data,
-                gas_estimate=withdraw_result.gas_estimate,
-                description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from Spark",
-                tx_type="lending_withdraw",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "pool_address": pool_address,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": str(withdraw_amount),
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Spark)"
-            )
-
-        # =================================================================
-        # PENDLE REDEEM PATH
-        # =================================================================
+            return _compile_withdraw_spark(compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings)
         elif protocol_lower == "pendle":
-            return compiler._compile_pendle_redeem(intent)
-
-        # =================================================================
-        # COMPOUND V3 PATH
-        # =================================================================
+            return _compile_withdraw_pendle(compiler, intent, initial_warnings)
         elif protocol_lower == "compound_v3":
-            from ..connectors.compound_v3.adapter import (
-                COMPOUND_V3_COMET_ADDRESSES,
-                CompoundV3Adapter,
-                CompoundV3Config,
+            return _compile_withdraw_compound_v3(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
-
-            market = intent.market_id or "usdc"
-
-            if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
-            if market not in available_markets:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            compound_config = CompoundV3Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-                market=market,
-                gateway_client=compiler._gateway_client,
-            )
-            compound_adapter = CompoundV3Adapter(compound_config)
-
-            # Detect if the token is the base token or a collateral token.
-            # Compound V3 uses withdraw() for the base asset and withdraw_collateral()
-            # for collateral assets — they are different contract methods.
-            # Compare by address (more robust than symbol, avoids alias ambiguity).
-            base_token_address = compound_adapter.market_config.get("base_token_address")
-            if not base_token_address:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-            is_base_token = withdraw_token.address.lower() == base_token_address.lower()
-
-            compound_withdraw_amount: Decimal = (
-                withdraw_amount_decimal if withdraw_amount_decimal is not None else Decimal("0")
-            )
-
-            if is_base_token:
-                # Withdraw base asset (reduce lending position)
-                # Base token withdraw supports MAX_UINT256 for withdraw_all natively.
-                withdraw_result = compound_adapter.withdraw(
-                    amount=compound_withdraw_amount,
-                    withdraw_all=intent.withdraw_all,
-                )
-            else:
-                # Withdraw collateral asset.
-                # For withdraw_all: use the intent's original amount if available, since
-                # Compound V3 stores collateral as uint128 and MAX_UINT256 causes safe128() revert.
-                # The on-chain query in the adapter is the primary path; the intent amount is
-                # the fallback for when no RPC is available.
-                collateral_amount = compound_withdraw_amount
-                if intent.withdraw_all and collateral_amount == 0 and intent.amount not in (None, "all"):
-                    try:
-                        collateral_amount = Decimal(str(intent.amount))
-                    except (TypeError, ValueError, ArithmeticError):
-                        pass
-
-                withdraw_result = compound_adapter.withdraw_collateral(
-                    asset=withdraw_token.symbol,
-                    amount=collateral_amount,
-                    withdraw_all=intent.withdraw_all,
-                )
-
-            if not withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Compound V3 withdraw failed: {withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            # No-op: withdraw_all on zero collateral returns success with no tx_data.
-            # Return a SUCCESS result with an empty ActionBundle so callers don't crash.
-            if withdraw_result.tx_data is None:
-                return CompilationResult(
-                    status=CompilationStatus.SUCCESS,
-                    action_bundle=ActionBundle(
-                        intent_type=IntentType.WITHDRAW.value,
-                        transactions=[],
-                        metadata={
-                            "protocol": intent.protocol,
-                            "comet_address": compound_adapter.comet_address,
-                            "market": market,
-                            "withdraw_token": withdraw_token.to_dict(),
-                            "withdraw_amount": "0",
-                            "withdraw_all": intent.withdraw_all,
-                            "withdraw_type": "collateral" if not is_base_token else "base",
-                            "chain": compiler.chain,
-                            "no_op": True,
-                            "reason": withdraw_result.description or "Nothing to withdraw (balance is 0)",
-                        },
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-            withdraw_data = withdraw_result.tx_data["data"]
-            if not withdraw_data.startswith("0x"):
-                withdraw_data = "0x" + withdraw_data
-
-            withdraw_tx = TransactionData(
-                to=withdraw_result.tx_data["to"],
-                value=int(withdraw_result.tx_data.get("value", 0)),
-                data=withdraw_data,
-                gas_estimate=withdraw_result.gas_estimate,
-                description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from Compound V3",
-                tx_type="lending_withdraw" if is_base_token else "lending_withdraw_collateral",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "comet_address": compound_adapter.comet_address,
-                    "market": market,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "withdraw_type": "base" if is_base_token else "collateral",
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            withdraw_type = "base" if is_base_token else "collateral"
-            logger.info(
-                f"Compiled WITHDRAW ({withdraw_type}): {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Compound V3)"
-            )
-
-        # =================================================================
-        # BENQI PATH (Compound V2 fork on Avalanche)
-        # =================================================================
         elif protocol_lower == "benqi":
-            from ..connectors.benqi.adapter import (
-                BENQI_QI_TOKENS,
-                BenqiAdapter,
-                BenqiConfig,
-            )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            benqi_config = BenqiConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            benqi_adapter = BenqiAdapter(benqi_config)
-
-            withdraw_symbol = withdraw_token.symbol.upper()
-            withdraw_market = benqi_adapter.get_market_info(withdraw_symbol)
-
-            if not withdraw_market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI does not support asset: {withdraw_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build withdraw (redeem) TX
-            withdraw_result = benqi_adapter.withdraw(
-                asset=withdraw_symbol,
-                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                withdraw_all=intent.withdraw_all,
-            )
-
-            if not withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"BENQI withdraw failed: {withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-            assert withdraw_result.tx_data is not None
-            withdraw_data = withdraw_result.tx_data["data"]
-            if not withdraw_data.startswith("0x"):
-                withdraw_data = "0x" + withdraw_data
-
-            withdraw_tx = TransactionData(
-                to=withdraw_result.tx_data["to"],
-                value=int(withdraw_result.tx_data.get("value", 0)),
-                data=withdraw_data,
-                gas_estimate=withdraw_result.gas_estimate,
-                description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from BENQI",
-                tx_type="lending_withdraw",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "comptroller_address": benqi_adapter.comptroller_address,
-                    "qi_token_address": withdraw_market.qi_token_address,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (BENQI)"
-            )
-
-        # =================================================================
-        # JOE LEND PATH (Compound V2 fork on Avalanche — Banker Joe)
-        # =================================================================
+            return _compile_withdraw_benqi(compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings)
         elif protocol_lower == "joelend":
-            from ..connectors.joelend.adapter import (
-                JOELEND_J_TOKENS,
-                JoeLendAdapter,
-                JoeLendConfig,
+            return _compile_withdraw_joelend(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
-
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            joelend_config = JoeLendConfig(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            joelend_adapter = JoeLendAdapter(joelend_config)
-
-            withdraw_symbol = withdraw_token.symbol.upper()
-            jl_withdraw_market = joelend_adapter.get_market_info(withdraw_symbol)
-
-            if not jl_withdraw_market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend does not support asset: {withdraw_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build withdraw (redeem) TX
-            jl_withdraw_result = joelend_adapter.withdraw(
-                asset=withdraw_symbol,
-                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                withdraw_all=intent.withdraw_all,
-            )
-
-            if not jl_withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Joe Lend withdraw failed: {jl_withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-            assert jl_withdraw_result.tx_data is not None
-            withdraw_data = jl_withdraw_result.tx_data["data"]
-            if not withdraw_data.startswith("0x"):
-                withdraw_data = "0x" + withdraw_data
-
-            withdraw_tx = TransactionData(
-                to=jl_withdraw_result.tx_data["to"],
-                value=int(jl_withdraw_result.tx_data.get("value", 0)),
-                data=withdraw_data,
-                gas_estimate=jl_withdraw_result.gas_estimate,
-                description=jl_withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from Joe Lend",
-                tx_type="lending_withdraw",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "joetroller_address": joelend_adapter.joetroller_address,
-                    "j_token_address": jl_withdraw_market.j_token_address,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Joe Lend)"
-            )
-
-        # =================================================================
-        # EULER V2 PATH (ERC-4626 vaults)
-        # =================================================================
         elif protocol_lower == "euler_v2":
-            from ..connectors.euler_v2.adapter import (
-                EulerV2Adapter,
-                EulerV2Config,
+            return _compile_withdraw_euler_v2(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
-
-            # Chain validation is handled by EulerV2Config.__post_init__
-            euler_config = EulerV2Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            euler_adapter = EulerV2Adapter(euler_config)
-
-            withdraw_symbol = withdraw_token.symbol.upper()
-            withdraw_vault = euler_adapter.find_vault_for_asset(withdraw_symbol)
-
-            if not withdraw_vault:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 does not have a vault for asset: {withdraw_symbol}. Supported: {euler_adapter.get_supported_assets()}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Build withdraw TX
-            withdraw_result = euler_adapter.withdraw(
-                asset=withdraw_symbol,
-                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                withdraw_all=intent.withdraw_all,
-                vault_symbol=withdraw_vault.vault_symbol,
-            )
-
-            if not withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Euler V2 withdraw failed: {withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-            assert withdraw_result.tx_data is not None
-            withdraw_data = withdraw_result.tx_data["data"]
-            if not withdraw_data.startswith("0x"):
-                withdraw_data = "0x" + withdraw_data
-
-            withdraw_tx = TransactionData(
-                to=withdraw_result.tx_data["to"],
-                value=int(withdraw_result.tx_data.get("value", 0)),
-                data=withdraw_data,
-                gas_estimate=withdraw_result.gas_estimate,
-                description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from Euler V2",
-                tx_type="lending_withdraw",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "vault_address": withdraw_vault.vault_address,
-                    "vault_symbol": withdraw_vault.vault_symbol,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Euler V2)"
-            )
-
-        # =================================================================
         elif protocol_lower == "silo_v2":
-            from ..connectors.silo_v2.adapter import (
-                SILO_V2_MARKETS,
-                SiloV2Adapter,
-                SiloV2Config,
+            return _compile_withdraw_silo_v2(
+                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
             )
 
-            if compiler.chain != "avalanche":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-
-            silo_config = SiloV2Config(
-                chain=compiler.chain,
-                wallet_address=compiler.wallet_address,
-            )
-            silo_adapter = SiloV2Adapter(silo_config)
-
-            withdraw_symbol = withdraw_token.symbol.upper()
-            sv2_silo_result = silo_adapter.find_silo_for_asset(withdraw_symbol)
-
-            if not sv2_silo_result:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Silo V2 market found for asset: {withdraw_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            sv2_market, silo_address, _ = sv2_silo_result
-
-            # Build withdraw TX
-            withdraw_result = silo_adapter.withdraw(
-                asset=withdraw_symbol,
-                amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-                market_name=sv2_market.market_name,
-                withdraw_all=intent.withdraw_all,
-            )
-
-            if not withdraw_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Silo V2 withdraw failed: {withdraw_result.error}",
-                    intent_id=intent.intent_id,
-                )
-
-            amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-            assert withdraw_result.tx_data is not None
-            withdraw_data = withdraw_result.tx_data["data"]
-            if not withdraw_data.startswith("0x"):
-                withdraw_data = "0x" + withdraw_data
-
-            withdraw_tx = TransactionData(
-                to=withdraw_result.tx_data["to"],
-                value=int(withdraw_result.tx_data.get("value", 0)),
-                data=withdraw_data,
-                gas_estimate=withdraw_result.gas_estimate,
-                description=withdraw_result.description
-                or f"Withdraw {amount_display} {withdraw_token.symbol} from Silo V2",
-                tx_type="lending_withdraw",
-            )
-            transactions.append(withdraw_tx)
-
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
-                intent_type=IntentType.WITHDRAW.value,
-                transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "protocol": intent.protocol,
-                    "silo_config": sv2_market.silo_config,
-                    "market_name": sv2_market.market_name,
-                    "silo_address": silo_address,
-                    "withdraw_token": withdraw_token.to_dict(),
-                    "withdraw_amount": amount_display,
-                    "withdraw_all": intent.withdraw_all,
-                    "chain": compiler.chain,
-                },
-            )
-
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
-            logger.info(
-                f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Silo V2 {sv2_market.market_name})"
-            )
-
-        # =================================================================
-        # UNSUPPORTED PROTOCOL
-        # =================================================================
-        else:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, pendle, compound_v3, benqi, joelend, euler_v2, silo_v2",
-                intent_id=intent.intent_id,
-            )
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, pendle, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            intent_id=intent.intent_id,
+        )
 
     except Exception as e:
         logger.exception(f"Failed to compile WITHDRAW intent: {e}")
         result.status = CompilationStatus.FAILED
         result.error = str(e)
 
+    return result
+
+
+def _compile_withdraw_jupiter_lend(compiler, intent: WithdrawIntent) -> CompilationResult:
+    """Compile WITHDRAW for Jupiter Lend (Solana only)."""
+    if not compiler._is_solana_chain():
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error="Protocol 'jupiter_lend' is only available on Solana chains.",
+        )
+    return compiler._compile_jupiter_lend_withdraw(intent)
+
+
+def _compile_withdraw_kamino(compiler, intent: WithdrawIntent) -> CompilationResult:
+    """Compile WITHDRAW for Kamino (Solana) and the Solana-fallback path.
+
+    Handles the original branch that matched ``protocol_lower == "kamino"`` or
+    any non-(morpho/morpho_blue/jupiter_lend) protocol on a Solana chain.
+    """
+    protocol_lower = intent.protocol.lower()
+    if compiler._is_solana_chain() and protocol_lower not in ("kamino", ""):
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=f"Protocol '{intent.protocol}' is not supported for WITHDRAW on Solana. Supported: kamino, jupiter_lend",
+        )
+    return compiler._compile_kamino_withdraw(intent)
+
+
+def _compile_withdraw_morpho_blue(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Morpho Blue."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Morpho Blue withdraw",
+            intent_id=intent.intent_id,
+        )
+
+    # Lazy import to avoid circular import
+    from ..connectors.morpho_blue.adapter import MorphoBlueAdapter, MorphoBlueConfig
+
+    # Resolve RPC URL with compiler's chain-aware fallback logic
+    # (explicit rpc_url -> managed Anvil fork -> configured provider)
+    morpho_rpc_url = compiler._get_chain_rpc_url()
+
+    morpho_config = MorphoBlueConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        rpc_url=morpho_rpc_url,  # DEPRECATED - only used when gateway_client is None
+        gateway_client=compiler._gateway_client,
+    )
+    morpho_adapter = MorphoBlueAdapter(morpho_config)
+
+    # Morpho Blue has two withdraw paths (mirrors supply):
+    # - withdraw_collateral() for collateral withdrawals
+    # - withdraw() for loan-token withdrawals (lender reclaiming supplied funds)
+    # Route based on is_collateral flag (default True for backward compat)
+    amount_for_adapter = withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0")
+    if intent.is_collateral:
+        withdraw_result: Any = morpho_adapter.withdraw_collateral(
+            market_id=intent.market_id,
+            amount=amount_for_adapter,
+            receiver=compiler.wallet_address,
+            on_behalf_of=compiler.wallet_address,
+            withdraw_all=intent.withdraw_all,
+        )
+        tx_type_label = "lending_withdraw_collateral"
+        description_suffix = "collateral"
+    else:
+        withdraw_result = morpho_adapter.withdraw(
+            market_id=intent.market_id,
+            amount=amount_for_adapter,
+            receiver=compiler.wallet_address,
+            on_behalf_of=compiler.wallet_address,
+            withdraw_all=intent.withdraw_all,
+        )
+        tx_type_label = "lending_withdraw"
+        description_suffix = "loan token"
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Morpho Blue withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=withdraw_result.tx_data["value"],
+        data=withdraw_result.tx_data["data"],
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description
+        or f"Withdraw {amount_display} {withdraw_token.symbol} {description_suffix} from Morpho Blue",
+        tx_type=tx_type_label,
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "morpho_address": morpho_adapter.morpho_address,
+            "market_id": intent.market_id,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Morpho Blue")
+    return result
+
+
+def _compile_withdraw_curvance(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Curvance (Monad - withdraw from collateral cToken)."""
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if not intent.market_id:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="market_id is required for Curvance withdraw (MarketManager address)",
+            intent_id=intent.intent_id,
+        )
+
+    from ..connectors.curvance.adapter import CurvanceAdapter, CurvanceConfig
+
+    curvance_adapter = CurvanceAdapter(
+        CurvanceConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            gateway_client=compiler._gateway_client,
+        )
+    )
+
+    mismatch = _validate_curvance_market_tokens(
+        curvance_adapter,
+        intent.market_id,
+        expected_collateral_symbol=withdraw_token.symbol,
+    )
+    if mismatch:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=mismatch,
+            intent_id=intent.intent_id,
+        )
+
+    # Curvance-side asset amount. ChainedAmount (``"all"``) is already
+    # rejected upstream for lending intents; the else-branch is therefore
+    # a concrete Decimal.
+    market_info = curvance_adapter.get_market(intent.market_id)
+    share_balance: int | None = None
+    if intent.withdraw_all:
+        curvance_withdraw_amount = Decimal("0")
+        # withdraw_all calls redeemCollateral(shares, receiver, owner)
+        # which has no MAX_UINT256 sentinel - we MUST read the cToken
+        # share balance and pass it explicitly or the adapter raises.
+        share_balance = compiler._query_erc20_balance(
+            market_info.collateral_ctoken,
+            compiler.wallet_address,
+        )
+        if share_balance is None or share_balance <= 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Curvance withdraw_all requires reading the cToken share balance "
+                    f"({market_info.collateral_ctoken}) for {compiler.wallet_address}; "
+                    "balance query returned no value or zero."
+                ),
+                intent_id=intent.intent_id,
+            )
+    else:
+        assert isinstance(intent.amount, Decimal), "amount must be Decimal at this point"
+        curvance_withdraw_amount = intent.amount
+    amount_display = "all" if intent.withdraw_all else str(curvance_withdraw_amount)
+    curvance_withdraw_result = curvance_adapter.withdraw_collateral(
+        market_id=intent.market_id,
+        amount=curvance_withdraw_amount,
+        withdraw_all=intent.withdraw_all,
+        receiver=compiler.wallet_address,
+        share_balance=share_balance,
+    )
+    if not curvance_withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Curvance withdraw failed: {curvance_withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+    assert curvance_withdraw_result.tx_data is not None
+    transactions.append(
+        TransactionData(
+            to=curvance_withdraw_result.tx_data["to"],
+            value=curvance_withdraw_result.tx_data["value"],
+            data=curvance_withdraw_result.tx_data["data"],
+            gas_estimate=curvance_withdraw_result.gas_estimate,
+            description=curvance_withdraw_result.description,
+            tx_type="lending_withdraw",
+        )
+    )
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": "curvance",
+            "market_id": intent.market_id,
+            "market_name": market_info.name,
+            "collateral_ctoken": market_info.collateral_ctoken,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+    logger.info(f"Compiled WITHDRAW: {amount_display} {withdraw_token.symbol} from Curvance {market_info.name}")
+    return result
+
+
+def _compile_withdraw_aave_compatible(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Aave-compatible protocols (Aave V3, Radiant V2)."""
+    from .compiler_adapters import AaveV3Adapter
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+    protocol_lower = intent.protocol.lower()
+
+    adapter = AaveV3Adapter(compiler.chain, protocol_lower)
+    pool_address = adapter.get_pool_address()
+
+    if pool_address == "0x0000000000000000000000000000000000000000":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"{intent.protocol} not available on chain: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    if intent.withdraw_all:
+        withdraw_amount = MAX_UINT256
+    else:
+        assert withdraw_amount_decimal is not None
+        withdraw_amount = int(withdraw_amount_decimal * Decimal(10**withdraw_token.decimals))
+
+    actual_withdraw_address = withdraw_token.address
+
+    if withdraw_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_withdraw_address = weth_address
+            warnings.append("Native token withdraw: will receive WETH (unwrap separately if needed)")
+        else:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Cannot withdraw native ETH - WETH address not found",
+                intent_id=intent.intent_id,
+            )
+
+    withdraw_calldata = adapter.get_withdraw_calldata(
+        asset=actual_withdraw_address,
+        amount=withdraw_amount,
+        to=compiler.wallet_address,
+    )
+
+    amount_display = "all" if intent.withdraw_all else compiler._format_amount(withdraw_amount, withdraw_token.decimals)
+
+    withdraw_tx = TransactionData(
+        to=pool_address,
+        value=0,
+        data="0x" + withdraw_calldata.hex(),
+        gas_estimate=adapter.estimate_withdraw_gas(),
+        description=(f"Withdraw {amount_display} {withdraw_token.symbol} from {intent.protocol}"),
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": str(withdraw_amount),
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas"
+    )
+    return result
+
+
+def _compile_withdraw_spark(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Spark (Aave V3 fork with Spark-specific addresses)."""
+    from ..connectors.spark import (
+        SPARK_POOL_ADDRESSES,
+        SparkAdapter,
+        SparkConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain not in SPARK_POOL_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark not available on chain: {compiler.chain}. Supported: {list(SPARK_POOL_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    spark_config = SparkConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    spark_adapter = SparkAdapter(spark_config)
+    pool_address = spark_adapter.pool_address
+
+    if intent.withdraw_all:
+        withdraw_amount = MAX_UINT256
+    else:
+        assert withdraw_amount_decimal is not None
+        withdraw_amount = int(withdraw_amount_decimal * Decimal(10**withdraw_token.decimals))
+
+    actual_withdraw_address = withdraw_token.address
+
+    if withdraw_token.is_native:
+        weth_address = compiler._get_wrapped_native_address()
+        if weth_address:
+            actual_withdraw_address = weth_address
+            warnings.append("Native token withdraw: will receive WETH (unwrap separately if needed)")
+        else:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Cannot withdraw native ETH - WETH address not found",
+                intent_id=intent.intent_id,
+            )
+
+    # Build withdraw TX via Spark adapter
+    withdraw_result = spark_adapter.withdraw(
+        asset=actual_withdraw_address,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        to=compiler.wallet_address,
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Spark withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else compiler._format_amount(withdraw_amount, withdraw_token.decimals)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=0,
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from Spark",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "pool_address": pool_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": str(withdraw_amount),
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Spark)"
+    )
+    return result
+
+
+def _compile_withdraw_pendle(
+    compiler,
+    intent: WithdrawIntent,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Pendle (redeem from PT/YT).
+
+    Delegates entirely to the compiler's ``_compile_pendle_redeem`` helper.
+    Unique to withdraw: Pendle has no supply/borrow/repay counterpart here.
+
+    ``initial_warnings`` carries dispatcher-level warnings (e.g. the
+    ``withdraw_all=True`` and ``amount='all'`` fallback notices) and is merged
+    into the returned ``CompilationResult.warnings`` so callers see them.
+    """
+    result = compiler._compile_pendle_redeem(intent)
+    if initial_warnings:
+        result.warnings = [*initial_warnings, *result.warnings]
+    return result
+
+
+def _compile_withdraw_compound_v3(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Compound V3 (base asset or collateral)."""
+    from ..connectors.compound_v3.adapter import (
+        COMPOUND_V3_COMET_ADDRESSES,
+        CompoundV3Adapter,
+        CompoundV3Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    market = intent.market_id or "usdc"
+
+    if compiler.chain not in COMPOUND_V3_COMET_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 not available on chain: {compiler.chain}. Supported: {list(COMPOUND_V3_COMET_ADDRESSES.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    available_markets = COMPOUND_V3_COMET_ADDRESSES.get(compiler.chain, {})
+    if market not in available_markets:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market '{market}' not available on {compiler.chain}. Available: {list(available_markets.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    compound_config = CompoundV3Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+        market=market,
+        gateway_client=compiler._gateway_client,
+    )
+    compound_adapter = CompoundV3Adapter(compound_config)
+
+    # Detect if the token is the base token or a collateral token.
+    # Compound V3 uses withdraw() for the base asset and withdraw_collateral()
+    # for collateral assets - they are different contract methods.
+    # Compare by address (more robust than symbol, avoids alias ambiguity).
+    base_token_address = compound_adapter.market_config.get("base_token_address")
+    if not base_token_address:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 market config missing base_token_address for market '{market}' on {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+    is_base_token = withdraw_token.address.lower() == base_token_address.lower()
+
+    compound_withdraw_amount: Decimal = withdraw_amount_decimal if withdraw_amount_decimal is not None else Decimal("0")
+
+    if is_base_token:
+        # Withdraw base asset (reduce lending position)
+        # Base token withdraw supports MAX_UINT256 for withdraw_all natively.
+        withdraw_result = compound_adapter.withdraw(
+            amount=compound_withdraw_amount,
+            withdraw_all=intent.withdraw_all,
+        )
+    else:
+        # Withdraw collateral asset.
+        # For withdraw_all: use the intent's original amount if available, since
+        # Compound V3 stores collateral as uint128 and MAX_UINT256 causes safe128() revert.
+        # The on-chain query in the adapter is the primary path; the intent amount is
+        # the fallback for when no RPC is available.
+        collateral_amount = compound_withdraw_amount
+        if intent.withdraw_all and collateral_amount == 0 and intent.amount not in (None, "all"):
+            try:
+                collateral_amount = Decimal(str(intent.amount))
+            except (TypeError, ValueError, ArithmeticError):
+                pass
+
+        withdraw_result = compound_adapter.withdraw_collateral(
+            asset=withdraw_token.symbol,
+            amount=collateral_amount,
+            withdraw_all=intent.withdraw_all,
+        )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Compound V3 withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    # No-op: withdraw_all on zero collateral returns success with no tx_data.
+    # Return a SUCCESS result with an empty ActionBundle so callers don't crash.
+    if withdraw_result.tx_data is None:
+        return CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            action_bundle=ActionBundle(
+                intent_type=IntentType.WITHDRAW.value,
+                transactions=[],
+                metadata={
+                    "protocol": intent.protocol,
+                    "comet_address": compound_adapter.comet_address,
+                    "market": market,
+                    "withdraw_token": withdraw_token.to_dict(),
+                    "withdraw_amount": "0",
+                    "withdraw_all": intent.withdraw_all,
+                    "withdraw_type": "collateral" if not is_base_token else "base",
+                    "chain": compiler.chain,
+                    "no_op": True,
+                    "reason": withdraw_result.description or "Nothing to withdraw (balance is 0)",
+                },
+            ),
+            intent_id=intent.intent_id,
+            warnings=warnings,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description
+        or f"Withdraw {amount_display} {withdraw_token.symbol} from Compound V3",
+        tx_type="lending_withdraw" if is_base_token else "lending_withdraw_collateral",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comet_address": compound_adapter.comet_address,
+            "market": market,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "withdraw_type": "base" if is_base_token else "collateral",
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    withdraw_type = "base" if is_base_token else "collateral"
+    logger.info(
+        f"Compiled WITHDRAW ({withdraw_type}): {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Compound V3)"
+    )
+    return result
+
+
+def _compile_withdraw_benqi(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for BENQI (Compound V2 fork on Avalanche)."""
+    from ..connectors.benqi.adapter import (
+        BENQI_QI_TOKENS,
+        BenqiAdapter,
+        BenqiConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    benqi_config = BenqiConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    benqi_adapter = BenqiAdapter(benqi_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    withdraw_market = benqi_adapter.get_market_info(withdraw_symbol)
+
+    if not withdraw_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI does not support asset: {withdraw_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build withdraw (redeem) TX
+    withdraw_result = benqi_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"BENQI withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from BENQI",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "comptroller_address": benqi_adapter.comptroller_address,
+            "qi_token_address": withdraw_market.qi_token_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (BENQI)"
+    )
+    return result
+
+
+def _compile_withdraw_joelend(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Joe Lend (Compound V2 fork on Avalanche - Banker Joe)."""
+    from ..connectors.joelend.adapter import (
+        JOELEND_J_TOKENS,
+        JoeLendAdapter,
+        JoeLendConfig,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    joelend_config = JoeLendConfig(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    joelend_adapter = JoeLendAdapter(joelend_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    jl_withdraw_market = joelend_adapter.get_market_info(withdraw_symbol)
+
+    if not jl_withdraw_market:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend does not support asset: {withdraw_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build withdraw (redeem) TX
+    jl_withdraw_result = joelend_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not jl_withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Joe Lend withdraw failed: {jl_withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert jl_withdraw_result.tx_data is not None
+    withdraw_data = jl_withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=jl_withdraw_result.tx_data["to"],
+        value=int(jl_withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=jl_withdraw_result.gas_estimate,
+        description=jl_withdraw_result.description
+        or f"Withdraw {amount_display} {withdraw_token.symbol} from Joe Lend",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "joetroller_address": joelend_adapter.joetroller_address,
+            "j_token_address": jl_withdraw_market.j_token_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Joe Lend)"
+    )
+    return result
+
+
+def _compile_withdraw_euler_v2(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Euler V2 (ERC-4626 vaults)."""
+    from ..connectors.euler_v2.adapter import (
+        EulerV2Adapter,
+        EulerV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    # Chain validation is handled by EulerV2Config.__post_init__
+    euler_config = EulerV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    euler_adapter = EulerV2Adapter(euler_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    withdraw_vault = euler_adapter.find_vault_for_asset(withdraw_symbol)
+
+    if not withdraw_vault:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 does not have a vault for asset: {withdraw_symbol}. Supported: {euler_adapter.get_supported_assets()}",
+            intent_id=intent.intent_id,
+        )
+
+    # Build withdraw TX
+    withdraw_result = euler_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        withdraw_all=intent.withdraw_all,
+        vault_symbol=withdraw_vault.vault_symbol,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Euler V2 withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from Euler V2",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "vault_address": withdraw_vault.vault_address,
+            "vault_symbol": withdraw_vault.vault_symbol,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Euler V2)"
+    )
+    return result
+
+
+def _compile_withdraw_silo_v2(
+    compiler,
+    intent: WithdrawIntent,
+    withdraw_token: Any,
+    withdraw_amount_decimal: Decimal | None,
+    initial_warnings: list[str],
+) -> CompilationResult:
+    """Compile WITHDRAW for Silo V2 (isolated markets on Avalanche)."""
+    from ..connectors.silo_v2.adapter import (
+        SILO_V2_MARKETS,
+        SiloV2Adapter,
+        SiloV2Config,
+    )
+
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+    transactions: list[TransactionData] = []
+    warnings: list[str] = list(initial_warnings)
+
+    if compiler.chain != "avalanche":
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 is only available on Avalanche, got: {compiler.chain}",
+            intent_id=intent.intent_id,
+        )
+
+    silo_config = SiloV2Config(
+        chain=compiler.chain,
+        wallet_address=compiler.wallet_address,
+    )
+    silo_adapter = SiloV2Adapter(silo_config)
+
+    withdraw_symbol = withdraw_token.symbol.upper()
+    sv2_silo_result = silo_adapter.find_silo_for_asset(withdraw_symbol)
+
+    if not sv2_silo_result:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"No Silo V2 market found for asset: {withdraw_symbol}. Available: {list(SILO_V2_MARKETS.keys())}",
+            intent_id=intent.intent_id,
+        )
+
+    sv2_market, silo_address, _ = sv2_silo_result
+
+    # Build withdraw TX
+    withdraw_result = silo_adapter.withdraw(
+        asset=withdraw_symbol,
+        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+        market_name=sv2_market.market_name,
+        withdraw_all=intent.withdraw_all,
+    )
+
+    if not withdraw_result.success:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Silo V2 withdraw failed: {withdraw_result.error}",
+            intent_id=intent.intent_id,
+        )
+
+    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
+
+    assert withdraw_result.tx_data is not None
+    withdraw_data = withdraw_result.tx_data["data"]
+    if not withdraw_data.startswith("0x"):
+        withdraw_data = "0x" + withdraw_data
+
+    withdraw_tx = TransactionData(
+        to=withdraw_result.tx_data["to"],
+        value=int(withdraw_result.tx_data.get("value", 0)),
+        data=withdraw_data,
+        gas_estimate=withdraw_result.gas_estimate,
+        description=withdraw_result.description or f"Withdraw {amount_display} {withdraw_token.symbol} from Silo V2",
+        tx_type="lending_withdraw",
+    )
+    transactions.append(withdraw_tx)
+
+    total_gas = sum(tx.gas_estimate for tx in transactions)
+
+    action_bundle = ActionBundle(
+        intent_type=IntentType.WITHDRAW.value,
+        transactions=[tx.to_dict() for tx in transactions],
+        metadata={
+            "protocol": intent.protocol,
+            "silo_config": sv2_market.silo_config,
+            "market_name": sv2_market.market_name,
+            "silo_address": silo_address,
+            "withdraw_token": withdraw_token.to_dict(),
+            "withdraw_amount": amount_display,
+            "withdraw_all": intent.withdraw_all,
+            "chain": compiler.chain,
+        },
+    )
+
+    result.action_bundle = action_bundle
+    result.transactions = transactions
+    result.total_gas_estimate = total_gas
+    result.warnings = warnings
+
+    logger.info(
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Silo V2 {sv2_market.market_name})"
+    )
     return result
