@@ -265,9 +265,14 @@ class TestBuildReconciliationReport:
         assert not report.incident
         assert any("WETH" in w for w in report.warnings)
 
-    def test_successful_swap_with_missing_swap_amounts_fails_closed(self) -> None:
-        """A successful SwapIntent whose swap_amounts are missing must not
-        silently bypass reconciliation — the report must flag an incident."""
+    def test_successful_swap_with_missing_swap_amounts_passes_directional_check(self) -> None:
+        """VIB-3292: a successful SwapIntent whose swap_amounts are missing
+        must fall back to a directional-sanity check on actual pre/post
+        balance deltas. When the deltas are directionally correct (from_token
+        decreased, to_token increased) this is NOT an incident — the
+        previous fail-closed behavior produced empty-mismatch false positives
+        that flipped confirmed on-chain swaps to RECONCILIATION_FAILED
+        (velodrome_swap_optimism and solana_swap both hit this)."""
         intent = SwapIntent(
             from_token="USDC",
             to_token="WETH",
@@ -280,13 +285,208 @@ class TestBuildReconciliationReport:
         result.success = True
 
         pre = _snap({"USDC": "5000", "WETH": "0"})
+        post = _snap({"USDC": "4000", "WETH": "0.5"})  # correct direction
+
+        report = build_reconciliation_report(pre, post, intent, result)
+
+        assert report.enforced, "fallback path still counts as enforced"
+        assert not report.incident, (
+            "directional deltas are correct — must not be an incident "
+            "(the empty-mismatch false positive was the VIB-3292 bug)"
+        )
+        assert report.mismatches == []
+        assert any("directional sanity check" in w for w in report.warnings)
+
+    def test_missing_swap_amounts_wrong_direction_raises_structured_incident(self) -> None:
+        """VIB-3292 safety net: when swap_amounts are missing AND actual
+        deltas show the wrong direction (from_token gained, to_token lost
+        or unchanged), the report MUST flag a structured incident whose
+        ``mismatches`` list explains exactly which side moved the wrong way.
+        Never an empty-list incident."""
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount_usd=Decimal("1000"),
+            max_slippage=Decimal("0.01"),
+        )
+        result = MagicMock()
+        result.swap_amounts = None
+        result.success = True
+
+        # USDC gained (wrong sign) and WETH did not increase.
+        pre = _snap({"USDC": "5000", "WETH": "0.5"})
+        post = _snap({"USDC": "5100", "WETH": "0.5"})
+
+        report = build_reconciliation_report(pre, post, intent, result)
+
+        assert report.incident
+        assert report.mismatches, "must surface structured mismatches, not empty list"
+        mismatch_tokens = {m.token for m in report.mismatches}
+        assert "USDC" in mismatch_tokens
+        assert "WETH" in mismatch_tokens
+
+    def test_missing_swap_amounts_native_gas_token_in_allows_gas_outflow(self) -> None:
+        """VIB-3292: when swap_amounts are missing and from_token is the
+        native gas token, the directional check must absorb gas outflow —
+        otherwise a real native-gas swap whose from_token delta equals
+        ``-(swap_in + gas)`` would erroneously pass only because gas is
+        ignored. Here we assert the opposite end: a near-zero from-token
+        delta (smaller in magnitude than gas) IS a mismatch because a real
+        swap should have moved at least gas-worth of the native token."""
+        intent = SwapIntent(
+            from_token="ETH",
+            to_token="USDC",
+            amount_usd=Decimal("100"),
+            max_slippage=Decimal("0.005"),
+        )
+        result = MagicMock()
+        result.swap_amounts = None
+        result.success = True
+        result.total_gas_cost_wei = 2 * 10**15  # 0.002 ETH
+
+        # Pre has 1 ETH, post has 0.9999999 ETH — moved less than observed
+        # gas. A real successful swap can't happen without burning at least
+        # the gas.
+        pre = _snap({"ETH": "1", "USDC": "0"})
+        post = _snap({"ETH": "0.9999999", "USDC": "0"})
+
+        # chain context is not wired through the MagicMock, so pass gas
+        # explicitly via the keyword — the public helper accepts it.
+        from ..reconciliation import build_reconciliation_report as _build
+
+        report = _build(pre, post, intent, result, gas_token="ETH", gas_cost_native=Decimal("0.002"))
+
+        assert report.incident
+        assert any(m.token == "ETH" for m in report.mismatches)
+
+    def test_missing_swap_amounts_into_native_gas_token_absorbs_gas_dip(self) -> None:
+        """VIB-3292 (CodeRabbit follow-up): when swap_amounts are missing AND
+        ``to_token`` IS the native gas token (e.g. USDC -> ETH on Arbitrum),
+        a successful swap can still show ``to_delta`` slightly below zero
+        because gas was paid from the same native balance. The directional
+        fallback must absorb a dip of up to ``gas_cost_native`` on the
+        to-side; below that we still flag a mismatch.
+        """
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="ETH",
+            amount_usd=Decimal("5"),
+            max_slippage=Decimal("0.005"),
+        )
+        result = MagicMock()
+        result.swap_amounts = None
+        result.success = True
+
+        # Pre 1 ETH, post 0.9985 ETH. Raw to-delta is -0.0015 ETH (wallet
+        # ended slightly lighter) but gas cost was 0.002 ETH — the net
+        # after accounting for gas is +0.0005, i.e. the swap DID deliver.
+        pre = _snap({"USDC": "10", "ETH": "1"})
+        post = _snap({"USDC": "5", "ETH": "0.9985"})
+
+        report = build_reconciliation_report(
+            pre,
+            post,
+            intent,
+            result,
+            gas_token="ETH",
+            gas_cost_native=Decimal("0.002"),
+        )
+
+        assert report.enforced
+        assert not report.incident, "to-delta within gas floor must not be an incident"
+
+    def test_missing_swap_amounts_into_native_gas_token_at_floor_is_allowed(self) -> None:
+        """Exact native-gas-floor equality is still tolerable on the to-side.
+
+        If the net native balance change equals exactly ``-gas_cost_native``,
+        the swap may have delivered value that was fully offset by gas spend.
+        The fallback must only incident BELOW that floor, not at equality.
+        """
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="ETH",
+            amount_usd=Decimal("5"),
+            max_slippage=Decimal("0.005"),
+        )
+        result = MagicMock()
+        result.swap_amounts = None
+        result.success = True
+
+        pre = _snap({"USDC": "10", "ETH": "1"})
+        post = _snap({"USDC": "5", "ETH": "0.998"})
+
+        report = build_reconciliation_report(
+            pre,
+            post,
+            intent,
+            result,
+            gas_token="ETH",
+            gas_cost_native=Decimal("0.002"),
+        )
+
+        assert report.enforced
+        assert not report.incident, "to-delta at the gas floor must not be an incident"
+
+    def test_missing_swap_amounts_into_native_gas_token_below_floor_is_mismatch(self) -> None:
+        """VIB-3292 (CodeRabbit follow-up): even with gas-aware tolerance
+        on the to-side, a to-delta that dips BELOW -gas_cost_native (i.e.
+        the wallet lost more native than gas explains) is still a real
+        mismatch — the swap neither delivered nor merely ate gas, so
+        something is wrong."""
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="ETH",
+            amount_usd=Decimal("5"),
+            max_slippage=Decimal("0.005"),
+        )
+        result = MagicMock()
+        result.swap_amounts = None
+        result.success = True
+
+        # Post dips by 0.01 ETH but gas was only 0.002 ETH -> 0.008 ETH
+        # is unaccounted for.
+        pre = _snap({"USDC": "10", "ETH": "1"})
+        post = _snap({"USDC": "5", "ETH": "0.99"})
+
+        report = build_reconciliation_report(
+            pre,
+            post,
+            intent,
+            result,
+            gas_token="ETH",
+            gas_cost_native=Decimal("0.002"),
+        )
+
+        assert report.incident
+        assert any(m.token == "ETH" for m in report.mismatches)
+
+    def test_missing_swap_amounts_missing_balance_does_not_enforce(self) -> None:
+        """VIB-3292 (CodeRabbit follow-up): if swap_amounts are missing AND
+        the directional fallback cannot see one or both sides' pre/post
+        deltas, the report MUST NOT claim enforcement — otherwise we could
+        silently return ``enforced=True, mismatches=[]`` on a swap that
+        was never actually verified. Downgrade to warnings-only and
+        leave ``enforced=False``."""
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount_usd=Decimal("1000"),
+            max_slippage=Decimal("0.01"),
+        )
+        result = MagicMock()
+        result.swap_amounts = None
+        result.success = True
+
+        # WETH absent from pre -> delta uncheckable on the to-side.
+        pre = _snap({"USDC": "5000"})
         post = _snap({"USDC": "4000", "WETH": "0.5"})
 
         report = build_reconciliation_report(pre, post, intent, result)
 
-        assert report.incident, "must fail-closed when expectations are unavailable"
-        assert report.enforced
-        assert any("could not derive expected deltas" in w for w in report.warnings)
+        assert not report.enforced, "fallback must not claim enforcement with missing delta"
+        assert not report.incident
+        assert report.mismatches == []
+        assert any("directional fallback skipped" in w for w in report.warnings)
 
     def test_failed_swap_with_missing_swap_amounts_does_not_incident(self) -> None:
         """A failed SwapIntent (execution_result.success=False) with missing

@@ -208,7 +208,6 @@ def build_reconciliation_report(
 
     mismatches: list[DeltaMismatch] = []
     warnings: list[str] = []
-    missing_expectations = False
 
     if isinstance(intent, SwapIntent):
         expected = compute_expected_swap_deltas(
@@ -220,21 +219,59 @@ def build_reconciliation_report(
         if expected:
             enforced = True
         elif execution_result is not None and getattr(execution_result, "success", False):
-            # Fail-closed: a successful SwapIntent that cannot produce an
-            # expected-delta range (missing / unparsable / non-positive
-            # swap_amounts) must not silently bypass reconciliation, or a
-            # receipt-parser regression would blind the safety net. Mark the
-            # reconciliation as enforced + record the condition so the caller
-            # flags an incident (see the final `incident=` assignment).
-            enforced = True
-            missing_expectations = True
-            warnings.append(
-                "SwapIntent reconciliation could not derive expected deltas "
-                "(missing/unparsable swap_amounts); treating as incident "
-                "(fail-closed)."
-            )
+            # Fail-closed fallback (VIB-3292): a successful SwapIntent whose
+            # enriched swap_amounts are missing/unparsable cannot be checked
+            # against a magnitude range, but the actual on-chain pre/post
+            # deltas are still ground truth. Verify the swap moved balances in
+            # the directionally correct way — from_token decreased (or was
+            # absorbed by gas), to_token increased — and only fail closed when
+            # a sign is wrong. This preserves the safety net against
+            # receipt-parser regressions while eliminating the false
+            # positive where a successful swap was flagged as an incident
+            # with an empty mismatch list (the original VIB-3292 bug: two
+            # strategies — velodrome_swap_optimism and solana_swap — both
+            # confirmed on-chain, both tripped RECONCILIATION_FAILED with
+            # mismatches=[]).
+            #
+            # Gate the fallback on BOTH sides having a pre/post delta
+            # available: if either the from-token or to-token balance was
+            # uncheckable, the directional check cannot be honest about
+            # whether it verified anything, so we downgrade to warnings-only
+            # and leave enforced=False (mirrors the line 252-254 guard that
+            # handles missing per-token balances in the enriched path).
+            from_delta_present = intent.from_token in actual
+            to_delta_present = intent.to_token in actual
+            if from_delta_present and to_delta_present:
+                enforced = True
+                mismatches.extend(
+                    _directional_sanity_mismatches(
+                        intent,
+                        actual,
+                        gas_token=gas_token,
+                        gas_cost_native=gas_cost_native,
+                    )
+                )
+                warnings.append(
+                    "SwapIntent reconciliation could not derive expected deltas "
+                    "(missing/unparsable swap_amounts); falling back to "
+                    "directional sanity check on actual balance deltas."
+                )
+            else:
+                missing = [
+                    tok
+                    for tok, present in (
+                        (intent.from_token, from_delta_present),
+                        (intent.to_token, to_delta_present),
+                    )
+                    if not present
+                ]
+                warnings.append(
+                    "SwapIntent reconciliation could not derive expected deltas "
+                    "and directional fallback skipped (balance snapshot missing "
+                    f"for: {', '.join(missing)})."
+                )
 
-    if enforced and not missing_expectations:
+    if enforced and expected:
         for token, rng in expected.items():
             if token not in actual:
                 warnings.append(f"expected-delta check skipped for {token} (balance unavailable pre or post)")
@@ -267,6 +304,100 @@ def build_reconciliation_report(
         expected_ranges=expected,
         mismatches=mismatches,
         warnings=warnings,
-        incident=bool(mismatches) or missing_expectations,
+        incident=bool(mismatches),
         enforced=enforced,
     )
+
+
+def _directional_sanity_mismatches(
+    intent: SwapIntent,
+    actual: dict[str, Decimal],
+    *,
+    gas_token: str | None,
+    gas_cost_native: Decimal | None,
+) -> list[DeltaMismatch]:
+    """Directional sanity check used when swap_amounts are unavailable.
+
+    Rules, designed so a real swap (or a swap-then-gas-spend on a native
+    from-token) never trips a false positive, while a wrong-direction move
+    (sign flipped) or a no-op ("success" but zero movement on either side)
+    DOES surface a structured mismatch that callers can surface in logs and
+    alerts — no more empty-list incidents.
+
+    - from_token: actual delta must be ≤ 0 (wallet lost funds). When the
+      from-token is the native gas token we tolerate gas-only outflow but
+      still require at least *some* outflow beyond gas; otherwise a
+      "successful" tx that never reached the swap would pass unchecked.
+    - to_token: actual delta must be > 0 (wallet gained funds). A
+      non-positive to-token delta on a successful swap is unambiguous
+      accounting corruption.
+
+    Returns a list of structured ``DeltaMismatch`` entries for each
+    violation (empty list means the swap passed the directional check).
+    """
+    mismatches: list[DeltaMismatch] = []
+
+    # Minimum expected outflow on from_token. If from_token pays gas we
+    # accept outflow of (at least) the gas cost as evidence the transaction
+    # reached the signer; anything smaller implies the wallet paid neither
+    # swap input nor gas, which is impossible for a truly successful tx.
+    from_floor_abs = Decimal("0")
+    if gas_token == intent.from_token and gas_cost_native is not None and gas_cost_native > 0:
+        from_floor_abs = gas_cost_native
+
+    from_delta = actual.get(intent.from_token)
+    if from_delta is not None:
+        # We expect: from_delta <= -from_floor_abs  (i.e. at least some outflow).
+        # Equivalent: from_delta + from_floor_abs <= 0 AND from_delta < 0.
+        if from_delta >= 0 and from_floor_abs == 0:
+            # Pure swap (non-gas-token in) that showed no outflow at all.
+            mismatches.append(
+                DeltaMismatch(
+                    token=intent.from_token,
+                    actual=from_delta,
+                    expected_min=Decimal("-Infinity"),
+                    expected_max=Decimal("0"),
+                )
+            )
+        elif from_delta > -from_floor_abs:
+            # Wallet moved less than the observed gas — impossible for a
+            # real successful swap.
+            mismatches.append(
+                DeltaMismatch(
+                    token=intent.from_token,
+                    actual=from_delta,
+                    expected_min=Decimal("-Infinity"),
+                    expected_max=-from_floor_abs,
+                )
+            )
+
+    # Minimum expected inflow on to_token. When the to-token is the native
+    # gas token (e.g. USDC -> ETH where ETH pays for gas), a successful
+    # small swap can still show a non-positive `to_delta` because gas was
+    # paid from the same balance. The real on-chain invariant is
+    # `post - pre >= swap_out - gas_cost`; without swap_out we cannot
+    # verify the magnitude, but we CAN tolerate a dip of up to gas_cost
+    # before flagging a mismatch. Anything below that is unambiguous
+    # accounting corruption (the wallet paid gas and got nothing back).
+    to_floor = Decimal("0")
+    if gas_token == intent.to_token and gas_cost_native is not None and gas_cost_native > 0:
+        to_floor = -gas_cost_native
+
+    to_delta = actual.get(intent.to_token)
+    if to_delta is not None:
+        violates_to_direction = (
+            to_delta < to_floor
+            if gas_token == intent.to_token and gas_cost_native is not None and gas_cost_native > 0
+            else to_delta <= to_floor
+        )
+        if violates_to_direction:
+            mismatches.append(
+                DeltaMismatch(
+                    token=intent.to_token,
+                    actual=to_delta,
+                    expected_min=to_floor,
+                    expected_max=Decimal("Infinity"),
+                )
+            )
+
+    return mismatches
