@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -48,6 +49,255 @@ _INVEST_TYPE_LABELS: dict[int, str] = {
     7: "lock",
     8: "leveraged_farming",
 }
+
+
+@dataclass(frozen=True)
+class OkxDefiContext:
+    """Per-(platform, chain) context threaded through the DeFi normalization helpers.
+
+    Built at levels 1-2 of the payload walk (wallet -> platform -> chain) and
+    passed verbatim into the level-3 row extractors. Keeping the context
+    immutable and explicit prevents accidental cross-level mutation and makes
+    each extractor a pure function of (payload fragment, context).
+    """
+
+    platform_names: dict[str, str]
+    platform_id: str
+    chain_index: str
+
+
+def _safe_decimal(value: Any) -> Decimal:
+    """Module-local mirror of :meth:`OkxIntegration._safe_decimal`.
+
+    Kept private to the module to avoid forcing the extractor helpers to
+    reach back into ``OkxIntegration`` for a pure-value conversion.
+    """
+    if value is None:
+        return Decimal("0")
+    try:
+        parsed = Decimal(str(value))
+        return parsed if parsed.is_finite() else Decimal("0")
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+
+
+def _sum_position_values(position_list: Any) -> str:
+    """Module-local mirror of :meth:`OkxIntegration._sum_position_values`.
+
+    Sums ``currencyAmount`` across every asset in every position; used as the
+    totalValue fallback for investments missing or reporting a zero total.
+    """
+    if not isinstance(position_list, list):
+        return "0"
+    total = Decimal("0")
+    for pos in position_list:
+        if not isinstance(pos, dict):
+            continue
+        assets = pos.get("assetsTokenList")
+        if isinstance(assets, list):
+            for asset in assets:
+                if isinstance(asset, dict):
+                    total += _safe_decimal(asset.get("currencyAmount", "0"))
+    return str(total)
+
+
+def _extract_data_entries(payload: Any) -> list[dict[str, Any]]:
+    """Normalize the outer ``data`` field of a DeFi-detail payload to a list.
+
+    The real OKX API wraps a single entry in a dict; some responses use a
+    list. Unknown shapes (missing/invalid) yield an empty list so the caller
+    can treat every iteration uniformly.
+    """
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def _resolve_protocol_and_symbols(invest: dict[str, Any], ctx: OkxDefiContext) -> tuple[str, list[str]]:
+    """Resolve the protocol name and token symbols for one investment row.
+
+    Walks ``investLogo`` per the OKX contract:
+
+    - ``bottomRightLogoList[0].tokenName`` overrides the platform name for
+      protocol attribution (e.g. "Aave" instead of "Aave V3" when OKX
+      attributes the specific protocol inside the platform).
+    - ``middleLogoList[*].tokenName`` supplies the token symbol list.
+    - When ``middleLogoList`` is missing or empty, ``tokenList[*].tokenSymbol``
+      is used as the fallback source for symbols.
+    """
+    protocol_name = ctx.platform_names.get(ctx.platform_id, "unknown")
+    invest_logo = invest.get("investLogo")
+    if isinstance(invest_logo, dict):
+        bottom_right = invest_logo.get("bottomRightLogoList")
+        if isinstance(bottom_right, list) and bottom_right:
+            logo_name = bottom_right[0].get("tokenName")
+            if logo_name:
+                protocol_name = str(logo_name)
+
+    symbols: list[str] = []
+    if isinstance(invest_logo, dict):
+        middle = invest_logo.get("middleLogoList")
+        if isinstance(middle, list):
+            for tok in middle:
+                if isinstance(tok, dict) and tok.get("tokenName"):
+                    symbols.append(tok["tokenName"])
+
+    if not symbols:
+        token_list = invest.get("tokenList")
+        if isinstance(token_list, list):
+            for tok in token_list:
+                if isinstance(tok, dict) and tok.get("tokenSymbol"):
+                    symbols.append(tok["tokenSymbol"])
+
+    return protocol_name, symbols
+
+
+def _extract_position_rows(invest: dict[str, Any], ctx: OkxDefiContext) -> list[WalletPosition]:
+    """Build the primary investment row(s) for one ``investTokenBalanceVoList`` entry.
+
+    Returns exactly one :class:`WalletPosition` for a valid investment. The
+    return type is a list so the caller can ``extend`` without special-casing
+    empty responses in the future.
+
+    NOTE: Preserves issue #1707 (measured ``totalValue == "0"`` recomputes
+    from positionList). Do not change behavior here — the characterization
+    test pins it.
+    """
+    inv_name = invest.get("investmentName", "")
+    inv_id = str(invest.get("investmentId", ""))
+    inv_type_int = invest.get("investType", 0)
+    inv_type = _INVEST_TYPE_LABELS.get(inv_type_int, f"type_{inv_type_int}")
+
+    protocol_name, symbols = _resolve_protocol_and_symbols(invest, ctx)
+
+    raw_value = invest.get("totalValue", "")
+    total_value = str(_safe_decimal(raw_value)) if raw_value else ""
+    if not total_value or total_value == "0":
+        # Issue #1707: measured zero collapses to a recompute.
+        total_value = _sum_position_values(invest.get("positionList"))
+
+    pool_addr = invest.get("poolAddress", "") or invest.get("tokenAddress", "")
+
+    return [
+        WalletPosition(
+            position_id=f"okx:defi:{ctx.platform_id}:{inv_id}",
+            protocol=protocol_name,
+            label=inv_name or f"{protocol_name} {inv_type}",
+            position_type=inv_type,
+            value_usd=total_value,
+            pool_address=pool_addr,
+            token_symbols=symbols,
+            details={
+                "invest_type": inv_type,
+                "invest_type_id": inv_type_int,
+                "investment_id": inv_id,
+                "chain_index": ctx.chain_index,
+                "platform_id": ctx.platform_id,
+            },
+        )
+    ]
+
+
+def _extract_reward_rows_from_position(invest: dict[str, Any], ctx: OkxDefiContext) -> list[WalletPosition]:
+    """Emit reward rows from ``positionList[].unclaimFeesDefiTokenInfo[].baseDefiTokenInfos[]``.
+
+    One row per non-zero reward. ``protocol`` mirrors the investment-level
+    resolution (via :func:`_resolve_protocol_and_symbols`), so rewards inherit
+    the protocol attribution rather than falling back to the platform name.
+    """
+    rows: list[WalletPosition] = []
+
+    protocol_name, _symbols = _resolve_protocol_and_symbols(invest, ctx)
+    inv_id = str(invest.get("investmentId", ""))
+
+    pos_list = invest.get("positionList")
+    if not isinstance(pos_list, list):
+        return rows
+
+    for pos in pos_list:
+        if not isinstance(pos, dict):
+            continue
+        unclaim = pos.get("unclaimFeesDefiTokenInfo")
+        if not isinstance(unclaim, list):
+            continue
+        for fee_group in unclaim:
+            if not isinstance(fee_group, dict):
+                continue
+            base_infos = fee_group.get("baseDefiTokenInfos")
+            if not isinstance(base_infos, list):
+                continue
+            for reward in base_infos:
+                if not isinstance(reward, dict):
+                    continue
+                r_symbol = reward.get("tokenSymbol", "UNKNOWN")
+                r_amount = reward.get("coinAmount", "0")
+                r_value = reward.get("currencyAmount", "0")
+                if _safe_decimal(r_value) <= 0:
+                    continue
+                rows.append(
+                    WalletPosition(
+                        position_id=f"okx:reward:{ctx.platform_id}:{inv_id}:{r_symbol}",
+                        protocol=protocol_name,
+                        label=f"{protocol_name} reward",
+                        position_type="reward",
+                        value_usd=r_value,
+                        token_symbols=[r_symbol],
+                        details={
+                            "reward_amount": r_amount,
+                            "chain_index": ctx.chain_index,
+                        },
+                    )
+                )
+
+    return rows
+
+
+def _extract_reward_rows_from_network(rewards: Any, ctx: OkxDefiContext) -> list[WalletPosition]:
+    """Emit reward rows from ``networkHoldVoList[].availableRewards[]``.
+
+    Network-level rewards use ``ctx.platform_names[platform_id]`` for
+    attribution rather than the per-investment ``investLogo`` override, so
+    the label/protocol falls back to the platform name.
+
+    NOTE: Issue #1708 — these may duplicate rewards already emitted at the
+    position level. Do not filter here; the characterization tests pin the
+    duplicate behavior.
+    """
+    rows: list[WalletPosition] = []
+    if not isinstance(rewards, list):
+        return rows
+
+    platform_label = ctx.platform_names.get(ctx.platform_id, "unknown")
+
+    for reward in rewards:
+        if not isinstance(reward, dict):
+            continue
+        r_symbol = reward.get("tokenSymbol", "UNKNOWN")
+        r_amount = reward.get("tokenAmount", reward.get("coinAmount", "0"))
+        r_value = reward.get("currencyAmount", "0")
+        if _safe_decimal(r_value) <= 0:
+            continue
+        rows.append(
+            WalletPosition(
+                position_id=f"okx:reward:{ctx.platform_id}:{r_symbol}",
+                protocol=platform_label,
+                label=f"{platform_label} reward",
+                position_type="reward",
+                value_usd=r_value,
+                token_symbols=[r_symbol],
+                details={
+                    "reward_amount": r_amount,
+                    "chain_index": ctx.chain_index,
+                },
+            )
+        )
+
+    return rows
 
 
 class OkxIntegration(BaseIntegration):
@@ -566,20 +816,16 @@ class OkxIntegration(BaseIntegration):
         data[].walletIdPlatformDetailList[].networkHoldVoList[].investTokenBalanceVoList[]
         Each investment has positionList[] with assetsTokenList[] for token details
         and unclaimFeesDefiTokenInfo[] for unclaimed rewards.
+
+        This top-level function only walks levels 0-2 (wallet entry -> platform
+        detail -> network hold) and builds an :class:`OkxDefiContext` for each
+        (platform, chain) pair. Row construction at level 3 (investments,
+        rewards) is delegated to dedicated extractors. See Phase 5f refactor
+        plan.
         """
         platform_names = {p["id"]: p["name"] for p in platforms}
+        data_list = _extract_data_entries(payload)
         positions: list[WalletPosition] = []
-
-        # data can be a dict (real API) or a list
-        if not isinstance(payload, dict):
-            return positions
-        data = payload.get("data")
-        if isinstance(data, dict):
-            data_list = [data]
-        elif isinstance(data, list):
-            data_list = [item for item in data if isinstance(item, dict)]
-        else:
-            return positions
 
         for entry in data_list:
             detail_list = entry.get("walletIdPlatformDetailList")
@@ -596,135 +842,27 @@ class OkxIntegration(BaseIntegration):
                 for network_hold in network_holds:
                     if not isinstance(network_hold, dict):
                         continue
-                    chain_index = network_hold.get("chainIndex", "")
 
                     invest_list = network_hold.get("investTokenBalanceVoList")
                     if not isinstance(invest_list, list):
+                        # Preserve byte-for-byte: when invest list is absent,
+                        # ``continue`` skips network-level availableRewards too.
+                        # Issue #1708 notes the duplication; don't fix here.
                         continue
+
+                    ctx = OkxDefiContext(
+                        platform_names=platform_names,
+                        platform_id=platform_id,
+                        chain_index=network_hold.get("chainIndex", ""),
+                    )
+
                     for invest in invest_list:
                         if not isinstance(invest, dict):
                             continue
+                        positions.extend(_extract_position_rows(invest, ctx))
+                        positions.extend(_extract_reward_rows_from_position(invest, ctx))
 
-                        inv_name = invest.get("investmentName", "")
-                        inv_id = str(invest.get("investmentId", ""))
-                        inv_type_int = invest.get("investType", 0)
-                        inv_type = _INVEST_TYPE_LABELS.get(inv_type_int, f"type_{inv_type_int}")
-
-                        # Extract protocol name from investLogo or platform_names lookup
-                        protocol_name = platform_names.get(platform_id, "unknown")
-                        invest_logo = invest.get("investLogo")
-                        if isinstance(invest_logo, dict):
-                            bottom_right = invest_logo.get("bottomRightLogoList")
-                            if isinstance(bottom_right, list) and bottom_right:
-                                logo_name = bottom_right[0].get("tokenName")
-                                if logo_name:
-                                    protocol_name = str(logo_name)
-
-                        # Extract token symbols from investLogo.middleLogoList
-                        symbols: list[str] = []
-                        if isinstance(invest_logo, dict):
-                            middle = invest_logo.get("middleLogoList")
-                            if isinstance(middle, list):
-                                for tok in middle:
-                                    if isinstance(tok, dict) and tok.get("tokenName"):
-                                        symbols.append(tok["tokenName"])
-
-                        # Fallback: extract from tokenList if present
-                        if not symbols:
-                            token_list = invest.get("tokenList")
-                            if isinstance(token_list, list):
-                                for tok in token_list:
-                                    if isinstance(tok, dict) and tok.get("tokenSymbol"):
-                                        symbols.append(tok["tokenSymbol"])
-
-                        # Calculate total value from positionList assets
-                        raw_value = invest.get("totalValue", "")
-                        total_value = str(OkxIntegration._safe_decimal(raw_value)) if raw_value else ""
-                        if not total_value or total_value == "0":
-                            total_value = OkxIntegration._sum_position_values(invest.get("positionList"))
-
-                        pool_addr = invest.get("poolAddress", "") or invest.get("tokenAddress", "")
-
-                        positions.append(
-                            WalletPosition(
-                                position_id=f"okx:defi:{platform_id}:{inv_id}",
-                                protocol=protocol_name,
-                                label=inv_name or f"{protocol_name} {inv_type}",
-                                position_type=inv_type,
-                                value_usd=total_value,
-                                pool_address=pool_addr,
-                                token_symbols=symbols,
-                                details={
-                                    "invest_type": inv_type,
-                                    "invest_type_id": inv_type_int,
-                                    "investment_id": inv_id,
-                                    "chain_index": chain_index,
-                                    "platform_id": platform_id,
-                                },
-                            )
-                        )
-
-                        # Extract unclaimed rewards from positions
-                        pos_list = invest.get("positionList")
-                        if isinstance(pos_list, list):
-                            for pos in pos_list:
-                                if not isinstance(pos, dict):
-                                    continue
-                                unclaim = pos.get("unclaimFeesDefiTokenInfo")
-                                if not isinstance(unclaim, list):
-                                    continue
-                                for fee_group in unclaim:
-                                    if not isinstance(fee_group, dict):
-                                        continue
-                                    base_infos = fee_group.get("baseDefiTokenInfos")
-                                    if not isinstance(base_infos, list):
-                                        continue
-                                    for reward in base_infos:
-                                        if not isinstance(reward, dict):
-                                            continue
-                                        r_symbol = reward.get("tokenSymbol", "UNKNOWN")
-                                        r_amount = reward.get("coinAmount", "0")
-                                        r_value = reward.get("currencyAmount", "0")
-                                        if OkxIntegration._safe_decimal(r_value) > 0:
-                                            positions.append(
-                                                WalletPosition(
-                                                    position_id=f"okx:reward:{platform_id}:{inv_id}:{r_symbol}",
-                                                    protocol=protocol_name,
-                                                    label=f"{protocol_name} reward",
-                                                    position_type="reward",
-                                                    value_usd=r_value,
-                                                    token_symbols=[r_symbol],
-                                                    details={
-                                                        "reward_amount": r_amount,
-                                                        "chain_index": chain_index,
-                                                    },
-                                                )
-                                            )
-
-                    # Also check top-level availableRewards
-                    rewards = network_hold.get("availableRewards")
-                    if isinstance(rewards, list):
-                        for reward in rewards:
-                            if not isinstance(reward, dict):
-                                continue
-                            r_symbol = reward.get("tokenSymbol", "UNKNOWN")
-                            r_amount = reward.get("tokenAmount", reward.get("coinAmount", "0"))
-                            r_value = reward.get("currencyAmount", "0")
-                            if OkxIntegration._safe_decimal(r_value) > 0:
-                                positions.append(
-                                    WalletPosition(
-                                        position_id=f"okx:reward:{platform_id}:{r_symbol}",
-                                        protocol=platform_names.get(platform_id, "unknown"),
-                                        label=f"{platform_names.get(platform_id, 'unknown')} reward",
-                                        position_type="reward",
-                                        value_usd=r_value,
-                                        token_symbols=[r_symbol],
-                                        details={
-                                            "reward_amount": r_amount,
-                                            "chain_index": chain_index,
-                                        },
-                                    )
-                                )
+                    positions.extend(_extract_reward_rows_from_network(network_hold.get("availableRewards"), ctx))
 
         return positions
 
