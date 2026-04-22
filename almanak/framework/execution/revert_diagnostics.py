@@ -507,6 +507,255 @@ async def check_balances(
     return checks
 
 
+# =============================================================================
+# Rule-table dispatch for determine_likely_cause
+# =============================================================================
+#
+# Each rule is a (predicate, builder) pair. determine_likely_cause walks the
+# table in priority order and returns the first match. The ladder below
+# preserves the exact priorities of the previous if/elif chain:
+#
+#   0.    Signer / address mismatch (configuration error)
+#   0.5.  Intent compilation / build errors
+#   1.    Insufficient native token (gas + execution fees)
+#   2.    Insufficient ERC-20 balance
+#   3.    "STF" with sufficient balances -> approval issue
+#   4.    Raw-error string patterns (STF/SafeTransferFrom generic, gas price
+#         cap, slippage/price, deadline, liquidity)
+#   5.    Gas-warning-only paths (STF vs unknown)
+#   6.    Default unknown-with-balances-OK
+#
+# Each builder receives a _Ctx dataclass and returns (cause, suggestions).
+
+
+@dataclass
+class _Ctx:
+    """Immutable per-call context for the rule-table dispatcher.
+
+    Packages every argument determine_likely_cause receives plus the
+    lower-cased raw_error so predicates don't recompute it.
+    """
+
+    balance_checks: list[BalanceCheck]
+    raw_error: str | None
+    native_eth_check: NativeETHCheck | None
+    gas_warnings: list[str] | None
+    chain: str
+    error_lower: str
+
+
+# --- builders (one per rule) -------------------------------------------------
+
+_SIGNING_MISMATCH_PATTERNS = (
+    "does not match signer",
+    "from_address",
+    "signing failed",
+    "address mismatch",
+)
+
+_COMPILATION_PATTERNS = (
+    "compilation failed",
+    "build failed",
+    "compile error",
+    "intent compilation",
+)
+
+
+def _build_signing_mismatch(ctx: _Ctx) -> tuple[str, list[str]]:
+    suggestions = [
+        "The transaction's from_address does not match the configured signer",
+        "Check ALMANAK_PRIVATE_KEY matches the wallet address in your strategy config",
+    ]
+    if "does not match" in ctx.error_lower and ctx.raw_error:
+        suggestions.append(f"Details: {ctx.raw_error[:200]}")
+    if ctx.gas_warnings:
+        suggestions.extend(f"Note: gas estimation also detected: {w}" for w in ctx.gas_warnings)
+    return "Configuration error: wallet address mismatch", suggestions
+
+
+def _build_compilation_error(ctx: _Ctx) -> tuple[str, list[str]]:
+    return "Intent compilation error", [
+        "The intent could not be compiled into transactions",
+        f"Details: {(ctx.raw_error or '')[:200]}",
+    ]
+
+
+def _build_insufficient_native_eth(ctx: _Ctx) -> tuple[str, list[str]]:
+    # Local import keeps the module-level import graph unchanged (matches
+    # the pre-refactor behaviour of importing lazily inside the branch).
+    from almanak.framework.execution.chain_executor import _CHAIN_NATIVE_SYMBOL
+
+    assert ctx.native_eth_check is not None  # guaranteed by predicate
+    native_eth_check = ctx.native_eth_check
+    native = _CHAIN_NATIVE_SYMBOL.get(ctx.chain, "ETH") if ctx.chain else "ETH"
+    cause = f"Insufficient native {native} for gas + execution fees"
+    suggestions = [
+        f"Send at least {native_eth_check.shortfall:.6f} {native} to your wallet on this chain",
+        f"Required: {native_eth_check.required:.6f} {native} ({native_eth_check.breakdown})",
+        f"Current balance: {native_eth_check.actual:.6f} {native}",
+    ]
+    if "gmx" in native_eth_check.breakdown.lower():
+        suggestions.append("Note: GMX V2 requires an execution fee paid to keepers who execute your order")
+        suggestions.append("For testing, you can reduce MIN_EXECUTION_FEE_FALLBACK in src/connectors/gmx_v2/sdk.py")
+    return cause, suggestions
+
+
+def _format_shortfall(shortfall: Decimal | str) -> str:
+    """Format a shortfall that may be Decimal or the literal string 'all'."""
+    return f"{shortfall:.6f}" if isinstance(shortfall, Decimal) else str(shortfall)
+
+
+def _suggest_for_insufficient_check(check: BalanceCheck, chain: str) -> str:
+    """Build the per-token suggestion for one insufficient BalanceCheck."""
+    shortfall_str = _format_shortfall(check.shortfall)
+    if check.symbol == "WETH":
+        weth_address = _get_weth_address(chain)
+        if weth_address:
+            return (
+                f"Wrap ETH to WETH: cast send {weth_address} 'deposit()' "
+                f"--value {shortfall_str}ether --rpc-url <RPC> --private-key <KEY>"
+            )
+        return f"Wrap {shortfall_str} ETH to WETH on {chain} (use your chain's WETH deposit() function)"
+    if check.symbol in ("USDC", "USDC.e", "USDT"):
+        return f"Acquire {shortfall_str} {check.symbol} via swap or bridge"
+    return f"Acquire {shortfall_str} more {check.symbol}"
+
+
+def _build_insufficient_balance(ctx: _Ctx) -> tuple[str, list[str]]:
+    insufficient = [c for c in ctx.balance_checks if not c.sufficient]
+    tokens = ", ".join(c.symbol for c in insufficient)
+    suggestions = [_suggest_for_insufficient_check(c, ctx.chain) for c in insufficient]
+    return f"Insufficient balance for: {tokens}", suggestions
+
+
+def _build_stf_balances_ok(ctx: _Ctx) -> tuple[str, list[str]]:
+    suggestions = [
+        "Check token approvals for the Position Manager contract",
+        "Approvals may have been consumed or not confirmed before mint TX",
+        "The system now clears approval cache on retry - try again",
+    ]
+    if ctx.gas_warnings:
+        suggestions.extend(f"Note: gas estimation also detected: {w}" for w in ctx.gas_warnings)
+    return "Token transfer failed (STF) - balances OK, likely an approval issue", suggestions
+
+
+def _build_stf_generic(_ctx: _Ctx) -> tuple[str, list[str]]:
+    return (
+        "Token transfer failed (STF) - likely insufficient balance or approval",
+        ["Check token balance", "Check token approval for the contract"],
+    )
+
+
+def _build_gas_price_cap(_ctx: _Ctx) -> tuple[str, list[str]]:
+    return (
+        "Gas price cap exceeded",
+        [
+            "Set ALMANAK_MAX_GAS_PRICE_GWEI to a higher value (e.g., ALMANAK_MAX_GAS_PRICE_GWEI=1000)",
+            "Current chain gas price is higher than the configured cap",
+            "In Anvil mode, the cap is disabled by default (9999 gwei) -- check your .env overrides",
+        ],
+    )
+
+
+def _build_slippage(_ctx: _Ctx) -> tuple[str, list[str]]:
+    return (
+        "Slippage or price check failed",
+        ["Increase slippage tolerance", "Try smaller trade size", "Wait for less volatile conditions"],
+    )
+
+
+def _build_deadline(_ctx: _Ctx) -> tuple[str, list[str]]:
+    return "Transaction deadline expired", ["Increase deadline", "Use faster gas settings"]
+
+
+def _build_liquidity(_ctx: _Ctx) -> tuple[str, list[str]]:
+    return "Insufficient liquidity in pool", ["Try smaller amount", "Use a different pool/route"]
+
+
+def _build_gas_warning_stf(ctx: _Ctx) -> tuple[str, list[str]]:
+    gas_warning_text = "; ".join(ctx.gas_warnings or [])
+    return (
+        "Gas estimation detected STF revert - likely an approval issue",
+        [
+            "Check token approvals for the target contract",
+            f"Gas estimation details: {gas_warning_text}",
+        ],
+    )
+
+
+def _build_gas_warning_unknown(ctx: _Ctx) -> tuple[str, list[str]]:
+    gas_warning_text = "; ".join(ctx.gas_warnings or [])
+    return (
+        "Unknown - balances appear sufficient but gas estimation detected issues",
+        [
+            f"Gas estimation warnings: {gas_warning_text}",
+            "Check token approvals",
+            "Verify contract parameters",
+        ],
+    )
+
+
+def _build_default_unknown(_ctx: _Ctx) -> tuple[str, list[str]]:
+    return (
+        "Unknown - balances appear sufficient",
+        ["Check token approvals", "Verify contract parameters", "Review transaction simulation"],
+    )
+
+
+# --- predicate helpers -------------------------------------------------------
+
+
+def _any_insufficient(ctx: _Ctx) -> bool:
+    return any(not c.sufficient for c in ctx.balance_checks)
+
+
+def _error_contains(ctx: _Ctx, *needles: str) -> bool:
+    return bool(ctx.raw_error) and any(n in ctx.error_lower for n in needles)
+
+
+def _gas_warnings_contain_stf(ctx: _Ctx) -> bool:
+    if not ctx.gas_warnings:
+        return False
+    joined = "; ".join(ctx.gas_warnings).lower()
+    return "stf" in joined or "safetransferfrom" in joined
+
+
+# --- rule table (priority-ordered) -------------------------------------------
+#
+# Each entry: (predicate, builder). The first predicate that returns True
+# determines the cause. Entries are ordered by the priorities documented at
+# the top of this section.
+
+_RULES: tuple[tuple[Any, Any], ...] = (
+    # 0. Signer / address mismatch (configuration error)
+    (lambda c: _error_contains(c, *_SIGNING_MISMATCH_PATTERNS), _build_signing_mismatch),
+    # 0.5. Intent compilation / build errors
+    (lambda c: _error_contains(c, *_COMPILATION_PATTERNS), _build_compilation_error),
+    # 1. Insufficient native token for gas + execution fees
+    (lambda c: c.native_eth_check is not None and not c.native_eth_check.sufficient, _build_insufficient_native_eth),
+    # 2. Insufficient ERC-20 balance
+    (_any_insufficient, _build_insufficient_balance),
+    # 3. STF reported but balances OK -> approval issue
+    (lambda c: _error_contains(c, "stf"), _build_stf_balances_ok),
+    # 4a. Raw STF / safeTransferFrom (unreachable in practice because rule 3
+    #     matches first when raw_error contains "stf"; preserved so the
+    #     historical ladder is faithfully represented).
+    (lambda c: _error_contains(c, "stf", "safetransferfrom"), _build_stf_generic),
+    # 4b. Gas price cap (must precede the generic slippage/price rule).
+    (lambda c: _error_contains(c, "gas price cap"), _build_gas_price_cap),
+    # 4c. Slippage / price check.
+    (lambda c: _error_contains(c, "slippage", "price"), _build_slippage),
+    # 4d. Deadline / expired.
+    (lambda c: _error_contains(c, "deadline", "expired"), _build_deadline),
+    # 4e. Liquidity.
+    (lambda c: _error_contains(c, "liquidity"), _build_liquidity),
+    # 5a. Gas-warning-only: STF.
+    (_gas_warnings_contain_stf, _build_gas_warning_stf),
+    # 5b. Gas-warning-only: generic.
+    (lambda c: bool(c.gas_warnings), _build_gas_warning_unknown),
+)
+
+
 def determine_likely_cause(
     balance_checks: list[BalanceCheck],
     raw_error: str | None,
@@ -516,159 +765,43 @@ def determine_likely_cause(
 ) -> tuple[str, list[str]]:
     """Determine the likely cause of a revert and suggest fixes.
 
+    Walks a priority-ordered rule table (see ``_RULES``) and returns the
+    first matching rule's ``(cause, suggestions)``. The historical if/elif
+    ladder priorities are preserved exactly:
+
+        0.   Signing / address mismatch (configuration error)
+        0.5. Intent compilation errors
+        1.   Insufficient native token (gas + execution fees)
+        2.   Insufficient ERC-20 balance
+        3.   STF with balances OK -> approval issue
+        4.   Raw-error patterns (gas price cap, slippage, deadline, liquidity)
+        5.   Gas-warning-only paths
+        6.   Default unknown-with-balances-OK fallthrough
+
     Args:
         balance_checks: Results of balance checks
         raw_error: The raw error message if available
         native_eth_check: Result of native ETH balance check
-        gas_warnings: Warnings from gas estimation (e.g., STF reverts during eth_estimateGas)
+        gas_warnings: Warnings from gas estimation (e.g., STF reverts during
+            eth_estimateGas)
+        chain: Chain name for chain-aware suggestions (WETH wrap address,
+            native-token symbol)
 
     Returns:
-        Tuple of (likely_cause, suggestions)
+        Tuple of (likely_cause, suggestions).
     """
-    suggestions = []
-    error_lower = raw_error.lower() if raw_error else ""
-
-    # PRIORITY 0: Signing / address mismatch errors
-    # These are configuration errors, not on-chain reverts
-    mismatch_patterns = ["does not match signer", "from_address", "signing failed", "address mismatch"]
-    if raw_error and any(p in error_lower for p in mismatch_patterns):
-        cause = "Configuration error: wallet address mismatch"
-        suggestions.append("The transaction's from_address does not match the configured signer")
-        suggestions.append("Check ALMANAK_PRIVATE_KEY matches the wallet address in your strategy config")
-        # Try to extract addresses from the error for context
-        if "does not match" in error_lower:
-            suggestions.append(f"Details: {raw_error[:200]}")
-        # Also note gas estimation warnings if present
-        if gas_warnings:
-            for w in gas_warnings:
-                suggestions.append(f"Note: gas estimation also detected: {w}")
-        return cause, suggestions
-
-    # PRIORITY 0.5: Compilation / build errors
-    compilation_patterns = ["compilation failed", "build failed", "compile error", "intent compilation"]
-    if raw_error and any(p in error_lower for p in compilation_patterns):
-        cause = "Intent compilation error"
-        suggestions.append("The intent could not be compiled into transactions")
-        suggestions.append(f"Details: {raw_error[:200]}")
-        return cause, suggestions
-
-    # PRIORITY 1: Check for insufficient native token (gas + execution fees)
-    # This is often the root cause for "insufficient funds" errors
-    if native_eth_check and not native_eth_check.sufficient:
-        from almanak.framework.execution.chain_executor import _CHAIN_NATIVE_SYMBOL
-
-        native = _CHAIN_NATIVE_SYMBOL.get(chain, "ETH") if chain else "ETH"
-        cause = f"Insufficient native {native} for gas + execution fees"
-        suggestions.append(f"Send at least {native_eth_check.shortfall:.6f} {native} to your wallet on this chain")
-        suggestions.append(f"Required: {native_eth_check.required:.6f} {native} ({native_eth_check.breakdown})")
-        suggestions.append(f"Current balance: {native_eth_check.actual:.6f} {native}")
-
-        # Check if this is a GMX-related issue
-        if "gmx" in native_eth_check.breakdown.lower():
-            suggestions.append("Note: GMX V2 requires an execution fee paid to keepers who execute your order")
-            suggestions.append("For testing, you can reduce MIN_EXECUTION_FEE_FALLBACK in src/connectors/gmx_v2/sdk.py")
-
-        return cause, suggestions
-
-    # PRIORITY 2: Check for insufficient token balances
-    insufficient = [c for c in balance_checks if not c.sufficient]
-    if insufficient:
-        tokens = ", ".join(c.symbol for c in insufficient)
-        cause = f"Insufficient balance for: {tokens}"
-
-        for check in insufficient:
-            # Handle shortfall that might be a string (e.g., "all") or Decimal
-            shortfall_str = f"{check.shortfall:.6f}" if isinstance(check.shortfall, Decimal) else str(check.shortfall)
-            if check.symbol == "WETH":
-                weth_address = _get_weth_address(chain)
-                if weth_address:
-                    suggestions.append(
-                        f"Wrap ETH to WETH: cast send {weth_address} 'deposit()' --value {shortfall_str}ether --rpc-url <RPC> --private-key <KEY>"
-                    )
-                else:
-                    suggestions.append(
-                        f"Wrap {shortfall_str} ETH to WETH on {chain} (use your chain's WETH deposit() function)"
-                    )
-            elif check.symbol in ("USDC", "USDC.e", "USDT"):
-                suggestions.append(f"Acquire {shortfall_str} {check.symbol} via swap or bridge")
-            else:
-                suggestions.append(f"Acquire {shortfall_str} more {check.symbol}")
-
-        return cause, suggestions
-
-    # If balances are sufficient, it might be an approval issue
-    if raw_error and "stf" in error_lower:
-        cause = "Token transfer failed (STF) - balances OK, likely an approval issue"
-        stf_suggestions = [
-            "Check token approvals for the Position Manager contract",
-            "Approvals may have been consumed or not confirmed before mint TX",
-            "The system now clears approval cache on retry - try again",
-        ]
-        if gas_warnings:
-            for w in gas_warnings:
-                stf_suggestions.append(f"Note: gas estimation also detected: {w}")
-        return cause, stf_suggestions
-
-    # Check for common error patterns
-    if raw_error:
-        if "stf" in error_lower or "safetransferfrom" in error_lower:
-            return (
-                "Token transfer failed (STF) - likely insufficient balance or approval",
-                ["Check token balance", "Check token approval for the contract"],
-            )
-
-        # VIB-305: Check gas price cap errors BEFORE generic "price" check.
-        # "Gas price cap exceeded" contains "price", so the generic check fires incorrectly.
-        if "gas price cap" in error_lower:
-            return (
-                "Gas price cap exceeded",
-                [
-                    "Set ALMANAK_MAX_GAS_PRICE_GWEI to a higher value (e.g., ALMANAK_MAX_GAS_PRICE_GWEI=1000)",
-                    "Current chain gas price is higher than the configured cap",
-                    "In Anvil mode, the cap is disabled by default (9999 gwei) -- check your .env overrides",
-                ],
-            )
-
-        if "slippage" in error_lower or "price" in error_lower:
-            return (
-                "Slippage or price check failed",
-                ["Increase slippage tolerance", "Try smaller trade size", "Wait for less volatile conditions"],
-            )
-
-        if "deadline" in error_lower or "expired" in error_lower:
-            return ("Transaction deadline expired", ["Increase deadline", "Use faster gas settings"])
-
-        if "liquidity" in error_lower:
-            return ("Insufficient liquidity in pool", ["Try smaller amount", "Use a different pool/route"])
-
-    # Check gas warnings for clues when error is otherwise unknown
-    if gas_warnings:
-        gas_warning_text = "; ".join(gas_warnings)
-        gas_lower = gas_warning_text.lower()
-
-        if "stf" in gas_lower or "safetransferfrom" in gas_lower:
-            return (
-                "Gas estimation detected STF revert - likely an approval issue",
-                [
-                    "Check token approvals for the target contract",
-                    f"Gas estimation details: {gas_warning_text}",
-                ],
-            )
-
-        return (
-            "Unknown - balances appear sufficient but gas estimation detected issues",
-            [
-                f"Gas estimation warnings: {gas_warning_text}",
-                "Check token approvals",
-                "Verify contract parameters",
-            ],
-        )
-
-    # Default
-    return (
-        "Unknown - balances appear sufficient",
-        ["Check token approvals", "Verify contract parameters", "Review transaction simulation"],
+    ctx = _Ctx(
+        balance_checks=balance_checks,
+        raw_error=raw_error,
+        native_eth_check=native_eth_check,
+        gas_warnings=gas_warnings,
+        chain=chain,
+        error_lower=raw_error.lower() if raw_error else "",
     )
+    for predicate, builder in _RULES:
+        if predicate(ctx):
+            return builder(ctx)
+    return _build_default_unknown(ctx)
 
 
 async def diagnose_revert(

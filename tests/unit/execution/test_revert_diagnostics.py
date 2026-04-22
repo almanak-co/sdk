@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from almanak.framework.execution.revert_diagnostics import (
     BalanceCheck,
+    NativeETHCheck,
     _get_weth_address,
     determine_likely_cause,
 )
@@ -150,3 +151,239 @@ class TestChainAwareWethAddress:
         wrap_suggestions = [s for s in suggestions if "cast send" in s]
         assert len(wrap_suggestions) == 1
         assert self.ARBITRUM_WETH.lower() in wrap_suggestions[0].lower()
+
+
+def _insufficient(symbol: str, shortfall: Decimal = Decimal("1.0")) -> BalanceCheck:
+    """Build an insufficient balance check for the given symbol."""
+    return BalanceCheck(
+        symbol=symbol,
+        required=shortfall,
+        actual=Decimal("0"),
+        sufficient=False,
+        shortfall=shortfall,
+    )
+
+
+class TestDetermineLikelyCauseCharacterization:
+    """Characterization tests locking in the current classification behaviour.
+
+    These tests pin the full priority-ordered rule ladder of
+    ``determine_likely_cause`` so the rule-table refactor (Phase 7.4)
+    can be verified without changing semantics.
+    """
+
+    # --- PRIORITY 0: signing / address mismatch --------------------------------
+
+    def test_signing_mismatch_takes_priority_over_balances(self):
+        """Signer mismatch is a configuration error and outranks balance / ETH checks."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[_insufficient("USDC")],
+            raw_error="from_address 0xabc does not match signer 0xdef",
+            native_eth_check=NativeETHCheck(
+                required=Decimal("0.01"),
+                actual=Decimal("0"),
+                sufficient=False,
+                shortfall=Decimal("0.01"),
+                breakdown="gas",
+            ),
+        )
+        assert cause == "Configuration error: wallet address mismatch"
+        assert any("ALMANAK_PRIVATE_KEY" in s for s in suggestions)
+        # The "does not match" branch appends the error details
+        assert any("Details:" in s for s in suggestions)
+
+    def test_signing_mismatch_appends_gas_warning_notes(self):
+        """When signer mismatch fires, gas warnings should still be surfaced as notes."""
+        _, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error="signing failed: address mismatch",
+            gas_warnings=["tx 1: execution reverted: STF"],
+        )
+        assert any("gas estimation also detected" in s for s in suggestions)
+
+    # --- PRIORITY 0.5: compilation errors -------------------------------------
+
+    def test_compilation_error_classified_before_balance_checks(self):
+        """Compilation-failure strings short-circuit the ladder."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[_insufficient("USDC")],
+            raw_error="intent compilation error: missing pool",
+        )
+        assert cause == "Intent compilation error"
+        assert any("could not be compiled" in s for s in suggestions)
+
+    # --- PRIORITY 1: native ETH insufficient ----------------------------------
+
+    def test_insufficient_native_eth_takes_priority_over_token_balances(self):
+        """Native ETH shortfall outranks ERC-20 shortfalls when both present."""
+        native_check = NativeETHCheck(
+            required=Decimal("0.005"),
+            actual=Decimal("0.001"),
+            sufficient=False,
+            shortfall=Decimal("0.004"),
+            breakdown="gas (~0.0005 ETH) + gmx_v2 keeper execution fee (~0.001 ETH)",
+        )
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[_insufficient("USDC")],
+            raw_error=None,
+            native_eth_check=native_check,
+            chain="arbitrum",
+        )
+        assert cause == "Insufficient native ETH for gas + execution fees"
+        # GMX-specific note should be appended when breakdown mentions gmx
+        assert any("GMX V2" in s for s in suggestions)
+
+    def test_insufficient_native_eth_on_polygon_uses_matic_symbol(self):
+        """Native symbol should come from the chain map."""
+        native_check = NativeETHCheck(
+            required=Decimal("0.1"),
+            actual=Decimal("0"),
+            sufficient=False,
+            shortfall=Decimal("0.1"),
+            breakdown="gas",
+        )
+        cause, _ = determine_likely_cause(
+            balance_checks=[],
+            raw_error=None,
+            native_eth_check=native_check,
+            chain="polygon",
+        )
+        assert cause == "Insufficient native MATIC for gas + execution fees"
+
+    # --- PRIORITY 2: insufficient token balance -------------------------------
+
+    def test_insufficient_weth_known_chain_emits_cast_send(self):
+        """WETH shortfall on a known chain produces a cast-send suggestion with that chain's WETH."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[_insufficient("WETH", Decimal("2.5"))],
+            raw_error=None,
+            chain="base",
+        )
+        assert cause == "Insufficient balance for: WETH"
+        assert any("cast send" in s for s in suggestions)
+
+    def test_insufficient_stable_emits_acquire_via_swap_suggestion(self):
+        """Known stablecoins get a swap-or-bridge suggestion."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[_insufficient("USDC.e", Decimal("100"))],
+            raw_error=None,
+            chain="arbitrum",
+        )
+        assert cause == "Insufficient balance for: USDC.e"
+        assert any("via swap or bridge" in s for s in suggestions)
+
+    def test_insufficient_generic_token_emits_acquire_more_suggestion(self):
+        """Unknown tokens fall through to the generic acquire-more suggestion."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[_insufficient("ARB", Decimal("50"))],
+            raw_error=None,
+            chain="arbitrum",
+        )
+        assert cause == "Insufficient balance for: ARB"
+        assert any("Acquire" in s and "ARB" in s for s in suggestions)
+
+    def test_multiple_insufficient_balances_concatenated_in_cause(self):
+        """Cause string lists all insufficient symbols joined by commas."""
+        cause, _ = determine_likely_cause(
+            balance_checks=[
+                _insufficient("WETH"),
+                _insufficient("USDC"),
+            ],
+            raw_error=None,
+            chain="arbitrum",
+        )
+        assert cause == "Insufficient balance for: WETH, USDC"
+
+    # --- balances OK: STF with balances sufficient ----------------------------
+
+    def test_stf_with_sufficient_balances_flags_approval_issue(self):
+        """STF revert with balances-OK branch points at approvals, not balance."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error="execution reverted: STF",
+        )
+        assert cause == "Token transfer failed (STF) - balances OK, likely an approval issue"
+        assert any("approval" in s.lower() for s in suggestions)
+
+    def test_stf_with_sufficient_balances_appends_gas_warnings(self):
+        """Gas warnings should be appended to STF-approval suggestions."""
+        _, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error="STF",
+            gas_warnings=["tx 2/3: execution reverted"],
+        )
+        assert any("gas estimation also detected" in s for s in suggestions)
+
+    # --- common error-string patterns (raw_error, balances OK) ----------------
+
+    def test_deadline_expired_error_maps_to_deadline_cause(self):
+        cause, _ = determine_likely_cause(
+            balance_checks=[],
+            raw_error="Transaction deadline expired",
+        )
+        assert cause == "Transaction deadline expired"
+
+    def test_liquidity_error_maps_to_liquidity_cause(self):
+        cause, _ = determine_likely_cause(
+            balance_checks=[],
+            raw_error="INSUFFICIENT_LIQUIDITY",
+        )
+        assert cause == "Insufficient liquidity in pool"
+
+    def test_safetransferfrom_error_maps_to_generic_stf_cause(self):
+        """Raw 'SafeTransferFrom' (no 'stf' substring) hits the generic STF rule."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error="execution reverted: SafeTransferFrom failed",
+        )
+        assert cause == "Token transfer failed (STF) - likely insufficient balance or approval"
+        assert any("approval" in s.lower() for s in suggestions)
+
+    # --- gas-warning-only branch ----------------------------------------------
+
+    def test_gas_warnings_with_stf_maps_to_approval_cause(self):
+        """No raw_error, balances OK, but gas warnings mention STF -> approval cause."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error=None,
+            gas_warnings=["gas estimation failed: STF"],
+        )
+        assert cause == "Gas estimation detected STF revert - likely an approval issue"
+        assert any("approvals" in s.lower() for s in suggestions)
+
+    def test_gas_warnings_generic_maps_to_unknown_with_warnings(self):
+        """Non-STF gas warnings fall through to the unknown-with-warnings branch."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error=None,
+            gas_warnings=["some unrelated gas warning"],
+        )
+        assert cause == "Unknown - balances appear sufficient but gas estimation detected issues"
+        assert any("unrelated gas warning" in s for s in suggestions)
+
+    # --- fallthrough / defaults -----------------------------------------------
+
+    def test_none_error_empty_checks_returns_default_unknown(self):
+        """No error, no warnings, no balance problems -> default unknown branch."""
+        cause, suggestions = determine_likely_cause(
+            balance_checks=[],
+            raw_error=None,
+        )
+        assert cause == "Unknown - balances appear sufficient"
+        assert any("approvals" in s.lower() for s in suggestions)
+
+    def test_empty_string_error_returns_default_unknown(self):
+        """Empty-string error is falsy and hits the default branch."""
+        cause, _ = determine_likely_cause(
+            balance_checks=[],
+            raw_error="",
+        )
+        assert cause == "Unknown - balances appear sufficient"
+
+    def test_unrecognised_error_returns_default_unknown(self):
+        """An error that matches no known pattern falls through to default."""
+        cause, _ = determine_likely_cause(
+            balance_checks=[],
+            raw_error="some totally unrelated runtime error",
+        )
+        assert cause == "Unknown - balances appear sufficient"
