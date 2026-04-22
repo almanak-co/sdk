@@ -3664,6 +3664,68 @@ class IntentCompiler:
         Returns:
             CompilationResult with LP close ActionBundle
         """
+        # Phase 6B backlog: route to dedicated protocol helpers when applicable.
+        # Falls through to the Uniswap-V3-style body when ``None`` is returned.
+        routed = self._dispatch_lp_close_protocol_route(intent)
+        if routed is not None:
+            return routed
+
+        protocol = self._resolve_protocol(intent.protocol)
+        return self._compile_lp_close_v3_body(intent, protocol)
+
+    def _dispatch_lp_close_protocol_route(self, intent: LPCloseIntent) -> CompilationResult | None:
+        """Route an LP_CLOSE intent to the correct protocol-specific compiler.
+
+        Returns the routed ``CompilationResult`` when a dedicated helper owns
+        the protocol, or ``None`` when the generic Uniswap-V3-style body in
+        ``_compile_lp_close_v3_body`` should handle it.
+
+        Extracted in Phase 6B backlog so ``_compile_lp_close`` itself stays small.
+        Dispatch order is preserved from the pre-refactor method.
+        """
+        # Solana chains route to Solana-only adapters or fail (delegated to keep CC small).
+        if self._is_solana_chain() or intent.protocol in {"meteora_dlmm", "orca_whirlpools", "raydium_clmm"}:
+            return self._dispatch_lp_close_solana_route(intent)
+
+        # Protocols with dedicated LP_CLOSE compile helpers. Some are dispatched by
+        # the resolved-alias name (uniswap_v4, aerodrome), others by the raw
+        # ``intent.protocol`` (traderjoe_v2, aerodrome_slipstream, pendle, curve,
+        # fluid). Preserve interleaved order from the pre-refactor method.
+        resolved = self._resolve_protocol(intent.protocol)
+
+        # Uniswap V4 LP close (flash accounting via PositionManager)
+        if resolved == "uniswap_v4":
+            return self._compile_lp_close_uniswap_v4(intent)
+        # TraderJoe V2 (fungible LP tokens, bins not ticks)
+        if intent.protocol == "traderjoe_v2":
+            return self._compile_lp_close_traderjoe_v2(intent)
+        # Aerodrome Slipstream CL (NFT tokenId-based, concentrated liquidity)
+        if intent.protocol == "aerodrome_slipstream":
+            return self._compile_lp_close_aerodrome_slipstream(intent)
+        # Aerodrome/Velodrome Solidly fork (fungible LP tokens).
+        # Resolve alias so velodrome -> aerodrome on Optimism.
+        if resolved == "aerodrome":
+            return self._compile_lp_close_aerodrome(intent)
+        # Pendle LP close
+        if intent.protocol == "pendle":
+            return self._compile_pendle_lp_close(intent)
+        # Curve LP close (pool-based AMM, proportional removal)
+        if intent.protocol == "curve":
+            return self._compile_lp_close_curve(intent)
+        # Fluid DEX LP close (with encumbrance guard)
+        if intent.protocol == "fluid":
+            return self._compile_lp_close_fluid(intent)
+
+        return None
+
+    def _dispatch_lp_close_solana_route(self, intent: LPCloseIntent) -> CompilationResult:
+        """Solana-side LP_CLOSE dispatch.
+
+        Covers the Meteora/Orca/Raydium cases plus the explicit failure for
+        other protocols on Solana chains. Always returns a CompilationResult -
+        this helper is only entered when the caller has already established
+        that the intent is bound for Solana.
+        """
         # Route Meteora DLMM to Solana-specific adapter
         if intent.protocol == "meteora_dlmm":
             if not self._is_solana_chain():
@@ -3688,44 +3750,22 @@ class IntentCompiler:
         if intent.protocol == "raydium_clmm" or (self._is_solana_chain() and intent.protocol is None):
             return self._compile_raydium_lp_close(intent)
 
-        # Fail explicitly for unsupported protocols on Solana
-        if self._is_solana_chain():
-            allowed_solana_lp = {"raydium_clmm", "meteora_dlmm", "orca_whirlpools"}
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=intent.intent_id,
-                error=f"Protocol '{intent.protocol}' is not supported for LP_CLOSE on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
-            )
+        # Fail explicitly for unsupported protocols on Solana. (Only reachable
+        # when ``_is_solana_chain()`` is True - the caller gates this helper.)
+        allowed_solana_lp = {"raydium_clmm", "meteora_dlmm", "orca_whirlpools"}
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=f"Protocol '{intent.protocol}' is not supported for LP_CLOSE on Solana. Supported: {', '.join(sorted(allowed_solana_lp))}",
+        )
 
-        # Handle Uniswap V4 LP close separately (flash accounting via PositionManager)
-        if self._resolve_protocol(intent.protocol) == "uniswap_v4":
-            return self._compile_lp_close_uniswap_v4(intent)
+    def _compile_lp_close_v3_body(self, intent: LPCloseIntent, protocol: str) -> CompilationResult:
+        """Uniswap-V3-style LP_CLOSE body shared across uniswap_v3, pancakeswap_v3, sushiswap_v3, etc.
 
-        # Handle TraderJoe V2 separately
-        if intent.protocol == "traderjoe_v2":
-            return self._compile_lp_close_traderjoe_v2(intent)
-
-        # Handle Aerodrome Slipstream CL close (NFT tokenId-based)
-        if intent.protocol == "aerodrome_slipstream":
-            return self._compile_lp_close_aerodrome_slipstream(intent)
-
-        # Handle Aerodrome/Velodrome separately (Solidly-fork with fungible LP tokens)
-        # Resolve alias so velodrome -> aerodrome on Optimism (LP dispatch doesn't pre-resolve)
-        if self._resolve_protocol(intent.protocol) == "aerodrome":
-            return self._compile_lp_close_aerodrome(intent)
-
-        # Handle Pendle LP close
-        if intent.protocol == "pendle":
-            return self._compile_pendle_lp_close(intent)
-
-        # Handle Curve LP close (pool-based AMM, proportional removal)
-        if intent.protocol == "curve":
-            return self._compile_lp_close_curve(intent)
-
-        # Handle Fluid DEX LP close (with encumbrance guard)
-        if intent.protocol == "fluid":
-            return self._compile_lp_close_fluid(intent)
-
+        Phase 6B backlog: extracted from ``_compile_lp_close`` onto local
+        per-step helpers. Behaviour - error messages, approval-chain ordering,
+        metadata shape - is preserved byte-for-byte.
+        """
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
             intent_id=intent.intent_id,
@@ -3735,7 +3775,6 @@ class IntentCompiler:
 
         try:
             # Step 1: Get LP adapter (resolve alias e.g. "agni" -> "uniswap_v3")
-            protocol = self._resolve_protocol(intent.protocol)
             adapter = UniswapV3LPAdapter(self.chain, protocol)
             position_manager = adapter.get_position_manager_address()
 
@@ -3756,116 +3795,40 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
+            # Use direct arithmetic (see swap path comment) to preserve
+            # byte-for-byte behaviour for non-positive
+            # ``default_deadline_seconds`` configurations.
             deadline = int(datetime.now(UTC).timestamp()) + self.default_deadline_seconds
 
-            # Step 3: Query position's actual liquidity and tokens owed from on-chain
-            liquidity = self._query_position_liquidity(position_manager, token_id)
-            if liquidity is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Could not query liquidity for position #{token_id}. Ensure rpc_url is provided to IntentCompiler.",
-                    intent_id=intent.intent_id,
-                )
+            # Step 3: Query position's on-chain state (liquidity + tokens owed)
+            state_or_fail = self._query_lp_close_position_state(
+                position_manager=position_manager,
+                token_id=token_id,
+                intent_id=intent.intent_id,
+                warnings=warnings,
+            )
+            if isinstance(state_or_fail, CompilationResult):
+                return state_or_fail
+            liquidity, position_has_activity = state_or_fail
 
-            # Query tokens owed (fees + withdrawn liquidity that hasn't been collected)
-            tokens_owed0, tokens_owed1 = self._query_position_tokens_owed(position_manager, token_id)
-            tokens_owed_unknown = tokens_owed0 is None or tokens_owed1 is None
-            if tokens_owed_unknown:
-                warnings.append(f"Could not query tokens owed for position #{token_id} - collecting anyway")
-            elif tokens_owed0 == 0 and tokens_owed1 == 0:
-                warnings.append(
-                    f"Position #{token_id} has no tokens owed pre-decrease - will still collect after close"
-                )
-
-            # Step 3a: Skip decreaseLiquidity if position has 0 liquidity
-            # (position may already be closed or liquidity already removed)
-            if liquidity == 0:
-                warnings.append(f"Position #{token_id} has 0 liquidity - skipping decreaseLiquidity step")
-            else:
-                # Use 0 for min amounts to ensure position can be closed
-                amount0_min = 0
-                amount1_min = 0
-
-                decrease_calldata = adapter.get_decrease_liquidity_calldata(
-                    token_id=token_id,
-                    liquidity=liquidity,
-                    amount0_min=amount0_min,
-                    amount1_min=amount1_min,
-                    deadline=deadline,
-                )
-
-                decrease_tx = TransactionData(
-                    to=position_manager,
-                    value=0,
-                    data="0x" + decrease_calldata.hex(),
-                    gas_estimate=get_gas_estimate(self.chain, "lp_decrease_liquidity"),
-                    description=f"Decrease liquidity: position #{token_id} (remove all)",
-                    tx_type="lp_decrease_liquidity",
-                )
-                transactions.append(decrease_tx)
-
-            # Determine if position has anything to collect/burn
-            # Treat unknown owed as potential activity (collect anyway to avoid leaving fees uncollected)
-            position_has_activity = (
-                liquidity > 0
-                or tokens_owed_unknown
-                or (tokens_owed0 is not None and tokens_owed1 is not None and (tokens_owed0 > 0 or tokens_owed1 > 0))
+            # Step 4: Build decrease / collect / burn transactions (ordering preserved)
+            self._extend_lp_close_transactions(
+                transactions=transactions,
+                warnings=warnings,
+                adapter=adapter,
+                position_manager=position_manager,
+                token_id=token_id,
+                liquidity=liquidity,
+                position_has_activity=position_has_activity,
+                collect_fees=intent.collect_fees,
+                deadline=deadline,
             )
 
-            # Step 4: Build collect TX
-            # Collect when requested AND position has activity (liquidity decreased or fees owed)
-            # Skip collect on already-closed/burned positions to avoid guaranteed reverts
-            if intent.collect_fees and position_has_activity:
-                collect_calldata = adapter.get_collect_calldata(
-                    token_id=token_id,
-                    recipient=self.wallet_address,
-                    amount0_max=MAX_UINT128,
-                    amount1_max=MAX_UINT128,
-                )
-
-                collect_tx = TransactionData(
-                    to=position_manager,
-                    value=0,
-                    data="0x" + collect_calldata.hex(),
-                    gas_estimate=get_gas_estimate(self.chain, "lp_collect"),
-                    description=f"Collect tokens and fees: position #{token_id}",
-                    tx_type="lp_collect",
-                )
-                transactions.append(collect_tx)
-            elif intent.collect_fees:
-                warnings.append(f"Skipping collect for position #{token_id} - position appears already closed")
-            else:
-                warnings.append("Skipping fee collection as collect_fees=False")
-
-            # Step 5: Build burn TX
-            # Only burn if position has activity (decreased liquidity or has tokens owed)
-            # If position was already closed (0 liquidity, 0 tokens owed), skip burn
-            # to avoid reverting on already-burned NFTs
-            should_burn = position_has_activity
-
-            if should_burn:
-                burn_calldata = adapter.get_burn_calldata(token_id=token_id)
-
-                burn_tx = TransactionData(
-                    to=position_manager,
-                    value=0,
-                    data="0x" + burn_calldata.hex(),
-                    gas_estimate=get_gas_estimate(self.chain, "lp_burn"),
-                    description=f"Burn position NFT: #{token_id}",
-                    tx_type="lp_burn",
-                )
-                transactions.append(burn_tx)
-            else:
-                warnings.append(
-                    f"Position #{token_id} appears already closed (0 liquidity, 0 tokens owed) - skipping burn"
-                )
-
-            # Step 6: Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
+            # Step 5: Assemble ActionBundle
+            total_gas = sum_transaction_gas(transactions)
+            action_bundle = assemble_action_bundle(
                 intent_type=IntentType.LP_CLOSE.value,
-                transactions=[tx.to_dict() for tx in transactions],
+                transactions=transactions,
                 metadata={
                     "position_id": intent.position_id,
                     "token_id": token_id,
@@ -3895,6 +3858,133 @@ class IntentCompiler:
             result.error = str(e)
 
         return result
+
+    def _query_lp_close_position_state(
+        self,
+        *,
+        position_manager: str,
+        token_id: int,
+        intent_id: str,
+        warnings: list[str],
+    ) -> tuple[int, bool] | CompilationResult:
+        """Fetch position liquidity + tokens-owed and classify activity.
+
+        Returns ``(liquidity, position_has_activity)`` on success, or a
+        FAILED ``CompilationResult`` when liquidity cannot be queried. Appends
+        context warnings to ``warnings`` in place to match the pre-refactor
+        message ordering.
+
+        ``position_has_activity`` is True when any of:
+            - liquidity > 0, OR
+            - tokens_owed is unknown (fail-open: collect anyway), OR
+            - either tokens_owed leg is > 0.
+        """
+        liquidity = self._query_position_liquidity(position_manager, token_id)
+        if liquidity is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Could not query liquidity for position #{token_id}. Ensure rpc_url is provided to IntentCompiler.",
+                intent_id=intent_id,
+            )
+
+        tokens_owed0, tokens_owed1 = self._query_position_tokens_owed(position_manager, token_id)
+        tokens_owed_unknown = tokens_owed0 is None or tokens_owed1 is None
+        if tokens_owed_unknown:
+            warnings.append(f"Could not query tokens owed for position #{token_id} - collecting anyway")
+        elif tokens_owed0 == 0 and tokens_owed1 == 0:
+            warnings.append(f"Position #{token_id} has no tokens owed pre-decrease - will still collect after close")
+
+        # Treat unknown owed as potential activity (collect anyway to avoid
+        # leaving fees uncollected).
+        position_has_activity = (
+            liquidity > 0
+            or tokens_owed_unknown
+            or (tokens_owed0 is not None and tokens_owed1 is not None and (tokens_owed0 > 0 or tokens_owed1 > 0))
+        )
+        return liquidity, position_has_activity
+
+    def _extend_lp_close_transactions(
+        self,
+        *,
+        transactions: list[TransactionData],
+        warnings: list[str],
+        adapter: UniswapV3LPAdapter,
+        position_manager: str,
+        token_id: int,
+        liquidity: int,
+        position_has_activity: bool,
+        collect_fees: bool,
+        deadline: int,
+    ) -> None:
+        """Append decrease / collect / burn TXs (consensus-critical ordering).
+
+        Extends ``transactions`` and ``warnings`` in-place so the caller keeps
+        ownership of the final assembly. Ordering is pinned by the
+        characterization tests — do not re-order, add, or drop branches
+        without updating the tests in lockstep.
+        """
+        # Decrease: skip on 0 liquidity, warn; else build decreaseLiquidity TX.
+        if liquidity == 0:
+            warnings.append(f"Position #{token_id} has 0 liquidity - skipping decreaseLiquidity step")
+        else:
+            # Use 0 for min amounts to ensure position can be closed.
+            decrease_calldata = adapter.get_decrease_liquidity_calldata(
+                token_id=token_id,
+                liquidity=liquidity,
+                amount0_min=0,
+                amount1_min=0,
+                deadline=deadline,
+            )
+            transactions.append(
+                TransactionData(
+                    to=position_manager,
+                    value=0,
+                    data="0x" + decrease_calldata.hex(),
+                    gas_estimate=get_gas_estimate(self.chain, "lp_decrease_liquidity"),
+                    description=f"Decrease liquidity: position #{token_id} (remove all)",
+                    tx_type="lp_decrease_liquidity",
+                )
+            )
+
+        # Collect: requested AND position has activity; else emit skip-warning.
+        if collect_fees and position_has_activity:
+            collect_calldata = adapter.get_collect_calldata(
+                token_id=token_id,
+                recipient=self.wallet_address,
+                amount0_max=MAX_UINT128,
+                amount1_max=MAX_UINT128,
+            )
+            transactions.append(
+                TransactionData(
+                    to=position_manager,
+                    value=0,
+                    data="0x" + collect_calldata.hex(),
+                    gas_estimate=get_gas_estimate(self.chain, "lp_collect"),
+                    description=f"Collect tokens and fees: position #{token_id}",
+                    tx_type="lp_collect",
+                )
+            )
+        elif collect_fees:
+            warnings.append(f"Skipping collect for position #{token_id} - position appears already closed")
+        else:
+            warnings.append("Skipping fee collection as collect_fees=False")
+
+        # Burn: only when position had activity - avoid reverting on
+        # already-burned NFTs.
+        if position_has_activity:
+            burn_calldata = adapter.get_burn_calldata(token_id=token_id)
+            transactions.append(
+                TransactionData(
+                    to=position_manager,
+                    value=0,
+                    data="0x" + burn_calldata.hex(),
+                    gas_estimate=get_gas_estimate(self.chain, "lp_burn"),
+                    description=f"Burn position NFT: #{token_id}",
+                    tx_type="lp_burn",
+                )
+            )
+        else:
+            warnings.append(f"Position #{token_id} appears already closed (0 liquidity, 0 tokens owed) - skipping burn")
 
     def _compile_lp_close_traderjoe_v2(self, intent: LPCloseIntent) -> CompilationResult:
         """Compile LP_CLOSE intent for TraderJoe V2 Liquidity Book.
