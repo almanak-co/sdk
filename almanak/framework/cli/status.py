@@ -16,11 +16,15 @@ Usage:
 import json
 import sys
 from datetime import UTC, datetime
-from typing import Any
 
 import click
 
 from ..gateway_client import GatewayClient, GatewayClientConfig
+from .status_helpers import (
+    _fetch_strategy_details,
+    _render_details_as_json,
+    _validate_status_args,
+)
 
 
 def _make_client(gateway_host: str, gateway_port: int) -> GatewayClient:
@@ -281,124 +285,20 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
         almanak strat status -s my_strategy --no-timeline
         almanak strat status -s uniswap_lp:abc123 --timeline-limit 20
     """
-    if timeline_limit < 1:
-        click.secho("--timeline-limit must be >= 1.", fg="red", err=True)
-        sys.exit(1)
-
-    from almanak.gateway.proto import gateway_pb2
+    _validate_status_args(timeline_limit)
 
     client = _make_client(gateway_host, gateway_port)
-    try:
-        request = gateway_pb2.GetStrategyDetailsRequest(
-            strategy_id=strategy_id,
-            include_timeline=timeline,
-            include_pnl_history=False,
-            timeline_limit=timeline_limit,
-        )
-        details = client.dashboard.GetStrategyDetails(request)
-    except Exception as e:
-        click.secho(f"Failed to get strategy details: {e}", fg="red", err=True)
-        sys.exit(1)
-    finally:
-        client.disconnect()
+    details = _fetch_strategy_details(
+        client,
+        strategy_id,
+        include_timeline=timeline,
+        timeline_limit=timeline_limit,
+    )
 
     s = details.summary
 
     if as_json:
-        result = {
-            "strategy_id": s.strategy_id,
-            "name": s.name,
-            "status": s.status,
-            "chain": s.chain,
-            "protocol": s.protocol,
-            "total_value_usd": s.total_value_usd,
-            "pnl_24h_usd": s.pnl_24h_usd,
-            "last_action_at": s.last_action_at,
-            "attention_required": s.attention_required,
-            "attention_reason": s.attention_reason,
-            "consecutive_errors": s.consecutive_errors,
-            "last_iteration_at": s.last_iteration_at,
-            "pnl_since_deploy_usd": s.pnl_since_deploy_usd or None,
-        }
-        if details.position:
-            pos_data: dict[str, Any] = {}
-            if details.position.token_balances:
-                pos_data["token_balances"] = [
-                    {"symbol": t.symbol, "balance": t.balance, "value_usd": t.value_usd}
-                    for t in details.position.token_balances
-                ]
-            if details.position.lp_positions:
-                pos_data["lp_positions"] = [
-                    {
-                        "pool": lp.pool,
-                        "token0": lp.token0,
-                        "token1": lp.token1,
-                        "liquidity_usd": lp.liquidity_usd,
-                    }
-                    for lp in details.position.lp_positions
-                ]
-            if details.position.health_factor is not None:
-                pos_data["health_factor"] = float(details.position.health_factor)
-            if details.position.strategy_positions:
-                sp_list = []
-                for sp in details.position.strategy_positions:
-                    sp_dict: dict[str, Any] = {
-                        "position_type": sp.position_type,
-                        "position_id": sp.position_id,
-                        "chain": sp.chain,
-                        "protocol": sp.protocol,
-                        "value_usd": sp.value_usd,
-                        "liquidation_risk": sp.liquidation_risk,
-                    }
-                    # Include optional monitoring fields when present
-                    for field in (
-                        "direction",
-                        "entry_price",
-                        "current_price",
-                        "unrealized_pnl_usd",
-                        "unrealized_pnl_pct",
-                        "size_usd",
-                        "collateral_usd",
-                        "leverage",
-                        "health_factor",
-                    ):
-                        val = getattr(sp, field, "")
-                        if val != "":
-                            sp_dict[field] = val
-                    if sp.details:
-                        sp_dict["details"] = dict(sp.details)
-                    sp_list.append(sp_dict)
-                pos_data["strategy_positions"] = sp_list
-            if pos_data:
-                result["position"] = pos_data
-        if details.timeline:
-            result["timeline"] = [
-                {
-                    "timestamp": e.timestamp,
-                    "event_type": e.event_type,
-                    "description": e.description,
-                    "tx_hash": e.tx_hash,
-                    "chain": e.chain,
-                }
-                for e in details.timeline
-            ]
-        if details.chain_health:
-            result["chain_health"] = {
-                name: {
-                    "status": h.status,
-                    "rpc_latency_ms": h.rpc_latency_ms,
-                    "gas_price_gwei": h.gas_price_gwei,
-                }
-                for name, h in details.chain_health.items()
-            }
-        if details.operator_card and details.operator_card.strategy_id:
-            result["operator_card"] = {
-                "severity": details.operator_card.severity,
-                "reason": details.operator_card.reason,
-                "risk_description": details.operator_card.risk_description,
-                "suggested_actions": list(details.operator_card.suggested_actions),
-            }
-        click.echo(json.dumps(result, indent=2))
+        click.echo(_render_details_as_json(details))
         return
 
     # Pretty print
