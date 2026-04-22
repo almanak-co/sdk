@@ -1,12 +1,13 @@
 """Pure compiler skeleton helpers shared by ``IntentCompiler._compile_swap``
-and ``IntentCompiler._compile_lp_open`` (Phase 6B.2).
+and ``IntentCompiler._compile_lp_open`` (Phase 6B.2), plus LiFi/TraderJoe
+V2 compile paths (Phase 6B.5).
 
 These helpers are pure functions (no I/O, no side effects) that implement
 the shared skeleton of the highest-complexity compile paths. They are
-designed to be wired into the existing ``_compile_swap`` and
-``_compile_lp_open`` methods in Phase 6B.3 / 6B.4 respectively. This PR
-adds the helpers and their isolation tests only; the consuming methods
-are unchanged.
+designed to be wired into the existing compile methods. Phase 6B.2 added
+the shared swap/LP skeleton; Phase 6B.5 adds LiFi-specific value/gas
+parsing and a protocol-agnostic bin-step probe used by TraderJoe V2 swap
+compilation.
 
 Scope / contract:
     - Every helper here MUST be pure. Anything that needs ``self._gateway_client``,
@@ -297,3 +298,192 @@ def assemble_action_bundle(
         transactions=[tx.to_dict() for tx in transactions],
         metadata=metadata,
     )
+
+
+# ---------------------------------------------------------------------------
+# LiFi aggregator helpers (Phase 6B.5)
+#
+# LiFi's quote.transaction_request carries `value` and `gas_limit` as strings
+# that may be decimal or hex ("0x..."). The compile path parses these twice
+# (once for TX value, once for gas) and picks the best gas estimate from
+# multiple candidate sources. Extracting them here keeps the compile method's
+# control flow linear and matches the existing math exactly.
+# ---------------------------------------------------------------------------
+
+
+def parse_lifi_tx_value(raw_value: object | None) -> int:
+    """Parse LiFi ``transaction_request.value`` into an integer wei amount.
+
+    LiFi returns the TX value as either a decimal string, a ``0x``-prefixed
+    hex string, or ``None``/empty (native-free swaps). Every shape must map
+    to a non-negative integer ready for ``TransactionData.value``.
+
+    Args:
+        raw_value: The raw ``value`` field from ``quote.transaction_request``.
+            Accepted shapes: ``None`` / empty string / ``"0"`` → ``0``;
+            decimal string → parsed as base-10; ``0x``-prefixed string → hex.
+
+    Returns:
+        Integer wei amount (``0`` for missing/empty input). Always
+        non-negative — negative parses raise ``ValueError``.
+
+    Raises:
+        ValueError: If the string is non-empty but cannot be parsed as int,
+            or if the parsed value is negative (TX values are unsigned wei).
+    """
+    if not raw_value:
+        return 0
+    raw_str = str(raw_value)
+    parsed = int(raw_str, 16) if raw_str.startswith("0x") else int(raw_str)
+    if parsed < 0:
+        raise ValueError(f"LiFi transaction_request.value must be non-negative, got {parsed} from {raw_str!r}")
+    return parsed
+
+
+def choose_lifi_gas_estimate(
+    *,
+    total_gas_estimate: int,
+    gas_limit: object | None,
+    default: int = 200_000,
+) -> int:
+    """Pick the best available gas estimate for a LiFi-built transaction.
+
+    Preference order (matches existing compile code):
+        1. ``quote.estimate.total_gas_estimate`` when positive.
+        2. ``quote.transaction_request.gas_limit`` (decimal or hex string).
+        3. ``default`` (falls back to 200_000 to match pre-refactor behaviour).
+
+    Args:
+        total_gas_estimate: LiFi ``quote.estimate.total_gas_estimate``. Zero
+            means "no estimate"; negative values are treated identically.
+        gas_limit: LiFi ``quote.transaction_request.gas_limit`` — string,
+            integer, or ``None``. Hex-prefixed strings are parsed as hex.
+        default: Fallback gas when neither signal is usable.
+
+    Returns:
+        A positive integer gas estimate.
+    """
+    if total_gas_estimate and total_gas_estimate > 0:
+        return total_gas_estimate
+    if gas_limit:
+        try:
+            gl = str(gas_limit)
+            parsed = int(gl, 16) if gl.startswith("0x") else int(gl)
+        except (ValueError, TypeError):
+            return default
+        # Gas of 0 or negative would produce a TX that can't include the
+        # intrinsic gas cost; treat those as unusable and fall through.
+        if parsed > 0:
+            return parsed
+    return default
+
+
+# ---------------------------------------------------------------------------
+# TraderJoe V2 helpers (Phase 6B.5)
+#
+# TraderJoe V2's Liquidity Book AMM exposes multiple pools per pair, one per
+# ``bin_step``. The compiler probes a fixed order of common bin steps until
+# a pool is found. Extracting this loop keeps the auto-detect logic isolated
+# and reusable for LP-open, LP-close, and swap paths.
+# ---------------------------------------------------------------------------
+
+
+def probe_traderjoe_bin_step(
+    *,
+    probe: object,
+    token_a: str,
+    token_b: str,
+    not_found_exception: type[BaseException],
+    candidates: tuple[int, ...] = (20, 25, 15, 10, 50, 5, 100, 1),
+) -> tuple[int | None, int | None, BaseException | None]:
+    """Find the first TraderJoe V2 bin step with an existing pool for a pair.
+
+    Calls ``probe(token_a, token_b, bin_step)`` for each candidate in order
+    and returns the first bin step whose probe succeeds. The caller is
+    responsible for the final fail-closed messaging — this helper only
+    reports "found" vs "not found" and bubbles unexpected exceptions back
+    (along with the bin step that broke) so the caller can attach
+    protocol-specific context.
+
+    Args:
+        probe: Callable invoked as ``probe(token_a, token_b, bin_step)``.
+            Typically ``tj_adapter.sdk.get_pool_address``. Must raise
+            ``not_found_exception`` on "no pool" and any other exception
+            on an unexpected failure (RPC flake, token resolution, etc.).
+        token_a: First token address (order irrelevant for probe semantics).
+        token_b: Second token address.
+        not_found_exception: Concrete exception class that means "probe
+            found no pool at this bin step" — the probe iterates past this
+            cleanly. Passed explicitly so the helper doesn't have to import
+            the connector-specific exception.
+        candidates: Tuple of bin steps to probe, in preference order. The
+            default mirrors the order used by the compiler (popular first).
+
+    Returns:
+        ``(bin_step, None, None)`` on success. ``(None, None, None)`` when
+        every candidate raised ``not_found_exception``. ``(None, bs, exc)``
+        when candidate ``bs`` raised an unexpected exception — the caller
+        converts this into a ``FAILED`` ``CompilationResult`` naming the
+        broken bin step.
+    """
+    if not callable(probe):
+        raise TypeError("probe must be callable")
+    for bin_step in candidates:
+        try:
+            probe(token_a, token_b, bin_step)
+            return bin_step, None, None
+        except not_found_exception:
+            continue
+        except Exception as exc:  # noqa: BLE001 — caller reshapes
+            return None, bin_step, exc
+    return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Gateway/RPC resolution for SDK adapters that accept either one
+# (Phase 6B.5)
+#
+# Several compile paths (TraderJoe V2 swap, TraderJoe V2 LP open, TraderJoe
+# V2 LP close, ...) share the same normalisation: a disconnected gateway
+# client is treated as absent and the caller falls back to rpc_url. This
+# helper encodes the normalisation without the compiler's RPC lookup —
+# callers still provide the two sources.
+# ---------------------------------------------------------------------------
+
+
+def normalise_gateway_or_rpc(
+    *,
+    gateway_client: object | None,
+    rpc_url_supplier: object,
+) -> tuple[object | None, str | None]:
+    """Normalise ``(gateway_client, rpc_url)`` for adapters that accept either.
+
+    Adapters like ``TraderJoeV2Adapter`` can be driven either by a connected
+    gateway client (production) or by a direct RPC URL (local/backtest).
+    The compiler treats a gateway client that answers ``is_connected=False``
+    the same as no client at all, then falls back to the RPC URL supplier.
+
+    Args:
+        gateway_client: Candidate gateway client. Must expose
+            ``is_connected`` (bool attribute or property) when non-None.
+            A value of ``None`` is accepted and forwarded as ``None``.
+        rpc_url_supplier: Zero-arg callable returning the chain's RPC URL
+            (or ``None`` / empty string). The supplier is only invoked when
+            ``gateway_client`` is unusable — saves a lookup when the
+            gateway path is taken.
+
+    Returns:
+        ``(client_or_none, rpc_url_or_none)``. Exactly one of these will be
+        set to a truthy value in the happy path; callers must raise on the
+        (None, None) / (None, "") case with their own error message so
+        protocol-specific context (adapter name, config hint) is preserved.
+    """
+    client: object | None = gateway_client
+    if client is not None and not getattr(client, "is_connected", False):
+        client = None
+
+    if client is not None:
+        return client, None
+
+    rpc_url = rpc_url_supplier() if callable(rpc_url_supplier) else None
+    return None, rpc_url or None

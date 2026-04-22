@@ -25,7 +25,7 @@ import os
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
 # Note: PolymarketAdapter import is done lazily in __init__ to avoid circular import and allow optional usage
@@ -107,8 +107,12 @@ from ._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
     check_price_impact,
+    choose_lifi_gas_estimate,
     choose_safer_quote,
     compute_min_amount_out,
+    normalise_gateway_or_rpc,
+    parse_lifi_tx_value,
+    probe_traderjoe_bin_step,
     sum_transaction_gas,
 )
 from .compiler_adapters import (  # noqa: F401
@@ -2071,6 +2075,149 @@ class IntentCompiler:
 
         return result
 
+    def _validate_lifi_chains(
+        self,
+        intent: SwapIntent,
+        chain_mapping: dict[str, int],
+    ) -> tuple[str, str, int, int, bool] | CompilationResult:
+        """Resolve LiFi source/destination chains to IDs or fail closed.
+
+        Preserves the exact error strings tested by
+        ``tests/unit/intents/test_compiler_lifi.py`` (``does not support chain``).
+        """
+        source_chain = intent.chain or self.chain
+        dest_chain = intent.destination_chain or source_chain
+
+        for chain in (source_chain, dest_chain):
+            if chain.lower() not in chain_mapping:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"LiFi does not support chain: {chain}. Supported: {', '.join(chain_mapping.keys())}",
+                    intent_id=intent.intent_id,
+                )
+
+        from_chain_id = chain_mapping[source_chain.lower()]
+        to_chain_id = chain_mapping[dest_chain.lower()]
+        # Compare normalised IDs rather than raw chain names: aliases or
+        # casing differences (e.g. "Arbitrum" vs "arbitrum", "eth" vs
+        # "ethereum") resolve to the same LiFi chain id and should not
+        # take the cross-chain path.
+        is_cross_chain = from_chain_id != to_chain_id
+        return source_chain, dest_chain, from_chain_id, to_chain_id, is_cross_chain
+
+    def _resolve_lifi_tokens_and_amount(
+        self,
+        intent: SwapIntent,
+        source_chain: str,
+        dest_chain: str,
+    ) -> tuple[TokenInfo, TokenInfo, int] | CompilationResult:
+        """Resolve LiFi source/destination tokens and input amount in wei.
+
+        Preserves the exact error messages tested in
+        ``tests/unit/intents/test_compiler_lifi.py``:
+            - ``Unknown token on {chain}: {symbol}``
+            - ``amount='all' must be resolved before compilation.``
+            - ``Either amount_usd or amount must be provided``
+        """
+        from_token = self._resolve_token(intent.from_token, chain=source_chain)
+        if from_token is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown token on {source_chain}: {intent.from_token}",
+                intent_id=intent.intent_id,
+            )
+        to_token = self._resolve_token(intent.to_token, chain=dest_chain)
+        if to_token is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown token on {dest_chain}: {intent.to_token}",
+                intent_id=intent.intent_id,
+            )
+
+        if intent.amount_usd is not None:
+            amount_in = self._usd_to_token_amount(intent.amount_usd, from_token)
+        elif intent.amount is not None:
+            if intent.amount == "all":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error="amount='all' must be resolved before compilation.",
+                    intent_id=intent.intent_id,
+                )
+            amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
+            amount_in = int(amount_decimal * Decimal(10**from_token.decimals))
+        else:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="Either amount_usd or amount must be provided",
+                intent_id=intent.intent_id,
+            )
+        return from_token, to_token, amount_in
+
+    def _build_lifi_swap_transaction(
+        self,
+        *,
+        intent: SwapIntent,
+        quote: Any,
+        from_token: TokenInfo,
+        to_token: TokenInfo,
+        amount_in: int,
+        is_cross_chain: bool,
+    ) -> TransactionData | CompilationResult:
+        """Build the deferred swap/bridge ``TransactionData`` from a LiFi quote.
+
+        The deferred-swap pattern (``tx_type`` = ``swap_deferred`` /
+        ``bridge_deferred``) is LiFi-specific and must not be collapsed into
+        the regular swap pattern — the executor re-fetches the route at
+        submission time using ``route_params`` from bundle metadata.
+        """
+        tx_request = quote.transaction_request
+        if tx_request is None or not tx_request.to or not tx_request.data:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="LiFi quote missing transaction_request data",
+                intent_id=intent.intent_id,
+            )
+
+        tx_type = "bridge_deferred" if is_cross_chain else "swap_deferred"
+        description_action = "Bridge" if is_cross_chain else "Swap"
+
+        value = parse_lifi_tx_value(tx_request.value)
+        gas_estimate = choose_lifi_gas_estimate(
+            total_gas_estimate=(quote.estimate.total_gas_estimate if quote.estimate else 0),
+            gas_limit=tx_request.gas_limit,
+        )
+
+        return TransactionData(
+            to=tx_request.to,
+            value=value,
+            data=tx_request.data,
+            gas_estimate=gas_estimate,
+            description=(
+                f"{description_action} via LiFi ({quote.tool}): "
+                f"{self._format_amount(amount_in, from_token.decimals)} {from_token.symbol} -> {to_token.symbol}"
+            ),
+            tx_type=tx_type,
+        )
+
+    @staticmethod
+    def _compute_lifi_expected_output_human(amount_out: object | None, to_token: TokenInfo) -> Decimal | None:
+        """Parse LiFi ``quote.get_to_amount()`` into a Decimal token amount.
+
+        Returns ``None`` when the string isn't a positive integer, matching
+        the pre-refactor ``int(amount_out) if amount_out else 0`` path.
+        """
+        if not amount_out:
+            return None
+        try:
+            # LiFi returns amount_out as a numeric string; normalise via str()
+            # so any repr (int, str, numeric-like) round-trips cleanly through int().
+            amount_out_int = int(str(amount_out))
+        except (TypeError, ValueError):
+            return None
+        if amount_out_int <= 0:
+            return None
+        return Decimal(str(amount_out_int)) / Decimal(10**to_token.decimals)
+
     def _compile_lifi_swap(self, intent: SwapIntent) -> CompilationResult:
         """Compile a SWAP intent using LiFi aggregator.
 
@@ -2091,99 +2238,34 @@ class IntentCompiler:
             CompilationResult with LiFi swap ActionBundle
         """
         from ..connectors.lifi import CHAIN_MAPPING, LiFiAdapter, LiFiConfig
+        from ..connectors.lifi.client import NATIVE_TOKEN_ADDRESS as LIFI_NATIVE_ADDRESS
 
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
         transactions: list[TransactionData] = []
-        warnings: list[str] = []
 
         try:
-            # Step 1: Determine source and destination chains
-            source_chain = intent.chain or self.chain
-            dest_chain = intent.destination_chain or source_chain
-            is_cross_chain = source_chain != dest_chain
+            chain_check = self._validate_lifi_chains(intent, CHAIN_MAPPING)
+            if isinstance(chain_check, CompilationResult):
+                return chain_check
+            source_chain, dest_chain, from_chain_id, to_chain_id, is_cross_chain = chain_check
 
-            # Resolve chain IDs
-            source_chain_lower = source_chain.lower()
-            dest_chain_lower = dest_chain.lower()
+            tokens_check = self._resolve_lifi_tokens_and_amount(intent, source_chain, dest_chain)
+            if isinstance(tokens_check, CompilationResult):
+                return tokens_check
+            from_token, to_token, amount_in = tokens_check
 
-            if source_chain_lower not in CHAIN_MAPPING:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"LiFi does not support chain: {source_chain}. Supported: {', '.join(CHAIN_MAPPING.keys())}",
-                    intent_id=intent.intent_id,
-                )
-            if dest_chain_lower not in CHAIN_MAPPING:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"LiFi does not support chain: {dest_chain}. Supported: {', '.join(CHAIN_MAPPING.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            from_chain_id = CHAIN_MAPPING[source_chain_lower]
-            to_chain_id = CHAIN_MAPPING[dest_chain_lower]
-
-            # Step 2: Resolve token addresses
-            from_token = self._resolve_token(intent.from_token, chain=source_chain)
-            if from_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token on {source_chain}: {intent.from_token}",
-                    intent_id=intent.intent_id,
-                )
-
-            to_token = self._resolve_token(intent.to_token, chain=dest_chain)
-            if to_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token on {dest_chain}: {intent.to_token}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 3: Calculate input amount
-            if intent.amount_usd is not None:
-                amount_in = self._usd_to_token_amount(intent.amount_usd, from_token)
-            elif intent.amount is not None:
-                if intent.amount == "all":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="amount='all' must be resolved before compilation.",
-                        intent_id=intent.intent_id,
-                    )
-                amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
-                amount_in = int(amount_decimal * Decimal(10**from_token.decimals))
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Either amount_usd or amount must be provided",
-                    intent_id=intent.intent_id,
-                )
-
-            # Step 4: Translate native token addresses for LiFi API
-            # Framework uses 0xEeee... sentinel for native tokens, but LiFi expects 0x0000...0000
-            from ..connectors.lifi.client import NATIVE_TOKEN_ADDRESS as LIFI_NATIVE_ADDRESS
-
+            # Translate native-token sentinel (framework uses 0xEeee..., LiFi uses 0x0000...)
             lifi_from_address = LIFI_NATIVE_ADDRESS if from_token.is_native else from_token.address
             lifi_to_address = LIFI_NATIVE_ADDRESS if to_token.is_native else to_token.address
 
-            # Step 5: Get quote from LiFi
             logger.info(
                 f"Getting LiFi quote: {from_token.symbol}@{source_chain} -> {to_token.symbol}@{dest_chain}, "
                 f"amount={amount_in}"
             )
-
-            config = LiFiConfig(
-                chain_id=from_chain_id,
-                wallet_address=self.wallet_address,
-            )
             adapter = LiFiAdapter(
-                config,
+                LiFiConfig(chain_id=from_chain_id, wallet_address=self.wallet_address),
                 price_provider=self.price_oracle,
                 allow_placeholder_prices=self._using_placeholders,
             )
-
             slippage = float(intent.max_slippage)
             quote = adapter.client.get_quote(
                 from_chain_id=from_chain_id,
@@ -2195,73 +2277,31 @@ class IntentCompiler:
                 slippage=slippage,
             )
 
-            # Step 5: Build approve TX if needed (skip for native token)
+            # Build approve TX if needed (skip native; LiFi gives us the exact approval target)
             approval_address = quote.estimate.approval_address if quote.estimate else ""
             if approval_address and not from_token.is_native:
-                approve_txs = self._build_approve_tx(
-                    from_token.address,
-                    approval_address,
-                    amount_in,
-                )
-                transactions.extend(approve_txs)
+                transactions.extend(self._build_approve_tx(from_token.address, approval_address, amount_in))
 
-            # Step 6: Build swap/bridge TX from LiFi quote
-            tx_request = quote.transaction_request
-            if tx_request is None or not tx_request.to or not tx_request.data:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="LiFi quote missing transaction_request data",
-                    intent_id=intent.intent_id,
-                )
-            tx_type = "bridge_deferred" if is_cross_chain else "swap_deferred"
-            description_action = "Bridge" if is_cross_chain else "Swap"
-
-            raw_value = tx_request.value if tx_request else None
-            if raw_value:
-                raw_str = str(raw_value)
-                value = int(raw_str, 16) if raw_str.startswith("0x") else int(raw_str)
-            else:
-                value = 0
-            gas_estimate = 200000
-            if quote.estimate and quote.estimate.total_gas_estimate > 0:
-                gas_estimate = quote.estimate.total_gas_estimate
-            elif tx_request and tx_request.gas_limit:
-                try:
-                    gl = str(tx_request.gas_limit)
-                    gas_estimate = int(gl, 16) if gl.startswith("0x") else int(gl)
-                except (ValueError, TypeError):
-                    pass
-
-            swap_tx = TransactionData(
-                to=tx_request.to if tx_request else "",
-                value=value,
-                data=tx_request.data if tx_request else "",
-                gas_estimate=gas_estimate,
-                description=(
-                    f"{description_action} via LiFi ({quote.tool}): "
-                    f"{self._format_amount(amount_in, from_token.decimals)} {from_token.symbol} -> {to_token.symbol}"
-                ),
-                tx_type=tx_type,
+            swap_or_err = self._build_lifi_swap_transaction(
+                intent=intent,
+                quote=quote,
+                from_token=from_token,
+                to_token=to_token,
+                amount_in=amount_in,
+                is_cross_chain=is_cross_chain,
             )
-            transactions.append(swap_tx)
+            if isinstance(swap_or_err, CompilationResult):
+                return swap_or_err
+            transactions.append(swap_or_err)
 
-            # Step 7: Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
             amount_out = quote.get_to_amount()
             amount_out_min = quote.get_to_amount_min()
+            expected_output_human = self._compute_lifi_expected_output_human(amount_out, to_token)
 
-            # VIB-3203: Human-readable quote for realized slippage computation.
-            try:
-                amount_out_int = int(amount_out) if amount_out else 0
-            except (TypeError, ValueError):
-                amount_out_int = 0
-            expected_output_human = (
-                Decimal(str(amount_out_int)) / Decimal(10**to_token.decimals) if amount_out_int else None
-            )
-
-            action_bundle = ActionBundle(
+            total_gas = sum_transaction_gas(transactions)
+            action_bundle = assemble_action_bundle(
                 intent_type=IntentType.SWAP.value,
-                transactions=[tx.to_dict() for tx in transactions],
+                transactions=transactions,
                 metadata={
                     "from_token": from_token.to_dict(),
                     "to_token": to_token.to_dict(),
@@ -2289,17 +2329,11 @@ class IntentCompiler:
                 },
             )
 
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
             # Format amounts for user-friendly logging
             amount_in_fmt = format_token_amount(amount_in, from_token.symbol, from_token.decimals)
             amount_out_fmt = format_token_amount(amount_out, to_token.symbol, to_token.decimals)
             min_out_fmt = format_token_amount(amount_out_min, to_token.symbol, to_token.decimals)
             slippage_fmt = format_percentage(intent.max_slippage)
-
             chain_info = f"{source_chain}->{dest_chain}" if is_cross_chain else source_chain
             logger.info(
                 f"Compiled SWAP (LiFi/{quote.tool}): {amount_in_fmt} -> {amount_out_fmt} "
@@ -2307,12 +2341,22 @@ class IntentCompiler:
             )
             logger.info(f"   Slippage: {slippage_fmt} | Txs: {len(transactions)} | Gas: {total_gas:,}")
 
+            return CompilationResult(
+                status=CompilationStatus.SUCCESS,
+                intent_id=intent.intent_id,
+                action_bundle=action_bundle,
+                transactions=transactions,
+                total_gas_estimate=total_gas,
+                warnings=[],
+            )
+
         except Exception as e:
             logger.exception("Failed to compile LiFi SWAP intent")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=str(e),
+            )
 
     def _compile_cross_chain_swap(self, intent: SwapIntent) -> CompilationResult:
         """Compile a cross-chain SWAP intent using Enso.
@@ -3326,6 +3370,134 @@ class IntentCompiler:
 
         return result
 
+    @staticmethod
+    def _parse_traderjoe_v2_pool_spec(
+        intent: LPOpenIntent,
+    ) -> tuple[str, str, int] | CompilationResult:
+        """Parse ``intent.pool`` as ``TOKEN_X/TOKEN_Y[/BIN_STEP]``.
+
+        Defaults ``BIN_STEP`` to 20 (most common for TraderJoe V2) when
+        omitted. Preserves the exact "Invalid pool format..." error string
+        pinned by the LP characterization tests.
+        """
+        pool_parts = intent.pool.split("/")
+        if len(pool_parts) < 2:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Invalid pool format for TraderJoe V2: {intent.pool}. Expected format: TOKEN_X/TOKEN_Y/BIN_STEP"
+                ),
+                intent_id=intent.intent_id,
+            )
+        token_x_symbol = pool_parts[0]
+        token_y_symbol = pool_parts[1]
+        bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
+        return token_x_symbol, token_y_symbol, bin_step
+
+    def _resolve_traderjoe_v2_lp_tokens(
+        self,
+        *,
+        intent: LPOpenIntent,
+        token_x_symbol: str,
+        token_y_symbol: str,
+    ) -> tuple[TokenInfo, TokenInfo] | CompilationResult:
+        """Resolve both pool tokens or fail with the exact pinned error string.
+
+        Error format matches the pre-refactor compiler:
+        ``Unknown token {symbol} for chain {self.chain}``.
+        """
+        token_x_info = self._resolve_token(token_x_symbol)
+        if not token_x_info:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown token {token_x_symbol} for chain {self.chain}",
+                intent_id=intent.intent_id,
+            )
+        token_y_info = self._resolve_token(token_y_symbol)
+        if not token_y_info:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown token {token_y_symbol} for chain {self.chain}",
+                intent_id=intent.intent_id,
+            )
+        return token_x_info, token_y_info
+
+    def _resolve_traderjoe_v2_lp_router(self, intent: LPOpenIntent) -> str | CompilationResult:
+        """Return the TraderJoe V2 LP position-manager router for the chain."""
+        router_address = LP_POSITION_MANAGERS.get(self.chain, {}).get(
+            "traderjoe_v2", "0x0000000000000000000000000000000000000000"
+        )
+        if router_address == "0x0000000000000000000000000000000000000000":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"TraderJoe V2 not configured for chain {self.chain}",
+                intent_id=intent.intent_id,
+            )
+        return router_address
+
+    @staticmethod
+    def _extract_traderjoe_v2_bin_range_params(
+        intent: LPOpenIntent,
+    ) -> tuple[int, int]:
+        """Read ``bin_range`` / ``id_slippage`` from ``intent.protocol_params``.
+
+        Raises ``ValueError`` (caught by the caller's generic try/except,
+        surfacing as ``result.error``) when ``bin_range`` is out of range
+        ``[1, 100]``. Defaults match pre-refactor behaviour (bin_range=5,
+        id_slippage=5).
+        """
+        params = intent.protocol_params or {}
+        bin_range = int(params.get("bin_range", 5))
+        if bin_range < 1 or bin_range > 100:
+            raise ValueError(f"bin_range must be between 1 and 100, got {bin_range}")
+        id_slippage = int(params.get("id_slippage", 5))
+        return bin_range, id_slippage
+
+    @staticmethod
+    def _build_traderjoe_v2_lp_open_tx_data(
+        *,
+        lp_tx: Any,
+        intent: LPOpenIntent,
+        token_x_symbol: str,
+        token_y_symbol: str,
+        bin_step: int,
+    ) -> TransactionData:
+        """Convert the adapter's add-liquidity TransactionData into compiler form."""
+        return TransactionData(
+            to=lp_tx.to,
+            value=lp_tx.value,
+            data=lp_tx.data if isinstance(lp_tx.data, str) else lp_tx.data,
+            gas_estimate=lp_tx.gas or 400000,
+            description=(
+                f"Add liquidity to TraderJoe V2: {intent.amount0} {token_x_symbol} + "
+                f"{intent.amount1} {token_y_symbol} (bin_step={bin_step})"
+            ),
+            tx_type="traderjoe_v2_add_liquidity",
+        )
+
+    def _build_traderjoe_v2_lp_approvals(
+        self,
+        *,
+        token_x_info: TokenInfo,
+        token_y_info: TokenInfo,
+        amount_x_wei: int,
+        amount_y_wei: int,
+        router_address: str,
+    ) -> list[TransactionData]:
+        """Build ERC-20 approval TXs for both LP tokens, in X-then-Y order.
+
+        Native tokens and zero amounts are skipped, matching pre-refactor
+        behaviour. The X-before-Y ordering is load-bearing: the approval
+        chain ordering is preserved across the compile -> sign -> submit
+        pipeline and tests assert it.
+        """
+        approvals: list[TransactionData] = []
+        if amount_x_wei > 0 and not token_x_info.is_native:
+            approvals.extend(self._build_approve_tx(token_x_info.address, router_address, amount_x_wei))
+        if amount_y_wei > 0 and not token_y_info.is_native:
+            approvals.extend(self._build_approve_tx(token_y_info.address, router_address, amount_y_wei))
+        return approvals
+
     def _compile_lp_open_traderjoe_v2(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for TraderJoe V2 Liquidity Book.
 
@@ -3340,51 +3512,36 @@ class IntentCompiler:
         Returns:
             CompilationResult with TraderJoe V2 LP ActionBundle
         """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
         transactions: list[TransactionData] = []
-        warnings: list[str] = []
 
         try:
-            # Import TraderJoe V2 adapter (lazy import to avoid circular deps)
             from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
-            # Parse pool info (format: TOKEN_X/TOKEN_Y/BIN_STEP)
-            pool_parts = intent.pool.split("/")
-            if len(pool_parts) < 2:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Invalid pool format for TraderJoe V2: {intent.pool}. Expected format: TOKEN_X/TOKEN_Y/BIN_STEP",
-                    intent_id=intent.intent_id,
-                )
+            pool_spec = self._parse_traderjoe_v2_pool_spec(intent)
+            if isinstance(pool_spec, CompilationResult):
+                return pool_spec
+            token_x_symbol, token_y_symbol, bin_step = pool_spec
 
-            token_x_symbol = pool_parts[0]
-            token_y_symbol = pool_parts[1]
-            bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
-
-            # Resolve token addresses and info via TokenResolver
-            token_x_info = self._resolve_token(token_x_symbol)
-            token_y_info = self._resolve_token(token_y_symbol)
-
-            if not token_x_info:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token {token_x_symbol} for chain {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-            if not token_y_info:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown token {token_y_symbol} for chain {self.chain}",
-                    intent_id=intent.intent_id,
-                )
-
+            tokens = self._resolve_traderjoe_v2_lp_tokens(
+                intent=intent,
+                token_x_symbol=token_x_symbol,
+                token_y_symbol=token_y_symbol,
+            )
+            if isinstance(tokens, CompilationResult):
+                return tokens
+            token_x_info, token_y_info = tokens
             token_x_addr = token_x_info.address
             token_y_addr = token_y_info.address
 
-            # Validate pool existence (best-effort)
+            # Resolve transport up front so pool validation AND the adapter
+            # use the same gateway/RPC pair. A disconnected ``self._gateway_client``
+            # would otherwise make ``validate_traderjoe_pool`` fail against a
+            # stale client even though the adapter falls back to RPC.
+            gateway_client, rpc_url = self._resolve_traderjoe_v2_gateway_rpc(
+                adapter_name="TraderJoe V2 adapter",
+            )
+
+            # Validate pool existence (best-effort; LP_OPEN can seed empty pools).
             from .pool_validation import validate_traderjoe_pool
 
             pool_check = validate_traderjoe_pool(
@@ -3392,81 +3549,44 @@ class IntentCompiler:
                 token_x_addr,
                 token_y_addr,
                 bin_step,
-                self._get_chain_rpc_url(),
-                gateway_client=self._gateway_client,
-                allow_empty_reserves=True,  # LP_OPEN can seed empty pools
+                rpc_url,
+                gateway_client=gateway_client,
+                allow_empty_reserves=True,
             )
             failed = self._validate_pool(pool_check, intent.intent_id)
             if failed is not None:
                 return failed
 
-            # Convert amounts to wei
             amount_x_wei = int(intent.amount0 * Decimal(10**token_x_info.decimals))
             amount_y_wei = int(intent.amount1 * Decimal(10**token_y_info.decimals))
 
-            # Get router address (position manager for TraderJoe V2)
-            router_address = LP_POSITION_MANAGERS.get(self.chain, {}).get(
-                "traderjoe_v2", "0x0000000000000000000000000000000000000000"
+            router_or_err = self._resolve_traderjoe_v2_lp_router(intent)
+            if isinstance(router_or_err, CompilationResult):
+                return router_or_err
+            router_address: str = router_or_err
+
+            # Approval chain — X before Y, native/zero skipped. Ordering is
+            # preserved across compile -> sign -> submit; tests assert it.
+            transactions.extend(
+                self._build_traderjoe_v2_lp_approvals(
+                    token_x_info=token_x_info,
+                    token_y_info=token_y_info,
+                    amount_x_wei=amount_x_wei,
+                    amount_y_wei=amount_y_wei,
+                    router_address=router_address,
+                )
+            )
+            tj_adapter = TraderJoeV2Adapter(
+                TraderJoeV2Config(
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                    rpc_url=rpc_url,
+                    gateway_client=gateway_client,
+                )
             )
 
-            if router_address == "0x0000000000000000000000000000000000000000":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"TraderJoe V2 not configured for chain {self.chain}",
-                    intent_id=intent.intent_id,
-                )
+            bin_range, id_slippage = self._extract_traderjoe_v2_bin_range_params(intent)
 
-            # Build approval TXs for both tokens
-            if amount_x_wei > 0 and not token_x_info.is_native:
-                approve_txs_x = self._build_approve_tx(
-                    token_x_info.address,
-                    router_address,
-                    amount_x_wei,
-                )
-                transactions.extend(approve_txs_x)
-
-            if amount_y_wei > 0 and not token_y_info.is_native:
-                approve_txs_y = self._build_approve_tx(
-                    token_y_info.address,
-                    router_address,
-                    amount_y_wei,
-                )
-                transactions.extend(approve_txs_y)
-
-            # TraderJoe V2 adapter accepts either a connected gateway_client
-            # (production path) or a direct RPC URL (local/backtest fallback).
-            # Normalize a disconnected gateway_client to None so we can fall
-            # back to rpc_url cleanly.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
-            if gateway_client is None and not rpc_url:
-                raise ValueError(
-                    "TraderJoe V2 adapter requires either a connected gateway_client "
-                    "or an RPC URL. Provide rpc_url to IntentCompiler or use "
-                    "GatewayExecutionOrchestrator."
-                )
-
-            # Create TraderJoe V2 adapter to build the liquidity TX
-            config = TraderJoeV2Config(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                rpc_url=rpc_url,
-                gateway_client=gateway_client,
-            )
-            tj_adapter = TraderJoeV2Adapter(config)
-
-            # Number of bins on each side of active bin
-            # Read from intent's protocol_params if provided, otherwise default to 5
-            params = intent.protocol_params or {}
-            bin_range = int(params.get("bin_range", 5))
-            if bin_range < 1 or bin_range > 100:
-                raise ValueError(f"bin_range must be between 1 and 100, got {bin_range}")
-            id_slippage = int(params.get("id_slippage", 5))
-
-            # Build add liquidity transaction
             lp_tx = tj_adapter.build_add_liquidity_transaction(
                 token_x=token_x_addr,
                 token_y=token_y_addr,
@@ -3476,26 +3596,20 @@ class IntentCompiler:
                 bin_range=bin_range,
                 id_slippage=id_slippage,
             )
-
-            # Convert to TransactionData format
-            lp_tx_data = TransactionData(
-                to=lp_tx.to,
-                value=lp_tx.value,
-                data=lp_tx.data if isinstance(lp_tx.data, str) else lp_tx.data,
-                gas_estimate=lp_tx.gas or 400000,
-                description=(
-                    f"Add liquidity to TraderJoe V2: {intent.amount0} {token_x_symbol} + {intent.amount1} {token_y_symbol} (bin_step={bin_step})"
-                ),
-                tx_type="traderjoe_v2_add_liquidity",
+            transactions.append(
+                self._build_traderjoe_v2_lp_open_tx_data(
+                    lp_tx=lp_tx,
+                    intent=intent,
+                    token_x_symbol=token_x_symbol,
+                    token_y_symbol=token_y_symbol,
+                    bin_step=bin_step,
+                )
             )
-            transactions.append(lp_tx_data)
 
-            # Build ActionBundle
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
+            total_gas = sum_transaction_gas(transactions)
+            action_bundle = assemble_action_bundle(
                 intent_type=IntentType.LP_OPEN.value,
-                transactions=[tx.to_dict() for tx in transactions],
+                transactions=transactions,
                 metadata={
                     "pool": intent.pool,
                     "token_x": token_x_info.to_dict(),
@@ -3512,23 +3626,29 @@ class IntentCompiler:
                 },
             )
 
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-            result.warnings = warnings
-
             tx_types = " + ".join(tx.tx_type for tx in transactions) if transactions else ""
             tx_summary = f" ({tx_types})" if tx_types else ""
             logger.info(
-                f"Compiled TraderJoe V2 LP_OPEN intent: {token_x_symbol}/{token_y_symbol}, bin_step={bin_step}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+                f"Compiled TraderJoe V2 LP_OPEN intent: {token_x_symbol}/{token_y_symbol}, "
+                f"bin_step={bin_step}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
+            )
+
+            return CompilationResult(
+                status=CompilationStatus.SUCCESS,
+                intent_id=intent.intent_id,
+                action_bundle=action_bundle,
+                transactions=transactions,
+                total_gas_estimate=total_gas,
+                warnings=[],
             )
 
         except Exception as e:
             logger.exception(f"Failed to compile TraderJoe V2 LP_OPEN intent: {e}")
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=str(e),
+            )
 
     def _compile_lp_close(self, intent: LPCloseIntent) -> CompilationResult:
         """Compile an LP_CLOSE intent into an ActionBundle.
@@ -4344,6 +4464,225 @@ class IntentCompiler:
 
         return compile_lp_close_aerodrome_slipstream(self, intent)
 
+    def _resolve_traderjoe_v2_swap_tokens(
+        self,
+        intent: SwapIntent,
+    ) -> tuple[TokenInfo, TokenInfo, Any, Any] | CompilationResult:
+        """Resolve from/to tokens and their wrapped-for-swap equivalents.
+
+        TraderJoe V2 LB pairs are ERC-20 only; native input/output must probe
+        and swap against the wrapped token. Preserves exact error strings
+        ("Unknown from_token: ...", "Unknown to_token: ...") pinned by
+        ``tests/unit/intents/test_compiler_traderjoe_v2_swap.py``.
+
+        Returns ``(from_token, to_token, swap_from_token, swap_to_token)`` on
+        success or a ``CompilationResult`` (FAILED) on unknown-token. The
+        swap tokens are either ``TokenInfo`` (non-native path) or
+        ``ResolvedToken`` (native path via ``resolve_for_swap``); both expose
+        ``.address`` which is all downstream consumers need, so the return
+        type is widened to ``Any`` for the last two elements rather than
+        importing ``ResolvedToken`` here.
+        """
+        resolver = self._token_resolver
+        from_token = self._resolve_token(intent.from_token)
+        to_token = self._resolve_token(intent.to_token)
+
+        if from_token is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown from_token: {intent.from_token}",
+                intent_id=intent.intent_id,
+            )
+        if to_token is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Unknown to_token: {intent.to_token}",
+                intent_id=intent.intent_id,
+            )
+
+        swap_from_token: Any = (
+            resolver.resolve_for_swap(intent.from_token, self.chain) if from_token.is_native else from_token
+        )
+        swap_to_token: Any = resolver.resolve_for_swap(intent.to_token, self.chain) if to_token.is_native else to_token
+        return from_token, to_token, swap_from_token, swap_to_token
+
+    def _resolve_traderjoe_v2_swap_amount(
+        self,
+        intent: SwapIntent,
+        from_token: TokenInfo,
+    ) -> Decimal | CompilationResult:
+        """Resolve a SwapIntent's amount to a Decimal in token units.
+
+        Preserves the exact error strings tested in
+        ``tests/unit/intents/test_compiler_traderjoe_v2_swap.py::...::
+        test_amount_all_rejected`` and the "Either amount_usd or amount must
+        be provided" branch.
+        """
+        if intent.amount_usd is not None:
+            price = self._require_token_price(from_token.symbol)
+            return intent.amount_usd / price
+        if intent.amount is not None:
+            if intent.amount == "all":
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        "amount='all' must be resolved before compilation. "
+                        "Use Intent.set_resolved_amount() to resolve chained amounts."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            return intent.amount  # type: ignore[return-value]
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Either amount_usd or amount must be provided",
+            intent_id=intent.intent_id,
+        )
+
+    def _resolve_traderjoe_v2_gateway_rpc(self, adapter_name: str) -> tuple["GatewayClient | None", str | None]:
+        """Return ``(gateway_client, rpc_url)`` for a TraderJoe V2 adapter.
+
+        Normalises a disconnected gateway to None and falls back to the
+        chain RPC URL. Raises ``ValueError`` (caught by the caller's generic
+        try/except, surfacing as ``result.error``) when neither is usable.
+
+        The ``GatewayClient`` cast is sound because the input to
+        ``normalise_gateway_or_rpc`` is already ``self._gateway_client:
+        GatewayClient | None`` — the helper only narrows via
+        ``is_connected``, it does not widen the type.
+        """
+        client, rpc_url = normalise_gateway_or_rpc(
+            gateway_client=self._gateway_client,
+            rpc_url_supplier=self._get_chain_rpc_url,
+        )
+        if client is None and not rpc_url:
+            raise ValueError(
+                f"Connected gateway_client or RPC URL required for {adapter_name}. "
+                "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
+            )
+        # Cast: the helper's `object | None` return is really the same
+        # `GatewayClient | None` the caller passed in.
+        return cast("GatewayClient | None", client), rpc_url
+
+    def _autodetect_traderjoe_v2_bin_step(
+        self,
+        *,
+        intent: SwapIntent,
+        tj_adapter: Any,
+        swap_from_token: TokenInfo,
+        swap_to_token: TokenInfo,
+        from_token_symbol: str,
+        to_token_symbol: str,
+        pool_not_found_exc: type[BaseException],
+    ) -> int | CompilationResult:
+        """Auto-detect a TraderJoe V2 bin step by probing the SDK.
+
+        Iterates common bin steps (20, 25, 15, 10, 50, 5, 100, 1) and returns
+        the first one with a pool. Preserves the exact error strings pinned
+        by ``test_compiler_traderjoe_v2_swap``:
+            - "Failed to probe TraderJoe V2 pool for bin_step={bs}: {exc}"
+            - "No TraderJoe V2 pool found for {X}/{Y} on {chain}. Tried bin
+              steps: [...]. The pair may not have a Liquidity Book pool."
+        """
+        bin_step_order = [20, 25, 15, 10, 50, 5, 100, 1]
+        found_bin_step, broken_bs, unexpected_exc = probe_traderjoe_bin_step(
+            probe=tj_adapter.sdk.get_pool_address,
+            token_a=swap_from_token.address,
+            token_b=swap_to_token.address,
+            not_found_exception=pool_not_found_exc,
+            candidates=tuple(bin_step_order),
+        )
+        if unexpected_exc is not None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Failed to probe TraderJoe V2 pool for bin_step={broken_bs}: {unexpected_exc}",
+                intent_id=intent.intent_id,
+            )
+        if found_bin_step is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"No TraderJoe V2 pool found for {from_token_symbol}/{to_token_symbol} on {self.chain}. "
+                    f"Tried bin steps: {bin_step_order}. "
+                    f"The pair may not have a Liquidity Book pool."
+                ),
+                intent_id=intent.intent_id,
+            )
+        return found_bin_step
+
+    @staticmethod
+    def _fetch_traderjoe_v2_swap_quote(
+        *,
+        intent: SwapIntent,
+        tj_adapter: Any,
+        from_token_symbol: str,
+        to_token_symbol: str,
+        amount_decimal: Decimal,
+        bin_step: int,
+        pool_not_found_exc: type[BaseException],
+        sdk_error_exc: type[BaseException],
+    ) -> Any:
+        """Fetch the Phase-B quote once (reused for both min-out and metadata).
+
+        Returns the raw quote on success or a ``CompilationResult`` (FAILED)
+        when the quote call fails or returns zero amount_out. See VIB-3203
+        Phase B for the "anchor both reads to the same on-chain quote"
+        rationale.
+        """
+        try:
+            quote = tj_adapter.get_swap_quote(
+                token_in=from_token_symbol,
+                token_out=to_token_symbol,
+                amount_in=amount_decimal,
+                bin_step=bin_step,
+            )
+        except (pool_not_found_exc, sdk_error_exc) as quote_exc:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"TraderJoe V2 quote failed for {from_token_symbol} -> {to_token_symbol} "
+                    f"(bin_step={bin_step}): {quote_exc}"
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        if quote.amount_out <= 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"TraderJoe V2 quote returned zero amount_out for {from_token_symbol} -> "
+                    f"{to_token_symbol} (bin_step={bin_step}); refusing to build swap with no "
+                    f"slippage floor"
+                ),
+                intent_id=intent.intent_id,
+            )
+        return quote
+
+    @staticmethod
+    def _build_traderjoe_v2_swap_tx_data(
+        *,
+        swap_tx: Any,
+        amount_decimal: Decimal,
+        from_token_symbol: str,
+        to_token_symbol: str,
+        bin_step: int,
+    ) -> TransactionData:
+        """Convert the adapter's TransactionData into compiler TransactionData.
+
+        Extracted so the main compile method stays small. Gas default matches
+        pre-refactor behaviour (``DEFAULT_GAS_ESTIMATES["traderjoe_v2_swap"]``
+        falling back to 200_000).
+        """
+        return TransactionData(
+            to=swap_tx.to,
+            value=swap_tx.value,
+            data=swap_tx.data if isinstance(swap_tx.data, str) else f"0x{swap_tx.data.hex()}",
+            gas_estimate=swap_tx.gas or DEFAULT_GAS_ESTIMATES.get("traderjoe_v2_swap", 200_000),
+            description=(
+                f"TraderJoe V2 swap: {amount_decimal} {from_token_symbol} -> {to_token_symbol} (bin_step={bin_step})"
+            ),
+            tx_type="traderjoe_v2_swap",
+        )
+
     def _compile_swap_traderjoe_v2(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for TraderJoe V2 Liquidity Book (VIB-1928).
 
@@ -4362,17 +4701,20 @@ class IntentCompiler:
         Returns:
             CompilationResult with TraderJoe V2 swap ActionBundle
         """
-        result = CompilationResult(
-            status=CompilationStatus.SUCCESS,
-            intent_id=intent.intent_id,
-        )
         transactions: list[TransactionData] = []
 
         try:
-            # Check chain support
             from almanak.core.contracts import TRADERJOE_V2 as TJ_ADDRESSES
-            from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
-            from almanak.framework.connectors.traderjoe_v2.sdk import PoolNotFoundError
+            from almanak.framework.connectors.traderjoe_v2 import (
+                TraderJoeV2Adapter,
+                TraderJoeV2Config,
+            )
+            from almanak.framework.connectors.traderjoe_v2.sdk import (
+                PoolNotFoundError as _TJPoolNotFoundError,
+            )
+            from almanak.framework.connectors.traderjoe_v2.sdk import (
+                TraderJoeV2SDKError as _TJSDKError,
+            )
 
             if self.chain not in TJ_ADDRESSES:
                 return CompilationResult(
@@ -4381,117 +4723,45 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            # Resolve tokens (use the compiler's injected resolver to keep this
-            # path consistent with _resolve_token() and test-time overrides)
-            resolver = self._token_resolver
-            from_token = self._resolve_token(intent.from_token)
-            to_token = self._resolve_token(intent.to_token)
+            tokens = self._resolve_traderjoe_v2_swap_tokens(intent)
+            if isinstance(tokens, CompilationResult):
+                return tokens
+            from_token, to_token, swap_from_token, swap_to_token = tokens
 
-            if from_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown from_token: {intent.from_token}",
-                    intent_id=intent.intent_id,
-                )
-            if to_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Unknown to_token: {intent.to_token}",
-                    intent_id=intent.intent_id,
-                )
-
-            # Wrap native tokens for pool probing/validation (LB pairs use ERC-20s)
-            swap_from_token = (
-                resolver.resolve_for_swap(intent.from_token, self.chain) if from_token.is_native else from_token
-            )
-            swap_to_token = resolver.resolve_for_swap(intent.to_token, self.chain) if to_token.is_native else to_token
-
-            # Calculate input amount
-            amount_decimal: Decimal
-            if intent.amount_usd is not None:
-                price = self._require_token_price(from_token.symbol)
-                amount_decimal = intent.amount_usd / price
-            elif intent.amount is not None:
-                if intent.amount == "all":
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                        intent_id=intent.intent_id,
-                    )
-                amount_decimal = intent.amount  # type: ignore[assignment]
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Either amount_usd or amount must be provided",
-                    intent_id=intent.intent_id,
-                )
-
+            amount_resolution = self._resolve_traderjoe_v2_swap_amount(intent, from_token)
+            if isinstance(amount_resolution, CompilationResult):
+                return amount_resolution
+            amount_decimal: Decimal = amount_resolution
             amount_in_wei = int(amount_decimal * Decimal(10**from_token.decimals))
 
-            # TraderJoe V2 adapter accepts either a connected gateway_client
-            # or a direct RPC URL. Normalize a disconnected gateway client to
-            # None so we fall back to rpc_url cleanly.
-            gateway_client = self._gateway_client
-            if gateway_client is not None and not gateway_client.is_connected:
-                gateway_client = None
-
-            rpc_url = None if gateway_client is not None else self._get_chain_rpc_url()
-            if gateway_client is None and not rpc_url:
-                raise ValueError(
-                    "Connected gateway_client or RPC URL required for TraderJoe V2 swap compilation. "
-                    "Either provide rpc_url to IntentCompiler or use GatewayExecutionOrchestrator."
-                )
-
-            # Auto-detect bin_step (swap_params.bin_step override is not yet supported; see VIB-1846)
-            requested_bin_step = None
-
-            # Get router address for approvals
-            router_address = TJ_ADDRESSES[self.chain]["router"]
-
-            # Create adapter
-            slippage_bps = int(intent.max_slippage * Decimal("10000"))
-            config = TraderJoeV2Config(
-                chain=self.chain,
-                wallet_address=self.wallet_address,
-                rpc_url=rpc_url,
-                default_slippage_bps=slippage_bps,
-                gateway_client=gateway_client,
+            gateway_client, rpc_url = self._resolve_traderjoe_v2_gateway_rpc(
+                adapter_name="TraderJoe V2 swap compilation",
             )
-            tj_adapter = TraderJoeV2Adapter(config)
 
-            # Auto-detect bin_step if not specified: try common bin steps
-            bin_step: int
-            if requested_bin_step is not None:
-                bin_step = int(requested_bin_step)
-            else:
-                # Try common bin steps in order of popularity (20 is most common)
-                bin_step_order = [20, 25, 15, 10, 50, 5, 100, 1]
-                found_bin_step = None
-                for bs in bin_step_order:
-                    try:
-                        tj_adapter.sdk.get_pool_address(swap_from_token.address, swap_to_token.address, bs)
-                        found_bin_step = bs
-                        break
-                    except PoolNotFoundError:
-                        continue
-                    except Exception as exc:
-                        return CompilationResult(
-                            status=CompilationStatus.FAILED,
-                            error=f"Failed to probe TraderJoe V2 pool for bin_step={bs}: {exc}",
-                            intent_id=intent.intent_id,
-                        )
+            router_address = TJ_ADDRESSES[self.chain]["router"]
+            slippage_bps = int(intent.max_slippage * Decimal("10000"))
+            tj_adapter = TraderJoeV2Adapter(
+                TraderJoeV2Config(
+                    chain=self.chain,
+                    wallet_address=self.wallet_address,
+                    rpc_url=rpc_url,
+                    default_slippage_bps=slippage_bps,
+                    gateway_client=gateway_client,
+                )
+            )
 
-                if found_bin_step is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"No TraderJoe V2 pool found for {from_token.symbol}/{to_token.symbol} on {self.chain}. "
-                            f"Tried bin steps: {bin_step_order}. "
-                            f"The pair may not have a Liquidity Book pool."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                bin_step = found_bin_step
+            bin_step_or_err = self._autodetect_traderjoe_v2_bin_step(
+                intent=intent,
+                tj_adapter=tj_adapter,
+                swap_from_token=swap_from_token,
+                swap_to_token=swap_to_token,
+                from_token_symbol=from_token.symbol,
+                to_token_symbol=to_token.symbol,
+                pool_not_found_exc=_TJPoolNotFoundError,
+            )
+            if isinstance(bin_step_or_err, CompilationResult):
+                return bin_step_or_err
+            bin_step: int = bin_step_or_err
 
             logger.info(
                 "Compiling TraderJoe V2 SWAP: %s -> %s, amount=%s, bin_step=%d",
@@ -4501,94 +4771,42 @@ class IntentCompiler:
                 bin_step,
             )
 
-            # Validate pool existence
             from .pool_validation import validate_traderjoe_pool
 
+            # Use the same normalised gateway as the adapter: a disconnected
+            # ``self._gateway_client`` would otherwise make validation fail
+            # against a stale client while the adapter succeeds via RPC.
             pool_check = validate_traderjoe_pool(
                 self.chain,
                 swap_from_token.address,
                 swap_to_token.address,
                 bin_step,
                 rpc_url,
-                gateway_client=self._gateway_client,
+                gateway_client=gateway_client,
             )
             failed = self._validate_pool(pool_check, intent.intent_id)
             if failed is not None:
                 return failed
 
-            # Build approve TX for input token
             if not from_token.is_native:
-                approve_txs = self._build_approve_tx(
-                    from_token.address,
-                    router_address,
-                    amount_in_wei,
-                )
-                transactions.extend(approve_txs)
+                transactions.extend(self._build_approve_tx(from_token.address, router_address, amount_in_wei))
 
-            # VIB-3203 Phase B: fetch the router quote ONCE up front so the
-            # same SwapQuote shapes both (a) ``amount_out_min`` baked into the
-            # swap calldata and (b) ``expected_output_human`` persisted on the
-            # bundle metadata for realized-slippage measurement. A second
-            # quote call between TX build and metadata persistence would let
-            # the LB pool drift across bins, making realized slippage measure
-            # against a different baseline than the protection threshold.
-            from almanak.framework.connectors.traderjoe_v2 import (
-                PoolNotFoundError as _TJPoolNotFoundError,
+            # VIB-3203 Phase B: quote once; re-use for both amount_out_min and metadata.
+            quote_or_err = self._fetch_traderjoe_v2_swap_quote(
+                intent=intent,
+                tj_adapter=tj_adapter,
+                from_token_symbol=from_token.symbol,
+                to_token_symbol=to_token.symbol,
+                amount_decimal=amount_decimal,
+                bin_step=bin_step,
+                pool_not_found_exc=_TJPoolNotFoundError,
+                sdk_error_exc=_TJSDKError,
             )
-            from almanak.framework.connectors.traderjoe_v2 import (
-                TraderJoeV2SDKError as _TJSDKError,
-            )
-
-            # VIB-3203 Phase B: fetch the quote once and anchor BOTH ``amount_out_min``
-            # and ``expected_output_human`` to the same on-chain read.
-            # We pass the resulting quote to ``build_swap_transaction`` which skips
-            # its own internal ``get_swap_quote`` call when a matching quote is
-            # provided — this eliminates the Liquidity Book bin-drift between two
-            # reads that would otherwise mis-anchor realized slippage.
-            #
-            # If this quote fails (PoolNotFound / RPC flake / TokenResolution),
-            # fail-closed here instead of falling through to
-            # ``build_swap_transaction`` and letting it re-query the same broken
-            # RPC. The pre-Phase-B behaviour already failed the compile in this
-            # case (the adapter itself would have hit the same error), but an
-            # explicit fail-closed here surfaces a clearer error to the strategy
-            # author and documents the contract: a successful TJ V2 swap
-            # compile requires a successful quote.
-            try:
-                quote = tj_adapter.get_swap_quote(
-                    token_in=from_token.symbol,
-                    token_out=to_token.symbol,
-                    amount_in=amount_decimal,
-                    bin_step=bin_step,
-                )
-            except (_TJPoolNotFoundError, _TJSDKError) as quote_exc:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"TraderJoe V2 quote failed for {from_token.symbol} -> {to_token.symbol} "
-                        f"(bin_step={bin_step}): {quote_exc}"
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            if quote.amount_out <= 0:
-                # Drained / malformed pool returning a zero quote would produce a
-                # swap with ``amount_out_min = 0`` — no slippage protection. Refuse
-                # the compile rather than build a zero-floor swap (pr-auditor P6).
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"TraderJoe V2 quote returned zero amount_out for {from_token.symbol} -> "
-                        f"{to_token.symbol} (bin_step={bin_step}); refusing to build swap with no "
-                        f"slippage floor"
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
+            if isinstance(quote_or_err, CompilationResult):
+                return quote_or_err
+            quote = quote_or_err
             expected_output_human: Decimal = quote.amount_out
 
-            # Build swap TX using adapter, reusing the quote so amount_out_min
-            # and expected_output_human are anchored to the same on-chain read.
             swap_tx = tj_adapter.build_swap_transaction(
                 token_in=from_token.symbol,
                 token_out=to_token.symbol,
@@ -4597,25 +4815,20 @@ class IntentCompiler:
                 slippage_bps=slippage_bps,
                 quote=quote,
             )
-
-            # Convert adapter TransactionData to compiler TransactionData
-            swap_tx_data = TransactionData(
-                to=swap_tx.to,
-                value=swap_tx.value,
-                data=swap_tx.data if isinstance(swap_tx.data, str) else f"0x{swap_tx.data.hex()}",
-                gas_estimate=swap_tx.gas or DEFAULT_GAS_ESTIMATES.get("traderjoe_v2_swap", 200_000),
-                description=(
-                    f"TraderJoe V2 swap: {amount_decimal} {from_token.symbol} -> {to_token.symbol} (bin_step={bin_step})"
-                ),
-                tx_type="traderjoe_v2_swap",
+            transactions.append(
+                self._build_traderjoe_v2_swap_tx_data(
+                    swap_tx=swap_tx,
+                    amount_decimal=amount_decimal,
+                    from_token_symbol=from_token.symbol,
+                    to_token_symbol=to_token.symbol,
+                    bin_step=bin_step,
+                )
             )
-            transactions.append(swap_tx_data)
 
-            total_gas = sum(tx.gas_estimate for tx in transactions)
-
-            action_bundle = ActionBundle(
+            total_gas = sum_transaction_gas(transactions)
+            action_bundle = assemble_action_bundle(
                 intent_type=IntentType.SWAP.value,
-                transactions=[tx.to_dict() for tx in transactions],
+                transactions=transactions,
                 metadata={
                     "from_token": from_token.to_dict(),
                     "to_token": to_token.to_dict(),
@@ -4631,10 +4844,6 @@ class IntentCompiler:
                 },
             )
 
-            result.action_bundle = action_bundle
-            result.transactions = transactions
-            result.total_gas_estimate = total_gas
-
             logger.info(
                 "Compiled TraderJoe V2 SWAP: %s -> %s, bin_step=%d, %d txs, %d gas",
                 from_token.symbol,
@@ -4644,12 +4853,22 @@ class IntentCompiler:
                 total_gas,
             )
 
+            return CompilationResult(
+                status=CompilationStatus.SUCCESS,
+                intent_id=intent.intent_id,
+                action_bundle=action_bundle,
+                transactions=transactions,
+                total_gas_estimate=total_gas,
+                warnings=[],
+            )
+
         except Exception as e:
             logger.exception("Failed to compile TraderJoe V2 SWAP intent: %s", e)
-            result.status = CompilationStatus.FAILED
-            result.error = str(e)
-
-        return result
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                intent_id=intent.intent_id,
+                error=str(e),
+            )
 
     def _compile_swap_fluid(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Fluid DEX (Arbitrum only).

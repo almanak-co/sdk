@@ -19,9 +19,13 @@ from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
     check_price_impact,
+    choose_lifi_gas_estimate,
     choose_safer_quote,
     compute_deadline,
     compute_min_amount_out,
+    normalise_gateway_or_rpc,
+    parse_lifi_tx_value,
+    probe_traderjoe_bin_step,
     sum_transaction_gas,
 )
 from almanak.framework.intents.compiler_models import TransactionData
@@ -455,3 +459,254 @@ class TestHelperComposition:
         )
         assert bundle.metadata["min_amount_out"] == "48755000000000000"
         assert bundle.metadata["deadline"] == 1_700_000_600
+
+
+# ---------------------------------------------------------------------------
+# parse_lifi_tx_value  (Phase 6B.5)
+# ---------------------------------------------------------------------------
+
+
+class TestParseLifiTxValue:
+    def test_none_returns_zero(self) -> None:
+        assert parse_lifi_tx_value(None) == 0
+
+    def test_empty_string_returns_zero(self) -> None:
+        assert parse_lifi_tx_value("") == 0
+
+    def test_decimal_string(self) -> None:
+        assert parse_lifi_tx_value("1000000000000000000") == 10**18
+
+    def test_hex_string(self) -> None:
+        assert parse_lifi_tx_value("0xde0b6b3a7640000") == 10**18
+
+    def test_integer_value(self) -> None:
+        # Defensive: the LiFi SDK normally returns strings, but an int must
+        # still parse cleanly.
+        assert parse_lifi_tx_value(42) == 42
+
+    def test_zero_string(self) -> None:
+        # Native-free same-chain swaps send value="0".
+        assert parse_lifi_tx_value("0") == 0
+
+    def test_garbage_string_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_lifi_tx_value("not a number")
+
+    def test_negative_value_raises(self) -> None:
+        # TX values are unsigned wei — negative parses must fail closed.
+        with pytest.raises(ValueError, match="must be non-negative"):
+            parse_lifi_tx_value("-1")
+
+    def test_negative_int_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be non-negative"):
+            parse_lifi_tx_value(-1)
+
+
+# ---------------------------------------------------------------------------
+# choose_lifi_gas_estimate  (Phase 6B.5)
+# ---------------------------------------------------------------------------
+
+
+class TestChooseLifiGasEstimate:
+    def test_prefers_total_gas_estimate_when_positive(self) -> None:
+        assert (
+            choose_lifi_gas_estimate(total_gas_estimate=350_000, gas_limit="0xABCDE")
+            == 350_000
+        )
+
+    def test_falls_back_to_gas_limit_decimal_when_estimate_zero(self) -> None:
+        assert (
+            choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="250000")
+            == 250_000
+        )
+
+    def test_falls_back_to_gas_limit_hex_when_estimate_zero(self) -> None:
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="0x3D090") == 0x3D090
+
+    def test_default_when_everything_missing(self) -> None:
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit=None) == 200_000
+
+    def test_custom_default(self) -> None:
+        assert (
+            choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit=None, default=300_000)
+            == 300_000
+        )
+
+    def test_negative_total_gas_estimate_treated_as_missing(self) -> None:
+        # Defensive: a negative value is nonsense; treat same as zero.
+        assert (
+            choose_lifi_gas_estimate(total_gas_estimate=-1, gas_limit="150000")
+            == 150_000
+        )
+
+    def test_unparseable_gas_limit_falls_back_to_default(self) -> None:
+        assert (
+            choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="not-a-number")
+            == 200_000
+        )
+
+    def test_zero_gas_limit_falls_back_to_default(self) -> None:
+        # A gas_limit of 0 can't cover the 21k intrinsic cost — treat as unusable.
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="0") == 200_000
+
+    def test_negative_gas_limit_falls_back_to_default(self) -> None:
+        assert choose_lifi_gas_estimate(total_gas_estimate=0, gas_limit="-1") == 200_000
+
+
+# ---------------------------------------------------------------------------
+# probe_traderjoe_bin_step  (Phase 6B.5)
+# ---------------------------------------------------------------------------
+
+
+class _FakePoolNotFound(Exception):
+    """Stand-in for connectors.traderjoe_v2.sdk.PoolNotFoundError."""
+
+
+class TestProbeTraderjoeBinStep:
+    def test_first_candidate_hits(self) -> None:
+        calls: list[int] = []
+
+        def probe(_a: str, _b: str, bs: int) -> None:
+            calls.append(bs)
+            return None
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25, 15),
+        )
+        assert found == 20
+        assert broken is None
+        assert exc is None
+        assert calls == [20]
+
+    def test_iterates_past_not_found(self) -> None:
+        calls: list[int] = []
+
+        def probe(_a: str, _b: str, bs: int) -> None:
+            calls.append(bs)
+            if bs in (20, 25):
+                raise _FakePoolNotFound("no pool")
+            return None
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25, 15, 10),
+        )
+        assert found == 15
+        assert broken is None
+        assert exc is None
+        assert calls == [20, 25, 15]
+
+    def test_all_not_found(self) -> None:
+        def probe(_a: str, _b: str, _bs: int) -> None:
+            raise _FakePoolNotFound("nope")
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25),
+        )
+        assert found is None
+        assert broken is None
+        assert exc is None
+
+    def test_unexpected_exception_reports_broken_bin_step(self) -> None:
+        def probe(_a: str, _b: str, bs: int) -> None:
+            if bs == 20:
+                raise _FakePoolNotFound("no pool at 20")
+            raise RuntimeError(f"RPC flake at {bs}")
+
+        found, broken, exc = probe_traderjoe_bin_step(
+            probe=probe,
+            token_a="0xA",
+            token_b="0xB",
+            not_found_exception=_FakePoolNotFound,
+            candidates=(20, 25, 15),
+        )
+        assert found is None
+        assert broken == 25
+        assert isinstance(exc, RuntimeError)
+        assert "RPC flake at 25" in str(exc)
+
+    def test_rejects_non_callable_probe(self) -> None:
+        with pytest.raises(TypeError):
+            probe_traderjoe_bin_step(
+                probe="not-callable",  # type: ignore[arg-type]
+                token_a="0xA",
+                token_b="0xB",
+                not_found_exception=_FakePoolNotFound,
+            )
+
+
+# ---------------------------------------------------------------------------
+# normalise_gateway_or_rpc  (Phase 6B.5)
+# ---------------------------------------------------------------------------
+
+
+class _ConnectedGateway:
+    is_connected = True
+
+
+class _DisconnectedGateway:
+    is_connected = False
+
+
+class TestNormaliseGatewayOrRpc:
+    def test_connected_gateway_wins(self) -> None:
+        gw = _ConnectedGateway()
+        supplied = False
+
+        def supplier() -> str:
+            nonlocal supplied
+            supplied = True
+            return "http://rpc"
+
+        client, rpc = normalise_gateway_or_rpc(
+            gateway_client=gw, rpc_url_supplier=supplier
+        )
+        assert client is gw
+        assert rpc is None
+        # Supplier is not invoked on the gateway path.
+        assert supplied is False
+
+    def test_disconnected_gateway_falls_back_to_rpc(self) -> None:
+        client, rpc = normalise_gateway_or_rpc(
+            gateway_client=_DisconnectedGateway(),
+            rpc_url_supplier=lambda: "http://rpc",
+        )
+        assert client is None
+        assert rpc == "http://rpc"
+
+    def test_no_gateway_falls_back_to_rpc(self) -> None:
+        client, rpc = normalise_gateway_or_rpc(
+            gateway_client=None,
+            rpc_url_supplier=lambda: "http://rpc",
+        )
+        assert client is None
+        assert rpc == "http://rpc"
+
+    def test_empty_rpc_returned_as_none(self) -> None:
+        # Callers distinguish "no RPC" from "RPC=''" via the None sentinel.
+        client, rpc = normalise_gateway_or_rpc(
+            gateway_client=None,
+            rpc_url_supplier=lambda: "",
+        )
+        assert client is None
+        assert rpc is None
+
+    def test_non_callable_supplier_yields_none_rpc(self) -> None:
+        # Defensive: a mistyped caller shouldn't crash the helper.
+        client, rpc = normalise_gateway_or_rpc(
+            gateway_client=None,
+            rpc_url_supplier="not-callable",
+        )
+        assert client is None
+        assert rpc is None
