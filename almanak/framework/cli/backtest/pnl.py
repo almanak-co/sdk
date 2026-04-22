@@ -18,6 +18,7 @@ from ...backtesting import (
     PnLBacktestConfig,
     PnLBacktester,
 )
+from ...backtesting.models import BacktestResult
 from ...backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ...backtesting.pnl.logging_utils import configure_backtest_logging
 from ...backtesting.visualization import save_chart
@@ -208,6 +209,416 @@ def _print_pnl_configuration(
         click.echo(f"Output: {ctx.output_path}")
 
     click.echo("=" * 60)
+
+
+# =============================================================================
+# Phase 5B.2 extractions: execution + output helpers
+# =============================================================================
+
+
+async def _warm_cache_async(
+    data_provider: CoinGeckoDataProvider,
+    cache: DataCache,
+    token_list: list[str],
+    start: datetime | None,
+    end: datetime | None,
+    interval: int,
+    pnl_config: PnLBacktestConfig,
+) -> int:
+    """Pre-fetch OHLCV data into `cache`. Returns total cached data points.
+
+    Preserves issue #1698 (silent per-token swallow): per-token failures log a
+    warning on stderr but do not halt the warm-up. The outer `DataProvider`
+    `close()` still runs in the `finally` block regardless of per-token errors.
+    """
+    from ...data.cache import CacheKey, OHLCVData
+
+    total_cached = 0
+    try:
+        for token in token_list:
+            try:
+                cache_start = start or pnl_config.start_time
+                cache_end = end or pnl_config.end_time
+                ohlcv_data = await data_provider.get_ohlcv(token, cache_start, cache_end, interval)
+                items = []
+                for ohlcv in ohlcv_data:
+                    key = CacheKey(
+                        token=token.upper(),
+                        timestamp=ohlcv.timestamp,
+                        interval=f"{interval}s",
+                    )
+                    data = OHLCVData(
+                        open=ohlcv.open,
+                        high=ohlcv.high,
+                        low=ohlcv.low,
+                        close=ohlcv.close,
+                        volume=ohlcv.volume if hasattr(ohlcv, "volume") else None,
+                    )
+                    items.append((key, data))
+
+                cached_count = cache.set_batch(items)
+                total_cached += cached_count
+                click.echo(f"  Cached {cached_count} data points for {token}")
+
+            except Exception as e:
+                click.echo(f"  Warning: Failed to cache data for {token}: {e}", err=True)
+    finally:
+        await data_provider.close()
+
+    return total_cached
+
+
+def _warm_cache(
+    ctx: PnLBacktestContext,
+    start: datetime | None,
+    end: datetime | None,
+    interval: int,
+) -> DataCache | None:
+    """Phase 9: pre-warm the OHLCV cache for the backtest.
+
+    Creates a fresh `DataCache`, uses a dedicated `CoinGeckoDataProvider` to
+    pre-fetch OHLCV data for each token, then closes that provider. The
+    caller creates its own provider for the backtest run itself — we do NOT
+    reuse the warming provider.
+
+    Preserves issue #1698 (silent overall swallow): if `asyncio.run` raises,
+    the backtest continues without a pre-warmed cache and the original
+    "Proceeding with backtest without pre-warmed cache..." fallback is
+    emitted byte-for-byte.
+
+    Returns:
+        The `DataCache` instance (populated or empty) on success. `None` is
+        never returned today because warming failures fall through — the
+        return type allows a future tightening without changing callers.
+    """
+    from ...backtesting.pnl.providers.coingecko import RetryConfig
+
+    click.echo()
+    click.echo("Warming data cache...")
+    cache = DataCache(ttl_seconds=0)
+    cache.reset_stats()
+
+    data_provider = CoinGeckoDataProvider(
+        retry_config=RetryConfig.for_backtest(),
+        persistent_cache=True,
+        historical_cache_ttl=0,
+    )
+
+    try:
+        total_points = asyncio.run(
+            _warm_cache_async(
+                data_provider=data_provider,
+                cache=cache,
+                token_list=ctx.token_list,
+                start=start,
+                end=end,
+                interval=interval,
+                pnl_config=ctx.pnl_config,
+            )
+        )
+        click.echo(f"Cache warming complete: {total_points} total data points")
+    except Exception as e:
+        click.echo(f"Warning: Cache warming failed: {e}", err=True)
+        click.echo("Proceeding with backtest without pre-warmed cache...")
+
+    return cache
+
+
+def _run_backtest(
+    backtester: PnLBacktester,
+    strategy_instance: Any,
+    pnl_config: PnLBacktestConfig,
+) -> BacktestResult:
+    """Phase 10: run the backtest in a fresh event loop.
+
+    Preserves the exact error string `"Error running backtest: {e}"` and the
+    `sys.exit(1)` exit code from the original inline block. Any exception from
+    `asyncio.run(backtester.backtest(...))` is surfaced via stderr and ends
+    the process.
+    """
+    try:
+        return asyncio.run(backtester.backtest(strategy_instance, pnl_config))
+    except Exception as e:
+        click.echo(f"Error running backtest: {e}", err=True)
+        sys.exit(1)
+
+
+def _compute_strategy_returns(equity_curve: list[Any]) -> list[Decimal]:
+    """Return per-step Decimal returns from an equity curve.
+
+    Preserves the original inline loop's behaviour: when `prev_val <= 0` the
+    step's return is recorded as `Decimal("0")` rather than raising. Consumers
+    must still compare `len(returns)` to `len(benchmark_returns)` — this
+    function does not truncate.
+    """
+    returns: list[Decimal] = []
+    for i in range(1, len(equity_curve)):
+        prev_val = equity_curve[i - 1].value_usd
+        curr_val = equity_curve[i].value_usd
+        if prev_val > 0:
+            returns.append((curr_val - prev_val) / prev_val)
+        else:
+            returns.append(Decimal("0"))
+    return returns
+
+
+async def _fetch_benchmark_returns(
+    benchmark: str,
+    start: datetime,
+    end: datetime,
+    interval: int,
+) -> tuple[list[Decimal], Decimal]:
+    """Fetch benchmark period returns and total return for the window.
+
+    Lifted from the inline `_fetch_benchmark` coroutine. Uses the `Benchmark`
+    enum resolver so callers pass the raw `--benchmark` CLI value.
+    """
+    from ...backtesting.pnl.providers.benchmark import (
+        Benchmark,
+        get_benchmark_returns,
+        get_benchmark_total_return,
+    )
+
+    benchmark_enum = Benchmark.from_string(benchmark)
+    returns = await get_benchmark_returns(benchmark_enum, start, end, interval)
+    total = await get_benchmark_total_return(benchmark_enum, start, end)
+    return returns, total
+
+
+def _print_benchmark_comparison(
+    ctx: PnLBacktestContext,
+    result: BacktestResult,
+    benchmark: str,
+    start: datetime | None,
+    end: datetime | None,
+    interval: int,
+) -> None:
+    """Phase 12: render the benchmark comparison block.
+
+    No-op when `benchmark`/`start`/`end` are not all present (matches the
+    original guard). Preserves issue #1699 (bare `except Exception` emitting
+    `"Could not calculate benchmark metrics: {e}"`) byte-for-byte.
+    """
+    if not (benchmark and start and end):
+        return
+
+    click.echo()
+    click.echo("-" * 60)
+    click.echo(f"BENCHMARK COMPARISON ({benchmark.upper()})")
+    click.echo("-" * 60)
+
+    try:
+        from ...backtesting.pnl.calculators.benchmark import (
+            calculate_alpha,
+            calculate_beta,
+            calculate_information_ratio,
+        )
+
+        benchmark_returns, benchmark_total = asyncio.run(_fetch_benchmark_returns(benchmark, start, end, interval))
+
+        if result.equity_curve and len(result.equity_curve) >= 2:
+            strategy_returns = _compute_strategy_returns(result.equity_curve)
+
+            min_len = min(len(strategy_returns), len(benchmark_returns))
+            if min_len >= 2:
+                strategy_returns = strategy_returns[:min_len]
+                benchmark_returns = benchmark_returns[:min_len]
+
+                info_ratio = calculate_information_ratio(strategy_returns, benchmark_returns)
+                beta_val = calculate_beta(strategy_returns, benchmark_returns)
+
+                # total_return_pct is a percentage (e.g. 15 for 15%); divide by 100 to
+                # get the ratio that calculate_alpha expects (same convention as benchmark_total).
+                strategy_total = (
+                    result.metrics.total_return_pct / Decimal("100")
+                    if result.metrics.total_return_pct
+                    else Decimal("0")
+                )
+                alpha_val = calculate_alpha(strategy_total, benchmark_total, beta_val)
+
+                click.echo(f"Benchmark Return: {float(benchmark_total) * 100:+.2f}%")
+                click.echo(f"Strategy Return:  {float(strategy_total) * 100:+.2f}%")
+                excess = float(strategy_total - benchmark_total) * 100
+                click.echo(f"Excess Return:    {excess:+.2f}%")
+                click.echo()
+                click.echo(f"Information Ratio: {float(info_ratio):.3f}")
+                click.echo(f"Beta:              {float(beta_val):.3f}")
+                click.echo(f"Alpha:             {float(alpha_val) * 100:+.2f}%")
+            else:
+                click.echo("Insufficient data for benchmark comparison.")
+        else:
+            click.echo("No equity curve data for benchmark comparison.")
+
+    except Exception as e:
+        click.echo(f"Could not calculate benchmark metrics: {e}")
+
+    click.echo("-" * 60)
+    # Note: ctx param is accepted for signature symmetry with other helpers.
+    # Read-only usage lets future enhancements (e.g. chain-specific benchmarks)
+    # avoid a signature churn.
+    del ctx
+
+
+def _print_cache_stats(cache_stats: CacheStats | None) -> None:
+    """Phase 13: render the cache statistics block.
+
+    No-op when `cache_stats is None` (matches the original guard).
+    """
+    if cache_stats is None:
+        return
+
+    click.echo()
+    click.echo("-" * 60)
+    click.echo("CACHE STATISTICS")
+    click.echo("-" * 60)
+    click.echo(f"Total Entries: {cache_stats.total_entries:,}")
+    click.echo(f"Cache Hits: {cache_stats.hits:,}")
+    click.echo(f"Cache Misses: {cache_stats.misses:,}")
+    click.echo(f"Expired: {cache_stats.expired:,}")
+    click.echo(f"Hit Rate: {cache_stats.hit_rate() * 100:.1f}%")
+    click.echo("-" * 60)
+
+
+def _print_verbose_trades(result: BacktestResult, verbose: bool) -> None:
+    """Phase 14: render the verbose trade history block.
+
+    No-op unless both `verbose=True` and `result.trades` is non-empty, matching
+    the original guard.
+    """
+    if not (verbose and result.trades):
+        return
+
+    click.echo()
+    click.echo("-" * 60)
+    click.echo("TRADE HISTORY")
+    click.echo("-" * 60)
+
+    for i, trade in enumerate(result.trades, 1):
+        pnl_sign = "+" if trade.pnl_usd >= 0 else ""
+        click.echo(
+            f"{i:3}. {trade.timestamp.strftime('%Y-%m-%d %H:%M')}: "
+            f"{trade.intent_type.value:10} "
+            f"{pnl_sign}${trade.pnl_usd:,.2f} "
+            f"(fee: ${trade.fee_usd:,.2f}, gas: ${trade.gas_cost_usd:,.2f})"
+        )
+
+    click.echo("-" * 60)
+
+
+def _write_json_output(
+    result: BacktestResult,
+    output_path: Path | None,
+    benchmark: str,
+    cache_stats: CacheStats | None,
+) -> None:
+    """Phase 15: write the full JSON result to `output_path` if requested.
+
+    Preserves the exact JSON schema: top-level keys come from `result.to_dict()`
+    with a `_meta` dict appended (generated_at, generator, engine, benchmark)
+    and `cache_stats` appended only when stats were collected. Key order and
+    naming are load-bearing — external tooling reads this file.
+    """
+    if output_path is None:
+        return
+
+    click.echo()
+    output_data = result.to_dict()
+    output_data["_meta"] = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "generator": "almanak backtest pnl",
+        "engine": "pnl",
+        "benchmark": benchmark,
+    }
+
+    if cache_stats is not None:
+        output_data["cache_stats"] = cache_stats.to_dict()
+
+    with open(output_path, "w") as f:
+        json.dump(output_data, f, indent=2, default=str)
+
+    click.echo(f"Results written to: {output_path}")
+
+
+def _chart_output_path(
+    strategy: str | None,
+    output_path: Path | None,
+    chart_format: str,
+) -> Path:
+    """Derive the chart output path.
+
+    Mirrors the inline rules: `.html` for html, `.png` otherwise; alongside
+    `output_path` when provided; otherwise `equity_curve_<strategy>.<ext>` in
+    the current directory.
+    """
+    chart_extension = ".html" if chart_format.lower() == "html" else ".png"
+    if output_path:
+        return output_path.with_suffix(chart_extension)
+    safe_strategy_name = strategy.replace("/", "_").replace("\\", "_") if strategy else "backtest"
+    return Path(f"equity_curve_{safe_strategy_name}{chart_extension}")
+
+
+def _generate_chart(
+    result: BacktestResult,
+    strategy: str | None,
+    output_path: Path | None,
+    chart_format: str,
+) -> None:
+    """Phase 16: generate the equity curve chart via `save_chart`.
+
+    Emits the same status lines and counts as the original inline block.
+    """
+    click.echo()
+    click.echo("Generating equity curve chart...")
+
+    chart_path = _chart_output_path(strategy, output_path, chart_format)
+
+    chart_result = save_chart(
+        result=result,
+        format=chart_format.lower(),
+        path=chart_path,
+        show_drawdown=True,
+        show_trades=True,
+    )
+
+    if chart_result.success:
+        click.echo(f"Chart saved to: {chart_result.file_path}")
+        if chart_result.drawdown_periods:
+            click.echo(f"  Highlighted {len(chart_result.drawdown_periods)} drawdown period(s)")
+        if chart_result.trade_markers:
+            click.echo(f"  Marked {len(chart_result.trade_markers)} trade(s)")
+    else:
+        click.echo(f"Warning: Failed to generate chart: {chart_result.error}", err=True)
+
+
+def _generate_html_report(
+    result: BacktestResult,
+    strategy: str | None,
+    output_path: Path | None,
+) -> None:
+    """Phase 17: generate an HTML report via `generate_report`.
+
+    NOTE: a shared `write_html_report` helper is planned for
+    `run_helpers.py` but is not yet available from 5B.1. The logic here is
+    inlined to match the original byte-for-byte; consolidate in 5B.3 when the
+    sweep command adopts the same helper.
+    """
+    from ...backtesting.report_generator import generate_report
+
+    click.echo()
+    click.echo("Generating HTML report...")
+
+    if output_path:
+        report_path = output_path.with_suffix(".html")
+    else:
+        safe_strategy_name = strategy.replace("/", "_").replace("\\", "_") if strategy else "backtest"
+        report_path = Path(f"backtest_report_{safe_strategy_name}.html")
+
+    report_result = generate_report(result, output_path=report_path)
+
+    if report_result.success:
+        click.echo(f"Report saved to: {report_result.file_path}")
+    else:
+        click.echo(f"Warning: Failed to generate report: {report_result.error}", err=True)
 
 
 @backtest.command("pnl")
@@ -418,325 +829,93 @@ def pnl_backtest(
         pnl_config=pnl_config,
     )
 
-    # Refresh locals for the remaining (still-inline) phases — 5B.2 will move these.
-    strategy = ctx.strategy
-    pnl_config = ctx.pnl_config
-    token_list = ctx.token_list
-    output_path = ctx.output_path
-
     # Configure logging based on verbose flag
     configure_backtest_logging(verbose=verbose)
 
     # Phase 5: display configuration banner
     _print_pnl_configuration(ctx, from_result, warm_cache)
 
-    # Handle dry run
+    # Phase 6: --dry-run early exit
     if dry_run:
         click.echo()
         click.echo("Dry run - backtest not executed.")
         return
 
-    # Load strategy configuration
+    # Phase 7: load strategy configuration and build instance
     if config_file:
         with open(config_file) as f:
             strategy_config = json.load(f)
         click.echo(f"Loaded config from: {config_file}")
     else:
-        strategy_config = load_strategy_config(strategy, chain)
+        strategy_config = load_strategy_config(ctx.strategy, ctx.pnl_config.chain)
 
     # Resolve strategy class. The earlier validation guarantees the strategy is
     # registered, so get_strategy() must not raise here.
-    strategy_class = get_strategy(strategy)
+    strategy_class = get_strategy(ctx.strategy)
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, ctx.pnl_config.chain)
 
-    # Create strategy instance
-    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, chain)
-
-    # Ensure strategy has a non-empty strategy_id.
     fallback_id = (
         strategy_config.get("strategy_id")
         or strategy_config.get("name")
-        or strategy
+        or ctx.strategy
         or strategy_instance.__class__.__name__
     )
     ensure_strategy_id(strategy_instance, fallback=fallback_id)
 
-    # Create data provider
+    # Phase 8: initialize data provider for the backtest run
     click.echo()
     click.echo("Initializing CoinGecko data provider...")
     from ...backtesting.pnl.providers.coingecko import RetryConfig
 
+    # Phase 9: warm cache (uses its own provider internally; closes it when done)
+    cache: DataCache | None = None
+    if warm_cache:
+        cache = _warm_cache(ctx, start, end, interval)
+
+    # Fresh data provider for the backtest run. Matches the original two-step
+    # sequence: warming uses a throwaway provider (closed in its own finally),
+    # then we create this one for the actual backtest.
     data_provider = CoinGeckoDataProvider(
         retry_config=RetryConfig.for_backtest(),
         persistent_cache=True,
         historical_cache_ttl=0,
     )
 
-    # Initialize data cache for tracking stats
-    cache: DataCache | None = None
-    cache_stats: CacheStats | None = None
-
-    # Warm cache if requested
-    if warm_cache:
-        click.echo()
-        click.echo("Warming data cache...")
-        cache = DataCache(ttl_seconds=0)
-        cache.reset_stats()
-
-        async def warm_cache_async() -> int:
-            """Pre-fetch OHLCV data and store in cache."""
-            from ...data.cache import CacheKey, OHLCVData
-
-            total_cached = 0
-            try:
-                for token in token_list:
-                    try:
-                        cache_start = start or pnl_config.start_time
-                        cache_end = end or pnl_config.end_time
-                        ohlcv_data = await data_provider.get_ohlcv(token, cache_start, cache_end, interval)
-                        items = []
-                        for ohlcv in ohlcv_data:
-                            key = CacheKey(
-                                token=token.upper(),
-                                timestamp=ohlcv.timestamp,
-                                interval=f"{interval}s",
-                            )
-                            data = OHLCVData(
-                                open=ohlcv.open,
-                                high=ohlcv.high,
-                                low=ohlcv.low,
-                                close=ohlcv.close,
-                                volume=ohlcv.volume if hasattr(ohlcv, "volume") else None,
-                            )
-                            items.append((key, data))
-
-                        if cache is not None:
-                            cached_count = cache.set_batch(items)
-                            total_cached += cached_count
-                            click.echo(f"  Cached {cached_count} data points for {token}")
-
-                    except Exception as e:
-                        click.echo(f"  Warning: Failed to cache data for {token}: {e}", err=True)
-            finally:
-                await data_provider.close()
-
-            return total_cached
-
-        try:
-            total_points = asyncio.run(warm_cache_async())
-            click.echo(f"Cache warming complete: {total_points} total data points")
-        except Exception as e:
-            click.echo(f"Warning: Cache warming failed: {e}", err=True)
-            click.echo("Proceeding with backtest without pre-warmed cache...")
-
-        # Create fresh data provider
-        data_provider = CoinGeckoDataProvider(
-            retry_config=RetryConfig.for_backtest(),
-            persistent_cache=True,
-            historical_cache_ttl=0,
-        )
-
-    # Create backtester
+    # Phase 10: run the backtest
     backtester = PnLBacktester(
         data_provider=data_provider,
         fee_models={},
         slippage_models={},
     )
 
-    # Run backtest
     click.echo()
     click.echo("Starting PnL backtest...")
     click.echo()
 
-    try:
-        result = asyncio.run(backtester.backtest(strategy_instance, pnl_config))
-    except Exception as e:
-        click.echo(f"Error running backtest: {e}", err=True)
-        sys.exit(1)
+    result = _run_backtest(backtester, strategy_instance, ctx.pnl_config)
 
-    # Collect cache statistics if cache was used
-    if cache is not None:
-        cache_stats = cache.stats
+    cache_stats: CacheStats | None = cache.stats if cache is not None else None
 
-    # Display results
+    # Phase 11: display results summary
     click.echo()
     click.echo("=" * 60)
     click.echo("BACKTEST RESULTS")
     click.echo("=" * 60)
     click.echo(result.summary())
 
-    # Display benchmark comparison
-    if benchmark and start and end:
-        click.echo()
-        click.echo("-" * 60)
-        click.echo(f"BENCHMARK COMPARISON ({benchmark.upper()})")
-        click.echo("-" * 60)
+    # Phases 12-14: print benchmark, cache, verbose-trade sections
+    _print_benchmark_comparison(ctx, result, benchmark, start, end, interval)
+    _print_cache_stats(cache_stats)
+    _print_verbose_trades(result, verbose)
 
-        try:
-            from ...backtesting.pnl.calculators.benchmark import (
-                calculate_alpha,
-                calculate_beta,
-                calculate_information_ratio,
-            )
-            from ...backtesting.pnl.providers.benchmark import (
-                Benchmark,
-                get_benchmark_returns,
-                get_benchmark_total_return,
-            )
-
-            benchmark_enum = Benchmark.from_string(benchmark)
-
-            async def _fetch_benchmark():
-                returns = await get_benchmark_returns(benchmark_enum, start, end, interval)
-                total = await get_benchmark_total_return(benchmark_enum, start, end)
-                return returns, total
-
-            benchmark_returns, benchmark_total = asyncio.run(_fetch_benchmark())
-
-            if result.equity_curve and len(result.equity_curve) >= 2:
-                strategy_returns = []
-                for i in range(1, len(result.equity_curve)):
-                    prev_val = result.equity_curve[i - 1].value_usd
-                    curr_val = result.equity_curve[i].value_usd
-                    if prev_val > 0:
-                        strategy_returns.append((curr_val - prev_val) / prev_val)
-                    else:
-                        strategy_returns.append(Decimal("0"))
-
-                min_len = min(len(strategy_returns), len(benchmark_returns))
-                if min_len >= 2:
-                    strategy_returns = strategy_returns[:min_len]
-                    benchmark_returns = benchmark_returns[:min_len]
-
-                    info_ratio = calculate_information_ratio(strategy_returns, benchmark_returns)
-                    beta_val = calculate_beta(strategy_returns, benchmark_returns)
-
-                    # total_return_pct is a percentage (e.g. 15 for 15%); divide by 100 to
-                    # get the ratio that calculate_alpha expects (same convention as benchmark_total).
-                    strategy_total = (
-                        result.metrics.total_return_pct / Decimal("100")
-                        if result.metrics.total_return_pct
-                        else Decimal("0")
-                    )
-                    alpha_val = calculate_alpha(strategy_total, benchmark_total, beta_val)
-
-                    click.echo(f"Benchmark Return: {float(benchmark_total) * 100:+.2f}%")
-                    click.echo(f"Strategy Return:  {float(strategy_total) * 100:+.2f}%")
-                    excess = float(strategy_total - benchmark_total) * 100
-                    click.echo(f"Excess Return:    {excess:+.2f}%")
-                    click.echo()
-                    click.echo(f"Information Ratio: {float(info_ratio):.3f}")
-                    click.echo(f"Beta:              {float(beta_val):.3f}")
-                    click.echo(f"Alpha:             {float(alpha_val) * 100:+.2f}%")
-                else:
-                    click.echo("Insufficient data for benchmark comparison.")
-            else:
-                click.echo("No equity curve data for benchmark comparison.")
-
-        except Exception as e:
-            click.echo(f"Could not calculate benchmark metrics: {e}")
-
-        click.echo("-" * 60)
-
-    # Display cache statistics
-    if cache_stats is not None:
-        click.echo()
-        click.echo("-" * 60)
-        click.echo("CACHE STATISTICS")
-        click.echo("-" * 60)
-        click.echo(f"Total Entries: {cache_stats.total_entries:,}")
-        click.echo(f"Cache Hits: {cache_stats.hits:,}")
-        click.echo(f"Cache Misses: {cache_stats.misses:,}")
-        click.echo(f"Expired: {cache_stats.expired:,}")
-        click.echo(f"Hit Rate: {cache_stats.hit_rate() * 100:.1f}%")
-        click.echo("-" * 60)
-
-    if verbose and result.trades:
-        click.echo()
-        click.echo("-" * 60)
-        click.echo("TRADE HISTORY")
-        click.echo("-" * 60)
-
-        for i, trade in enumerate(result.trades, 1):
-            pnl_sign = "+" if trade.pnl_usd >= 0 else ""
-            click.echo(
-                f"{i:3}. {trade.timestamp.strftime('%Y-%m-%d %H:%M')}: "
-                f"{trade.intent_type.value:10} "
-                f"{pnl_sign}${trade.pnl_usd:,.2f} "
-                f"(fee: ${trade.fee_usd:,.2f}, gas: ${trade.gas_cost_usd:,.2f})"
-            )
-
-        click.echo("-" * 60)
-
-    # Write JSON output if requested
-    if output_path:
-        click.echo()
-        output_data = result.to_dict()
-        output_data["_meta"] = {
-            "generated_at": datetime.now(UTC).isoformat(),
-            "generator": "almanak backtest pnl",
-            "engine": "pnl",
-            "benchmark": benchmark,
-        }
-
-        if cache_stats is not None:
-            output_data["cache_stats"] = cache_stats.to_dict()
-
-        with open(output_path, "w") as f:
-            json.dump(output_data, f, indent=2, default=str)
-
-        click.echo(f"Results written to: {output_path}")
-
-    # Generate chart if requested
+    # Phases 15-17: write JSON + optional chart + optional HTML report
+    _write_json_output(result, ctx.output_path, benchmark, cache_stats)
     if chart:
-        click.echo()
-        click.echo("Generating equity curve chart...")
-
-        if output_path:
-            chart_extension = ".html" if chart_format.lower() == "html" else ".png"
-            chart_path = output_path.with_suffix(chart_extension)
-        else:
-            safe_strategy_name = strategy.replace("/", "_").replace("\\", "_") if strategy else "backtest"
-            chart_extension = ".html" if chart_format.lower() == "html" else ".png"
-            chart_path = Path(f"equity_curve_{safe_strategy_name}{chart_extension}")
-
-        chart_result = save_chart(
-            result=result,
-            format=chart_format.lower(),
-            path=chart_path,
-            show_drawdown=True,
-            show_trades=True,
-        )
-
-        if chart_result.success:
-            click.echo(f"Chart saved to: {chart_result.file_path}")
-            if chart_result.drawdown_periods:
-                click.echo(f"  Highlighted {len(chart_result.drawdown_periods)} drawdown period(s)")
-            if chart_result.trade_markers:
-                click.echo(f"  Marked {len(chart_result.trade_markers)} trade(s)")
-        else:
-            click.echo(f"Warning: Failed to generate chart: {chart_result.error}", err=True)
-
-    # Generate HTML report if requested
+        _generate_chart(result, ctx.strategy, ctx.output_path, chart_format)
     if report:
-        from ...backtesting.report_generator import generate_report
+        _generate_html_report(result, ctx.strategy, ctx.output_path)
 
-        click.echo()
-        click.echo("Generating HTML report...")
-
-        if output_path:
-            report_path = output_path.with_suffix(".html")
-        else:
-            safe_strategy_name = strategy.replace("/", "_").replace("\\", "_") if strategy else "backtest"
-            report_path = Path(f"backtest_report_{safe_strategy_name}.html")
-
-        report_result = generate_report(result, output_path=report_path)
-
-        if report_result.success:
-            click.echo(f"Report saved to: {report_result.file_path}")
-        else:
-            click.echo(f"Warning: Failed to generate report: {report_result.error}", err=True)
-
-    # Post-backtest tip
+    # Phase 18: post-backtest tip
     click.echo()
     click.echo("Tip: Try 'almanak backtest sweep' to test multiple parameter combinations,")
     click.echo("     or 'almanak backtest optimize' for Bayesian hyperparameter tuning.")
