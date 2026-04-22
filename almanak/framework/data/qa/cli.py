@@ -27,7 +27,13 @@ from pathlib import Path
 import click
 from dotenv import load_dotenv
 
-from .config import QAConfig, load_config
+from .cli_helpers import (
+    apply_cli_overrides,
+    configure_logging,
+    load_qa_config_or_exit,
+    print_startup_banner,
+)
+from .config import QAConfig
 from .runner import QAReport, QARunner
 
 logger = logging.getLogger(__name__)
@@ -213,76 +219,20 @@ def qa_data(
     load_dotenv()
 
     # Configure logging
-    log_level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    configure_logging(verbose)
 
-    # Load configuration
-    try:
-        if config_file:
-            config = load_config(config_file)
-            click.echo(f"Loaded config from: {config_file}")
-        else:
-            config = load_config()
-            click.echo("Loaded default config")
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-    except ValueError as e:
-        click.echo(f"Invalid config: {e}", err=True)
-        sys.exit(1)
+    # Load configuration (exits on FileNotFoundError / ValueError)
+    config = load_qa_config_or_exit(config_file)
 
     # Override config with CLI options
-    if chain:
-        config = QAConfig(
-            chain=chain,
-            historical_days=days if days else config.historical_days,
-            timeframe=config.timeframe,
-            rsi_period=config.rsi_period,
-            thresholds=config.thresholds,
-            popular_tokens=config.popular_tokens,
-            additional_tokens=config.additional_tokens,
-            dex_tokens=config.dex_tokens,
-        )
-    elif days:
-        config = QAConfig(
-            chain=config.chain,
-            historical_days=days,
-            timeframe=config.timeframe,
-            rsi_period=config.rsi_period,
-            thresholds=config.thresholds,
-            popular_tokens=config.popular_tokens,
-            additional_tokens=config.additional_tokens,
-            dex_tokens=config.dex_tokens,
-        )
+    config = apply_cli_overrides(config, chain, days)
 
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Display startup information
-    click.echo()
-    click.echo("=" * 60)
-    click.echo("ALMANAK DATA QA FRAMEWORK")
-    click.echo("=" * 60)
-    click.echo(f"Chain: {config.chain}")
-    click.echo(f"Historical days: {config.historical_days}")
-    click.echo(f"Timeframe: {config.timeframe}")
-    click.echo(f"RSI period: {config.rsi_period}")
-    click.echo(f"Popular tokens: {', '.join(config.popular_tokens)}")
-    click.echo(f"Additional tokens: {', '.join(config.additional_tokens)}")
-    click.echo(f"DEX tokens: {', '.join(config.dex_tokens)}")
-    click.echo(f"Output: {output_path}")
-    click.echo(f"Skip plots: {skip_plots}")
-    if test_name:
-        click.echo(f"Running test: {test_name}")
-    else:
-        click.echo("Running: All tests")
-    click.echo("=" * 60)
-    click.echo()
+    print_startup_banner(config, output_path, skip_plots, test_name)
 
     # Run tests
     try:
