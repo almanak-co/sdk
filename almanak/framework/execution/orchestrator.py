@@ -541,6 +541,187 @@ def _format_amount(amount: Any, token_data: Any = None) -> str:
     return str(amount)
 
 
+def _append_suffix(desc: str, keyword: str, value: str) -> str:
+    """Append ``f" {keyword} {value}"`` to ``desc`` iff ``value`` is truthy."""
+    return f"{desc} {keyword} {value}" if value else desc
+
+
+def _describe_swap(metadata: dict[str, Any], protocol: str) -> str:
+    from_token_data = metadata.get("from_token", {})
+    to_token_data = metadata.get("to_token", {})
+    from_token = _get_token_symbol(from_token_data)
+    to_token = _get_token_symbol(to_token_data)
+    # ``amount_in`` is the canonical key emitted by the SWAP compiler
+    # (``almanak/framework/intents/compiler.py``); ``from_amount`` and ``amount``
+    # are kept for legacy / manually-constructed bundles.
+    raw_amount = metadata.get("amount_in", metadata.get("from_amount", metadata.get("amount", "")))
+    amount = _format_amount(raw_amount, from_token_data)
+
+    if amount and from_token and to_token:
+        desc = f"Swap {amount} {from_token} \u2192 {to_token}"
+    elif from_token and to_token:
+        desc = f"Swap {from_token} \u2192 {to_token}"
+    else:
+        desc = "Swap tokens"
+    return _append_suffix(desc, "via", protocol)
+
+
+def _describe_supply(metadata: dict[str, Any], protocol: str) -> str:
+    supply_token_data = metadata.get("supply_token", {})
+    supply_token = _get_token_symbol(supply_token_data)
+    amount = _format_amount(metadata.get("supply_amount", ""), supply_token_data)
+
+    if amount and supply_token:
+        desc = f"Supply {amount} {supply_token} as collateral"
+    elif supply_token:
+        desc = f"Supply {supply_token} as collateral"
+    else:
+        desc = "Supply collateral"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_borrow(metadata: dict[str, Any], protocol: str) -> str:
+    borrow_token_data = metadata.get("borrow_token", {})
+    collateral_token_data = metadata.get("collateral_token", {})
+    borrow_token = _get_token_symbol(borrow_token_data)
+    collateral_token = _get_token_symbol(collateral_token_data)
+    borrow_amount = _format_amount(metadata.get("borrow_amount", ""), borrow_token_data)
+
+    if borrow_amount and borrow_token:
+        desc = f"Borrow {borrow_amount} {borrow_token}"
+    elif borrow_token:
+        desc = f"Borrow {borrow_token}"
+    else:
+        desc = "Borrow tokens"
+    if collateral_token:
+        desc += f" against {collateral_token} collateral"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_repay(metadata: dict[str, Any], protocol: str) -> str:
+    repay_token_data = metadata.get("repay_token", {})
+    repay_token = _get_token_symbol(repay_token_data)
+    amount = _format_amount(metadata.get("repay_amount", ""), repay_token_data)
+
+    if amount and repay_token:
+        desc = f"Repay {amount} {repay_token}"
+    elif repay_token:
+        desc = f"Repay {repay_token} debt"
+    else:
+        desc = "Repay debt"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_withdraw(metadata: dict[str, Any], protocol: str) -> str:
+    withdraw_token_data = metadata.get("withdraw_token", {})
+    withdraw_token = _get_token_symbol(withdraw_token_data)
+    amount = _format_amount(metadata.get("withdraw_amount", ""), withdraw_token_data)
+
+    if amount and withdraw_token:
+        desc = f"Withdraw {amount} {withdraw_token}"
+    elif withdraw_token:
+        desc = f"Withdraw {withdraw_token}"
+    else:
+        desc = "Withdraw from protocol"
+    return _append_suffix(desc, "from", protocol)
+
+
+def _describe_lp_open(metadata: dict[str, Any], protocol: str) -> str:
+    token0 = _get_token_symbol(metadata.get("token0", ""))
+    token1 = _get_token_symbol(metadata.get("token1", ""))
+    pool = metadata.get("pool", "")
+
+    if token0 and token1:
+        desc = f"Open LP: {token0}/{token1}"
+    elif pool:
+        desc = f"Open LP: {pool}"
+    else:
+        desc = "Open LP position"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_lp_close(metadata: dict[str, Any], protocol: str) -> str:
+    token0 = _get_token_symbol(metadata.get("token0", ""))
+    token1 = _get_token_symbol(metadata.get("token1", ""))
+
+    if token0 and token1:
+        desc = f"Close LP: {token0}/{token1}"
+    else:
+        desc = "Close LP position"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_perp_open(metadata: dict[str, Any], protocol: str) -> str:
+    direction = metadata.get("direction", "long")
+    if isinstance(direction, str):
+        direction = direction.lower()
+    market = metadata.get("market", "")
+    leverage = metadata.get("leverage", "")
+    collateral_token_data = metadata.get("collateral_token", {})
+    collateral_token = _get_token_symbol(collateral_token_data)
+    collateral_amount = _format_amount(metadata.get("collateral_amount", ""), collateral_token_data)
+
+    if collateral_amount and collateral_token:
+        desc = f"Open {direction}: {collateral_amount} {collateral_token}"
+    elif market:
+        desc = f"Open {direction}: {market}"
+    else:
+        desc = f"Open {direction} position"
+    if leverage:
+        desc += f" ({leverage}x)"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_perp_close(metadata: dict[str, Any], protocol: str) -> str:
+    market = metadata.get("market", "")
+    desc = f"Close position: {market}" if market else "Close perpetual position"
+    return _append_suffix(desc, "on", protocol)
+
+
+def _describe_bridge(metadata: dict[str, Any], protocol: str, chain: str) -> str:
+    token_data = metadata.get("token", {})
+    token = _get_token_symbol(token_data)
+    amount = _format_amount(metadata.get("amount", ""), token_data)
+    from_chain = metadata.get("from_chain", "")
+    to_chain = metadata.get("to_chain", chain)
+
+    if amount and token:
+        desc = f"Bridge {amount} {token}"
+    elif token:
+        desc = f"Bridge {token}"
+    else:
+        desc = "Bridge tokens"
+    if from_chain and to_chain:
+        desc += f": {from_chain} \u2192 {to_chain}"
+    elif to_chain:
+        desc += f" to {to_chain}"
+    return _append_suffix(desc, "via", protocol)
+
+
+def _describe_hold(metadata: dict[str, Any]) -> str:
+    reason = metadata.get("reason", "")
+    return f"Hold: {reason}" if reason else "Hold position"
+
+
+# Dispatch table: intent_type -> handler(metadata, protocol, chain) -> str.
+# Every describer takes the same 3-arg signature so the table covers ALL known
+# intent types uniformly. Handlers that don't need ``protocol`` or ``chain``
+# simply ignore the extra arg (see ``_describe_hold`` wrapper).
+_INTENT_DESCRIBERS: dict[str, Callable[[dict[str, Any], str, str], str]] = {
+    "SWAP": lambda m, p, _c: _describe_swap(m, p),
+    "SUPPLY": lambda m, p, _c: _describe_supply(m, p),
+    "BORROW": lambda m, p, _c: _describe_borrow(m, p),
+    "REPAY": lambda m, p, _c: _describe_repay(m, p),
+    "WITHDRAW": lambda m, p, _c: _describe_withdraw(m, p),
+    "LP_OPEN": lambda m, p, _c: _describe_lp_open(m, p),
+    "LP_CLOSE": lambda m, p, _c: _describe_lp_close(m, p),
+    "PERP_OPEN": lambda m, p, _c: _describe_perp_open(m, p),
+    "PERP_CLOSE": lambda m, p, _c: _describe_perp_close(m, p),
+    "BRIDGE": _describe_bridge,
+    "HOLD": lambda m, _p, _c: _describe_hold(m),
+}
+
+
 def _generate_intent_description(action_bundle: "ActionBundle") -> str:
     """Generate a human-readable description of an intent.
 
@@ -552,181 +733,15 @@ def _generate_intent_description(action_bundle: "ActionBundle") -> str:
     """
     intent_type = action_bundle.intent_type.upper()
     metadata = action_bundle.metadata or {}
-
-    # Extract common fields - handle both dict and string formats
     protocol = metadata.get("protocol", "")
     chain = metadata.get("chain", "")
 
-    # Generate description based on intent type
-    if intent_type == "SWAP":
-        from_token_data = metadata.get("from_token", {})
-        to_token_data = metadata.get("to_token", {})
-        from_token = _get_token_symbol(from_token_data)
-        to_token = _get_token_symbol(to_token_data)
-        amount = _format_amount(metadata.get("from_amount", metadata.get("amount", "")), from_token_data)
+    describer = _INTENT_DESCRIBERS.get(intent_type)
+    if describer is not None:
+        return describer(metadata, protocol, chain)
 
-        if amount and from_token and to_token:
-            desc = f"Swap {amount} {from_token} → {to_token}"
-        elif from_token and to_token:
-            desc = f"Swap {from_token} → {to_token}"
-        else:
-            desc = "Swap tokens"
-        if protocol:
-            desc += f" via {protocol}"
-        return desc
-
-    elif intent_type == "SUPPLY":
-        supply_token_data = metadata.get("supply_token", {})
-        supply_token = _get_token_symbol(supply_token_data)
-        amount = _format_amount(metadata.get("supply_amount", ""), supply_token_data)
-
-        if amount and supply_token:
-            desc = f"Supply {amount} {supply_token} as collateral"
-        elif supply_token:
-            desc = f"Supply {supply_token} as collateral"
-        else:
-            desc = "Supply collateral"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "BORROW":
-        borrow_token_data = metadata.get("borrow_token", {})
-        collateral_token_data = metadata.get("collateral_token", {})
-        borrow_token = _get_token_symbol(borrow_token_data)
-        collateral_token = _get_token_symbol(collateral_token_data)
-        borrow_amount = _format_amount(metadata.get("borrow_amount", ""), borrow_token_data)
-
-        if borrow_amount and borrow_token:
-            desc = f"Borrow {borrow_amount} {borrow_token}"
-        elif borrow_token:
-            desc = f"Borrow {borrow_token}"
-        else:
-            desc = "Borrow tokens"
-        if collateral_token:
-            desc += f" against {collateral_token} collateral"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "REPAY":
-        repay_token_data = metadata.get("repay_token", {})
-        repay_token = _get_token_symbol(repay_token_data)
-        amount = _format_amount(metadata.get("repay_amount", ""), repay_token_data)
-
-        if amount and repay_token:
-            desc = f"Repay {amount} {repay_token}"
-        elif repay_token:
-            desc = f"Repay {repay_token} debt"
-        else:
-            desc = "Repay debt"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "WITHDRAW":
-        withdraw_token_data = metadata.get("withdraw_token", {})
-        withdraw_token = _get_token_symbol(withdraw_token_data)
-        amount = _format_amount(metadata.get("withdraw_amount", ""), withdraw_token_data)
-
-        if amount and withdraw_token:
-            desc = f"Withdraw {amount} {withdraw_token}"
-        elif withdraw_token:
-            desc = f"Withdraw {withdraw_token}"
-        else:
-            desc = "Withdraw from protocol"
-        if protocol:
-            desc += f" from {protocol}"
-        return desc
-
-    elif intent_type == "LP_OPEN":
-        token0 = _get_token_symbol(metadata.get("token0", ""))
-        token1 = _get_token_symbol(metadata.get("token1", ""))
-        pool = metadata.get("pool", "")
-
-        if token0 and token1:
-            desc = f"Open LP: {token0}/{token1}"
-        elif pool:
-            desc = f"Open LP: {pool}"
-        else:
-            desc = "Open LP position"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "LP_CLOSE":
-        token0 = _get_token_symbol(metadata.get("token0", ""))
-        token1 = _get_token_symbol(metadata.get("token1", ""))
-
-        if token0 and token1:
-            desc = f"Close LP: {token0}/{token1}"
-        else:
-            desc = "Close LP position"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "PERP_OPEN":
-        direction = metadata.get("direction", "long")
-        if isinstance(direction, str):
-            direction = direction.lower()
-        market = metadata.get("market", "")
-        leverage = metadata.get("leverage", "")
-        collateral_token_data = metadata.get("collateral_token", {})
-        collateral_token = _get_token_symbol(collateral_token_data)
-        collateral_amount = _format_amount(metadata.get("collateral_amount", ""), collateral_token_data)
-
-        if collateral_amount and collateral_token:
-            desc = f"Open {direction}: {collateral_amount} {collateral_token}"
-        elif market:
-            desc = f"Open {direction}: {market}"
-        else:
-            desc = f"Open {direction} position"
-        if leverage:
-            desc += f" ({leverage}x)"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "PERP_CLOSE":
-        market = metadata.get("market", "")
-        if market:
-            desc = f"Close position: {market}"
-        else:
-            desc = "Close perpetual position"
-        if protocol:
-            desc += f" on {protocol}"
-        return desc
-
-    elif intent_type == "BRIDGE":
-        token_data = metadata.get("token", {})
-        token = _get_token_symbol(token_data)
-        amount = _format_amount(metadata.get("amount", ""), token_data)
-        from_chain = metadata.get("from_chain", "")
-        to_chain = metadata.get("to_chain", chain)
-
-        if amount and token:
-            desc = f"Bridge {amount} {token}"
-        elif token:
-            desc = f"Bridge {token}"
-        else:
-            desc = "Bridge tokens"
-        if from_chain and to_chain:
-            desc += f": {from_chain} → {to_chain}"
-        elif to_chain:
-            desc += f" to {to_chain}"
-        if protocol:
-            desc += f" via {protocol}"
-        return desc
-
-    elif intent_type == "HOLD":
-        reason = metadata.get("reason", "")
-        if reason:
-            return f"Hold: {reason}"
-        return "Hold position"
-
-    # Default: use intent type
-    return f"{intent_type.replace('_', ' ').title()}"
+    # Default: title-case the intent type.
+    return intent_type.replace("_", " ").title()
 
 
 # =============================================================================
