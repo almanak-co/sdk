@@ -26,6 +26,11 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
+from almanak.gateway.services._dashboard_helpers import (
+    build_registry_strategy_info,
+    build_strategy_summary_kwargs,
+    enrich_strategy_info,
+)
 from almanak.gateway.timeline.store import get_timeline_store
 from almanak.gateway.validation import ValidationError, resolve_agent_id, validate_strategy_id
 
@@ -695,78 +700,22 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
                     if include_registry:
                         effective_status = self._compute_effective_status(inst)
+                        strategy_info = build_registry_strategy_info(inst, effective_status)
 
-                        # Harden last_action_at for missing heartbeats
-                        last_action_ts = 0
-                        if inst.last_heartbeat_at is not None:
-                            try:
-                                hb = inst.last_heartbeat_at
-                                if hb.tzinfo is None:
-                                    hb = hb.replace(tzinfo=UTC)
-                                last_action_ts = int(hb.timestamp())
-                            except (ValueError, OSError):
-                                pass
-
-                        # Parse chain_wallets JSON if present
-                        inst_chain_wallets: dict[str, str] = {}
-                        if hasattr(inst, "chain_wallets") and inst.chain_wallets:
-                            try:
-                                parsed = json.loads(inst.chain_wallets)
-                                if isinstance(parsed, dict):
-                                    inst_chain_wallets = parsed
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-
-                        strategy_info = {
-                            "strategy_id": inst.strategy_id,
-                            "name": inst.strategy_name.replace("_", " ").title(),
-                            "status": effective_status,
-                            "chain": inst.chain,
-                            "protocol": inst.protocol,
-                            "total_value_usd": "0",
-                            "pnl_24h_usd": "0",
-                            "last_action_at": last_action_ts,
-                            "attention_required": effective_status in ("STALE", "ERROR"),
-                            "attention_reason": "Heartbeat stale" if effective_status == "STALE" else "",
-                            "is_multi_chain": "," in inst.chain,
-                            "chains": [c.strip() for c in inst.chain.split(",")],
-                            "consecutive_errors": 0,
-                            "last_iteration_at": 0,
-                            "pnl_since_deploy_usd": "",
-                            "wallet_address": inst.wallet_address,
-                            "chain_wallets": inst_chain_wallets,
-                        }
-
-                        # Enrich with state data
+                        # Enrich with state + portfolio data
                         state = await self._get_strategy_state_data(inst.strategy_id)
-
-                        # Portfolio metrics (framework-owned, fresh snapshot grace period)
                         total_value, pnl = await self._get_portfolio_value_and_pnl(
                             inst.strategy_id,
                         )
-                        strategy_info["total_value_usd"] = total_value
-                        strategy_info["pnl_24h_usd"] = pnl
-
-                        if state:
-                            try:
-                                strategy_info["consecutive_errors"] = int(state.get("consecutive_errors", 0) or 0)
-                            except (TypeError, ValueError):
-                                strategy_info["consecutive_errors"] = 0
-
-                            last_iteration = state.get("last_iteration", {})
-                            last_iteration_ts = last_iteration.get("timestamp")
-                            if last_iteration_ts:
-                                try:
-                                    ts = datetime.fromisoformat(last_iteration_ts)
-                                    strategy_info["last_iteration_at"] = int(ts.timestamp())
-                                except (ValueError, TypeError):
-                                    strategy_info["last_iteration_at"] = 0
-                            else:
-                                strategy_info["last_iteration_at"] = 0
-
                         pnl_metrics = await self._get_portfolio_metrics(inst.strategy_id)
-                        if pnl_metrics is not None:
-                            strategy_info["pnl_since_deploy_usd"] = str(pnl_metrics)
+                        enrich_strategy_info(
+                            strategy_info,
+                            state=state,
+                            total_value=total_value,
+                            pnl=pnl,
+                            pnl_metrics=pnl_metrics,
+                            preserve_status_precedence=False,
+                        )
 
                         strategies.append(strategy_info)
 
@@ -802,32 +751,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             filtered.append(s)
 
         # Convert to proto messages
-        summaries = []
-        for s in filtered:
-            summary_kwargs = {
-                "strategy_id": s["strategy_id"],
-                "name": s["name"],
-                "status": s["status"],
-                "chain": s["chain"],
-                "protocol": s["protocol"],
-                "total_value_usd": s["total_value_usd"],
-                "pnl_24h_usd": s["pnl_24h_usd"],
-                "last_action_at": s["last_action_at"],
-                "attention_required": s["attention_required"],
-                "attention_reason": s["attention_reason"],
-                "is_multi_chain": s["is_multi_chain"],
-                "chains": s["chains"],
-                "consecutive_errors": s.get("consecutive_errors", 0),
-                "last_iteration_at": s.get("last_iteration_at", 0),
-                "pnl_since_deploy_usd": s.get("pnl_since_deploy_usd", ""),
-                "execution_mode": s.get("execution_mode", ""),
-                "paper_metrics_json": s.get("paper_metrics_json", ""),
-            }
-            if "wallet_address" in s:
-                summary_kwargs["wallet_address"] = s["wallet_address"]
-            if "chain_wallets" in s:
-                summary_kwargs["chain_wallets"] = s["chain_wallets"]
-            summaries.append(gateway_pb2.StrategySummary(**summary_kwargs))
+        summaries = [gateway_pb2.StrategySummary(**build_strategy_summary_kwargs(s)) for s in filtered]
 
         return gateway_pb2.ListStrategiesResponse(
             strategies=summaries,
@@ -868,45 +792,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             inst = registry.get(strategy_id)
             if inst is not None:
                 effective_status = self._compute_effective_status(inst)
-
-                # Harden last_action_at for missing heartbeats
-                last_action_ts = 0
-                if inst.last_heartbeat_at is not None:
-                    try:
-                        hb = inst.last_heartbeat_at
-                        if hb.tzinfo is None:
-                            hb = hb.replace(tzinfo=UTC)
-                        last_action_ts = int(hb.timestamp())
-                    except (ValueError, OSError):
-                        pass
-
-                # Parse chain_wallets JSON if present
-                inst_chain_wallets: dict[str, str] = {}
-                if hasattr(inst, "chain_wallets") and inst.chain_wallets:
-                    try:
-                        inst_chain_wallets = json.loads(inst.chain_wallets)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-                strategy_info = {
-                    "strategy_id": inst.strategy_id,
-                    "name": inst.strategy_name.replace("_", " ").title(),
-                    "status": effective_status,
-                    "chain": inst.chain,
-                    "protocol": inst.protocol,
-                    "total_value_usd": "0",
-                    "pnl_24h_usd": "0",
-                    "last_action_at": last_action_ts,
-                    "attention_required": effective_status in ("STALE", "ERROR"),
-                    "attention_reason": "Heartbeat stale" if effective_status == "STALE" else "",
-                    "is_multi_chain": "," in inst.chain,
-                    "chains": [c.strip() for c in inst.chain.split(",")],
-                    "consecutive_errors": 0,
-                    "last_iteration_at": 0,
-                    "pnl_since_deploy_usd": "",
-                    "wallet_address": inst.wallet_address,
-                    "chain_wallets": inst_chain_wallets,
-                }
+                strategy_info = build_registry_strategy_info(inst, effective_status)
         except Exception as e:
             logger.debug(f"Failed to check registry for {strategy_id}: {e}")
 
@@ -933,84 +819,19 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         # Enrich with state data (fallback bridges legacy pre-normalization state)
         state = await self._get_strategy_state_data(strategy_id, fallback_strategy_id=original_strategy_id)
-
-        # Portfolio metrics (framework-owned, fresh snapshot grace period)
-        total_value, pnl = await self._get_portfolio_value_and_pnl(
-            strategy_id,
-        )
-        strategy_info["total_value_usd"] = total_value
-        strategy_info["pnl_24h_usd"] = pnl
-
-        if state:
-            # Derive status from state, but never downgrade a registry-set PAUSED to ERROR.
-            # The runner explicitly sets PAUSED in the registry via _gateway_update_status();
-            # that signal must take precedence over a stale last_iteration error status.
-            last_iteration = state.get("last_iteration", {})
-            iteration_status = last_iteration.get("status", "")
-            registry_status = strategy_info.get("status", "")
-            if registry_status == "PAUSED":
-                pass  # preserve PAUSED — operator explicitly paused this strategy
-            elif iteration_status in ("EXECUTION_FAILED", "STRATEGY_ERROR"):
-                strategy_info["status"] = "ERROR"
-                strategy_info["attention_required"] = True
-                strategy_info["attention_reason"] = f"Last iteration: {iteration_status}"
-            elif "is_running" in state and state["is_running"]:
-                strategy_info["status"] = "RUNNING"
-            elif "is_paused" in state and state["is_paused"]:
-                strategy_info["status"] = "PAUSED"
-
-            # Get last action timestamp
-            if "updated_at" in state:
-                try:
-                    ts = datetime.fromisoformat(state["updated_at"])
-                    strategy_info["last_action_at"] = int(ts.timestamp())
-                except (ValueError, TypeError):
-                    pass
-
-            try:
-                strategy_info["consecutive_errors"] = int(state.get("consecutive_errors", 0) or 0)
-            except (TypeError, ValueError):
-                strategy_info["consecutive_errors"] = 0
-
-            last_iteration_ts = last_iteration.get("timestamp")
-            if last_iteration_ts:
-                try:
-                    ts = datetime.fromisoformat(last_iteration_ts)
-                    strategy_info["last_iteration_at"] = int(ts.timestamp())
-                except (ValueError, TypeError):
-                    strategy_info["last_iteration_at"] = 0
-            else:
-                strategy_info["last_iteration_at"] = 0
-
+        total_value, pnl = await self._get_portfolio_value_and_pnl(strategy_id)
         pnl_metrics = await self._get_portfolio_metrics(strategy_id)
-        if pnl_metrics is not None:
-            strategy_info["pnl_since_deploy_usd"] = str(pnl_metrics)
+        enrich_strategy_info(
+            strategy_info,
+            state=state,
+            total_value=total_value,
+            pnl=pnl,
+            pnl_metrics=pnl_metrics,
+            preserve_status_precedence=True,
+        )
 
         # Build summary
-        summary_kwargs = {
-            "strategy_id": str(strategy_info["strategy_id"]),
-            "name": str(strategy_info["name"]),
-            "status": str(strategy_info["status"]),
-            "chain": str(strategy_info["chain"]),
-            "protocol": str(strategy_info["protocol"]),
-            "total_value_usd": str(strategy_info["total_value_usd"]),
-            "pnl_24h_usd": str(strategy_info["pnl_24h_usd"]),
-            "last_action_at": int(str(strategy_info["last_action_at"])),
-            "attention_required": bool(strategy_info["attention_required"]),
-            "attention_reason": str(strategy_info["attention_reason"]),
-            "is_multi_chain": bool(strategy_info["is_multi_chain"]),
-            "chains": strategy_info["chains"],
-            "consecutive_errors": int(str(strategy_info.get("consecutive_errors", 0))),
-            "last_iteration_at": int(str(strategy_info.get("last_iteration_at", 0))),
-            "pnl_since_deploy_usd": str(strategy_info.get("pnl_since_deploy_usd", "")),
-            "execution_mode": str(strategy_info.get("execution_mode", "")),
-            "paper_metrics_json": str(strategy_info.get("paper_metrics_json", "")),
-        }
-        if "wallet_address" in strategy_info:
-            summary_kwargs["wallet_address"] = str(strategy_info["wallet_address"])
-        if "chain_wallets" in strategy_info:
-            summary_kwargs["chain_wallets"] = strategy_info["chain_wallets"]
-        summary = gateway_pb2.StrategySummary(**summary_kwargs)  # type: ignore[arg-type]
+        summary = gateway_pb2.StrategySummary(**build_strategy_summary_kwargs(strategy_info))
 
         # Build position info — prefer framework snapshot over state dict
         position = gateway_pb2.PositionInfo()
