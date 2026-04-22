@@ -750,12 +750,17 @@ class _StubTokenResolver:
 
 
 # Deterministic addresses used across characterization tests.
-_POOL_MGR_ARB = "0x000000000004444c5dc75cb358380d2e3de08a90"
+# _POOL_MGR_ARB is the REAL Arbitrum V4 PoolManager from
+# almanak/core/contracts.py::UNISWAP_V4["arbitrum"]. Keeping this consistent
+# is critical: tests that verify direction-fallback / pool-manager-match
+# behavior must use the same address the parser resolves at construction.
+_POOL_MGR_ARB = "0x360e68faccca8ca495c1b759fd9eee466db9fb32"
 _USDC_ARB = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 _WETH_ARB = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 _USDT_ARB = "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
 _USER = "0x1111111111111111111111111111111111111111"
-_ROUTER = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+# Arbitrum UniversalRouter (UNISWAP_V4["arbitrum"]["universal_router"]).
+_ROUTER = "0xa51afafe0263b40edaef0df8781ea9aa03e381a3"
 
 
 class TestBuildSwapResultCharacterization:
@@ -925,20 +930,23 @@ class TestBuildSwapResultCharacterization:
         assert result.swap_result.token_in == _WETH_ARB
         assert result.swap_result.token_out == _USDC_ARB
 
-    def test_token_identification_last_resort_elimination(self):
+    def test_token_identification_last_resort_deterministic_tiebreaker(self):
         """Last-resort path: neither PoolManager match nor amount match nor
         infra-direction match hits; remaining unseen tokens get assigned by
-        elimination (output first, then input).
+        a DETERMINISTIC, log-order-independent tiebreaker.
 
-        WARNING: this is the log-order-dependent path flagged as a latent
-        bug in https://github.com/almanak-co/almanak-sdk-private/issues/1767.
-        The test pins the CURRENT behavior so a future deterministic fix can
-        update the assertion intentionally; the refactor preserved this
-        behavior byte-for-byte and did NOT introduce it.
+        Previously this branch used first-unseen-token -> output which
+        depended on receipt log ordering (issue #1767). The fix sorts
+        remaining tokens by lowercase address and assigns lowest-address
+        -> output. For this fixture: WETH (0x82af...) < USDC (0xaf88...),
+        so WETH -> output, USDC -> input regardless of log order.
+
+        A deterministic guess is still a guess — the parser emits a
+        WARNING when this branch fires.
         """
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
-        # Neither endpoint is PoolManager; amounts don't match amount_in/out.
+        # Neither endpoint is in the infra set; amounts don't match.
         # Both transfers flow between two unknown EOAs.
         t1 = _build_transfer_log(
             token=_USDC_ARB,
@@ -955,25 +963,29 @@ class TestBuildSwapResultCharacterization:
         result = parser.parse_receipt({"logs": [swap, t1, t2]})
 
         assert result.swap_result is not None
-        # Last-resort elimination: first unseen token -> output, second -> input.
-        assert result.swap_result.token_out == _USDC_ARB
-        assert result.swap_result.token_in == _WETH_ARB
+        # Deterministic tiebreaker: lowest lowercase address -> output
+        assert result.swap_result.token_out == _WETH_ARB
+        assert result.swap_result.token_in == _USDC_ARB
 
-    def test_latent_bug_router_only_direction_fallback_flips_sides(self):
-        """Latent bug characterization — ISSUE #1767.
+        # And log order must not change the outcome.
+        result_reversed = parser.parse_receipt({"logs": [swap, t2, t1]})
+        assert result_reversed.swap_result is not None
+        assert result_reversed.swap_result.token_out == _WETH_ARB
+        assert result_reversed.swap_result.token_in == _USDC_ARB
 
-        When ERC-20 Transfer amounts diverge from Swap event amounts (the
-        exact scenario _identify_tokens_by_direction was designed for — e.g.
-        WRAP_ETH / UNWRAP_WETH paths via UniversalRouter), the current
-        ``infra`` set contains only ``self.pool_manager``. Router-routed
-        transfers never touch PoolManager, so the directional pass finds no
-        signal and the fallback degenerates to log-order-based elimination.
+    def test_router_routed_direction_fallback_resolves_correctly(self):
+        """Regression for #1767.
 
-        With the INPUT-side transfer logged first, ``token_out`` gets the
-        input address and ``token_in`` gets the output address — the two
-        fields are silently FLIPPED. This test pins that flipped behavior
-        so a deterministic fix (broaden infra, fail-closed, or stable
-        tiebreaker — see #1767) has to explicitly update it.
+        When ERC-20 Transfer amounts diverge from Swap event amounts
+        (WRAP_ETH / UNWRAP_WETH via UniversalRouter), the direction
+        fallback must still identify sides correctly via the broadened
+        ``_infra_addresses`` set (pool_manager + position_manager +
+        universal_router + Permit2 + wrapped-native).
+
+        Pre-fix behavior (issue #1767): with INPUT-side transfer logged
+        first, elimination silently FLIPPED token_in / token_out. Fix:
+        UniversalRouter is now in the infra set, so the directional pass
+        resolves WETH->input / USDC->output regardless of log order.
         """
         parser = UniswapV4ReceiptParser(chain="arbitrum")
         # amount0=+1000 USDC (received), amount1=-0.5 WETH (paid) per V4 Swap.
@@ -981,9 +993,8 @@ class TestBuildSwapResultCharacterization:
         # Wrapped-ETH path: user's WETH transfer amount differs from the V4
         # Swap amount (0.6 WETH wrapped, only 0.5 consumed); USDC payout also
         # differs (router returns dust). Neither amount matches the Swap
-        # event's amount_in / amount_out, and neither endpoint is the
-        # PoolManager — so the amount fallback and pool-manager pass both
-        # miss, and the direction fallback hits only log-order elimination.
+        # event's amount_in / amount_out; both transfers flow to/from the
+        # UniversalRouter. With the fix, direction pass identifies sides.
         input_side = _build_transfer_log(
             token=_WETH_ARB,
             from_addr=_USER,
@@ -1001,10 +1012,73 @@ class TestBuildSwapResultCharacterization:
 
         assert result.swap_result is not None
         sr = result.swap_result
-        # BUG: input transfer logged first -> elimination makes it token_out.
-        # The correct values would be token_in=WETH, token_out=USDC.
-        assert sr.token_out == _WETH_ARB, "pinned buggy behavior — see issue #1767"
-        assert sr.token_in == _USDC_ARB, "pinned buggy behavior — see issue #1767"
+        # Correct side assignment from directional pass (router in infra).
+        assert sr.token_in == _WETH_ARB
+        assert sr.token_out == _USDC_ARB
+
+    def test_router_routed_direction_fallback_is_log_order_independent(self):
+        """Regression for #1767 — log order must not affect side assignment.
+
+        Same scenario as the previous test, but with output-side logged
+        first. Pre-fix: log-order elimination produced the "correct"
+        answer here but the flipped answer when input-side came first;
+        the fix eliminates the log-order dependency entirely.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        input_side = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_ROUTER, amount=6 * 10**17
+        )
+        output_side = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_ROUTER, to_addr=_USER, amount=999 * 10**6
+        )
+        # Reversed log order vs previous test
+        result = parser.parse_receipt({"logs": [swap, output_side, input_side]})
+        assert result.swap_result is not None
+        assert result.swap_result.token_in == _WETH_ARB
+        assert result.swap_result.token_out == _USDC_ARB
+
+    def test_direction_fallback_ignores_infra_to_infra_hops(self):
+        """Regression: infra-to-infra Transfers in the direction fallback
+        carry no directional information and must NOT be classified as
+        user output/input.
+
+        Flagged by Gemini / Codex on PR #1774: with the broadened infra
+        set, a Permit2 -> UniversalRouter or WETH-contract -> Router
+        internal routing leg could be misclassified as user output
+        because ``from_lower in infra``. The fix requires EXACTLY ONE
+        side to be non-infra.
+
+        Test construction: a dummy token flows Permit2 -> Router (both
+        infra, neither the pool_manager, so the primary pool-manager
+        pass doesn't consume it). Without the guard, the direction
+        pass would eat this hop as token_out and then the real USDC
+        output leg would slot into the remaining slot via the
+        last-resort tiebreaker, flipping sides.
+        """
+        _PERMIT2 = "0x000000000022d473030f116ddee9f6b43ac78ba3"
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        # Amounts deliberately differ from swap amounts so the amount
+        # fallback also misses and we end up in the direction pass.
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        infra_hop = _build_transfer_log(
+            token="0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+            from_addr=_PERMIT2,
+            to_addr=_ROUTER,  # infra -> infra, and neither is pool_manager
+            amount=7,
+        )
+        # Legitimate user legs via ROUTER (one side infra, one side user).
+        input_side = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_ROUTER, amount=6 * 10**17
+        )
+        output_side = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_ROUTER, to_addr=_USER, amount=999 * 10**6
+        )
+        # Infra hop BEFORE user legs to maximize misclassification risk.
+        result = parser.parse_receipt({"logs": [swap, infra_hop, input_side, output_side]})
+        assert result.swap_result is not None
+        assert result.swap_result.token_in == _WETH_ARB
+        assert result.swap_result.token_out == _USDC_ARB
 
     # -- Decimal / precision handling ---------------------------------------
 

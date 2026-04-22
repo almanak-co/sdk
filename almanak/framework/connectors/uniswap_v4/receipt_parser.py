@@ -191,6 +191,37 @@ class UniswapV4ReceiptParser:
         else:
             self.position_manager = chain_addrs.get("position_manager", "").lower()
 
+        # Infrastructure address set used by the direction-based token
+        # identification fallback (see ``_identify_tokens_by_direction``).
+        # A Transfer that enters or leaves one of these addresses is
+        # infra-routing flow (user <-> swap rails), not a user-to-user
+        # transfer. This MUST include more than the PoolManager — V4 swaps
+        # often route ERC-20 legs through UniversalRouter + Permit2 and
+        # WRAP_ETH / UNWRAP_WETH touches the chain's canonical wrapped-native
+        # contract rather than the PoolManager. A narrow set (pool_manager
+        # only) silently degrades the fallback to log-order elimination —
+        # see issue #1767.
+        #
+        # Canonical Permit2 address is the same on every EVM chain
+        # (https://github.com/Uniswap/permit2). Re-using the SDK's own
+        # constant rather than re-declaring it keeps the two in sync.
+        from almanak.framework.connectors.uniswap_v4.sdk import PERMIT2_ADDRESS
+        from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
+
+        infra_addresses: set[str] = set()
+        if self.pool_manager:
+            infra_addresses.add(self.pool_manager)
+        if self.position_manager:
+            infra_addresses.add(self.position_manager)
+        universal_router = chain_addrs.get("universal_router", "")
+        if universal_router:
+            infra_addresses.add(universal_router.lower())
+        infra_addresses.add(PERMIT2_ADDRESS.lower())
+        wrapped_native = WRAPPED_NATIVE.get(self.chain, "")
+        if wrapped_native:
+            infra_addresses.add(wrapped_native.lower())
+        self._infra_addresses: frozenset[str] = frozenset(infra_addresses)
+
     def parse_receipt(
         self,
         receipt: dict[str, Any],
@@ -652,9 +683,22 @@ class UniswapV4ReceiptParser:
     ) -> tuple[str | None, str | None]:
         """Fallback 2: For WETH-routed swaps, ERC-20 amounts may diverge from
         Swap event amounts due to WRAP_ETH/UNWRAP_WETH. Identify tokens by
-        transfer direction relative to PoolManager, then by elimination.
+        transfer direction relative to any known infra address (PoolManager,
+        PositionManager, UniversalRouter, Permit2, wrapped-native contract).
+
+        Historically this used only ``{self.pool_manager}``, which silently
+        failed for router-routed receipts (Transfers never touched
+        PoolManager) and fell through to log-order-based elimination —
+        issue #1767. The broadened ``self._infra_addresses`` catches those
+        paths.
+
+        Last-resort elimination now uses a deterministic tiebreaker
+        (lowest-lowercase-address -> output) instead of log order, and logs
+        a WARNING so operators see that the assignment is a guess. A
+        deterministic guess is still a guess — callers downstream should
+        treat tokens produced by this last-resort branch as lower
+        confidence than tokens produced by the direction pass.
         """
-        infra = {self.pool_manager}
         seen_tokens: set[str] = set()
         if token_in_addr:
             seen_tokens.add(token_in_addr.lower())
@@ -667,27 +711,49 @@ class UniswapV4ReceiptParser:
                 continue
             from_lower = transfer.from_address.lower()
             to_lower = transfer.to_address.lower()
+            from_is_infra = from_lower in self._infra_addresses
+            to_is_infra = to_lower in self._infra_addresses
+            # Only directional evidence fires when EXACTLY ONE side is
+            # infra (user <-> rails). Infra-to-infra hops (e.g. Permit2 ->
+            # PoolManager) are internal routing plumbing and carry no
+            # directional information about the user's swap.
+            if from_is_infra == to_is_infra:
+                continue
             # Token sent FROM infrastructure TO non-infra = output (user receives)
-            if token_out_addr is None and from_lower in infra:
+            if token_out_addr is None and from_is_infra:
                 token_out_addr = transfer.token
                 seen_tokens.add(token_lower)
             # Token sent TO infrastructure FROM non-infra = input (user pays)
-            elif token_in_addr is None and to_lower in infra:
+            elif token_in_addr is None and to_is_infra:
                 token_in_addr = transfer.token
                 seen_tokens.add(token_lower)
 
-        # Last resort: assign remaining unseen tokens by elimination (output first).
+        # Last resort: deterministic tiebreaker over remaining unseen
+        # tokens — sort by lowercase address so the assignment does NOT
+        # depend on log ordering. Lowest address -> output (arbitrary but
+        # stable). Emit a WARNING: any hit here means all 3 identification
+        # passes failed to find a signal, which is a suspicious receipt.
         if token_in_addr is None or token_out_addr is None:
-            for transfer in transfer_events:
-                token_lower = transfer.token.lower()
-                if token_lower in seen_tokens:
-                    continue
+            remaining = sorted(
+                {t.token for t in transfer_events if t.token.lower() not in seen_tokens},
+                key=lambda addr: addr.lower(),
+            )
+            if remaining:
+                logger.warning(
+                    "V4 receipt parser: direction fallback hit last-resort "
+                    "tiebreaker on chain=%s; assigning %s by address order. "
+                    "This indicates neither PoolManager, amount-match, nor "
+                    "infra-direction pass identified token sides — the "
+                    "receipt may be malformed or routed through an "
+                    "unrecognized infrastructure address. See issue #1767.",
+                    self.chain,
+                    remaining,
+                )
+            for token in remaining:
                 if token_out_addr is None:
-                    token_out_addr = transfer.token
-                    seen_tokens.add(token_lower)
+                    token_out_addr = token
                 elif token_in_addr is None:
-                    token_in_addr = transfer.token
-                    seen_tokens.add(token_lower)
+                    token_in_addr = token
         return token_in_addr, token_out_addr
 
     def _identify_swap_tokens(

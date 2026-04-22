@@ -151,14 +151,16 @@ def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmou
 
     Token sides fall back to ``intent.from_token`` / ``intent.to_token`` when
     the swap_amounts side is falsy (empty string). Amount sides use
-    truthiness coercion to stringify -- matches the pre-Phase-5k contract
-    (Decimal(0) -> "" is a latent bug pinned by the characterization tests;
-    NOT fixed in this refactor).
+    ``is not None`` checks instead of truthiness so measured-zero amounts
+    (``Decimal("0")``) are preserved as ``"0"`` rather than silently dropped
+    to ``""`` -- issue #1768 (sibling of #1709 / #1710 fixed in #1751).
     """
     token_in = swap_amounts.token_in or getattr(intent, "from_token", "") or ""
     token_out = swap_amounts.token_out or getattr(intent, "to_token", "") or ""
-    amount_in = str(swap_amounts.amount_in_decimal) if swap_amounts.amount_in_decimal else ""
-    amount_out = str(swap_amounts.amount_out_decimal) if swap_amounts.amount_out_decimal else ""
+    amt_in = getattr(swap_amounts, "amount_in_decimal", None)
+    amt_out = getattr(swap_amounts, "amount_out_decimal", None)
+    amount_in = str(amt_in) if amt_in is not None else ""
+    amount_out = str(amt_out) if amt_out is not None else ""
     effective_price = str(swap_amounts.effective_price) if swap_amounts.effective_price is not None else ""
     return (
         token_in,

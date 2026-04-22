@@ -247,11 +247,11 @@ class TestHappyPathsPerIntentType:
         assert entry.intent_type == "LP_CLOSE"
         assert entry.token_in == "NFT-12345"
         assert entry.token_out == "USDC"
-        # LATENT BUG: Decimal("0") is falsy → the `... if x else ""` coercion
-        # drops a measured-zero amount_in. Pinned at current prod behaviour so
-        # the refactor can't silently "fix" it without explicit review. Filed
-        # as a follow-up: see issue link in module docstring.
-        assert entry.amount_in == ""
+        # Regression for issue #1768 (sibling of #1710 fixed in #1751).
+        # Decimal("0") is falsy so truthiness coercion would silently drop
+        # a measured-zero amount_in to "". The fix uses ``is not None``
+        # checks so "measured zero" is distinguishable from "unknown".
+        assert entry.amount_in == "0"
         assert entry.amount_out == "500"
 
     def test_supply_happy_path(self):
