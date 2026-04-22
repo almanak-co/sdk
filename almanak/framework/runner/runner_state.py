@@ -141,6 +141,229 @@ async def persist_vault_state(
 # -------------------------------------------------------------------------
 
 
+# Reconciliation-related metadata keys mirrored from ``snapshot_metadata``
+# into ``StateData.state`` so DashboardService can surface them without
+# loading the snapshot row. Kept at module scope so helpers + tests agree
+# on the exact set.
+_RECONCILIATION_STATE_KEYS: tuple[str, ...] = (
+    "valuation_source",
+    "external_provider",
+    "external_total_value_usd",
+    "framework_total_value_usd",
+    "reconciliation_status",
+)
+
+
+def _snapshot_throttled(runner: Any, now: datetime, force_snapshot: bool) -> bool:
+    """Return ``True`` when the snapshot should be skipped by the rate-limit.
+
+    Snapshots are rate-limited to once per ``_snapshot_interval_seconds`` so
+    the time-series table stays bounded; ``force_snapshot`` bypasses the
+    throttle so every trade iteration gets its before/after valuation for
+    accounting.
+    """
+    if force_snapshot or runner._last_snapshot_time is None:
+        return False
+    elapsed = (now - runner._last_snapshot_time).total_seconds()
+    return elapsed < runner._snapshot_interval_seconds
+
+
+def _value_via_portfolio_valuer(
+    runner: Any,
+    strategy: StrategyProtocol,
+    iteration_number: int,
+) -> PortfolioSnapshot | None:
+    """Run the framework-owned ``PortfolioValuer`` primary valuation path.
+
+    Returns ``None`` when the valuer is not applicable (multi-chain, strategy
+    lacks the required hooks), when it raises, or when it returns an
+    ``UNAVAILABLE`` snapshot -- all of which require the caller to try the
+    strategy's own ``get_portfolio_snapshot`` fallback.
+    """
+    if runner._is_multi_chain:
+        return None
+    if not (hasattr(strategy, "_get_tracked_tokens") and hasattr(strategy, "create_market_snapshot")):
+        return None
+
+    try:
+        # Ensure valuer has gateway client for LP re-pricing
+        gw = runner._get_gateway_client()
+        if gw is not None:
+            runner._portfolio_valuer.set_gateway_client(gw)
+
+        market = strategy.create_market_snapshot()
+        snapshot = runner._portfolio_valuer.value(
+            strategy=strategy,
+            market=market,
+            iteration_number=iteration_number,
+        )
+    except Exception as e:
+        logger.debug("PortfolioValuer failed, trying fallback: %s", e)
+        return None
+
+    if snapshot and snapshot.value_confidence != ValueConfidence.UNAVAILABLE:
+        logger.debug(
+            "Portfolio valued by PortfolioValuer for %s: $%.2f (%s)",
+            strategy.strategy_id,
+            snapshot.total_value_usd,
+            snapshot.value_confidence.value,
+        )
+    return snapshot
+
+
+def _value_via_strategy_fallback(
+    strategy: StrategyProtocol,
+    iteration_number: int,
+    current: PortfolioSnapshot | None,
+) -> PortfolioSnapshot | None:
+    """Run the strategy-owned ``get_portfolio_snapshot`` fallback path.
+
+    Only invoked when the primary valuer did not produce a confident result.
+    Preserves the legacy semantics: the fallback replaces ``current`` only
+    when it is non-``None`` AND non-``UNAVAILABLE``; when ``current`` is
+    ``None`` the fallback (even ``UNAVAILABLE``) is surfaced so downstream
+    code sees the strategy-reported failure reason rather than the generic
+    "no valuation path" one.
+    """
+    if not hasattr(strategy, "get_portfolio_snapshot"):
+        return current
+
+    fallback = strategy.get_portfolio_snapshot()
+    if fallback is not None:
+        fallback.iteration_number = iteration_number
+    if fallback is not None and fallback.value_confidence != ValueConfidence.UNAVAILABLE:
+        logger.debug(
+            "Portfolio valued by strategy fallback for %s: $%.2f",
+            strategy.strategy_id,
+            fallback.total_value_usd,
+        )
+        return fallback
+    if current is None:
+        return fallback
+    return current
+
+
+def _make_unavailable_snapshot(
+    *,
+    strategy: StrategyProtocol,
+    iteration_number: int,
+    now: datetime,
+    error: str,
+) -> PortfolioSnapshot:
+    """Build an ``UNAVAILABLE`` snapshot satisfying the failure contract.
+
+    ``capture_portfolio_snapshot`` never silently skips a snapshot on an
+    iteration -- when neither valuation path works the runner records an
+    ``UNAVAILABLE`` row so the equity curve does not develop holes.
+    """
+    return PortfolioSnapshot(
+        timestamp=now,
+        strategy_id=getattr(strategy, "strategy_id", "unknown"),
+        total_value_usd=Decimal("0"),
+        available_cash_usd=Decimal("0"),
+        value_confidence=ValueConfidence.UNAVAILABLE,
+        error=error,
+        chain=getattr(strategy, "chain", ""),
+        iteration_number=iteration_number,
+    )
+
+
+async def _persist_snapshot_and_metrics(
+    runner: Any,
+    snapshot: PortfolioSnapshot,
+    metrics: PortfolioMetrics | None,
+) -> int:
+    """Persist snapshot + optional metrics, preferring atomic co-write.
+
+    ``save_snapshot_and_metrics`` is the VIB-2765 transactional helper;
+    backends that don't implement it (``GatewayStateManager``) fall back to
+    separate writes in the original order so the ledger + metrics history
+    stays consistent with the accounting-loss invariants.
+
+    Post-snapshot metrics failures are re-raised as
+    ``AccountingPersistenceError`` so the outer ``capture_portfolio_snapshot``
+    handler re-raises instead of writing a duplicate ``UNAVAILABLE`` row for
+    the same iteration (the snapshot itself already persisted successfully).
+    """
+    if metrics and hasattr(runner.state_manager, "save_snapshot_and_metrics"):
+        return await runner.state_manager.save_snapshot_and_metrics(snapshot, metrics)
+
+    snapshot_id = await runner.state_manager.save_portfolio_snapshot(snapshot)
+    if metrics:
+        try:
+            await runner.state_manager.save_portfolio_metrics(metrics)
+        except AccountingPersistenceError:
+            # Already typed -- let it propagate untouched so the runner halts
+            # with ACCOUNTING_FAILED and no duplicate UNAVAILABLE row is
+            # written for the (already-persisted) snapshot.
+            raise
+        except Exception as exc:
+            raise AccountingPersistenceError(
+                write_kind="metrics",
+                strategy_id=snapshot.strategy_id,
+                message=str(exc),
+                cause=exc,
+            ) from exc
+    return snapshot_id
+
+
+async def _write_valuation_into_strategy_state(
+    runner: Any,
+    strategy_id: str,
+    snapshot: PortfolioSnapshot,
+) -> None:
+    """Mirror valuation + reconciliation fields into ``StateData.state``.
+
+    DashboardService reads these directly off strategy state so operators
+    see a fresh value even when the snapshot time-series is throttled.
+    Failures here are non-fatal -- the snapshot row itself is the durable
+    record -- but surfaced as a debug log for observability.
+    """
+    try:
+        state = await runner.state_manager.load_state(strategy_id)
+        if state is None:
+            return
+        state.state["total_value_usd"] = str(snapshot.total_value_usd)
+        state.state["value_confidence"] = snapshot.value_confidence.value
+        for key in _RECONCILIATION_STATE_KEYS:
+            if snapshot.snapshot_metadata and key in snapshot.snapshot_metadata:
+                state.state[key] = str(snapshot.snapshot_metadata[key])
+            else:
+                state.state.pop(key, None)
+        await runner.state_manager.save_state(state, expected_version=state.version)
+    except Exception as ve:
+        logger.debug("Failed to write valuation into strategy state: %s", ve)
+
+
+async def _persist_unavailable_on_failure(
+    runner: Any,
+    strategy: StrategyProtocol,
+    iteration_number: int,
+    now: datetime,
+    error: Exception,
+) -> None:
+    """Failure-fallback: persist an ``UNAVAILABLE`` snapshot after an error.
+
+    ``AccountingPersistenceError`` is re-raised so the runner still flips to
+    ACCOUNTING_FAILED; any other persistence failure is logged and swallowed
+    because the outer handler has already lost the original valuation and
+    cannot do anything more useful here.
+    """
+    try:
+        unavailable_snapshot = _make_unavailable_snapshot(
+            strategy=strategy,
+            iteration_number=iteration_number,
+            now=now,
+            error=str(error),
+        )
+        await runner.state_manager.save_portfolio_snapshot(unavailable_snapshot)
+        runner._last_snapshot_time = now
+    except AccountingPersistenceError:
+        raise
+    except Exception as persist_err:
+        logger.warning("Failed to persist UNAVAILABLE snapshot: %s", persist_err)
+
+
 async def capture_portfolio_snapshot(
     runner: Any,
     strategy: StrategyProtocol,
@@ -166,90 +389,26 @@ async def capture_portfolio_snapshot(
     """
     now = datetime.now(UTC)
 
-    # Rate-limit snapshot persistence (store every 5 min for time-series).
-    # Always snapshot when a trade executed (force_snapshot=True) so every
-    # trade gets before/after valuation for accounting.
-    if not force_snapshot and runner._last_snapshot_time is not None:
-        elapsed = (now - runner._last_snapshot_time).total_seconds()
-        if elapsed < runner._snapshot_interval_seconds:
-            return None
+    if _snapshot_throttled(runner, now, force_snapshot):
+        return None
 
     try:
-        snapshot: PortfolioSnapshot | None = None
+        snapshot = _value_via_portfolio_valuer(runner, strategy, iteration_number)
+        if snapshot is None or snapshot.value_confidence == ValueConfidence.UNAVAILABLE:
+            snapshot = _value_via_strategy_fallback(strategy, iteration_number, snapshot)
 
-        # Primary path: framework-owned PortfolioValuer
-        # Skip for multi-chain strategies -- their MarketSnapshot requires
-        # chain= argument that PortfolioValuer doesn't pass yet.
-        if (
-            hasattr(strategy, "_get_tracked_tokens")
-            and hasattr(strategy, "create_market_snapshot")
-            and not runner._is_multi_chain
-        ):
-            try:
-                # Ensure valuer has gateway client for LP re-pricing
-                gw = runner._get_gateway_client()
-                if gw is not None:
-                    runner._portfolio_valuer.set_gateway_client(gw)
-
-                market = strategy.create_market_snapshot()
-                snapshot = runner._portfolio_valuer.value(
-                    strategy=strategy,
-                    market=market,
-                    iteration_number=iteration_number,
-                )
-                # If valuer produced a valid snapshot, use it
-                if snapshot and snapshot.value_confidence != ValueConfidence.UNAVAILABLE:
-                    logger.debug(
-                        "Portfolio valued by PortfolioValuer for %s: $%.2f (%s)",
-                        strategy.strategy_id,
-                        snapshot.total_value_usd,
-                        snapshot.value_confidence.value,
-                    )
-            except Exception as e:
-                logger.debug("PortfolioValuer failed, trying fallback: %s", e)
-                snapshot = None
-
-        # Fallback: strategy's own get_portfolio_snapshot (migration path)
-        if (snapshot is None or snapshot.value_confidence == ValueConfidence.UNAVAILABLE) and hasattr(
-            strategy, "get_portfolio_snapshot"
-        ):
-            fallback = strategy.get_portfolio_snapshot()
-            if fallback is not None:
-                fallback.iteration_number = iteration_number
-            if fallback is not None and fallback.value_confidence != ValueConfidence.UNAVAILABLE:
-                snapshot = fallback
-                logger.debug(
-                    "Portfolio valued by strategy fallback for %s: $%.2f",
-                    strategy.strategy_id,
-                    snapshot.total_value_usd,
-                )
-            elif snapshot is None:
-                snapshot = fallback
-
-        # Failure contract: never skip a snapshot -- construct UNAVAILABLE if needed
+        # Failure contract: never skip a snapshot -- construct UNAVAILABLE if needed.
         if snapshot is None:
-            snapshot = PortfolioSnapshot(
-                timestamp=now,
-                strategy_id=strategy.strategy_id,
-                total_value_usd=Decimal("0"),
-                available_cash_usd=Decimal("0"),
-                value_confidence=ValueConfidence.UNAVAILABLE,
-                error="No valuation path produced a portfolio snapshot",
-                chain=getattr(strategy, "chain", ""),
+            snapshot = _make_unavailable_snapshot(
+                strategy=strategy,
                 iteration_number=iteration_number,
+                now=now,
+                error="No valuation path produced a portfolio snapshot",
             )
 
-        # Build metrics for atomic co-write (VIB-2765)
+        # Build metrics for atomic co-write (VIB-2765).
         metrics = await _build_metrics_for_snapshot(runner, strategy.strategy_id, snapshot)
-
-        # Atomic co-write: snapshot + metrics in one transaction when supported.
-        if metrics and hasattr(runner.state_manager, "save_snapshot_and_metrics"):
-            snapshot_id = await runner.state_manager.save_snapshot_and_metrics(snapshot, metrics)
-        else:
-            # Fallback: separate writes (GatewayStateManager, etc.)
-            snapshot_id = await runner.state_manager.save_portfolio_snapshot(snapshot)
-            if metrics:
-                await runner.state_manager.save_portfolio_metrics(metrics)
+        snapshot_id = await _persist_snapshot_and_metrics(runner, snapshot, metrics)
 
         if snapshot_id > 0:
             runner._last_snapshot_time = now
@@ -261,28 +420,9 @@ async def capture_portfolio_snapshot(
                 snapshot.value_confidence.value,
             )
 
-        # Write valuation fields into strategy state so DashboardService can read them.
-        # Always persist (even zero) to avoid stale dashboard values.
-        try:
-            state = await runner.state_manager.load_state(strategy.strategy_id)
-            if state is not None:
-                state.state["total_value_usd"] = str(snapshot.total_value_usd)
-                state.state["value_confidence"] = snapshot.value_confidence.value
-                _RECONCILIATION_STATE_KEYS = (
-                    "valuation_source",
-                    "external_provider",
-                    "external_total_value_usd",
-                    "framework_total_value_usd",
-                    "reconciliation_status",
-                )
-                for key in _RECONCILIATION_STATE_KEYS:
-                    if snapshot.snapshot_metadata and key in snapshot.snapshot_metadata:
-                        state.state[key] = str(snapshot.snapshot_metadata[key])
-                    else:
-                        state.state.pop(key, None)
-                await runner.state_manager.save_state(state, expected_version=state.version)
-        except Exception as ve:
-            logger.debug("Failed to write valuation into strategy state: %s", ve)
+        # Mirror valuation fields onto strategy state (always persist, even zero,
+        # to avoid stale dashboard values).
+        await _write_valuation_into_strategy_state(runner, strategy.strategy_id, snapshot)
 
         return snapshot
 
@@ -294,28 +434,7 @@ async def capture_portfolio_snapshot(
         raise
     except Exception as e:
         logger.warning(f"Failed to capture portfolio snapshot: {e}")
-        # Failure contract: persist UNAVAILABLE snapshot rather than skipping
-        try:
-            # Use getattr for all strategy accessors -- the main path may have
-            # failed because one of these properties raised.
-            sid = getattr(strategy, "strategy_id", "unknown")
-            chain = getattr(strategy, "chain", "")
-            unavailable_snapshot = PortfolioSnapshot(
-                timestamp=now,
-                strategy_id=sid,
-                total_value_usd=Decimal("0"),
-                available_cash_usd=Decimal("0"),
-                value_confidence=ValueConfidence.UNAVAILABLE,
-                error=str(e),
-                chain=chain,
-                iteration_number=iteration_number,
-            )
-            await runner.state_manager.save_portfolio_snapshot(unavailable_snapshot)
-            runner._last_snapshot_time = now
-        except AccountingPersistenceError:
-            raise
-        except Exception as persist_err:
-            logger.warning("Failed to persist UNAVAILABLE snapshot: %s", persist_err)
+        await _persist_unavailable_on_failure(runner, strategy, iteration_number, now, e)
         return None
 
 
