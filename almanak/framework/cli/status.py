@@ -23,6 +23,7 @@ from ..gateway_client import GatewayClient, GatewayClientConfig
 from .status_helpers import (
     _fetch_strategy_details,
     _render_details_as_json,
+    _render_details_pretty,
     _validate_status_args,
 )
 
@@ -295,145 +296,11 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
         timeline_limit=timeline_limit,
     )
 
-    s = details.summary
-
     if as_json:
         click.echo(_render_details_as_json(details))
         return
 
-    # Pretty print
-    click.echo()
-    click.echo(click.style(f"Strategy: {s.name or s.strategy_id}", bold=True, fg="cyan"))
-    click.echo()
-
-    click.echo(f"  ID:          {s.strategy_id}")
-    click.echo(f"  Status:      {_status_color(s.status)}")
-    click.echo(f"  Chain:       {','.join(s.chains) if s.is_multi_chain else s.chain}")
-    click.echo(f"  Protocol:    {s.protocol or '-'}")
-    click.echo(f"  Value:       ${s.total_value_usd}" if s.total_value_usd is not None else "  Value:       -")
-    click.echo(f"  PnL (24h):   ${s.pnl_24h_usd}" if s.pnl_24h_usd is not None else "  PnL (24h):   -")
-    click.echo(f"  PnL (total): ${s.pnl_since_deploy_usd}" if s.pnl_since_deploy_usd != "" else "  PnL (total): -")
-    click.echo(f"  Last Active: {_format_timestamp(s.last_action_at)}")
-    if s.last_iteration_at:
-        click.echo(f"  Last Iter:   {_format_timestamp(s.last_iteration_at)}")
-    if s.consecutive_errors:
-        click.echo(click.style(f"  Errors:      {s.consecutive_errors} consecutive", fg="red"))
-
-    if s.attention_required:
-        click.echo()
-        click.echo(click.style(f"  ! {s.attention_reason}", fg="yellow", bold=True))
-
-    # Operator card
-    if details.operator_card and details.operator_card.strategy_id:
-        oc = details.operator_card
-        click.echo()
-        severity_colors = {"LOW": "white", "MEDIUM": "yellow", "HIGH": "red", "CRITICAL": "red"}
-        click.echo(
-            click.style(
-                f"  Operator Alert [{oc.severity}]: {oc.reason}",
-                fg=severity_colors.get(oc.severity, "white"),
-                bold=oc.severity in ("HIGH", "CRITICAL"),
-            )
-        )
-        if oc.risk_description:
-            click.echo(f"    Risk: {oc.risk_description}")
-        if oc.suggested_actions:
-            click.echo("    Suggested:")
-            for action in oc.suggested_actions:
-                click.echo(f"      - {action}")
-
-    # Position
-    pos = details.position
-    if pos and (pos.token_balances or pos.lp_positions or pos.health_factor is not None):
-        click.echo()
-        click.echo(click.style("  Position:", bold=True))
-        if pos.token_balances:
-            for t in pos.token_balances:
-                val = f" (${t.value_usd})" if t.value_usd is not None else ""
-                click.echo(f"    {t.symbol}: {t.balance}{val}")
-        if pos.lp_positions:
-            for lp in pos.lp_positions:
-                click.echo(f"    LP: {lp.pool} ({lp.token0}/{lp.token1}) ${lp.liquidity_usd}")
-        if pos.health_factor is not None:
-            click.echo(f"    Health Factor: {pos.health_factor}")
-
-    # Strategy positions (from get_open_positions())
-    if pos and pos.strategy_positions:
-        click.echo()
-        click.echo(click.style("  Positions:", bold=True))
-        for sp in pos.strategy_positions:
-            # Header line: PERP LONG ETH/USD (gmx_v2) on arbitrum
-            direction_str = f" {sp.direction}" if sp.direction else ""
-            click.echo(
-                f"    {click.style(sp.position_type, bold=True)}"
-                f"{direction_str} {sp.position_id} ({sp.protocol}) on {sp.chain}"
-            )
-            # Size / collateral / leverage line (for perps/borrows)
-            parts = []
-            if sp.size_usd:
-                parts.append(f"Size: ${sp.size_usd}")
-            elif sp.value_usd:
-                parts.append(f"Value: ${sp.value_usd}")
-            if sp.collateral_usd:
-                parts.append(f"Collateral: ${sp.collateral_usd}")
-            if sp.leverage:
-                parts.append(f"Leverage: {sp.leverage}x")
-            if sp.health_factor:
-                parts.append(f"HF: {sp.health_factor}")
-            if parts:
-                click.echo(f"      {' | '.join(parts)}")
-            # PnL line
-            if sp.entry_price != "" or sp.current_price != "" or sp.unrealized_pnl_usd != "":
-                pnl_parts = []
-                if sp.entry_price != "":
-                    pnl_parts.append(f"Entry: ${sp.entry_price}")
-                if sp.current_price != "":
-                    pnl_parts.append(f"Current: ${sp.current_price}")
-                if sp.unrealized_pnl_usd != "":
-                    pnl_val = sp.unrealized_pnl_usd
-                    pnl_pct = f" ({sp.unrealized_pnl_pct}%)" if sp.unrealized_pnl_pct else ""
-                    try:
-                        pnl_num = float(pnl_val)
-                    except (ValueError, TypeError):
-                        pnl_num = 0.0
-                    if pnl_num > 0:
-                        pnl_prefix, pnl_color = "+", "green"
-                    elif pnl_num < 0:
-                        pnl_prefix, pnl_color = "", "red"
-                    else:
-                        pnl_prefix, pnl_color = "", "white"
-                    pnl_parts.append(f"PnL: {click.style(f'{pnl_prefix}${pnl_val}{pnl_pct}', fg=pnl_color)}")
-                if pnl_parts:
-                    click.echo(f"      {' | '.join(pnl_parts)}")
-            if sp.liquidation_risk:
-                click.echo(click.style("      ! Liquidation risk", fg="red", bold=True))
-
-    # Chain health
-    if details.chain_health:
-        click.echo()
-        click.echo(click.style("  Chain Health:", bold=True))
-        for chain_name, health in details.chain_health.items():
-            status_color = {"HEALTHY": "green", "DEGRADED": "yellow", "UNAVAILABLE": "red"}
-            click.echo(
-                f"    {chain_name}: "
-                f"{click.style(health.status, fg=status_color.get(health.status, 'white'))} "
-                f"(RPC: {health.rpc_latency_ms}ms, gas: {health.gas_price_gwei} gwei)"
-            )
-
-    # Timeline
-    if timeline and details.timeline:
-        click.echo()
-        click.echo(click.style("  Recent Events:", bold=True))
-        for evt in details.timeline:
-            ts = _format_relative_time(evt.timestamp)
-            type_colors = {"TRADE": "green", "REBALANCE": "cyan", "ERROR": "red", "STATE_CHANGE": "yellow"}
-            etype = click.style(evt.event_type, fg=type_colors.get(evt.event_type, "white"))
-            line = f"    {ts:<12} {etype:<20} {evt.description}"
-            if evt.tx_hash:
-                line += f"  tx:{evt.tx_hash[:10]}..."
-            click.echo(line)
-
-    click.echo()
+    _render_details_pretty(details, timeline_enabled=timeline)
 
 
 # =============================================================================
