@@ -1045,64 +1045,17 @@ def page(strategies: list[Strategy]) -> None:
 
     st.divider()
 
-    # Main content area - two columns
-    left_col, right_col = st.columns([2, 1])
+    # Main content area (two-column layout) + bridge / lifecycle / timeline
+    # lower-stack are extracted to _detail_content for testability and to
+    # collapse the duplicated try/except+traceback boilerplate; see Phase 5c
+    # plan.
+    from almanak.framework.dashboard.pages._detail_content import (
+        render_bridge_and_lifecycle,
+        render_main_content_columns,
+    )
 
-    with left_col:
-        # PnL Chart
-        st.markdown("### Portfolio Performance (7 days)")
-        try:
-            render_pnl_chart(strategy)
-        except Exception as e:
-            st.error(f"Error rendering PnL chart: {e}")
-            import traceback
-
-            st.code(traceback.format_exc())
-
-        try:
-            render_profile_charts(strategy)
-        except Exception as e:
-            st.error(f"Error rendering strategy insights: {e}")
-            import traceback
-
-            st.code(traceback.format_exc())
-
-    with right_col:
-        # Position Summary - use multi-chain view if applicable
-        try:
-            if strategy.is_multi_chain:
-                render_multi_chain_position_summary(strategy)
-            else:
-                render_position_summary(strategy)
-        except Exception as e:
-            st.error(f"Error rendering position summary: {e}")
-            import traceback
-
-            st.code(traceback.format_exc())
+    render_main_content_columns(strategy)
 
     st.divider()
 
-    # Bridge Transfers section for multi-chain strategies
-    if strategy.is_multi_chain and strategy.bridge_transfers:
-        render_bridge_transfers(strategy)
-        st.divider()
-
-    # Position Lifecycle (VIB-2777)
-    try:
-        render_position_lifecycle(strategy)
-    except Exception as e:
-        st.error(f"Error rendering position lifecycle: {e}")
-        import traceback
-
-        st.code(traceback.format_exc())
-
-    st.divider()
-
-    # Timeline Events
-    try:
-        render_timeline_events(strategy, limit=10)
-    except Exception as e:
-        st.error(f"Error rendering timeline events: {e}")
-        import traceback
-
-        st.code(traceback.format_exc())
+    render_bridge_and_lifecycle(strategy)
