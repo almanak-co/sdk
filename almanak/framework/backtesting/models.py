@@ -2282,28 +2282,61 @@ class BacktestResult:
             "data_coverage_metrics": self.data_coverage_metrics.to_dict() if self.data_coverage_metrics else None,
         }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "BacktestResult":
-        """Deserialize from dictionary.
+    # -------------------------------------------------------------------------
+    # from_dict deserialization helpers (Phase 7.2 extraction)
+    #
+    # The per-section helpers below are intentionally kept as staticmethods on
+    # BacktestResult rather than module-level functions so they stay co-located
+    # with the (frozen) dataclass field surface and with `to_dict`. Each helper
+    # owns exactly one conceptual shape; `from_dict` composes them without
+    # having to know how any one subshape parses.
+    #
+    # Invariants the helpers must preserve:
+    #   * v1 -> v2 metrics migration (ratio -> percent) happens inside
+    #     `_parse_metrics`.
+    #   * Optional Decimal fields stay None when the source value is None OR
+    #     the key is absent.
+    #   * EquityPoint optional fields key off *key presence* in the source dict
+    #     (historical quirk of to_dict -- it only emits the key when non-None).
+    #   * from_dict tolerates a missing top-level `metrics` dict (older
+    #     artifacts); required fields (`engine`, `strategy_id`, `start_time`,
+    #     `end_time`) still raise if absent.
+    # -------------------------------------------------------------------------
 
-        Args:
-            data: Dictionary with serialized BacktestResult data
+    @staticmethod
+    def _optional_decimal(data: dict[str, Any], key: str) -> Decimal | None:
+        """Return Decimal(data[key]) when `data.get(key)` is not None, else None."""
+        value = data.get(key)
+        return Decimal(value) if value is not None else None
 
-        Returns:
-            BacktestResult instance
+    @staticmethod
+    def _optional_datetime(value: str | None) -> datetime | None:
+        """Parse an ISO-format datetime or pass through None."""
+        return datetime.fromisoformat(value) if value else None
+
+    @staticmethod
+    def _parse_metrics(metrics_data: dict[str, Any] | None) -> BacktestMetrics:
+        """Rehydrate a `BacktestMetrics` dict, migrating v1 -> v2 when needed.
+
+        VIB-2915: v1 stored total_return_pct / annualized_return_pct as ratios
+        (0.10 for 10%); v2 stores them as whole percentages (10 for 10%).
+        Artifacts without a schema_version are treated as v1 and migrated.
+
+        Explicit `None` (JSON `null` on the top-level `metrics` key) is treated
+        as an empty dict -- defensive against hand-authored / third-party
+        artifacts; `to_dict` itself always emits a dict.
         """
-        # Parse metrics
-        metrics_data = data.get("metrics", {})
-        # VIB-2915: v1 stored total_return_pct / annualized_return_pct as ratios
-        # (0.10 for 10%); v2 stores them as whole percentages (10 for 10%).
-        # Artifacts without a schema_version are treated as v1 and migrated.
+        metrics_data = metrics_data or {}
         legacy_metrics_schema = metrics_data.get("schema_version", 1) < BacktestMetrics.SCHEMA_VERSION
         total_return_pct = Decimal(metrics_data.get("total_return_pct", "0"))
         annualized_return_pct = Decimal(metrics_data.get("annualized_return_pct", "0"))
         if legacy_metrics_schema:
             total_return_pct *= Decimal("100")
             annualized_return_pct *= Decimal("100")
-        metrics = BacktestMetrics(
+
+        opt_dec = BacktestResult._optional_decimal
+
+        return BacktestMetrics(
             total_pnl_usd=Decimal(metrics_data.get("total_pnl_usd", "0")),
             net_pnl_usd=Decimal(metrics_data.get("net_pnl_usd", "0")),
             sharpe_ratio=Decimal(metrics_data.get("sharpe_ratio", "0")),
@@ -2344,18 +2377,12 @@ class BacktestResult:
             total_mev_cost_usd=Decimal(metrics_data.get("total_mev_cost_usd", "0")),
             total_leverage=Decimal(metrics_data.get("total_leverage", "0")),
             max_net_delta={k: Decimal(v) for k, v in metrics_data.get("max_net_delta", {}).items()},
-            correlation_risk=Decimal(metrics_data["correlation_risk"])
-            if metrics_data.get("correlation_risk") is not None
-            else None,
+            correlation_risk=opt_dec(metrics_data, "correlation_risk"),
             liquidation_cascade_risk=Decimal(metrics_data.get("liquidation_cascade_risk", "0")),
-            information_ratio=Decimal(metrics_data["information_ratio"])
-            if metrics_data.get("information_ratio") is not None
-            else None,
-            beta=Decimal(metrics_data["beta"]) if metrics_data.get("beta") is not None else None,
-            alpha=Decimal(metrics_data["alpha"]) if metrics_data.get("alpha") is not None else None,
-            benchmark_return=Decimal(metrics_data["benchmark_return"])
-            if metrics_data.get("benchmark_return") is not None
-            else None,
+            information_ratio=opt_dec(metrics_data, "information_ratio"),
+            beta=opt_dec(metrics_data, "beta"),
+            alpha=opt_dec(metrics_data, "alpha"),
+            benchmark_return=opt_dec(metrics_data, "benchmark_return"),
             pnl_by_protocol={k: Decimal(v) for k, v in metrics_data.get("pnl_by_protocol", {}).items()},
             pnl_by_intent_type={k: Decimal(v) for k, v in metrics_data.get("pnl_by_intent_type", {}).items()},
             pnl_by_asset={k: Decimal(v) for k, v in metrics_data.get("pnl_by_asset", {}).items()},
@@ -2363,173 +2390,178 @@ class BacktestResult:
             unrealized_pnl=Decimal(metrics_data.get("unrealized_pnl", "0")),
         )
 
-        # Parse trades
-        trades = []
-        for t_data in data.get("trades", []):
-            trades.append(
-                TradeRecord(
-                    timestamp=datetime.fromisoformat(t_data["timestamp"]),
-                    intent_type=IntentType(t_data["intent_type"]),
-                    executed_price=Decimal(t_data["executed_price"]),
-                    fee_usd=Decimal(t_data["fee_usd"]),
-                    slippage_usd=Decimal(t_data["slippage_usd"]),
-                    gas_cost_usd=Decimal(t_data["gas_cost_usd"]),
-                    pnl_usd=Decimal(t_data["pnl_usd"]),
-                    success=t_data["success"],
-                    amount_usd=Decimal(t_data.get("amount_usd", "0")),
-                    protocol=t_data.get("protocol", ""),
-                    tokens=t_data.get("tokens", []),
-                    tx_hash=t_data.get("tx_hash"),
-                    error=t_data.get("error"),
-                    metadata=t_data.get("metadata", {}),
-                    actual_amount_in=Decimal(t_data["actual_amount_in"])
-                    if t_data.get("actual_amount_in") is not None
-                    else None,
-                    actual_amount_out=Decimal(t_data["actual_amount_out"])
-                    if t_data.get("actual_amount_out") is not None
-                    else None,
-                    expected_amount_in=Decimal(t_data["expected_amount_in"])
-                    if t_data.get("expected_amount_in") is not None
-                    else None,
-                    expected_amount_out=Decimal(t_data["expected_amount_out"])
-                    if t_data.get("expected_amount_out") is not None
-                    else None,
-                    il_loss_usd=Decimal(t_data["il_loss_usd"]) if t_data.get("il_loss_usd") is not None else None,
-                    fees_earned_usd=Decimal(t_data["fees_earned_usd"])
-                    if t_data.get("fees_earned_usd") is not None
-                    else None,
-                    net_lp_pnl_usd=Decimal(t_data["net_lp_pnl_usd"])
-                    if t_data.get("net_lp_pnl_usd") is not None
-                    else None,
-                    gas_price_gwei=Decimal(t_data["gas_price_gwei"])
-                    if t_data.get("gas_price_gwei") is not None
-                    else None,
-                    estimated_mev_cost_usd=Decimal(t_data["estimated_mev_cost_usd"])
-                    if t_data.get("estimated_mev_cost_usd") is not None
-                    else None,
-                    delayed_at_end=t_data.get("delayed_at_end", False),
-                    position_id=t_data.get("position_id"),
-                )
-            )
+    @staticmethod
+    def _parse_trade_record(t_data: dict[str, Any]) -> TradeRecord:
+        """Rehydrate a single TradeRecord dict."""
+        opt_dec = BacktestResult._optional_decimal
+        return TradeRecord(
+            timestamp=datetime.fromisoformat(t_data["timestamp"]),
+            intent_type=IntentType(t_data["intent_type"]),
+            executed_price=Decimal(t_data["executed_price"]),
+            fee_usd=Decimal(t_data["fee_usd"]),
+            slippage_usd=Decimal(t_data["slippage_usd"]),
+            gas_cost_usd=Decimal(t_data["gas_cost_usd"]),
+            pnl_usd=Decimal(t_data["pnl_usd"]),
+            success=t_data["success"],
+            amount_usd=Decimal(t_data.get("amount_usd", "0")),
+            protocol=t_data.get("protocol", ""),
+            tokens=t_data.get("tokens", []),
+            tx_hash=t_data.get("tx_hash"),
+            error=t_data.get("error"),
+            metadata=t_data.get("metadata", {}),
+            actual_amount_in=opt_dec(t_data, "actual_amount_in"),
+            actual_amount_out=opt_dec(t_data, "actual_amount_out"),
+            expected_amount_in=opt_dec(t_data, "expected_amount_in"),
+            expected_amount_out=opt_dec(t_data, "expected_amount_out"),
+            il_loss_usd=opt_dec(t_data, "il_loss_usd"),
+            fees_earned_usd=opt_dec(t_data, "fees_earned_usd"),
+            net_lp_pnl_usd=opt_dec(t_data, "net_lp_pnl_usd"),
+            gas_price_gwei=opt_dec(t_data, "gas_price_gwei"),
+            estimated_mev_cost_usd=opt_dec(t_data, "estimated_mev_cost_usd"),
+            delayed_at_end=t_data.get("delayed_at_end", False),
+            position_id=t_data.get("position_id"),
+        )
 
-        # Parse equity curve
-        equity_curve = []
-        for e_data in data.get("equity_curve", []):
-            equity_curve.append(
-                EquityPoint(
-                    timestamp=datetime.fromisoformat(e_data["timestamp"]),
-                    value_usd=Decimal(e_data["value_usd"]),
-                    eth_price_usd=Decimal(e_data["eth_price_usd"]) if "eth_price_usd" in e_data else None,
-                    spot_value_usd=Decimal(e_data["spot_value_usd"]) if "spot_value_usd" in e_data else None,
-                    position_value_usd=(
-                        Decimal(e_data["position_value_usd"]) if "position_value_usd" in e_data else None
-                    ),
-                    valuation_source=e_data.get("valuation_source", "simple"),
-                )
-            )
+    @staticmethod
+    def _parse_trades(raw: "list[dict[str, Any]] | None") -> list[TradeRecord]:
+        """Rehydrate a list of TradeRecord dicts; None is treated as empty."""
+        return [BacktestResult._parse_trade_record(t) for t in (raw or [])]
 
-        # Parse lending liquidations
-        lending_liquidations = []
-        for ll_data in data.get("lending_liquidations", []):
-            lending_liquidations.append(LendingLiquidationEvent.from_dict(ll_data))
+    @staticmethod
+    def _parse_equity_curve(raw: "list[dict[str, Any]] | None") -> list[EquityPoint]:
+        """Rehydrate a list of EquityPoint dicts; None is treated as empty."""
+        return [BacktestResult._parse_equity_point(e) for e in (raw or [])]
 
-        # Parse aggregated portfolio view
-        aggregated_portfolio_view = None
-        if data.get("aggregated_portfolio_view"):
-            aggregated_portfolio_view = AggregatedPortfolioView.from_dict(data["aggregated_portfolio_view"])
+    @staticmethod
+    def _parse_equity_point(e_data: dict[str, Any]) -> EquityPoint:
+        """Rehydrate a single EquityPoint dict.
 
-        # Parse reconciliation events
-        reconciliation_events = []
-        for re_data in data.get("reconciliation_events", []):
-            reconciliation_events.append(ReconciliationEvent.from_dict(re_data))
+        EquityPoint.to_dict drops optional keys when their values are None, so
+        absent keys must round-trip to None. `_optional_decimal` already handles
+        both "key absent" and "value is None" as None -> None, which preserves
+        the round-trip contract and additionally hardens us against explicit
+        JSON `null` for these keys.
+        """
+        opt_dec = BacktestResult._optional_decimal
+        return EquityPoint(
+            timestamp=datetime.fromisoformat(e_data["timestamp"]),
+            value_usd=Decimal(e_data["value_usd"]),
+            eth_price_usd=opt_dec(e_data, "eth_price_usd"),
+            spot_value_usd=opt_dec(e_data, "spot_value_usd"),
+            position_value_usd=opt_dec(e_data, "position_value_usd"),
+            valuation_source=e_data.get("valuation_source") or "simple",
+        )
 
-        # Parse walk-forward results (import here to avoid circular import)
-        walk_forward_results = None
-        if data.get("walk_forward_results"):
-            from almanak.framework.backtesting.pnl.walk_forward import WalkForwardResult
-
-            walk_forward_results = WalkForwardResult.from_dict(data["walk_forward_results"])
-
-        # Parse Monte Carlo results (import here to avoid circular import)
-        monte_carlo_results = None
-        if data.get("monte_carlo_results"):
-            from almanak.framework.backtesting.pnl.calculators.monte_carlo_runner import (
-                MonteCarloSimulationResult,
-            )
-
-            monte_carlo_results = MonteCarloSimulationResult.from_dict(data["monte_carlo_results"])
-
-        # Parse crisis results
-        crisis_results = None
-        if data.get("crisis_results"):
-            crisis_results = CrisisMetrics.from_dict(data["crisis_results"])
-
-        # Parse data source capabilities (import here to avoid circular import)
+    @staticmethod
+    def _parse_data_source_capabilities(
+        raw: dict[str, Any] | None,
+    ) -> "dict[str, HistoricalDataCapability]":
+        """Rehydrate {provider_name: HistoricalDataCapability} from enum values."""
+        # Import here to avoid circular import.
         from almanak.framework.backtesting.pnl.data_provider import HistoricalDataCapability
 
-        data_source_capabilities: dict[str, HistoricalDataCapability] = {}
-        if data.get("data_source_capabilities"):
-            for k, v in data["data_source_capabilities"].items():
-                data_source_capabilities[k] = HistoricalDataCapability(v)
+        if not raw:
+            return {}
+        return {k: HistoricalDataCapability(v) for k, v in raw.items()}
 
-        # Parse data quality report
-        data_quality = None
-        if data.get("data_quality"):
-            data_quality = DataQualityReport.from_dict(data["data_quality"])
+    @staticmethod
+    def _parse_walk_forward_results(raw: dict[str, Any] | None) -> "WalkForwardResult | None":
+        """Rehydrate optional WalkForwardResult (avoids circular import at module scope)."""
+        if not raw:
+            return None
+        from almanak.framework.backtesting.pnl.walk_forward import WalkForwardResult
 
-        # Parse preflight report
-        preflight_report = None
-        if data.get("preflight_report"):
-            preflight_report = PreflightReport.from_dict(data["preflight_report"])
+        return WalkForwardResult.from_dict(raw)
 
+    @staticmethod
+    def _parse_monte_carlo_results(
+        raw: dict[str, Any] | None,
+    ) -> "MonteCarloSimulationResult | None":
+        """Rehydrate optional MonteCarloSimulationResult (avoids circular import at module scope)."""
+        if not raw:
+            return None
+        from almanak.framework.backtesting.pnl.calculators.monte_carlo_runner import (
+            MonteCarloSimulationResult,
+        )
+
+        return MonteCarloSimulationResult.from_dict(raw)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BacktestResult":
+        """Deserialize from dictionary.
+
+        Accepts both v1 (legacy, ratio-based total_return_pct) and v2
+        (percentage-based) metrics artifacts. See `_parse_metrics` for the
+        full migration rule.
+
+        Args:
+            data: Dictionary with serialized BacktestResult data
+
+        Returns:
+            BacktestResult instance
+
+        Raises:
+            KeyError: when a required top-level field is missing
+                (`engine`, `strategy_id`, `start_time`, `end_time`).
+            ValueError: when a required field is present but malformed
+                (e.g. an unknown BacktestEngine value or a bad datetime).
+        """
         return cls(
             engine=BacktestEngine(data["engine"]),
             strategy_id=data["strategy_id"],
             start_time=datetime.fromisoformat(data["start_time"]),
             end_time=datetime.fromisoformat(data["end_time"]),
-            metrics=metrics,
-            trades=trades,
-            equity_curve=equity_curve,
+            metrics=cls._parse_metrics(data.get("metrics")),
+            trades=cls._parse_trades(data.get("trades")),
+            equity_curve=cls._parse_equity_curve(data.get("equity_curve")),
             initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
             final_capital_usd=Decimal(data.get("final_capital_usd", "10000")),
             chain=data.get("chain", "arbitrum"),
-            run_started_at=datetime.fromisoformat(data["run_started_at"]) if data.get("run_started_at") else None,
-            run_ended_at=datetime.fromisoformat(data["run_ended_at"]) if data.get("run_ended_at") else None,
+            run_started_at=cls._optional_datetime(data.get("run_started_at")),
+            run_ended_at=cls._optional_datetime(data.get("run_ended_at")),
             run_duration_seconds=data.get("run_duration_seconds", 0.0),
             config=data.get("config", {}),
             error=data.get("error"),
-            lending_liquidations=lending_liquidations,
-            aggregated_portfolio_view=aggregated_portfolio_view,
-            reconciliation_events=reconciliation_events,
-            walk_forward_results=walk_forward_results,
-            monte_carlo_results=monte_carlo_results,
-            crisis_results=crisis_results,
+            lending_liquidations=[LendingLiquidationEvent.from_dict(ll) for ll in data.get("lending_liquidations", [])],
+            aggregated_portfolio_view=(
+                AggregatedPortfolioView.from_dict(data["aggregated_portfolio_view"])
+                if data.get("aggregated_portfolio_view")
+                else None
+            ),
+            reconciliation_events=[ReconciliationEvent.from_dict(re) for re in data.get("reconciliation_events", [])],
+            walk_forward_results=cls._parse_walk_forward_results(data.get("walk_forward_results")),
+            monte_carlo_results=cls._parse_monte_carlo_results(data.get("monte_carlo_results")),
+            crisis_results=CrisisMetrics.from_dict(data["crisis_results"]) if data.get("crisis_results") else None,
             errors=data.get("errors", []),
             backtest_id=data.get("backtest_id"),
             phase_timings=data.get("phase_timings", []),
             config_hash=data.get("config_hash"),
             execution_delayed_at_end=data.get("execution_delayed_at_end", 0),
-            data_source_capabilities=data_source_capabilities,
+            data_source_capabilities=cls._parse_data_source_capabilities(data.get("data_source_capabilities")),
             data_source_warnings=data.get("data_source_warnings", []),
-            data_quality=data_quality,
+            data_quality=DataQualityReport.from_dict(data["data_quality"]) if data.get("data_quality") else None,
             institutional_compliance=data.get("institutional_compliance", True),
             compliance_violations=data.get("compliance_violations", []),
             fallback_usage=data.get("fallback_usage", {}),
-            preflight_report=preflight_report,
+            preflight_report=(
+                PreflightReport.from_dict(data["preflight_report"]) if data.get("preflight_report") else None
+            ),
             preflight_passed=data.get("preflight_passed", True),
             gas_prices_used=[GasPriceRecord.from_dict(r) for r in data.get("gas_prices_used", [])],
-            gas_price_summary=GasPriceSummary.from_dict(data["gas_price_summary"])
-            if data.get("gas_price_summary")
-            else None,
-            parameter_sources=ParameterSourceTracker.from_dict(data["parameter_sources"])
-            if data.get("parameter_sources")
-            else None,
-            accuracy_estimate=AccuracyEstimate.from_dict(data["accuracy_estimate"])
-            if data.get("accuracy_estimate")
-            else None,
-            data_coverage_metrics=DataCoverageMetrics.from_dict(data["data_coverage_metrics"])
-            if data.get("data_coverage_metrics")
-            else None,
+            gas_price_summary=(
+                GasPriceSummary.from_dict(data["gas_price_summary"]) if data.get("gas_price_summary") else None
+            ),
+            parameter_sources=(
+                ParameterSourceTracker.from_dict(data["parameter_sources"]) if data.get("parameter_sources") else None
+            ),
+            accuracy_estimate=(
+                AccuracyEstimate.from_dict(data["accuracy_estimate"]) if data.get("accuracy_estimate") else None
+            ),
+            data_coverage_metrics=(
+                DataCoverageMetrics.from_dict(data["data_coverage_metrics"])
+                if data.get("data_coverage_metrics")
+                else None
+            ),
         )
 
 
