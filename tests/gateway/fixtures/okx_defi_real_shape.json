@@ -1,0 +1,88 @@
+{
+  "_description": "Golden fixture: real OKX DeFi detail API shape with data as a dict (single entry). Covers multi-platform, multi-chain, position-level unclaimed rewards, network-level availableRewards, and investLogo-derived protocol/symbols.",
+  "code": "0",
+  "msg": "success",
+  "data": {
+    "walletIdPlatformDetailList": [
+      {
+        "analysisPlatformId": "44",
+        "platformName": "Aave V3",
+        "networkHoldVoList": [
+          {
+            "chainIndex": "42161",
+            "investTokenBalanceVoList": [
+              {
+                "investmentName": "USDC Supply",
+                "investmentId": "aave-usdc-supply",
+                "investType": 6,
+                "totalValue": "1500.75",
+                "investLogo": {
+                  "bottomRightLogoList": [
+                    {"tokenName": "Aave"}
+                  ],
+                  "middleLogoList": [
+                    {"tokenName": "USDC"}
+                  ]
+                },
+                "poolAddress": "0xaave-pool",
+                "positionList": [
+                  {
+                    "assetsTokenList": [
+                      {"tokenSymbol": "USDC", "currencyAmount": "1500.75"}
+                    ],
+                    "unclaimFeesDefiTokenInfo": [
+                      {
+                        "baseDefiTokenInfos": [
+                          {
+                            "tokenSymbol": "AAVE",
+                            "coinAmount": "0.25",
+                            "currencyAmount": "22.50"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "availableRewards": [
+              {
+                "tokenSymbol": "ARB",
+                "tokenAmount": "10.0",
+                "currencyAmount": "15.50"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "analysisPlatformId": "123",
+        "platformName": "Uniswap V3",
+        "networkHoldVoList": [
+          {
+            "chainIndex": "42161",
+            "investTokenBalanceVoList": [
+              {
+                "investmentName": "ETH/USDC Pool",
+                "investmentId": "uni-eth-usdc",
+                "investType": 2,
+                "totalValue": "5000.00",
+                "investLogo": {
+                  "bottomRightLogoList": [
+                    {"tokenName": "Uniswap"}
+                  ],
+                  "middleLogoList": [
+                    {"tokenName": "ETH"},
+                    {"tokenName": "USDC"}
+                  ]
+                },
+                "tokenAddress": "0xuni-pool-token",
+                "positionList": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

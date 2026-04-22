@@ -1,0 +1,54 @@
+{
+  "_description": "Golden fixture: OKX DeFi detail in list-of-entries shape (data: [{...}]). Exercises totalValue fallback via _sum_position_values and multiple unclaimFeesDefiTokenInfo groups.",
+  "code": "0",
+  "msg": "success",
+  "data": [
+    {
+      "walletIdPlatformDetailList": [
+        {
+          "analysisPlatformId": "99",
+          "platformName": "Compound V3",
+          "networkHoldVoList": [
+            {
+              "chainIndex": "1",
+              "investTokenBalanceVoList": [
+                {
+                  "investmentName": "USDC Market",
+                  "investmentId": "compound-usdc",
+                  "investType": 6,
+                  "positionList": [
+                    {
+                      "assetsTokenList": [
+                        {"tokenSymbol": "USDC", "currencyAmount": "250.50"},
+                        {"tokenSymbol": "USDC", "currencyAmount": "750.25"}
+                      ],
+                      "unclaimFeesDefiTokenInfo": [
+                        {
+                          "baseDefiTokenInfos": [
+                            {
+                              "tokenSymbol": "COMP",
+                              "coinAmount": "0.10",
+                              "currencyAmount": "12.00"
+                            },
+                            {
+                              "tokenSymbol": "WETH",
+                              "coinAmount": "0.005",
+                              "currencyAmount": "18.00"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "tokenList": [
+                    {"tokenSymbol": "USDC"}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

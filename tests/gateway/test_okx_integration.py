@@ -1,12 +1,16 @@
 """Tests for OKX OnchainOS portfolio integration."""
 
+import json
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from almanak.gateway.integrations.base import IntegrationError
 from almanak.gateway.integrations.okx import OkxIntegration
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 class TestOkxIntegration:
@@ -529,3 +533,727 @@ class TestOkxIntegration:
                 await okx._fetch("/api/v6/dex/balance/total-value-by-address")
 
         assert okx._metrics.failed_requests > 0
+
+
+class TestNormalizeDefiDetails:
+    """Characterization tests for ``OkxIntegration._normalize_defi_details``.
+
+    Phase 5e-chars (Track B gate): this class captures the CURRENT observable
+    behavior of ``_normalize_defi_details`` before the Phase 5f refactor splits
+    the 6-level nested loop into per-level extractors. Every assertion here is
+    a contract-freeze: if the refactor changes any of these outputs without an
+    explicit behavior-change note, the test must fail.
+
+    Two documented latent bugs are asserted at their CURRENT (buggy) behavior:
+
+    - Issue #1707: ``totalValue == "0"`` silently triggers a recompute from
+      ``positionList``. Measured-zero positions are indistinguishable from
+      "field missing". Current behavior: recompute. Tests flip when #1707 is fixed.
+    - Issue #1708: Rewards can surface twice: once under
+      ``positionList[].unclaimFeesDefiTokenInfo`` (position-level) and again
+      under ``networkHoldVoList[].availableRewards`` (network-level). When the
+      same reward token is present at both levels, the current implementation
+      emits two rows. Current behavior: duplicate. Tests flip when #1708 is fixed.
+    """
+
+    @pytest.fixture
+    def platforms(self) -> list[dict[str, str]]:
+        """Minimal platform list mapping id -> protocol name."""
+        return [
+            {"id": "44", "name": "Aave V3"},
+            {"id": "123", "name": "Uniswap V3"},
+            {"id": "99", "name": "Compound V3"},
+        ]
+
+    # ------------------------------------------------------------------
+    # Shape variants: dict vs list-of-entries
+    # ------------------------------------------------------------------
+
+    def test_real_api_shape_data_as_dict(self, platforms):
+        """Real OKX API: ``data`` is a dict with a single entry.
+
+        Fixture exercises the full pipeline: two platforms, investLogo-derived
+        protocol/symbols, position-level rewards, and network-level rewards.
+        """
+        payload = json.loads((FIXTURES_DIR / "okx_defi_real_shape.json").read_text())
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+
+        # 2 investments + 1 position-level reward (AAVE) + 1 network-level reward (ARB)
+        # from the Aave platform, plus 1 investment from Uniswap = 4 rows total.
+        assert len(positions) == 4
+
+        aave_supply = positions[0]
+        assert aave_supply.position_id == "okx:defi:44:aave-usdc-supply"
+        assert aave_supply.protocol == "Aave"  # from investLogo.bottomRightLogoList
+        assert aave_supply.label == "USDC Supply"
+        assert aave_supply.position_type == "lending"  # investType 6
+        assert aave_supply.value_usd == "1500.75"
+        assert aave_supply.token_symbols == ["USDC"]
+        assert aave_supply.pool_address == "0xaave-pool"
+        assert aave_supply.details == {
+            "invest_type": "lending",
+            "invest_type_id": 6,
+            "investment_id": "aave-usdc-supply",
+            "chain_index": "42161",
+            "platform_id": "44",
+        }
+
+        # Position-level reward (unclaimFeesDefiTokenInfo)
+        aave_reward = positions[1]
+        assert aave_reward.position_id == "okx:reward:44:aave-usdc-supply:AAVE"
+        assert aave_reward.position_type == "reward"
+        assert aave_reward.protocol == "Aave"
+        assert aave_reward.value_usd == "22.50"
+        assert aave_reward.token_symbols == ["AAVE"]
+        assert aave_reward.details == {"reward_amount": "0.25", "chain_index": "42161"}
+
+        # Network-level reward (availableRewards)
+        arb_reward = positions[2]
+        assert arb_reward.position_id == "okx:reward:44:ARB"
+        assert arb_reward.position_type == "reward"
+        # Network-level reward uses platform_names lookup, NOT investLogo.
+        assert arb_reward.protocol == "Aave V3"
+        assert arb_reward.value_usd == "15.50"
+        assert arb_reward.token_symbols == ["ARB"]
+
+        # Uniswap investment
+        uni_pool = positions[3]
+        assert uni_pool.protocol == "Uniswap"  # investLogo overrides platform_names
+        assert uni_pool.position_type == "pool"  # investType 2
+        assert uni_pool.token_symbols == ["ETH", "USDC"]
+        assert uni_pool.pool_address == "0xuni-pool-token"  # tokenAddress fallback
+
+    def test_list_of_entries_shape(self, platforms):
+        """``data`` as a list of entries is handled identically to dict form."""
+        payload = json.loads((FIXTURES_DIR / "okx_defi_list_shape.json").read_text())
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+
+        # 1 investment + 2 position-level rewards (COMP, WETH)
+        assert len(positions) == 3
+
+        compound_market = positions[0]
+        assert compound_market.position_id == "okx:defi:99:compound-usdc"
+        assert compound_market.protocol == "Compound V3"  # platform_names lookup
+        assert compound_market.position_type == "lending"
+        # Fixture omits totalValue: _sum_position_values sums
+        # 250.50 + 750.25 = 1000.75 across the two assetsTokenList entries.
+        assert compound_market.value_usd == "1000.75"
+        # No investLogo + no empty middleLogoList => tokenList fallback.
+        assert compound_market.token_symbols == ["USDC"]
+
+        comp_reward = positions[1]
+        assert comp_reward.position_id == "okx:reward:99:compound-usdc:COMP"
+        assert comp_reward.value_usd == "12.00"
+
+        weth_reward = positions[2]
+        assert weth_reward.position_id == "okx:reward:99:compound-usdc:WETH"
+        assert weth_reward.value_usd == "18.00"
+
+    # ------------------------------------------------------------------
+    # Payload-envelope edge cases
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            "not a dict",
+            [],
+            42,
+            {"code": "0"},                   # no 'data' key
+            {"code": "0", "data": "nope"},   # data is neither dict nor list
+            {"code": "0", "data": None},
+            {"code": "0", "data": {}},       # dict without walletIdPlatformDetailList
+            {"code": "0", "data": []},
+        ],
+    )
+    def test_malformed_payload_returns_empty(self, platforms, payload):
+        """Every non-dict or unusable-shape payload returns an empty list."""
+        assert OkxIntegration._normalize_defi_details(payload, platforms) == []
+
+    def test_empty_wallet_id_platform_detail_list(self, platforms):
+        """Missing/empty walletIdPlatformDetailList yields no positions."""
+        payload = {"code": "0", "data": {"walletIdPlatformDetailList": []}}
+        assert OkxIntegration._normalize_defi_details(payload, platforms) == []
+
+        payload = {"code": "0", "data": {"walletIdPlatformDetailList": None}}
+        assert OkxIntegration._normalize_defi_details(payload, platforms) == []
+
+    def test_empty_network_hold_list(self, platforms):
+        """Missing/empty networkHoldVoList at a platform yields no positions."""
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {"analysisPlatformId": "44", "networkHoldVoList": []},
+                    {"analysisPlatformId": "44", "networkHoldVoList": None},
+                    {"analysisPlatformId": "44"},  # key absent entirely
+                ]
+            },
+        }
+        assert OkxIntegration._normalize_defi_details(payload, platforms) == []
+
+    def test_empty_invest_token_balance_list(self, platforms):
+        """Missing investTokenBalanceVoList skips BOTH investments and network-level rewards.
+
+        The ``availableRewards`` loop lives below the ``investTokenBalanceVoList``
+        guard in the inner network_hold body, so when the invest list is absent
+        the ``continue`` fires and the network-level reward check is never reached.
+        """
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            {
+                                "chainIndex": "1",
+                                # investTokenBalanceVoList absent -> no invest rows,
+                                # but availableRewards still scanned at network level.
+                                "availableRewards": [
+                                    {
+                                        "tokenSymbol": "ARB",
+                                        "tokenAmount": "5",
+                                        "currencyAmount": "10",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        # Current behavior: when investTokenBalanceVoList is absent, the inner
+        # loop is skipped entirely via `continue`, which ALSO skips the
+        # network-level availableRewards check (it lives inside the invest-list
+        # loop body). Net: no rewards emitted.
+        assert positions == []
+
+    def test_non_list_nested_containers_skipped(self, platforms):
+        """Nested containers that are not lists trigger the intermediate guards.
+
+        Covers:
+          - ``investTokenBalanceVoList`` as non-list (network_hold guard).
+          - ``baseDefiTokenInfos`` as non-list (unclaim-fee guard).
+        """
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            # First hold: investTokenBalanceVoList is not a list.
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": "not-a-list",
+                            },
+                            # Second hold: valid invest, but baseDefiTokenInfos non-list.
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": [
+                                    {
+                                        "investmentName": "ok",
+                                        "investmentId": "ok",
+                                        "investType": 1,
+                                        "totalValue": "1",
+                                        "positionList": [
+                                            {
+                                                "unclaimFeesDefiTokenInfo": [
+                                                    {"baseDefiTokenInfos": "not-a-list"},
+                                                    {"baseDefiTokenInfos": None},
+                                                ]
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        # Only the single valid investment row; no rewards.
+        assert len(positions) == 1
+        assert positions[0].label == "ok"
+
+    def test_non_dict_entries_skipped_at_every_level(self, platforms):
+        """Every nested ``if not isinstance(..., dict): continue`` guard is exercised.
+
+        Mixing scalar/list sentinels into each nested container verifies the
+        defensive filters at:
+          - detail_list entry
+          - network_hold entry
+          - invest entry
+          - position entry
+          - fee_group entry
+          - reward entry (both position-level and network-level)
+        """
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    "not-a-dict-detail",  # skipped
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            "not-a-dict-network",  # skipped
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": [
+                                    "not-a-dict-invest",  # skipped
+                                    {
+                                        "investmentName": "real",
+                                        "investmentId": "r",
+                                        "investType": 1,
+                                        "totalValue": "50",
+                                        "positionList": [
+                                            "not-a-dict-pos",  # skipped
+                                            {
+                                                "unclaimFeesDefiTokenInfo": [
+                                                    "not-a-dict-fee-group",  # skipped
+                                                    {
+                                                        "baseDefiTokenInfos": [
+                                                            "not-a-dict-reward",  # skipped
+                                                            {
+                                                                "tokenSymbol": "R",
+                                                                "coinAmount": "1",
+                                                                "currencyAmount": "2",
+                                                            },
+                                                        ]
+                                                    },
+                                                ]
+                                            },
+                                        ],
+                                    },
+                                ],
+                                "availableRewards": [
+                                    "not-a-dict-net-reward",  # skipped
+                                    {
+                                        "tokenSymbol": "N",
+                                        "tokenAmount": "3",
+                                        "currencyAmount": "4",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        # 1 investment + 1 position-level reward + 1 network-level reward.
+        assert len(positions) == 3
+        assert positions[0].label == "real"
+        assert positions[1].token_symbols == ["R"]
+        assert positions[2].token_symbols == ["N"]
+
+    # ------------------------------------------------------------------
+    # investLogo handling
+    # ------------------------------------------------------------------
+
+    def test_invest_logo_missing(self, platforms):
+        """No investLogo: protocol falls back to platform_names, symbols to tokenList."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "no-logo",
+                "investmentId": "x",
+                "investType": 1,
+                "totalValue": "50",
+                "tokenList": [{"tokenSymbol": "USDC"}],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        assert positions[0].protocol == "Aave V3"  # platform_names lookup
+        assert positions[0].token_symbols == ["USDC"]
+
+    @pytest.mark.parametrize("non_dict_logo", ["string", 42, ["list"], None])
+    def test_invest_logo_non_dict(self, platforms, non_dict_logo):
+        """investLogo as non-dict falls back to platform_names + tokenList."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "bad-logo",
+                "investmentId": "x",
+                "investType": 1,
+                "totalValue": "50",
+                "investLogo": non_dict_logo,
+                "tokenList": [{"tokenSymbol": "DAI"}],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        assert positions[0].protocol == "Aave V3"
+        assert positions[0].token_symbols == ["DAI"]
+
+    def test_invest_logo_only_bottom_right(self, platforms):
+        """bottomRightLogoList sets protocol; missing middleLogoList triggers tokenList fallback."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "br-only",
+                "investmentId": "x",
+                "investType": 1,
+                "totalValue": "50",
+                "investLogo": {
+                    "bottomRightLogoList": [{"tokenName": "Morpho"}],
+                    # middleLogoList absent
+                },
+                "tokenList": [{"tokenSymbol": "USDT"}],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert positions[0].protocol == "Morpho"
+        assert positions[0].token_symbols == ["USDT"]
+
+    def test_invest_logo_only_middle(self, platforms):
+        """middleLogoList sets symbols; missing bottomRightLogoList falls back to platform_names."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "mid-only",
+                "investmentId": "x",
+                "investType": 2,
+                "totalValue": "50",
+                "investLogo": {
+                    "middleLogoList": [
+                        {"tokenName": "WBTC"},
+                        {"tokenName": "WETH"},
+                    ],
+                },
+                "tokenList": [{"tokenSymbol": "SHOULD_NOT_APPEAR"}],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert positions[0].protocol == "Aave V3"  # platform_names fallback
+        # middleLogoList wins over tokenList fallback.
+        assert positions[0].token_symbols == ["WBTC", "WETH"]
+
+    def test_invest_logo_both_present(self, platforms):
+        """Both lists present: protocol from bottomRight, symbols from middle."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "both",
+                "investmentId": "x",
+                "investType": 2,
+                "totalValue": "100",
+                "investLogo": {
+                    "bottomRightLogoList": [{"tokenName": "Balancer"}],
+                    "middleLogoList": [
+                        {"tokenName": "ETH"},
+                        {"tokenName": "OP"},
+                    ],
+                },
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert positions[0].protocol == "Balancer"
+        assert positions[0].token_symbols == ["ETH", "OP"]
+
+    def test_token_list_fallback_when_middle_logo_empty(self, platforms):
+        """Empty middleLogoList triggers tokenList fallback (even with a logo dict)."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "middle-empty",
+                "investmentId": "x",
+                "investType": 1,
+                "totalValue": "10",
+                "investLogo": {
+                    "bottomRightLogoList": [{"tokenName": "Morpho"}],
+                    "middleLogoList": [],  # empty -> fallback triggers
+                },
+                "tokenList": [{"tokenSymbol": "FRAX"}],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert positions[0].protocol == "Morpho"
+        assert positions[0].token_symbols == ["FRAX"]
+
+    # ------------------------------------------------------------------
+    # Reward handling
+    # ------------------------------------------------------------------
+
+    def test_position_level_rewards_from_unclaim_fees(self, platforms):
+        """positionList[].unclaimFeesDefiTokenInfo[] emits one reward row per non-zero reward."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "with-rewards",
+                "investmentId": "y",
+                "investType": 1,
+                "totalValue": "100",
+                "positionList": [
+                    {
+                        "unclaimFeesDefiTokenInfo": [
+                            {
+                                "baseDefiTokenInfos": [
+                                    {
+                                        "tokenSymbol": "REW1",
+                                        "coinAmount": "1.0",
+                                        "currencyAmount": "5.00",
+                                    },
+                                    {
+                                        "tokenSymbol": "ZERO",
+                                        "coinAmount": "0",
+                                        "currencyAmount": "0",  # filtered out
+                                    },
+                                    {
+                                        "tokenSymbol": "REW2",
+                                        "coinAmount": "2.0",
+                                        "currencyAmount": "3.00",
+                                    },
+                                ]
+                            }
+                        ]
+                    }
+                ],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        # 1 investment + 2 non-zero rewards
+        assert len(positions) == 3
+        reward_symbols = [p.token_symbols[0] for p in positions if p.position_type == "reward"]
+        assert reward_symbols == ["REW1", "REW2"]
+
+    def test_duplicate_rewards_at_network_and_position_level_issue_1708(self, platforms):
+        """Issue #1708: same reward present at both levels produces two rows.
+
+        Current (buggy) behavior: a reward token that appears in both
+        ``positionList[].unclaimFeesDefiTokenInfo`` AND
+        ``networkHoldVoList[].availableRewards`` is emitted twice with
+        different position_ids. When #1708 is fixed, this test must flip to
+        assert a single row.
+        """
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": [
+                                    {
+                                        "investmentName": "dup-reward",
+                                        "investmentId": "inv-dup",
+                                        "investType": 1,
+                                        "totalValue": "100",
+                                        "positionList": [
+                                            {
+                                                "unclaimFeesDefiTokenInfo": [
+                                                    {
+                                                        "baseDefiTokenInfos": [
+                                                            {
+                                                                "tokenSymbol": "ARB",
+                                                                "coinAmount": "5",
+                                                                "currencyAmount": "10",
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    }
+                                ],
+                                "availableRewards": [
+                                    {
+                                        "tokenSymbol": "ARB",
+                                        "tokenAmount": "5",
+                                        "currencyAmount": "10",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        rewards = [p for p in positions if p.position_type == "reward"]
+        # Duplicate-by-design today: position-level + network-level rows coexist.
+        assert len(rewards) == 2
+        reward_ids = sorted(r.position_id for r in rewards)
+        assert reward_ids == [
+            "okx:reward:44:ARB",            # network-level row
+            "okx:reward:44:inv-dup:ARB",    # position-level row
+        ]
+
+    def test_available_rewards_uses_token_amount_then_coin_amount(self, platforms):
+        """availableRewards: ``tokenAmount`` preferred, falls back to ``coinAmount``."""
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": [
+                                    {"investmentName": "anchor", "investmentId": "a",
+                                     "investType": 1, "totalValue": "1"}
+                                ],
+                                "availableRewards": [
+                                    {"tokenSymbol": "A", "tokenAmount": "1.0", "currencyAmount": "5"},
+                                    {"tokenSymbol": "B", "coinAmount": "2.0", "currencyAmount": "6"},
+                                    {"tokenSymbol": "C", "currencyAmount": "7"},  # defaults to "0"
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        rewards = [p for p in positions if p.position_type == "reward"]
+        assert len(rewards) == 3
+        amounts = {p.token_symbols[0]: p.details["reward_amount"] for p in rewards}
+        assert amounts == {"A": "1.0", "B": "2.0", "C": "0"}
+
+    # ------------------------------------------------------------------
+    # _sum_position_values fallback
+    # ------------------------------------------------------------------
+
+    def test_sum_position_values_fallback_when_total_value_missing(self, platforms):
+        """totalValue absent -> _sum_position_values aggregates assets."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "summed",
+                "investmentId": "s",
+                "investType": 1,
+                # totalValue omitted
+                "positionList": [
+                    {
+                        "assetsTokenList": [
+                            {"tokenSymbol": "A", "currencyAmount": "10.25"},
+                            {"tokenSymbol": "B", "currencyAmount": "5.75"},
+                        ]
+                    }
+                ],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        # 10.25 + 5.75 = 16.00
+        assert Decimal(positions[0].value_usd) == Decimal("16.00")
+
+    def test_measured_zero_total_value_silently_recomputes_issue_1707(self, platforms):
+        """Issue #1707: ``totalValue == "0"`` triggers _sum_position_values recompute.
+
+        Current (buggy) behavior: a measured-zero totalValue is indistinguishable
+        from "field missing" and is silently overwritten by the sum of
+        positionList assets. When #1707 is fixed, totalValue "0" must be
+        preserved verbatim and this assertion must flip.
+        """
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "zero-measured",
+                "investmentId": "z",
+                "investType": 1,
+                "totalValue": "0",  # measured zero
+                "positionList": [
+                    {
+                        "assetsTokenList": [
+                            {"tokenSymbol": "A", "currencyAmount": "42.00"},
+                        ]
+                    }
+                ],
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        # Current buggy behavior: totalValue "0" silently recomputed from assets.
+        assert positions[0].value_usd == "42.00"
+
+    # ------------------------------------------------------------------
+    # investType label mapping
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "invest_type,expected_label",
+        [
+            (1, "save"),
+            (2, "pool"),
+            (3, "farm"),
+            (4, "vault"),
+            (5, "stake"),
+            (6, "lending"),
+            (7, "lock"),
+            (8, "leveraged_farming"),
+        ],
+    )
+    def test_known_invest_types_map_to_labels(self, platforms, invest_type, expected_label):
+        """All 8 known investType IDs map to their canonical string labels."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "t",
+                "investmentId": "t",
+                "investType": invest_type,
+                "totalValue": "1",
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert positions[0].position_type == expected_label
+        assert positions[0].details["invest_type"] == expected_label
+        assert positions[0].details["invest_type_id"] == invest_type
+
+    def test_unknown_invest_type_produces_type_n_label(self, platforms):
+        """Unknown investType ids produce the fallback ``type_<n>`` label."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "unknown",
+                "investmentId": "u",
+                "investType": 99,
+                "totalValue": "1",
+            },
+        )
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert positions[0].position_type == "type_99"
+        assert positions[0].details["invest_type_id"] == 99
+        # investType missing entirely defaults to 0 -> "type_0".
+        payload2 = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "no-type",
+                "investmentId": "v",
+                "totalValue": "1",
+            },
+        )
+        positions2 = OkxIntegration._normalize_defi_details(payload2, platforms)
+        assert positions2[0].position_type == "type_0"
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _single_invest_payload(*, platform_id: str, invest: dict, chain_index: str = "1") -> dict:
+        """Build a minimal ``data: dict`` payload with a single invest row."""
+        return {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": platform_id,
+                        "networkHoldVoList": [
+                            {
+                                "chainIndex": chain_index,
+                                "investTokenBalanceVoList": [invest],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
