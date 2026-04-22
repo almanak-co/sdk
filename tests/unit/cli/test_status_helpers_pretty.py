@@ -31,7 +31,6 @@ from click.testing import CliRunner
 
 from almanak.framework.cli import status_helpers
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -229,11 +228,20 @@ def test_print_operator_card_noop_when_none(capsys: pytest.CaptureFixture) -> No
     assert capsys.readouterr().out == ""
 
 
-def test_print_operator_card_noop_when_strategy_id_empty(capsys: pytest.CaptureFixture) -> None:
-    """No output when `oc.strategy_id` is empty (matches original guard)."""
-    oc = _make_operator_card(strategy_id="")
-    status_helpers._print_operator_card(oc)
-    assert capsys.readouterr().out == ""
+def test_print_operator_card_renders_even_when_strategy_id_empty() -> None:
+    """Empty `strategy_id` no longer suppresses the card (#1704).
+
+    Previously `_print_operator_card` bailed when `oc.strategy_id` was the
+    empty string, using proto3's empty-string-as-falsy default as a presence
+    sentinel. That conflates "unset" with "intentionally empty" and would
+    silently drop a legitimately-empty card. The #1704 fix moves presence
+    decisions to the orchestrator (`_has_operator_card` via `HasField`); the
+    direct helper renders whatever non-None card it receives.
+    """
+    runner = CliRunner()
+    oc = _make_operator_card(strategy_id="", severity="LOW", reason="note")
+    out = _invoke(runner, status_helpers._print_operator_card, oc)
+    assert "Operator Alert [LOW]: note" in out
 
 
 def test_print_operator_card_minimal() -> None:
@@ -398,18 +406,27 @@ def test_format_pnl_line_zero_pnl_white_no_prefix() -> None:
     assert "+$0" not in out
 
 
-def test_format_pnl_line_invalid_pnl_falls_back_to_zero() -> None:
-    """Invalid PnL string falls back to 0.0 (white, no prefix) -- issue #1697.
+def test_format_pnl_line_invalid_pnl_renders_yellow_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Invalid PnL string renders in YELLOW and emits a logger.warning (#1697).
 
-    This silent-0.0 fallback is a latent bug tracked in #1697 and is preserved
-    byte-for-byte by this refactor. Do NOT fix here.
+    Previously the silent-0.0 fallback rendered white, making a bogus value
+    indistinguishable from a measured zero. The fix: log a warning and render
+    the raw value in yellow so the operator sees a distinct signal.
     """
     sp = _make_strategy_position(unrealized_pnl_usd="not_a_number")
-    out = status_helpers._format_strategy_position_pnl_line(sp)
-    # Treated as 0 => white, no prefix
-    assert "\x1b[37m" in out
+    with caplog.at_level("WARNING", logger=status_helpers.logger.name):
+        out = status_helpers._format_strategy_position_pnl_line(sp)
+    # Yellow ANSI -> warning signal (was white before the fix)
+    assert "\x1b[33m" in out
+    # Raw value preserved in the output (no silent coercion)
     assert "$not_a_number" in out
     assert "+$not_a_number" not in out
+    # logger.warning must fire, with the unparseable value in the message
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warning_records, "expected logger.warning to fire for unparseable PnL"
+    assert "not_a_number" in warning_records[0].getMessage()
 
 
 def test_format_pnl_line_pct_suffix_optional() -> None:
@@ -662,27 +679,40 @@ def test_format_pnl_line_zero_float_string_with_pct_no_prefix() -> None:
     assert "+$" not in out
 
 
-def test_format_pnl_line_none_value_invalid_fallback() -> None:
-    """`None` for `unrealized_pnl_usd` exercises the TypeError branch.
+def test_format_pnl_line_none_value_invalid_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`None` for `unrealized_pnl_usd` exercises the TypeError branch (#1697).
 
-    Note: the guard at line 406 treats `None != ""` as True, so this DOES
-    take the PnL path with TypeError fallback to 0.0 -- preserving the
-    silent-0.0 semantic (#1697).
+    The guard `sp.unrealized_pnl_usd != ""` is True for None, so the PnL
+    branch runs. `float(None)` raises TypeError, which now routes to the
+    yellow-warning path (was silent-0.0/white before the fix).
     """
     sp = _make_strategy_position(unrealized_pnl_usd=None)
-    out = status_helpers._format_strategy_position_pnl_line(sp)
-    # TypeError -> pnl_num=0.0 -> white, no prefix
-    assert "\x1b[37m" in out
+    with caplog.at_level("WARNING", logger=status_helpers.logger.name):
+        out = status_helpers._format_strategy_position_pnl_line(sp)
+    # TypeError -> yellow warning color
+    assert "\x1b[33m" in out
     # The raw `None` value is formatted into the output literal
     assert "$None" in out
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warning_records, "expected logger.warning for TypeError fallback"
 
 
-def test_format_pnl_line_value_error_branch() -> None:
-    """Explicitly exercise the ValueError branch of the try/except."""
+def test_format_pnl_line_value_error_branch(caplog: pytest.LogCaptureFixture) -> None:
+    """Explicitly exercise the ValueError branch of the try/except (#1697).
+
+    Previously fell back silently to 0.0/white. Now renders yellow with a
+    warning log so operators can tell a parse failure from a real zero.
+    """
     sp = _make_strategy_position(unrealized_pnl_usd="abc-not-a-num")
-    out = status_helpers._format_strategy_position_pnl_line(sp)
-    assert "\x1b[37m" in out  # 0.0 fallback -> white
+    with caplog.at_level("WARNING", logger=status_helpers.logger.name):
+        out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert "\x1b[33m" in out  # yellow warning color
     assert "$abc-not-a-num" in out
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warning_records, "expected logger.warning for ValueError fallback"
+    assert "abc-not-a-num" in warning_records[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -1067,13 +1097,60 @@ def test_print_timeline_no_tx_hash_omits_tx_suffix() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_details_pretty_empty_operator_card_skipped() -> None:
-    """`operator_card` with empty `strategy_id` -> no Operator Alert block."""
+def test_render_details_pretty_operator_card_none_skipped() -> None:
+    """`operator_card=None` -> no Operator Alert block (#1704).
+
+    After the #1704 fix presence is determined by the parent message via
+    `HasField("operator_card")` (authoritative) or, for test fakes lacking
+    that method, by `operator_card is not None` (fallback). We no longer
+    use the sub-field `strategy_id` emptiness as a presence sentinel — a
+    separate test covers that case.
+    """
     runner = CliRunner()
-    oc = _make_operator_card(strategy_id="")
-    details = _make_details(operator_card=oc)
+    details = _make_details(operator_card=None)
     out = _invoke(runner, status_helpers._render_details_pretty, details, True)
     assert "Operator Alert" not in out
+
+
+def test_render_details_pretty_operator_card_empty_strategy_id_now_renders() -> None:
+    """Empty `strategy_id` no longer suppresses the operator card (#1704).
+
+    Regression guard for the fix: previously, a legitimately-empty
+    `strategy_id` would silently hide the card because proto3 scalars are
+    falsy. Now the pretty-print path relies on parent presence semantics,
+    so a present card with empty `strategy_id` DOES render. For test
+    fakes (no `HasField`), the fallback is `operator_card is not None`.
+    """
+    runner = CliRunner()
+    oc = _make_operator_card(strategy_id="", severity="MEDIUM", reason="watchlist")
+    details = _make_details(operator_card=oc)
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Operator Alert [MEDIUM]: watchlist" in out
+
+
+def test_render_details_pretty_operator_card_hasfield_respected() -> None:
+    """Proto3-like `HasField` takes precedence over fallback logic (#1704)."""
+
+    class _ProtoLikeDetails(SimpleNamespace):
+        def HasField(self, name: str) -> bool:  # noqa: N802 (proto naming)
+            return name in getattr(self, "_present", ())
+
+    runner = CliRunner()
+    oc = _make_operator_card(strategy_id="x", severity="HIGH", reason="stuck")
+    details = _ProtoLikeDetails(
+        summary=_make_summary(),
+        position=None,
+        timeline=[],
+        chain_health={},
+        operator_card=oc,
+        _present=set(),  # message not present per HasField
+    )
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Operator Alert" not in out
+
+    details._present = {"operator_card"}
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Operator Alert [HIGH]: stuck" in out
 
 
 def test_render_details_pretty_legacy_pos_populated_only() -> None:

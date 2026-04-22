@@ -33,6 +33,7 @@ See `blueprints/` and `.claude/plans/phase-5-cli-cc-reduction.md`.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,8 @@ import click
 
 if TYPE_CHECKING:
     from ..gateway_client import GatewayClient
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -132,8 +135,12 @@ def _render_json_position(position: Any) -> dict[str, Any]:
         - `lp_positions` only emitted when non-empty.
         - `health_factor` only emitted when not None.
         - For `strategy_positions`, optional monitoring fields are included
-          only when proto string is non-empty (the proto3 empty-string sentinel
-          — issue #1704 documents this; this refactor preserves behavior).
+          only when the proto3 scalar string is non-empty. Proto3 scalars
+          cannot distinguish "unset" from "set to empty string", so this is
+          a best-effort presence filter — documented, not a bug. (Issue
+          #1704 specifically targeted the separate `operator_card` case
+          where the parent is a message and `HasField` IS available; see
+          `_has_operator_card`.)
         - If no sub-fields populate, returns an empty dict (caller decides
           whether to include a `position` key at all).
     """
@@ -222,8 +229,8 @@ def _render_json_chain_health(chain_health: Any) -> dict[str, Any]:
 def _render_json_operator_card(operator_card: Any) -> dict[str, Any]:
     """Serialize `details.operator_card` to a JSON-friendly dict.
 
-    Preserves fields from `status.py:395-400`. Caller guards on
-    `operator_card.strategy_id` truthiness before invoking.
+    Preserves fields from `status.py:395-400`. Caller must first confirm the
+    sub-message is present via `_has_operator_card(details)`.
     """
     return {
         "severity": operator_card.severity,
@@ -233,6 +240,33 @@ def _render_json_operator_card(operator_card: Any) -> dict[str, Any]:
     }
 
 
+def _has_operator_card(details: Any) -> bool:
+    """Return True when `details.operator_card` sub-message is present.
+
+    Closes issue #1704. Previously the code relied on
+    `details.operator_card.strategy_id` truthiness to decide presence, which
+    is fragile because proto3 scalar fields default to empty string — a
+    legitimately-empty `strategy_id` would silently hide the card.
+
+    Correct presence check for a proto3 *message-typed* field is
+    `parent.HasField("operator_card")` (message fields DO carry presence
+    info in proto3, unlike scalar fields). We call it directly when
+    available, and fall back to an explicit comparison for duck-typed test
+    fakes / `SimpleNamespace` objects.
+    """
+    has_field = getattr(details, "HasField", None)
+    if callable(has_field):
+        try:
+            return bool(has_field("operator_card"))
+        except ValueError:
+            # Raised if the field name is unknown on this message type.
+            return False
+    # Fallback for non-proto shims (test fakes). NOTE: this is an explicit
+    # "not None" check — it does NOT re-introduce the proto3 empty-string
+    # sentinel anti-pattern that #1704 tracks.
+    return getattr(details, "operator_card", None) is not None
+
+
 def _render_details_as_json(details: Any) -> str:
     """Render `GetStrategyDetailsResponse` as the JSON string emitted by
     `strat status --json`.
@@ -240,14 +274,16 @@ def _render_details_as_json(details: Any) -> str:
     Returns the JSON text ready for `click.echo`. Does NOT call echo directly
     — keeps the helper pure and trivially unit-testable.
 
-    Preserves the exact top-level structure from `status.py:307-401`:
+    Top-level structure:
         - summary always present.
-        - `position` key only when _render_json_position produces non-empty dict
-          AND `details.position` is truthy.
+        - `position` key only when _render_json_position produces non-empty
+          dict AND `details.position` is truthy.
         - `timeline` key only when `details.timeline` truthy.
         - `chain_health` key only when `details.chain_health` truthy.
-        - `operator_card` key only when both `details.operator_card` AND
-          `operator_card.strategy_id` are truthy.
+        - `operator_card` key only when the sub-message is present on the
+          parent (proto3 `HasField("operator_card")`) — see
+          `_has_operator_card` and issue #1704. The schema on the wire is
+          unchanged; the change is the presence check only.
         - JSON is indented with 2 spaces.
     """
     result: dict[str, Any] = _render_json_summary(details.summary)
@@ -259,7 +295,7 @@ def _render_details_as_json(details: Any) -> str:
         result["timeline"] = _render_json_timeline(details.timeline)
     if details.chain_health:
         result["chain_health"] = _render_json_chain_health(details.chain_health)
-    if details.operator_card and details.operator_card.strategy_id:
+    if _has_operator_card(details):
         result["operator_card"] = _render_json_operator_card(details.operator_card)
     return json.dumps(result, indent=2)
 
@@ -310,10 +346,14 @@ def _print_summary_header(s: Any) -> None:
 def _print_operator_card(oc: Any) -> None:
     """Emit the operator alert block.
 
-    Preserves the exact format from `status.py:327-343`. No-op when
-    `oc` is falsy or `oc.strategy_id` is empty (matches the original guard).
+    Presence is decided at the orchestrator via `_has_operator_card`
+    (#1704). This function only defends against `oc is None` — it does NOT
+    inspect `oc.strategy_id` for presence, because that would re-introduce
+    the proto3 empty-string-as-falsy sentinel anti-pattern that #1704 is
+    explicitly fixing. A card with an intentionally-empty `strategy_id`
+    MUST still render.
     """
-    if not oc or not oc.strategy_id:
+    if oc is None:
         return
 
     click.echo()
@@ -384,13 +424,16 @@ def _format_strategy_position_size_line(sp: Any) -> str:
 def _format_strategy_position_pnl_line(sp: Any) -> str:
     """Build the Entry/Current/PnL pipe-joined line with colored PnL.
 
-    Preserves the exact format and color rules from `status.py:386-407`:
+    Format and color rules:
         - Outer guard: only build when one of entry/current/pnl is non-empty.
-        - PnL parsing uses `try/except (ValueError, TypeError) -> pnl_num = 0.0`
-          — this silent-0.0 fallback is tracked as issue #1697 and is NOT
-          being fixed in this refactor; it is preserved byte-for-byte.
-        - Color: >0 green with '+' prefix, <0 red no prefix, ==0 white no
-          prefix.
+        - Numeric PnL color: >0 green with '+' prefix, <0 red no prefix,
+          ==0 white no prefix.
+        - Unparseable PnL (ValueError/TypeError on `float(pnl_val)`): log a
+          warning and render the cell in YELLOW so operators see a distinct
+          signal rather than silently mistaking a malformed value for a
+          measured zero. This closes issue #1697 — the prior behavior
+          silently coerced bad input to 0.0 and rendered white, making a
+          real zero indistinguishable from a parse error.
 
     Returns an empty string when none of the three sub-fields is set OR
     when the guard passes but no individual part materializes (defensive).
@@ -409,13 +452,21 @@ def _format_strategy_position_pnl_line(sp: Any) -> str:
         try:
             pnl_num = float(pnl_val)
         except (ValueError, TypeError):
-            pnl_num = 0.0
-        if pnl_num > 0:
-            pnl_prefix, pnl_color = "+", "green"
-        elif pnl_num < 0:
-            pnl_prefix, pnl_color = "", "red"
+            # Unparseable input: surface a warning and color the cell yellow
+            # so operators can distinguish "malformed value" from "real zero"
+            # (issue #1697).
+            logger.warning(
+                "Unparseable unrealized_pnl_usd=%r; rendering as warning",
+                pnl_val,
+            )
+            pnl_prefix, pnl_color = "", "yellow"
         else:
-            pnl_prefix, pnl_color = "", "white"
+            if pnl_num > 0:
+                pnl_prefix, pnl_color = "+", "green"
+            elif pnl_num < 0:
+                pnl_prefix, pnl_color = "", "red"
+            else:
+                pnl_prefix, pnl_color = "", "white"
         pnl_parts.append(f"PnL: {click.style(f'{pnl_prefix}${pnl_val}{pnl_pct}', fg=pnl_color)}")
     if not pnl_parts:
         return ""
@@ -510,7 +561,8 @@ def _render_details_pretty(details: Any, timeline_enabled: bool) -> None:
         7. trailing blank line
     """
     _print_summary_header(details.summary)
-    _print_operator_card(details.operator_card)
+    if _has_operator_card(details):
+        _print_operator_card(details.operator_card)
     _print_legacy_position(details.position)
     _print_strategy_positions(details.position.strategy_positions if details.position else None)
     _print_chain_health(details.chain_health)

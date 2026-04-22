@@ -25,7 +25,6 @@ import pytest
 
 from almanak.framework.cli import status_helpers
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -592,29 +591,38 @@ def test_render_details_as_json_chain_health_populated() -> None:
     assert data["chain_health"]["arbitrum"]["status"] == "HEALTHY"
 
 
-def test_render_details_as_json_operator_card_guarded_by_strategy_id() -> None:
-    """Operator card only emitted when BOTH truthy AND `strategy_id` set."""
-    # Case 1: operator_card present but strategy_id empty => NOT included
-    oc_unset = SimpleNamespace(
-        strategy_id="",
+def test_render_details_as_json_operator_card_included_when_present() -> None:
+    """Operator card is emitted whenever the sub-message is present (#1704).
+
+    After the #1704 fix, presence is determined by
+    `parent.HasField("operator_card")` (or, for duck-typed fakes,
+    `details.operator_card is not None`). An empty-string `strategy_id` is
+    no longer used as a presence sentinel: a card with an intentionally
+    empty `strategy_id` MUST still render.
+    """
+    oc_empty_sid = SimpleNamespace(
+        strategy_id="",  # explicitly empty — must still render (#1704)
         severity="HIGH",
         reason="x",
         risk_description="y",
         suggested_actions=[],
     )
-    details = _make_details(operator_card=oc_unset)
+    details = _make_details(operator_card=oc_empty_sid)
     data = json.loads(status_helpers._render_details_as_json(details))
-    assert "operator_card" not in data
+    assert "operator_card" in data, (
+        "empty-string strategy_id must not suppress the operator card (#1704)"
+    )
+    assert data["operator_card"]["severity"] == "HIGH"
 
-    # Case 2: strategy_id present => included
-    oc_set = SimpleNamespace(
+    # And a fully-populated card likewise renders.
+    oc_full = SimpleNamespace(
         strategy_id="demo",
         severity="HIGH",
         reason="Stuck",
         risk_description="Risk",
         suggested_actions=["pause"],
     )
-    details = _make_details(operator_card=oc_set)
+    details = _make_details(operator_card=oc_full)
     data = json.loads(status_helpers._render_details_as_json(details))
     assert data["operator_card"]["severity"] == "HIGH"
     assert data["operator_card"]["suggested_actions"] == ["pause"]
@@ -625,6 +633,51 @@ def test_render_details_as_json_operator_card_none_omitted() -> None:
     details = _make_details(operator_card=None)
     data = json.loads(status_helpers._render_details_as_json(details))
     assert "operator_card" not in data
+
+
+def test_render_details_as_json_operator_card_hasfield_respected() -> None:
+    """When parent exposes `HasField`, it takes precedence over the fallback.
+
+    Simulates the real proto3 message: `HasField("operator_card")` is the
+    authoritative presence signal. When it returns False, the card must be
+    suppressed even if the attribute is set (proto3 default-instance
+    semantics — accessing the sub-message returns an "empty" message, not
+    None).
+    """
+
+    class _ProtoLikeDetails(SimpleNamespace):
+        def __init__(self, **kw: Any) -> None:
+            present = set(kw.pop("_present", ()))
+            super().__init__(**kw)
+            self._present: set[str] = present
+
+        def HasField(self, name: str) -> bool:  # noqa: N802 (proto naming)
+            return name in self._present
+
+    # Build a proto-like `details` where operator_card attr exists but
+    # HasField returns False (matches proto3 default-instance behavior).
+    oc = SimpleNamespace(
+        strategy_id="anything",  # irrelevant — HasField is authoritative
+        severity="HIGH",
+        reason="",
+        risk_description="",
+        suggested_actions=[],
+    )
+    details = _ProtoLikeDetails(
+        summary=_make_summary(),
+        position=None,
+        timeline=[],
+        chain_health={},
+        operator_card=oc,
+    )
+    # operator_card is NOT registered as present -> must be omitted
+    data = json.loads(status_helpers._render_details_as_json(details))
+    assert "operator_card" not in data
+
+    # Now mark it present -> must appear
+    details._present.add("operator_card")
+    data = json.loads(status_helpers._render_details_as_json(details))
+    assert data["operator_card"]["severity"] == "HIGH"
 
 
 def test_render_details_as_json_indent_is_2() -> None:
@@ -894,9 +947,17 @@ def test_render_details_as_json_position_falsy_skips_render() -> None:
 
 
 def test_render_details_as_json_operator_card_truthy_no_strategy_id() -> None:
-    """`operator_card` truthy but `strategy_id` empty -> NOT included."""
+    """Operator card with empty `strategy_id` MUST render when present (#1704).
+
+    Previously this test asserted the buggy behavior: an empty-string
+    `strategy_id` suppressed the entire card (proto3 empty-string-as-falsy
+    used as presence sentinel). The #1704 fix switches presence to the
+    parent's `HasField("operator_card")` (with a `is not None` fallback for
+    test fakes), so an intentionally-empty `strategy_id` no longer hides
+    the card.
+    """
     oc = SimpleNamespace(
-        strategy_id="",
+        strategy_id="",  # empty but card IS present -> must render
         severity="HIGH",
         reason="present-but-unset",
         risk_description="",
@@ -904,7 +965,9 @@ def test_render_details_as_json_operator_card_truthy_no_strategy_id() -> None:
     )
     details = _make_details(operator_card=oc)
     data = json.loads(status_helpers._render_details_as_json(details))
-    assert "operator_card" not in data
+    assert "operator_card" in data
+    assert data["operator_card"]["severity"] == "HIGH"
+    assert data["operator_card"]["reason"] == "present-but-unset"
 
 
 def test_render_details_as_json_chain_health_empty_dict_omitted() -> None:
