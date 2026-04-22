@@ -119,6 +119,59 @@ def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False
     }
 
 
+class _TeardownContext:
+    """Mutable shared state threaded through the vault teardown state machine.
+
+    Phase helpers on :class:`ToolExecutor` (``_teardown_*``) mutate this in
+    place so the crash-recovery ordering of progress saves, counters, and
+    tx-hash collection is preserved byte-for-byte relative to the original
+    monolithic ``_execute_teardown_vault``.
+    """
+
+    __slots__ = (
+        "chain",
+        "vault_address",
+        "safe_address",
+        "valuator_address",
+        "dry_run",
+        "agent_state",
+        "teardown_state",
+        "teardown_phase",
+        "tx_hashes",
+        "positions_closed",
+        "swaps_executed",
+        "pre_close_lp_position_id",
+    )
+
+    def __init__(
+        self,
+        *,
+        chain: str,
+        vault_address: str,
+        safe_address: str,
+        valuator_address: str,
+        dry_run: bool,
+    ) -> None:
+        self.chain = chain
+        self.vault_address = vault_address
+        self.safe_address = safe_address
+        self.valuator_address = valuator_address
+        self.dry_run = dry_run
+        self.agent_state: dict = {}
+        self.teardown_state: dict = {}
+        self.teardown_phase: str = "start"
+        self.tx_hashes: list[str] = []
+        self.positions_closed: int = 0
+        self.swaps_executed: int = 0
+        # LP id captured at the start of teardown (before any phase mutates
+        # agent_state["lp_position_id"]). Swap-target discovery MUST use this
+        # id — not the live agent_state value — so we can still look up the
+        # closed LP's token pair after the close phase cleared it. Populated
+        # on resume from teardown_state["pre_close_lp_position_id"] so that
+        # crash-after-close runs preserve the discovery id too.
+        self.pre_close_lp_position_id: str | None = None
+
+
 class ToolExecutor:
     """Executes agent tool calls through the Almanak gateway.
 
@@ -4027,104 +4080,118 @@ class ToolExecutor:
             },
         )
 
-    async def _execute_teardown_vault(self, args: dict) -> ToolResponse:
-        """Deterministic vault teardown with crash-recovery state machine.
+    # ------------------------------------------------------------------ #
+    # Teardown state-machine helpers                                     #
+    # ------------------------------------------------------------------ #
+    # The vault teardown state-machine is split into per-phase helpers so
+    # crash-recovery semantics can be reasoned about phase-by-phase. The
+    # outer `_execute_teardown_vault` orchestrator composes these helpers
+    # around a single mutable `_TeardownContext` that carries the shared
+    # state (agent_state dict, per-attempt counters, tx_hashes, etc.). The
+    # helpers preserve byte-for-byte the pre-extraction ordering of gateway
+    # calls, logging, alerts, and persistence — a regression here leaks
+    # user funds during vault unwind.
 
-        Phases: lp_closing -> swapping -> settling -> torn_down
-        Progress is persisted after each phase so partial failures resume
-        from the interrupted step instead of retrying from scratch.
+    def _teardown_check_sub_tool_policy(self) -> ToolResponse | None:
+        """Pre-flight: verify all teardown sub-tools are permitted by policy.
+
+        Without this check, teardown would fail mid-execution with cryptic
+        "not in the allowed set" errors from individual sub-calls.
         """
         from almanak.framework.agent_tools.policy import TEARDOWN_REQUIRED_TOOLS
-        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+
+        allowed = self._policy_engine.policy.allowed_tools
+        if allowed is None:
+            return None
+        missing = TEARDOWN_REQUIRED_TOOLS - set(allowed)
+        if not missing:
+            return None
+        return ToolResponse(
+            status="error",
+            error=_error_dict(
+                AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS,
+                f"teardown_vault requires these sub-tools to be in allowed_tools: "
+                f"{sorted(missing)}. Add them to the policy's allowed_tools set.",
+            ),
+        )
+
+    def _teardown_load_agent_state(self) -> dict:
+        """Load agent state for teardown (includes teardown progress if resuming).
+
+        Returns an empty dict on any load failure so teardown always runs
+        against a clean baseline rather than crashing when state is missing.
+        """
         from almanak.gateway.proto import gateway_pb2
 
-        # Pre-flight: verify all required sub-tools are permitted by policy.
-        # Without this check, teardown would fail mid-execution with cryptic
-        # "not in the allowed set" errors from individual sub-calls.
-        allowed = self._policy_engine.policy.allowed_tools
-        if allowed is not None:
-            allowed_set = set(allowed)
-            missing = TEARDOWN_REQUIRED_TOOLS - allowed_set
-            if missing:
-                return ToolResponse(
-                    status="error",
-                    error=_error_dict(
-                        AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS,
-                        f"teardown_vault requires these sub-tools to be in allowed_tools: "
-                        f"{sorted(missing)}. Add them to the policy's allowed_tools set.",
-                    ),
-                )
-
-        chain = args.get("chain", self._default_chain)
-        vault_address = args["vault_address"]
-        safe_address = args["safe_address"]
-        valuator_address = args["valuator_address"]
-        dry_run = args.get("dry_run", False)
-
-        tx_hashes: list[str] = []
-        positions_closed = 0
-        swaps_executed = 0
-
-        # 1. Load agent state (includes teardown progress if resuming)
-        strategy_id = self._strategy_id
-        agent_state: dict = {}
         try:
-            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=strategy_id))
-            agent_state = json.loads(state_resp.data) if state_resp.data else {}
+            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(strategy_id=self._strategy_id))
+            return json.loads(state_resp.data) if state_resp.data else {}
         except Exception:
             logger.warning("No agent state found during teardown; starting from clean state")
+            return {}
 
-        teardown_state = agent_state.get("_teardown", {})
-        teardown_phase = teardown_state.get("phase", "start")
+    def _teardown_save_progress(self, ctx: _TeardownContext, phase: str, **extra: Any) -> None:
+        """Persist teardown progress so partial failures can resume."""
+        from almanak.gateway.proto import gateway_pb2
 
-        # Already completed
-        if agent_state.get("phase") == "torn_down" or teardown_phase == "torn_down":
-            return ToolResponse(
-                status="success",
-                data={"status": "success", "message": "Vault already torn down"},
-            )
-
-        def _save_teardown_progress(phase: str, **extra: Any) -> None:
-            """Persist teardown progress so partial failures can resume."""
-            if dry_run:
-                return
-            teardown_state["phase"] = phase
-            teardown_state.update(extra)
-            agent_state["_teardown"] = teardown_state
-            try:
-                self._client.state.SaveState(
-                    gateway_pb2.SaveStateRequest(
-                        strategy_id=strategy_id,
-                        data=json.dumps(agent_state).encode(),
-                        schema_version=1,
-                    )
+        if ctx.dry_run:
+            return
+        ctx.teardown_state["phase"] = phase
+        ctx.teardown_state.update(extra)
+        ctx.agent_state["_teardown"] = ctx.teardown_state
+        try:
+            self._client.state.SaveState(
+                gateway_pb2.SaveStateRequest(
+                    strategy_id=self._strategy_id,
+                    data=json.dumps(ctx.agent_state).encode(),
+                    schema_version=1,
                 )
-            except Exception:
-                logger.warning("Failed to persist teardown progress (phase=%s)", phase)
+            )
+        except Exception:
+            logger.warning("Failed to persist teardown progress (phase=%s)", phase)
 
-        # 2. Close LP positions (skip if already done in a previous attempt)
-        lp_close_failed = False
-        lp_close_error = ""
-        lp_position_id = agent_state.get("lp_position_id")
-        if lp_position_id and teardown_phase in ("start", "lp_closing"):
-            _save_teardown_progress("lp_closing")
+    async def _teardown_close_lp_phase(self, ctx: _TeardownContext) -> ToolResponse | None:
+        """Close the recorded LP position, or resume by loading prior count.
+
+        Returns an early-exit ToolResponse on LP close failure (blocks
+        teardown, fires critical alert, marks error recoverable). Returns
+        None on success or when LP phase is already behind us.
+        """
+        lp_position_id = ctx.agent_state.get("lp_position_id")
+        if lp_position_id and ctx.teardown_phase in ("start", "lp_closing"):
+            # Capture the LP id BEFORE we mutate agent_state on close. Swap
+            # target discovery in _teardown_collect_swap_targets depends on
+            # this id to look up token_a / token_b of the just-closed LP.
+            ctx.pre_close_lp_position_id = str(lp_position_id)
+            self._teardown_save_progress(
+                ctx,
+                "lp_closing",
+                pre_close_lp_position_id=ctx.pre_close_lp_position_id,
+            )
             logger.info("teardown_vault: closing LP position %s", lp_position_id)
+            lp_close_failed = False
+            lp_close_error = ""
             try:
                 close_result = await self.execute(
                     "close_lp_position",
                     {
                         "position_id": str(lp_position_id),
-                        "chain": chain,
-                        "execution_wallet": safe_address,
-                        "dry_run": dry_run,
+                        "chain": ctx.chain,
+                        "execution_wallet": ctx.safe_address,
+                        "dry_run": ctx.dry_run,
                     },
                 )
                 if close_result.status == "success":
-                    positions_closed += 1
+                    ctx.positions_closed += 1
                     if close_result.data and close_result.data.get("tx_hash"):
-                        tx_hashes.append(close_result.data["tx_hash"])
-                    agent_state["lp_position_id"] = None
-                    _save_teardown_progress("lp_closed")
+                        ctx.tx_hashes.append(close_result.data["tx_hash"])
+                    ctx.agent_state["lp_position_id"] = None
+                    self._teardown_save_progress(
+                        ctx,
+                        "lp_closed",
+                        positions_closed=ctx.positions_closed,
+                        pre_close_lp_position_id=ctx.pre_close_lp_position_id,
+                    )
                 else:
                     lp_close_failed = True
                     lp_close_error = str(close_result.error)
@@ -4135,7 +4202,12 @@ class ToolExecutor:
                 logger.warning("teardown_vault: LP close error: %s", e)
 
             if lp_close_failed:
-                _save_teardown_progress("lp_closing", error=lp_close_error)
+                self._teardown_save_progress(
+                    ctx,
+                    "lp_closing",
+                    error=lp_close_error,
+                    pre_close_lp_position_id=ctx.pre_close_lp_position_id,
+                )
                 self._fire_alert(
                     f"Vault teardown blocked: LP close failed for position {lp_position_id}: {lp_close_error[:200]}",
                     severity="critical",
@@ -4148,146 +4220,248 @@ class ToolExecutor:
                         recoverable=True,
                     ),
                 )
-        elif teardown_phase in ("lp_closed", "swapping", "settling"):
-            # LP already closed in a previous attempt
-            positions_closed = teardown_state.get("positions_closed", 0)
+            return None
 
-        # 3. Swap non-underlying tokens to underlying
-        sdk = LagoonVaultSDK(self._client, chain=chain)
-        try:
-            underlying_token = sdk.get_underlying_token_address(vault_address)
-        except Exception:
-            underlying_token = None
+        if ctx.teardown_phase in ("lp_closed", "swapping", "swapped", "settling"):
+            # LP already closed in a previous attempt. Restore both the
+            # counter AND the pre-close LP id so the swap phase can still
+            # discover its token pair. If the swap phase already finished in
+            # the previous run, it will be short-circuited below anyway; we
+            # still restore the counters so the final response reflects the
+            # real totals instead of zeroing them on resume.
+            ctx.positions_closed = ctx.teardown_state.get("positions_closed", 0)
+            ctx.swaps_executed = ctx.teardown_state.get("swaps_executed", 0)
+            preserved = ctx.teardown_state.get("pre_close_lp_position_id")
+            if preserved:
+                ctx.pre_close_lp_position_id = str(preserved)
+        return None
 
-        if underlying_token and teardown_phase in ("start", "lp_closing", "lp_closed", "swapping"):
-            _save_teardown_progress("swapping", positions_closed=positions_closed)
+    async def _teardown_collect_swap_targets(self, ctx: _TeardownContext, underlying_token: str) -> set[str]:
+        """Build the set of non-underlying token addresses to swap out.
 
-            # Build token list from LP position data and agent state
-            tokens_to_swap: set[str] = set()
-
-            # Get tokens from the LP position that was just closed
-            if lp_position_id:
-                try:
-                    lp_info = await self._execute_get_lp_position({"position_id": str(lp_position_id), "chain": chain})
-                    if lp_info.status == "success" and lp_info.data:
-                        for key in ("token_a", "token_b"):
-                            addr = lp_info.data.get(key, "")
-                            if addr and addr.lower() != underlying_token.lower():
-                                tokens_to_swap.add(addr)
-                except Exception:
-                    logger.warning("teardown_vault: could not read LP tokens for swap list")
-
-            # Check agent state for any additional known token addresses
-            for key in ("token_a", "token_b", "almanak_token"):
-                addr = agent_state.get(key, "")
-                if addr and addr.lower() != underlying_token.lower():
-                    tokens_to_swap.add(addr)
-
-            for token_addr in tokens_to_swap:
-                try:
-                    balance_result = await self.execute(
-                        "get_balance",
-                        {
-                            "token": token_addr,
-                            "chain": chain,
-                            "wallet_address": safe_address,
-                        },
-                    )
-                    if (
-                        balance_result.status == "success"
-                        and balance_result.data
-                        and float(balance_result.data.get("balance", "0")) > 0
-                    ):
-                        swap_result = await self.execute(
-                            "swap_tokens",
-                            {
-                                "token_in": token_addr,
-                                "token_out": underlying_token,
-                                "amount": balance_result.data["balance"],
-                                "chain": chain,
-                                "execution_wallet": safe_address,
-                                "dry_run": dry_run,
-                            },
-                        )
-                        if swap_result.status == "success":
-                            swaps_executed += 1
-                            if swap_result.data and swap_result.data.get("tx_hash"):
-                                tx_hashes.append(swap_result.data["tx_hash"])
-                except Exception as e:
-                    logger.warning("teardown_vault: swap %s failed: %s (tokens may remain in Safe)", token_addr[:10], e)
-
-            _save_teardown_progress("swapped", positions_closed=positions_closed, swaps_executed=swaps_executed)
-
-        # 4. Final settlement
-        settle_failed = False
-        if teardown_phase not in ("settling_done", "torn_down"):
-            _save_teardown_progress("settling")
+        Uses ``ctx.pre_close_lp_position_id`` — the id captured BEFORE the
+        close phase cleared ``agent_state["lp_position_id"]`` — so LP-token
+        discovery still runs even after a successful close in the same
+        invocation. Reading the live ``agent_state`` value here would match
+        the extracted-helper structure but regress the original monolith's
+        behaviour (it captured the id into a local before the close), which
+        would strand LP tokens in the Safe whenever ``token_a`` / ``token_b``
+        were not separately persisted in ``agent_state``.
+        """
+        tokens_to_swap: set[str] = set()
+        lp_position_id = ctx.pre_close_lp_position_id
+        if lp_position_id:
             try:
-                settle_result = await self.execute(
-                    "settle_vault",
-                    {
-                        "vault_address": vault_address,
-                        "safe_address": safe_address,
-                        "valuator_address": valuator_address,
-                        "chain": chain,
-                        "dry_run": dry_run,
-                    },
-                )
-                if settle_result.status == "success" and settle_result.data:
-                    if settle_result.data.get("tx_hash"):
-                        tx_hashes.append(settle_result.data["tx_hash"])
-                elif settle_result.status != "success":
-                    settle_failed = True
-                    logger.warning("teardown_vault: final settlement failed: %s", settle_result.error)
-            except Exception as e:
-                settle_failed = True
-                logger.warning("teardown_vault: final settlement error: %s", e)
+                lp_info = await self._execute_get_lp_position({"position_id": str(lp_position_id), "chain": ctx.chain})
+                if lp_info.status == "success" and lp_info.data:
+                    for key in ("token_a", "token_b"):
+                        addr = lp_info.data.get(key, "")
+                        if addr and addr.lower() != underlying_token.lower():
+                            tokens_to_swap.add(addr)
+            except Exception:
+                logger.warning("teardown_vault: could not read LP tokens for swap list")
 
-        # 5. Compute final NAV
-        final_nav = 0
+        # Additional known token addresses from agent state
+        for key in ("token_a", "token_b", "almanak_token"):
+            addr = ctx.agent_state.get(key, "")
+            if addr and addr.lower() != underlying_token.lower():
+                tokens_to_swap.add(addr)
+        return tokens_to_swap
+
+    async def _teardown_swap_one_token(self, ctx: _TeardownContext, token_addr: str, underlying_token: str) -> None:
+        """Swap a single non-underlying token to underlying if any balance exists."""
         try:
-            final_nav = sdk.get_total_assets(vault_address)
+            balance_result = await self.execute(
+                "get_balance",
+                {
+                    "token": token_addr,
+                    "chain": ctx.chain,
+                    "wallet_address": ctx.safe_address,
+                },
+            )
+            if not (
+                balance_result.status == "success"
+                and balance_result.data
+                and float(balance_result.data.get("balance", "0")) > 0
+            ):
+                return
+            swap_result = await self.execute(
+                "swap_tokens",
+                {
+                    "token_in": token_addr,
+                    "token_out": underlying_token,
+                    "amount": balance_result.data["balance"],
+                    "chain": ctx.chain,
+                    "execution_wallet": ctx.safe_address,
+                    "dry_run": ctx.dry_run,
+                },
+            )
+            if swap_result.status == "success":
+                ctx.swaps_executed += 1
+                if swap_result.data and swap_result.data.get("tx_hash"):
+                    ctx.tx_hashes.append(swap_result.data["tx_hash"])
+        except Exception as e:
+            logger.warning(
+                "teardown_vault: swap %s failed: %s (tokens may remain in Safe)",
+                token_addr[:10],
+                e,
+            )
+
+    async def _teardown_swap_phase(self, ctx: _TeardownContext, underlying_token: str | None) -> None:
+        """Swap all non-underlying tokens to underlying. No-op if already past."""
+        if not underlying_token:
+            return
+        if ctx.teardown_phase not in ("start", "lp_closing", "lp_closed", "swapping"):
+            return
+        self._teardown_save_progress(
+            ctx,
+            "swapping",
+            positions_closed=ctx.positions_closed,
+            pre_close_lp_position_id=ctx.pre_close_lp_position_id,
+        )
+        tokens_to_swap = await self._teardown_collect_swap_targets(ctx, underlying_token)
+        for token_addr in tokens_to_swap:
+            await self._teardown_swap_one_token(ctx, token_addr, underlying_token)
+        self._teardown_save_progress(
+            ctx,
+            "swapped",
+            positions_closed=ctx.positions_closed,
+            swaps_executed=ctx.swaps_executed,
+            pre_close_lp_position_id=ctx.pre_close_lp_position_id,
+        )
+
+    async def _teardown_settle_phase(self, ctx: _TeardownContext) -> bool:
+        """Run final settlement. Returns True if settlement failed."""
+        if ctx.teardown_phase in ("settling_done", "torn_down"):
+            return False
+        self._teardown_save_progress(ctx, "settling")
+        try:
+            settle_result = await self.execute(
+                "settle_vault",
+                {
+                    "vault_address": ctx.vault_address,
+                    "safe_address": ctx.safe_address,
+                    "valuator_address": ctx.valuator_address,
+                    "chain": ctx.chain,
+                    "dry_run": ctx.dry_run,
+                },
+            )
+            if settle_result.status == "success" and settle_result.data:
+                if settle_result.data.get("tx_hash"):
+                    ctx.tx_hashes.append(settle_result.data["tx_hash"])
+                return False
+            if settle_result.status != "success":
+                logger.warning("teardown_vault: final settlement failed: %s", settle_result.error)
+                return True
+            return False
+        except Exception as e:
+            logger.warning("teardown_vault: final settlement error: %s", e)
+            return True
+
+    def _teardown_read_final_nav(self, sdk: Any, vault_address: str) -> int:
+        """Read the vault's final NAV; swallow any read error and return 0."""
+        try:
+            return sdk.get_total_assets(vault_address)
         except Exception as e:
             logger.warning("Failed to read final NAV during teardown: %s", e)
+            return 0
 
-        # 6. Determine status and save final state
-        if dry_run:
-            status = "simulated"
-        elif settle_failed:
-            status = "partial_failure"
-            _save_teardown_progress("settling", error="settlement failed")
+    def _teardown_finalize_status(self, ctx: _TeardownContext, settle_failed: bool) -> str:
+        """Determine final status + fire partial-failure alert + persist terminal state."""
+        from almanak.gateway.proto import gateway_pb2
+
+        if ctx.dry_run:
+            return "simulated"
+        if settle_failed:
+            self._teardown_save_progress(ctx, "settling", error="settlement failed")
             self._fire_alert(
-                f"Vault teardown partial failure: final settlement failed for vault {vault_address[:10]}",
+                f"Vault teardown partial failure: final settlement failed for vault {ctx.vault_address[:10]}",
                 severity="critical",
             )
-        else:
-            status = "success"
+            return "partial_failure"
 
-        # Save final teardown state (even on partial failure for progress tracking)
-        if not dry_run and status == "success":
-            agent_state["phase"] = "torn_down"
-            agent_state["lp_position_id"] = None
-            agent_state.pop("_teardown", None)
-            try:
-                self._client.state.SaveState(
-                    gateway_pb2.SaveStateRequest(
-                        strategy_id=strategy_id,
-                        data=json.dumps(agent_state).encode(),
-                        schema_version=1,
-                    )
+        # Success: promote to torn_down and clear the _teardown sub-state.
+        ctx.agent_state["phase"] = "torn_down"
+        ctx.agent_state["lp_position_id"] = None
+        ctx.agent_state.pop("_teardown", None)
+        try:
+            self._client.state.SaveState(
+                gateway_pb2.SaveStateRequest(
+                    strategy_id=self._strategy_id,
+                    data=json.dumps(ctx.agent_state).encode(),
+                    schema_version=1,
                 )
-            except Exception:
-                logger.warning("Failed to save teardown state")
+            )
+        except Exception:
+            logger.warning("Failed to save teardown state")
+        return "success"
+
+    async def _execute_teardown_vault(self, args: dict) -> ToolResponse:
+        """Deterministic vault teardown with crash-recovery state machine.
+
+        Phases: lp_closing -> swapping -> settling -> torn_down
+        Progress is persisted after each phase so partial failures resume
+        from the interrupted step instead of retrying from scratch.
+        """
+        from almanak.framework.connectors.lagoon.sdk import LagoonVaultSDK
+
+        # Phase 0: policy preflight.
+        preflight = self._teardown_check_sub_tool_policy()
+        if preflight is not None:
+            return preflight
+
+        ctx = _TeardownContext(
+            chain=args.get("chain", self._default_chain),
+            vault_address=args["vault_address"],
+            safe_address=args["safe_address"],
+            valuator_address=args["valuator_address"],
+            dry_run=args.get("dry_run", False),
+        )
+
+        # Phase 1: load agent state + recover teardown progress.
+        ctx.agent_state = self._teardown_load_agent_state()
+        ctx.teardown_state = ctx.agent_state.get("_teardown", {})
+        ctx.teardown_phase = ctx.teardown_state.get("phase", "start")
+
+        # Fast-path: already torn down.
+        if ctx.agent_state.get("phase") == "torn_down" or ctx.teardown_phase == "torn_down":
+            return ToolResponse(
+                status="success",
+                data={"status": "success", "message": "Vault already torn down"},
+            )
+
+        # Phase 2: close LP positions (may early-return on failure).
+        lp_error = await self._teardown_close_lp_phase(ctx)
+        if lp_error is not None:
+            return lp_error
+
+        # Phase 3: swap non-underlying tokens to underlying.
+        sdk = LagoonVaultSDK(self._client, chain=ctx.chain)
+        try:
+            underlying_token: str | None = sdk.get_underlying_token_address(ctx.vault_address)
+        except Exception:
+            underlying_token = None
+        await self._teardown_swap_phase(ctx, underlying_token)
+
+        # Phase 4: final settlement (records failure, does not short-circuit).
+        settle_failed = await self._teardown_settle_phase(ctx)
+
+        # Phase 5: final NAV + status determination + terminal state save.
+        final_nav = self._teardown_read_final_nav(sdk, ctx.vault_address)
+        status = self._teardown_finalize_status(ctx, settle_failed)
 
         return ToolResponse(
             status=status,
             data={
                 "status": status,
-                "positions_closed": positions_closed,
-                "swaps_executed": swaps_executed,
+                "positions_closed": ctx.positions_closed,
+                "swaps_executed": ctx.swaps_executed,
                 "final_nav": str(final_nav),
-                "tx_hashes": tx_hashes,
-                "message": f"Teardown {status}. Closed {positions_closed} positions, {swaps_executed} swaps. Final NAV: {final_nav}",
+                "tx_hashes": ctx.tx_hashes,
+                "message": (
+                    f"Teardown {status}. Closed {ctx.positions_closed} positions, "
+                    f"{ctx.swaps_executed} swaps. Final NAV: {final_nav}"
+                ),
             },
         )
 
