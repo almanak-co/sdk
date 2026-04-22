@@ -256,8 +256,10 @@ class TestUniswapV3SwapIntent:
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
 
-        # Try to swap more than we have
-        excessive_amount = balance_decimal * Decimal("100")
+        # Exceed balance by 2x so execution fails on-chain with insufficient balance,
+        # but stay inside the compiler's price-impact guard (default 30%) so this path
+        # exercises execution-level failure rather than compile-time rejection.
+        excessive_amount = balance_decimal * Decimal("2")
 
         print(f"\n{'='*80}")
         print("Test: SwapIntent with Insufficient Balance")

@@ -259,8 +259,10 @@ class TestUniswapV3SwapIntent:
         if usdc_balance == 0:
             pytest.skip("USDC funding missing for funded_wallet; skipping insufficient-balance test")
 
-        # Try to swap more than we have
-        excessive_amount = balance_decimal * Decimal("100")
+        # Exceed balance by 2x so execution fails on-chain with insufficient balance,
+        # but stay inside the compiler's price-impact guard (default 30%) so this path
+        # exercises execution-level failure rather than compile-time rejection.
+        excessive_amount = balance_decimal * Decimal("2")
 
         print(f"\n{'='*80}")
         print("Test: SwapIntent with Insufficient Balance")

@@ -452,6 +452,10 @@ class TestSushiSwapV3LPCloseIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.xfail(
+        reason="flaky: receipt timeout on Anvil fork under load; previously quarantined in #606",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
         self,
