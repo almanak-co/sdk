@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -847,8 +848,23 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             pnl_history = await self._build_pnl_history(strategy_id)
 
         # Derive chain health from strategy chains (stub — UNKNOWN until real probing wired)
+        # Fix (#1705): accept any Sequence[str] (tuples are valid). A strict
+        # isinstance(list) check previously coerced tuple chains to an empty
+        # list, producing "no chains" for multi-chain strategies whose producer
+        # happens to return a tuple. ``str`` / ``bytes`` are explicitly excluded
+        # because they ARE Sequences but iterating them yields characters, which
+        # is never what a chain list means.
         raw_chains = strategy_info.get("chains")
-        chains: list[str] = raw_chains if isinstance(raw_chains, list) else []
+        if isinstance(raw_chains, Sequence) and not isinstance(raw_chains, str | bytes):
+            chains: list[str] = [str(c) for c in raw_chains]
+        else:
+            if raw_chains is not None:
+                logger.warning(
+                    "Unexpected chains type %s for strategy %s; coercing to empty list",
+                    type(raw_chains).__name__,
+                    strategy_info.get("strategy_id", "<unknown>"),
+                )
+            chains = []
         chain_health = build_chain_health(chains)
 
         return gateway_pb2.StrategyDetails(

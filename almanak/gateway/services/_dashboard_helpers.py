@@ -133,17 +133,21 @@ def enrich_strategy_info(
                a stale iteration record).
             2. ``EXECUTION_FAILED`` / ``STRATEGY_ERROR`` →
                ``status=ERROR`` + attention flag.
-            3. ``is_running=True`` → ``RUNNING``.
-            4. ``is_paused=True`` → ``PAUSED``.
+            3. ``is_paused=True`` → ``PAUSED`` (fix #1706: a pause signal
+               wins over a concurrent ``is_running=True``. A strategy
+               carrying both flags is almost certainly mid-transition;
+               treating it as PAUSED is the safer default — a paused
+               strategy shown as RUNNING would mislead operators into
+               thinking the strategy is actively managing funds).
+            4. ``is_running=True`` → ``RUNNING``.
 
             Also honours ``state["updated_at"]`` for
             ``last_action_at``. When ``False`` (``ListStrategies``
             behaviour), these status/last-action derivations are skipped
             — ``ListStrategies`` keeps the registry-computed status.
 
-    Preserves byte-for-byte behaviour of the original blocks, including
-    the ``issue #1706`` ordering (``is_running`` checked before
-    ``is_paused``) and ``issue #1705`` (``chains`` field not touched).
+    Preserves byte-for-byte behaviour of the original block for ``issue
+    #1705`` (``chains`` field not touched).
     """
     info["total_value_usd"] = total_value
     info["pnl_24h_usd"] = pnl
@@ -163,10 +167,14 @@ def enrich_strategy_info(
                 info["status"] = "ERROR"
                 info["attention_required"] = True
                 info["attention_reason"] = f"Last iteration: {iteration_status}"
-            elif "is_running" in state and state["is_running"]:
-                info["status"] = "RUNNING"
+            # Fix #1706: explicit precedence — paused > running. When a
+            # state carries both flags the strategy is almost certainly
+            # mid-transition; treating it as PAUSED avoids advertising a
+            # paused strategy as actively running.
             elif "is_paused" in state and state["is_paused"]:
                 info["status"] = "PAUSED"
+            elif "is_running" in state and state["is_running"]:
+                info["status"] = "RUNNING"
 
             # Get last action timestamp
             if "updated_at" in state:

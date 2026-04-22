@@ -23,10 +23,12 @@ The phase ordering is LOAD-BEARING and must not change:
                               a co-occurring swap leg keeps its real pair
                               identities (token0/token1) instead of being
                               clobbered by the swap's token_in/token_out.
-    ζ  _apply_perp          : perp_data enrichment. Currently overrides
+    ζ  _apply_perp          : perp_data enrichment. Overrides
                               ``position_id`` when ``perp.position_id`` is
-                              truthy; see latent bug #1709 — preserved
-                              byte-for-byte in this refactor.
+                              truthy; a mismatch against an already-seeded
+                              ``event.position_id`` is logged as a WARNING
+                              (fix #1709 — perp still wins, but silently
+                              no longer).
     η  _apply_protocol_fees : VIB-3205 protocol fee USD capture. Empty
                               string ("unknown") is DISTINCT from "0"
                               ("measured zero") — preserve that invariant.
@@ -36,11 +38,14 @@ Constraint (critical): γ → δ → ε → ζ → η ordering. Re-ordering ε b
 γ silently regresses the invariant called out above.
 """
 
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class PositionEventType(StrEnum):
@@ -293,13 +298,49 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
 
     Reads received amounts and coalesces the parser-variant fee attribute
     names (fees_token0 preferred, fee0 fallback) for both token sides.
+
+    Fix #1710: an lp_open that already wrote amount0/amount1 (Phase γ) is
+    never clobbered. If an extracted payload somehow carries BOTH
+    lp_open_data and lp_close_data on the same intent — lifecycle-wise
+    this shouldn't happen — Phase δ's received amounts are only written
+    into slots that Phase γ left empty, and the anomaly is logged. The
+    fee fields are independent data (not populated by lp_open) so they
+    are written unconditionally.
     """
     lp_close = ctx.extracted.get("lp_close_data")
     if not lp_close:
         return
 
-    event.amount0 = str(getattr(lp_close, "amount0_received", "") or "")
-    event.amount1 = str(getattr(lp_close, "amount1_received", "") or "")
+    # CR #1751 (CodeRabbit): do NOT coerce with `or ""` — an explicit
+    # measured zero ("0" / 0) is a legitimate value that must reach
+    # persistence. Truthiness coercion would drop it. Use `is not None`
+    # instead so only genuinely missing values fall through.
+    amount0_received = getattr(lp_close, "amount0_received", None)
+    amount1_received = getattr(lp_close, "amount1_received", None)
+
+    # Mutual-exclusivity check — log whenever BOTH payloads coexist on the
+    # same intent, regardless of whether lp_open already wrote amount0/
+    # amount1. CR #1751 round 2 (CodeRabbit): keying this off event.amount0/
+    # amount1 hid the collision whenever lp_open_data was present but
+    # carried missing / None amounts (payload corruption, parser regression,
+    # genuinely zero-deposit edge cases). The collision itself is the
+    # operator-visible anomaly; the preservation logic below handles value
+    # writes independently.
+    lp_open_present = ctx.extracted.get("lp_open_data") is not None
+    if lp_open_present:
+        logger.warning(
+            "Both lp_open_data and lp_close_data present on the same intent "
+            "(deployment=%s protocol=%s position_id=%s); preserving existing "
+            "amount slots and only filling empty ones. See issue #1710.",
+            ctx.deployment_id,
+            event.protocol,
+            event.position_id,
+        )
+
+    if not event.amount0 and amount0_received is not None:
+        event.amount0 = str(amount0_received)
+    if not event.amount1 and amount1_received is not None:
+        event.amount1 = str(amount1_received)
     for fee_attr in ("fees_token0", "fee0"):
         fee = getattr(lp_close, fee_attr, None)
         if fee is not None:
@@ -341,10 +382,16 @@ def _apply_swap_fallback(event: PositionEvent, ctx: IntentEventContext) -> None:
 def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase ζ — enrich with perp_data.
 
-    Copies leverage, entry/mark price, unrealized PnL and direction. When
-    ``perp.position_id`` is truthy, it currently overrides the seeded
-    position_id — preserved byte-for-byte per latent bug #1709 (fixed out
-    of scope for this refactor).
+    Copies leverage, entry/mark price, unrealized PnL and direction.
+
+    Position-id precedence (fix #1709): a ``perp.position_id`` that
+    disagrees with the already-seeded ``event.position_id`` is now logged
+    as a WARNING before the perp value is written. Silent override was
+    the old (buggy) behaviour — it meant PnL attribution could key off a
+    different position than the LP close / accounting write with no
+    signal to the operator. The perp extractor still wins on mismatch
+    (the parser is typically the most authoritative source for perp NFT
+    ids), but the mismatch itself is no longer invisible.
     """
     perp = ctx.extracted.get("perp_data")
     if not perp:
@@ -356,7 +403,17 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     event.unrealized_pnl = str(getattr(perp, "unrealized_pnl", "") or "")
     event.is_long = getattr(perp, "is_long", None)
     if hasattr(perp, "position_id") and perp.position_id:
-        event.position_id = str(perp.position_id)
+        new_pid = str(perp.position_id)
+        if event.position_id and event.position_id != new_pid:
+            logger.warning(
+                "perp.position_id=%s differs from already-set event.position_id=%s "
+                "(deployment=%s protocol=%s); perp wins. See issue #1709.",
+                new_pid,
+                event.position_id,
+                ctx.deployment_id,
+                event.protocol,
+            )
+        event.position_id = new_pid
 
 
 def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:

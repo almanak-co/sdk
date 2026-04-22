@@ -931,9 +931,9 @@ class TestDeployedModeAgentIdResolution:
 #
 # These tests pin down current behavior of the 3-way source lookup (registry,
 # filesystem, paper sessions), the status filter matrix, chain filtering, and
-# the state-enrichment branches. They deliberately document existing behavior
-# (including the #1706 last-branch-wins quirk) so that the Phase 5b helper
-# extraction can refactor without regressing observable behavior.
+# the state-enrichment branches. The #1706 "last-branch-wins" elif-ordering
+# quirk has been fixed — is_paused now takes precedence over is_running when
+# both flags are set. The assertion below has been flipped accordingly.
 # ---------------------------------------------------------------------------
 
 
@@ -1365,11 +1365,11 @@ class TestListStrategiesRegistryEnrichment:
 class TestGetStrategyDetailsStateEnrichment:
     """Characterization: GetStrategyDetails state-enrichment precedence rules.
 
-    Covers the branch cascade in `dashboard_service.py:944-960`:
+    Covers the branch cascade in `_dashboard_helpers.py:enrich_strategy_info`:
       1. registry PAUSED wins over state-derived status
       2. EXECUTION_FAILED / STRATEGY_ERROR → ERROR
-      3. is_running → RUNNING
-      4. is_paused → PAUSED  (last branch wins; #1706)
+      3. is_paused → PAUSED  (fix #1706: paused > running)
+      4. is_running → RUNNING
     """
 
     @pytest.mark.asyncio
@@ -1460,17 +1460,14 @@ class TestGetStrategyDetailsStateEnrichment:
         assert response.summary.status == "RUNNING"
 
     @pytest.mark.asyncio
-    async def test_issue_1706_is_running_wins_over_is_paused(
+    async def test_issue_1706_paused_wins_over_running(
         self, dashboard_service, mock_context, monkeypatch
     ):
-        """Characterize #1706: when state sets BOTH is_running=True and is_paused=True.
+        """Fix #1706: when state sets BOTH is_running=True and is_paused=True, PAUSED wins.
 
-        Current (buggy) behavior: the cascade uses `elif`, so `is_running` (evaluated first)
-        wins and RUNNING is reported. The issue argues this is fragile — producers that
-        flip both keys silently pick whichever branch is checked first.
-
-        This test pins down the current behavior. When #1706 is fixed (explicit precedence
-        or a single lifecycle enum), this assertion will need to flip.
+        A strategy carrying both flags is almost certainly mid-transition; treating it
+        as PAUSED is the safer default. Advertising a paused strategy as RUNNING would
+        mislead operators into thinking funds are actively being managed.
         """
         monkeypatch.delenv("AGENT_ID", raising=False)
         dashboard_service._initialized = True
@@ -1492,9 +1489,8 @@ class TestGetStrategyDetailsStateEnrichment:
             request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
             response = await dashboard_service.GetStrategyDetails(request, mock_context)
 
-        # TODO(#1706): is_running currently wins due to elif ordering. When #1706
-        # is fixed with explicit precedence or a lifecycle enum, update this.
-        assert response.summary.status == "RUNNING"
+        # Fix #1706: paused precedence — a concurrent is_running=True must not mask pause.
+        assert response.summary.status == "PAUSED"
 
     @pytest.mark.asyncio
     async def test_is_paused_in_state_promotes_to_paused(
@@ -1597,6 +1593,58 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         assert response.summary.execution_mode == "paper"
         assert response.summary.status == "PAPER_TRADING"
         assert response.summary.paper_metrics_json == '{"tick_count": 10}'
+
+    @pytest.mark.asyncio
+    async def test_issue_1705_tuple_chains_accepted(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """Fix #1705: a paper/filesystem source that returns ``chains`` as a
+        tuple (rather than a list) must still produce chain_health entries.
+
+        The pre-fix code used a strict ``isinstance(raw_chains, list)`` check,
+        silently coercing tuples to an empty list — multi-chain strategies
+        whose producer returned a tuple would show "no chains" on the
+        operator dashboard. The fix accepts any Sequence[str] (except
+        str/bytes) and logs a warning when coercion still happens.
+        """
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = None
+
+        paper_session = {
+            "strategy_id": "paper:multi_chain_tuple",
+            "name": "Multi Chain Tuple (Paper)",
+            "status": "PAPER_TRADING",
+            "chain": "arbitrum,base",
+            "protocol": "Unknown",
+            "total_value_usd": "0",
+            "pnl_24h_usd": "0",
+            "last_action_at": 0,
+            "attention_required": False,
+            "attention_reason": "",
+            "is_multi_chain": True,
+            # Deliberately a tuple (not a list) — pre-fix this collapsed to []
+            "chains": ("arbitrum", "base"),
+            "execution_mode": "paper",
+            "paper_metrics_json": "",
+        }
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="paper:multi_chain_tuple")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.strategy_id == "paper:multi_chain_tuple"
+        # Fix #1705: chain health is populated from the tuple, not empty.
+        assert set(response.chain_health.keys()) == {"arbitrum", "base"}
 
     @pytest.mark.asyncio
     async def test_position_prefers_snapshot_wallet_balances_over_state_dict(

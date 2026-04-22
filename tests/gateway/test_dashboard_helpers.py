@@ -16,12 +16,18 @@ tests in ``test_dashboard_service.py``.
 Known issues documented by assertion (current behaviour is the contract;
 the assertions will catch any accidental drift):
 
-- **#1705**: ``enrich_strategy_info`` does not rebuild ``info["chains"]``
-  from any state field, so a registry-mismatched chain list survives
-  enrichment.
-- **#1706**: When ``preserve_status_precedence=True``, ``is_running=True``
-  is evaluated before ``is_paused=True``. A state dict with both flags
-  set yields ``RUNNING`` — the pause signal is shadowed.
+- **#1705** (fixed): ``enrich_strategy_info`` does not rebuild
+  ``info["chains"]`` from any state field, so a registry-mismatched
+  chain list survives enrichment. The #1705 bug was about
+  ``dashboard_service.GetStrategyDetails`` coercing tuple chains to an
+  empty list at the call site; that is fixed in
+  ``dashboard_service.py``. The enrichment helper is unchanged.
+- **#1706** (fixed): When ``preserve_status_precedence=True``,
+  ``is_paused=True`` now takes precedence over ``is_running=True``.
+  A state dict with both flags set yields ``PAUSED`` — the pause signal
+  is the safer default because a paused strategy advertised as
+  RUNNING would mislead operators into thinking funds are actively
+  managed.
 """
 
 from __future__ import annotations
@@ -388,12 +394,13 @@ class TestEnrichStrategyInfo:
 
         assert info["status"] == "PAUSED"
 
-    def test_precedence_issue_1706_is_running_shadows_is_paused(self):
-        """#1706 — ``is_running`` is checked before ``is_paused``.
+    def test_precedence_paused_wins_over_running_issue_1706(self):
+        """#1706 fix — when both flags are set, ``is_paused`` wins.
 
-        When both flags are set, the current behaviour returns ``RUNNING``.
-        This test pins that behaviour; when #1706 is fixed the expected
-        status should flip to ``PAUSED``.
+        A strategy carrying both ``is_running=True`` and ``is_paused=True``
+        is almost certainly mid-transition; treating it as PAUSED is the
+        safer default — a paused strategy advertised as RUNNING would
+        mislead operators into thinking funds are actively managed.
         """
         info = self._base_info(status="STALE")
         state = {"is_running": True, "is_paused": True}
@@ -407,8 +414,8 @@ class TestEnrichStrategyInfo:
             preserve_status_precedence=True,
         )
 
-        # Documented current behaviour — pin the order.
-        assert info["status"] == "RUNNING"
+        # Fixed behaviour: paused takes precedence over running.
+        assert info["status"] == "PAUSED"
 
     def test_precedence_off_preserves_registry_status(self):
         """``preserve_status_precedence=False`` skips status derivation entirely.

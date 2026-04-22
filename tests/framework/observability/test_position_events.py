@@ -257,8 +257,11 @@ class TestPositionEventPersistence:
 # from blueprints/plan: α (dispatch) → β (seed) → γ (lp_open) → δ (lp_close)
 # → ε (swap fallback) → ζ (perp) → η (protocol fees) → θ (final guard).
 #
-# Two tests document KNOWN LATENT BUGS (#1709, #1710) — they assert the
-# buggy-but-current behavior.  When those bugs are fixed, the tests flip.
+# Issues #1709 (perp position_id silent override) and #1710 (lp_close
+# clobbering lp_open amounts) have been FIXED.  The pinned tests have
+# been flipped and now assert the corrected behaviour:
+#   - #1709: perp still wins on mismatch but a WARNING is emitted.
+#   - #1710: lp_close no longer overwrites lp_open amounts; WARNING emitted.
 
 
 class _Attrs:
@@ -456,7 +459,9 @@ class TestLPCloseEnrichment:
         assert event.fees_token1 == ""
 
     def test_lp_close_missing_amount_attrs_coalesce_to_empty_string(self):
-        """`getattr(lp_close, 'amount0_received', '') or ''` → ''."""
+        """Missing attrs → `getattr(lp_close, 'amount0_received', None) is None`
+        so the empty-string event defaults survive.
+        """
         intent = MockIntent("LP_CLOSE", position_id="pos-5")
         result = MockResult()
         result.extracted_data = {"lp_close_data": _Attrs()}  # no attrs at all
@@ -466,6 +471,26 @@ class TestLPCloseEnrichment:
         assert event is not None
         assert event.amount0 == ""
         assert event.amount1 == ""
+
+    def test_lp_close_zero_received_amounts_are_preserved(self):
+        """CR #1751 regression: a measured zero close amount must reach the
+        event (and therefore persistence) as "0" rather than being coerced to
+        "" by truthiness. Pre-fix the code used `str(... or "")`, which
+        silently dropped explicit zeros. `amount0`/`amount1` are written
+        straight through to `almanak/framework/state/backends/sqlite.py`, so
+        losing a zero here is a real data-integrity bug.
+        """
+        intent = MockIntent("LP_CLOSE", position_id="pos-zero")
+        result = MockResult()
+        result.extracted_data = {
+            "lp_close_data": _Attrs(amount0_received=0, amount1_received=0)
+        }
+        event = build_position_event_from_intent(
+            deployment_id="d", intent=intent, result=result
+        )
+        assert event is not None
+        assert event.amount0 == "0"
+        assert event.amount1 == "0"
 
 
 class TestSwapFallback:
@@ -572,25 +597,48 @@ class TestPerpEnrichment:
         assert event is not None
         assert event.is_long is False
 
-    def test_perp_position_id_override_LATENT_BUG_1709(self):
-        """DOCUMENTS #1709: perp.position_id unconditionally OVERWRITES the
-        earlier seed (from result.position_id / intent.position_id).
+    def test_perp_position_id_mismatch_warns_issue_1709(self, caplog):
+        """Fix #1709: perp.position_id still wins on mismatch, but a WARNING
+        is emitted so the silent-override behaviour is no longer silent.
 
-        When #1709 is fixed — either by asserting equality or documenting
-        precedence — this test will flip. Until then the BUG behavior is
-        pinned here so the Phase 5i refactor is provably behavior-preserving.
+        Precedence (post-fix): perp > result > intent. The perp extractor is
+        typically the most authoritative source for perp NFT ids, so it
+        remains the tie-breaker when the seeded value differs. The fix makes
+        the disagreement observable instead of invisible.
         """
+        import logging
+
         intent = MockIntent("PERP_OPEN", protocol="gmx_v2", position_id="from-intent")
         result = MockResult(position_id="from-result")  # seeded
         result.extracted_data = {
             "perp_data": _Attrs(position_id="from-perp-extractor")
         }
-        event = build_position_event_from_intent(
-            deployment_id="d", intent=intent, result=result
-        )
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.observability.position_events"):
+            event = build_position_event_from_intent(
+                deployment_id="d", intent=intent, result=result
+            )
         assert event is not None
-        # Bug: perp extractor clobbers result.position_id silently
+        # Perp still wins on mismatch — but the warning makes it auditable.
         assert event.position_id == "from-perp-extractor"
+        # A WARNING must be emitted on mismatch.
+        assert any("#1709" in r.getMessage() for r in caplog.records)
+
+    def test_perp_position_id_agreement_does_not_warn(self, caplog):
+        """Fix #1709: when perp.position_id agrees with the seeded value,
+        no warning is emitted (the mismatch path is the only loud path).
+        """
+        import logging
+
+        intent = MockIntent("PERP_OPEN", protocol="gmx_v2", position_id="same")
+        result = MockResult(position_id="same")
+        result.extracted_data = {"perp_data": _Attrs(position_id="same")}
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.observability.position_events"):
+            event = build_position_event_from_intent(
+                deployment_id="d", intent=intent, result=result
+            )
+        assert event is not None
+        assert event.position_id == "same"
+        assert not any("#1709" in r.getMessage() for r in caplog.records)
 
     def test_perp_without_position_id_attr_keeps_seeded(self):
         """If perp_data has no position_id (or falsy), seed is preserved."""
@@ -771,18 +819,21 @@ class TestPhaseOrderingInvariant:
 
 
 class TestLPOpenLPCloseCoexistence:
-    """#1710 defensive: lp_close CAN clobber lp_open amount0/amount1 today."""
+    """#1710 fix: lp_close MUST NOT clobber lp_open amount0/amount1."""
 
-    def test_lp_close_clobbers_lp_open_amounts_LATENT_BUG_1710(self):
-        """DOCUMENTS #1710: If extracted_data contains BOTH lp_open_data and
-        lp_close_data, the close phase (δ) unconditionally overwrites the
-        amount0/amount1 that the open phase (γ) populated.
+    def test_lp_close_preserves_lp_open_amounts_issue_1710(self, caplog):
+        """Fix #1710: If extracted_data somehow contains BOTH lp_open_data and
+        lp_close_data on the same intent, the close phase (δ) must not
+        overwrite the amount0/amount1 that the open phase (γ) populated.
 
         Lifecycle-wise this shouldn't happen (an intent is either an OPEN or
-        a CLOSE, never both), but it's not asserted. This test pins the
-        current buggy-but-stable behavior so the 5i refactor is provably
-        behavior-preserving. When #1710 lands, this test flips.
+        a CLOSE, never both), but the bug pre-fix silently clobbered the
+        deposit amounts with the received amounts. After the fix, lp_open
+        amounts are preserved and a WARNING is logged so the anomaly is
+        visible instead of silent.
         """
+        import logging
+
         intent = MockLPIntent("LP_OPEN", token0="WETH", token1="USDC")
         result = MockResult(position_id="any")
         result.extracted_data = {
@@ -793,16 +844,55 @@ class TestLPOpenLPCloseCoexistence:
                 amount0_received=999, amount1_received=888
             ),
         }
-        event = build_position_event_from_intent(
-            deployment_id="d", intent=intent, result=result
-        )
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.observability.position_events"):
+            event = build_position_event_from_intent(
+                deployment_id="d", intent=intent, result=result
+            )
         assert event is not None
-        # Bug: close clobbers open amounts
-        assert event.amount0 == "999"
-        assert event.amount1 == "888"
+        # Fix: lp_open amounts preserved; close amounts dropped on the floor.
+        assert event.amount0 == "100"
+        assert event.amount1 == "200"
         # Token identity still from lp_open / intent
         assert event.token0 == "WETH"
         assert event.token1 == "USDC"
+        # A WARNING must be emitted so the mutual-exclusivity violation is visible.
+        assert any("#1710" in r.getMessage() for r in caplog.records)
+
+    def test_coexistence_warning_fires_even_when_lp_open_amounts_empty(self, caplog):
+        """CR #1751 round 2 regression: the collision warning must fire
+        whenever BOTH lp_open_data and lp_close_data are present on the
+        same intent, even if lp_open_data did not populate event.amount0/
+        amount1 (e.g., payload carried position_id but no amounts).
+
+        Pre-fix the warning was keyed off event.amount0/amount1 truthiness,
+        so an lp_open with missing amount attrs silently suppressed the
+        collision log — hiding a real mutual-exclusivity violation from
+        operators. The collision itself is the anomaly; value preservation
+        is handled independently below.
+        """
+        import logging
+
+        # lp_open_data carries position_id but NO amounts. lp_close fills
+        # them. Collision is still a real anomaly that must be logged.
+        intent = MockLPIntent("LP_OPEN", token0="WETH", token1="USDC")
+        result = MockResult(position_id="any")
+        result.extracted_data = {
+            "lp_open_data": _Attrs(position_id=1),  # no amount0/amount1
+            "lp_close_data": _Attrs(
+                amount0_received=999, amount1_received=888
+            ),
+        }
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.observability.position_events"):
+            event = build_position_event_from_intent(
+                deployment_id="d", intent=intent, result=result
+            )
+        assert event is not None
+        # Empty lp_open slots were filled by lp_close (preservation-only-
+        # for-non-empty-slots still applies).
+        assert event.amount0 == "999"
+        assert event.amount1 == "888"
+        # Warning MUST fire on the payload collision itself.
+        assert any("#1710" in r.getMessage() for r in caplog.records)
 
 
 class TestIntentDispatch:
