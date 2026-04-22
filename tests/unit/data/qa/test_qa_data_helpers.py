@@ -1,8 +1,9 @@
 """Unit tests for ``almanak.framework.data.qa.cli_helpers``.
 
-Phase 6 extraction: ``qa_data`` grew to CC 47. The first PR pulls the
-environment bootstrap, config loading, CLI override, and banner-print
-phases onto small, side-effect-compatible helpers. These tests pin the
+Phase 6 extraction: ``qa_data`` grew to CC 47. Successive PRs pull the
+environment bootstrap, config loading, CLI override, banner-print,
+per-category summary, per-category failure, and test-dispatch phases
+onto small, side-effect-compatible helpers. These tests pin the
 behavioural contract so subsequent PRs can keep carving at the
 ``qa_data`` body without regressing observable behaviour.
 
@@ -12,6 +13,10 @@ Focus areas:
 - ``load_qa_config_or_exit``: both echo paths, both exit-1 paths.
 - ``apply_cli_overrides``: chain/days precedence, no-op case.
 - ``print_startup_banner``: byte-for-byte output + single-vs-all branch.
+- ``summarize_category``: per-category pass/fail line (Phase 6.2).
+- ``echo_category_failures``: per-category failure detail lines (Phase 6.3).
+- ``dispatch_test_run``: single-vs-all dispatch + generic exception trap
+  (Phase 6.4).
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from click.testing import CliRunner
 from almanak.framework.data.qa.cli_helpers import (
     apply_cli_overrides,
     configure_logging,
+    dispatch_test_run,
     echo_category_failures,
     load_qa_config_or_exit,
     print_startup_banner,
@@ -434,10 +440,7 @@ class TestEchoCategoryFailures:
             _FakeResult(passed=False, token="UNI", error=None),
         ]
         out = _invoke_failures(results, "CEX Historical")
-        assert out == (
-            "  - CEX Historical WBTC: boom\n"
-            "  - CEX Historical UNI: validation failed\n"
-        )
+        assert out == ("  - CEX Historical WBTC: boom\n  - CEX Historical UNI: validation failed\n")
 
     def test_multiple_failures_preserve_iteration_order(self) -> None:
         """Operator log readability depends on stable category iteration order."""
@@ -447,11 +450,7 @@ class TestEchoCategoryFailures:
             _FakeResult(passed=False, token="C", error="e3"),
         ]
         out = _invoke_failures(results, "DEX Historical")
-        assert out == (
-            "  - DEX Historical A: e1\n"
-            "  - DEX Historical B: e2\n"
-            "  - DEX Historical C: e3\n"
-        )
+        assert out == ("  - DEX Historical A: e1\n  - DEX Historical B: e2\n  - DEX Historical C: e3\n")
 
     @pytest.mark.parametrize(
         "label",
@@ -462,3 +461,238 @@ class TestEchoCategoryFailures:
         results = [_FakeResult(passed=False, token="X", error="why")]
         out = _invoke_failures(results, label)
         assert out == f"  - {label} X: why\n"
+
+
+# =============================================================================
+# dispatch_test_run (Phase 6.4)
+# =============================================================================
+
+
+async def _noop_report(sentinel: object) -> object:
+    """Awaitable coroutine that just hands back the provided sentinel.
+
+    Stands in for ``runner.run_all()`` / ``_run_single_test(...)`` in the
+    dispatch tests so we never have to construct a real ``QARunner``.
+    """
+    return sentinel
+
+
+def _invoke_dispatch(
+    test_name: str | None,
+    *,
+    run_single: object,
+    run_all: object,
+    mix_stderr: bool = True,
+) -> tuple[int, str, str]:
+    """Invoke ``dispatch_test_run`` via a throwaway Click command.
+
+    Returns ``(exit_code, stdout, stderr)``. ``mix_stderr=False`` is used
+    by the exception-path tests so we can assert the operator-facing
+    error surface lands on stderr specifically.
+    """
+    runner = CliRunner(mix_stderr=mix_stderr)
+
+    @click.command()
+    def _cmd() -> None:
+        dispatch_test_run(
+            test_name,
+            run_single=run_single,  # type: ignore[arg-type]
+            run_all=run_all,  # type: ignore[arg-type]
+        )
+
+    result = runner.invoke(_cmd)
+    stderr = "" if mix_stderr else result.stderr
+    return result.exit_code, result.stdout, stderr
+
+
+class TestDispatchTestRun:
+    def test_single_test_branch_echoes_display_name_and_returns_report(self) -> None:
+        """Single-test branch: echo ``Running <name> tests...`` then return report."""
+        sentinel = object()
+        single_calls: list[int] = []
+        all_calls: list[int] = []
+
+        def run_single() -> tuple[object, str]:
+            single_calls.append(1)
+            return _noop_report(sentinel), "CEX Spot Prices"
+
+        def run_all() -> object:
+            all_calls.append(1)
+            return _noop_report(sentinel)
+
+        exit_code, stdout, _ = _invoke_dispatch("cex_spot", run_single=run_single, run_all=run_all)
+
+        assert exit_code == 0
+        # ``run_all`` must NOT be called on the single-test branch.
+        assert single_calls == [1]
+        assert all_calls == []
+        # Echo string is locked to byte-for-byte identical operator output.
+        assert "Running CEX Spot Prices tests...\n" in stdout
+        assert "Running all QA tests..." not in stdout
+
+    def test_all_test_branch_echoes_all_tests_banner(self) -> None:
+        """All-test branch: echo ``Running all QA tests...`` then return report."""
+        single_calls: list[int] = []
+        all_calls: list[int] = []
+
+        def run_single() -> tuple[object, str]:
+            single_calls.append(1)
+            return _noop_report(object()), "unused"
+
+        def run_all() -> object:
+            all_calls.append(1)
+            return _noop_report(object())
+
+        exit_code, stdout, _ = _invoke_dispatch(None, run_single=run_single, run_all=run_all)
+
+        assert exit_code == 0
+        # ``run_single`` must NOT be called on the all-test branch.
+        assert single_calls == []
+        assert all_calls == [1]
+        assert "Running all QA tests...\n" in stdout
+        assert "Running " not in stdout.replace("Running all QA tests...", "")
+
+    def test_empty_string_test_name_is_treated_as_all_tests(self) -> None:
+        """``""`` is falsy in the original ``if test_name:`` expression; mirror that."""
+        single_calls: list[int] = []
+
+        def run_single() -> tuple[object, str]:
+            single_calls.append(1)
+            return _noop_report(object()), "nope"
+
+        def run_all() -> object:
+            return _noop_report(object())
+
+        exit_code, stdout, _ = _invoke_dispatch("", run_single=run_single, run_all=run_all)
+
+        assert exit_code == 0
+        assert single_calls == []
+        assert "Running all QA tests...\n" in stdout
+
+    def test_single_test_returns_the_coroutine_result(self) -> None:
+        """The return value of ``asyncio.run(coro)`` is handed back to the caller."""
+        sentinel = object()
+        captured: dict[str, object] = {}
+
+        def run_single() -> tuple[object, str]:
+            return _noop_report(sentinel), "RSI Indicators"
+
+        def run_all() -> object:
+            return _noop_report(object())
+
+        @click.command()
+        def _cmd() -> None:
+            captured["report"] = dispatch_test_run(
+                "rsi",
+                run_single=run_single,
+                run_all=run_all,
+            )
+
+        result = CliRunner().invoke(_cmd)
+        assert result.exit_code == 0
+        assert captured["report"] is sentinel
+
+    def test_exception_in_run_all_exits_1_with_error_surface(self) -> None:
+        """Generic ``Exception`` path: stderr echo + ``logger.exception`` + exit 1."""
+
+        def run_single() -> tuple[object, str]:
+            return _noop_report(object()), "unused"
+
+        def run_all() -> object:
+            raise RuntimeError("boom")
+
+        with patch("almanak.framework.data.qa.cli_helpers.logger") as lg:
+            exit_code, _stdout, stderr = _invoke_dispatch(
+                None,
+                run_single=run_single,
+                run_all=run_all,
+                mix_stderr=False,
+            )
+
+        assert exit_code == 1
+        # Operator-facing stderr echo is byte-for-byte from the original.
+        assert "Error running tests: boom" in stderr
+        # ``logger.exception("Test execution failed")`` is preserved for
+        # platform log scraping.
+        lg.exception.assert_called_once_with("Test execution failed")
+
+    def test_exception_in_run_single_exits_1_with_error_surface(self) -> None:
+        """The single-test branch shares the same generic-exception trap."""
+
+        def run_single() -> tuple[object, str]:
+            raise ValueError("no runner")
+
+        def run_all() -> object:
+            return _noop_report(object())
+
+        with patch("almanak.framework.data.qa.cli_helpers.logger") as lg:
+            exit_code, _stdout, stderr = _invoke_dispatch(
+                "rsi",
+                run_single=run_single,
+                run_all=run_all,
+                mix_stderr=False,
+            )
+
+        assert exit_code == 1
+        assert "Error running tests: no runner" in stderr
+        lg.exception.assert_called_once_with("Test execution failed")
+
+    def test_exception_raised_inside_coroutine_is_also_trapped(self) -> None:
+        """An exception raised inside the ``asyncio.run(coro)`` body is caught too."""
+
+        async def _boom() -> None:
+            raise RuntimeError("async boom")
+
+        def run_single() -> tuple[object, str]:
+            return _noop_report(object()), "unused"
+
+        def run_all() -> object:
+            return _boom()
+
+        with patch("almanak.framework.data.qa.cli_helpers.logger") as lg:
+            exit_code, _stdout, stderr = _invoke_dispatch(
+                None,
+                run_single=run_single,
+                run_all=run_all,
+                mix_stderr=False,
+            )
+
+        assert exit_code == 1
+        assert "Error running tests: async boom" in stderr
+        lg.exception.assert_called_once_with("Test execution failed")
+
+    def test_error_logger_override_is_used_on_exception_path(self) -> None:
+        """Caller-supplied ``error_logger`` must receive the ``logger.exception``
+        call so the emitted ``%(name)s`` field stays anchored to the caller's
+        module (preserving the pre-extraction logger name for operator log
+        filters)."""
+        runner = CliRunner(mix_stderr=False)
+        injected = logging.getLogger("almanak.framework.data.qa.cli")
+
+        def run_single() -> tuple[object, str]:
+            return _noop_report(object()), "unused"
+
+        def run_all() -> object:
+            raise RuntimeError("boom")
+
+        @click.command()
+        def _cmd() -> None:
+            dispatch_test_run(
+                None,
+                run_single=run_single,
+                run_all=run_all,
+                error_logger=injected,
+            )
+
+        with (
+            patch.object(injected, "exception") as injected_exc,
+            patch("almanak.framework.data.qa.cli_helpers.logger") as module_lg,
+        ):
+            result = runner.invoke(_cmd)
+
+        assert result.exit_code == 1
+        injected_exc.assert_called_once_with("Test execution failed")
+        # The module-level fallback logger must NOT be called when the
+        # caller supplied an override -- otherwise we would emit two log
+        # records on a single failure.
+        module_lg.exception.assert_not_called()

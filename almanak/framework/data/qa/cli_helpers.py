@@ -16,15 +16,18 @@ context so they can be unit-tested without a CLI runner.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import click
 
 from .config import QAConfig, load_config
+
+logger = logging.getLogger(__name__)
 
 
 def configure_logging(verbose: bool) -> None:
@@ -234,9 +237,81 @@ def echo_category_failures(
             click.echo(f"  - {label} {r.token}: {r.error or 'validation failed'}")
 
 
+def dispatch_test_run(
+    test_name: str | None,
+    *,
+    run_single: Callable[[], tuple[Awaitable[Any], str]],
+    run_all: Callable[[], Awaitable[Any]],
+    error_logger: logging.Logger | None = None,
+) -> Any:
+    """Dispatch a single-test or all-test QA run and return the report.
+
+    Consolidates Phase E of the original inline ``qa_data`` body:
+
+    - branch on ``test_name`` (single test vs full suite),
+    - wrap the chosen coroutine in ``asyncio.run``,
+    - trap any unexpected exception with the same operator-facing error
+      surface (``click.echo`` to stderr + ``logger.exception`` + exit 1).
+
+    The caller injects the two factories so this helper stays decoupled
+    from ``QARunner`` and is trivial to unit-test:
+
+    - ``run_single()`` returns ``(coroutine, display_name)`` for the
+      selected test. The display name is echoed as
+      ``"Running <name> tests..."`` before ``asyncio.run``.
+    - ``run_all()`` returns the coroutine for the full suite. The echo
+      ``"Running all QA tests..."`` is emitted before ``asyncio.run``.
+
+    Both echo strings are preserved byte-for-byte from the original inline
+    block. The generic ``except Exception`` path also matches the original
+    exactly:
+
+        click.echo(f"Error running tests: {e}", err=True)
+        logger.exception("Test execution failed")
+        sys.exit(1)
+
+    The caller may inject its own ``error_logger`` so the ``%(name)s``
+    field in the emitted log record stays anchored to the caller's module
+    (``cli``) rather than this helpers module. When ``None``, the
+    module-level ``logger`` is used as a fallback.
+
+    Args:
+        test_name: Name of the single test, or ``None`` to run all tests.
+        run_single: Zero-arg factory returning the single-test coroutine
+            and its operator-facing display name. Only invoked when
+            ``test_name`` is truthy.
+        run_all: Zero-arg factory returning the full-suite coroutine.
+            Only invoked when ``test_name`` is falsy.
+        error_logger: Optional logger used for the exception path. When
+            ``None``, falls back to the module-level ``logger``. Callers
+            should pass their own ``logging.getLogger(__name__)`` so the
+            emitted logger name matches the original pre-extraction name
+            (``almanak.framework.data.qa.cli``) and existing operator log
+            filters keep working.
+
+    Returns:
+        The ``QAReport`` produced by the chosen coroutine. The return type
+        is ``Any`` so the helper does not depend on ``runner.QAReport`` at
+        import time -- ``cli.py`` re-types the value via its own import.
+    """
+    log = error_logger if error_logger is not None else logger
+    try:
+        if test_name:
+            coro, display_name = run_single()
+            click.echo(f"Running {display_name} tests...")
+            return asyncio.run(coro)
+        click.echo("Running all QA tests...")
+        return asyncio.run(run_all())
+    except Exception as e:  # noqa: BLE001 -- preserve original catch-all
+        click.echo(f"Error running tests: {e}", err=True)
+        log.exception("Test execution failed")
+        sys.exit(1)
+
+
 __all__ = [
     "apply_cli_overrides",
     "configure_logging",
+    "dispatch_test_run",
     "echo_category_failures",
     "load_qa_config_or_exit",
     "print_startup_banner",

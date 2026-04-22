@@ -19,7 +19,6 @@ Example:
     python -m src.data.qa.cli --output reports/qa-data
 """
 
-import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -31,6 +30,7 @@ from dotenv import load_dotenv
 from .cli_helpers import (
     apply_cli_overrides,
     configure_logging,
+    dispatch_test_run,
     echo_category_failures,
     load_qa_config_or_exit,
     print_startup_banner,
@@ -39,6 +39,10 @@ from .cli_helpers import (
 from .config import QAConfig
 from .runner import QAReport, QARunner
 
+# Anchor the exception-path logger name on this module so operator log
+# filters that match ``almanak.framework.data.qa.cli`` keep working after
+# the Phase 6.4 dispatch extraction. Passed explicitly to
+# ``dispatch_test_run`` below.
 logger = logging.getLogger(__name__)
 
 # Valid test names for --test option
@@ -237,32 +241,34 @@ def qa_data(
     # Display startup information
     print_startup_banner(config, output_path, skip_plots, test_name)
 
-    # Run tests
-    try:
-        if test_name:
-            # Run single test
-            runner, test_display_name = _create_test_only_runner(
-                config=config,
-                output_dir=output_path,
-                test=test_name,
-                skip_plots=skip_plots,
-            )
-            click.echo(f"Running {test_display_name} tests...")
-            report = asyncio.run(_run_single_test(runner, test_name, config))
-        else:
-            # Run all tests
-            runner = QARunner(
-                config=config,
-                output_dir=output_path,
-                skip_plots=skip_plots,
-            )
-            click.echo("Running all QA tests...")
-            report = asyncio.run(runner.run_all())
+    # Run tests. Factories below are only invoked on their respective
+    # branch inside ``dispatch_test_run``; ``selected_test`` is the
+    # type-narrowed alias the single-test closure captures.
+    selected_test = test_name or ""
 
-    except Exception as e:
-        click.echo(f"Error running tests: {e}", err=True)
-        logger.exception("Test execution failed")
-        sys.exit(1)
+    def _single() -> tuple[Any, str]:
+        runner, display_name = _create_test_only_runner(
+            config=config,
+            output_dir=output_path,
+            test=selected_test,
+            skip_plots=skip_plots,
+        )
+        return _run_single_test(runner, selected_test, config), display_name
+
+    def _all() -> Any:
+        runner = QARunner(
+            config=config,
+            output_dir=output_path,
+            skip_plots=skip_plots,
+        )
+        return runner.run_all()
+
+    report: QAReport = dispatch_test_run(
+        test_name,
+        run_single=_single,
+        run_all=_all,
+        error_logger=logger,
+    )
 
     # Display summary
     click.echo()
