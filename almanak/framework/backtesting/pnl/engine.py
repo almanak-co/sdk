@@ -80,7 +80,6 @@ from almanak.framework.backtesting.adapters.registry import (
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.models import (
-    BacktestEngine,
     BacktestMetrics,
     BacktestResult,
     GasPriceRecord,
@@ -92,18 +91,18 @@ from almanak.framework.backtesting.models import (
     PreflightReport,
     TradeRecord,
 )
+
+# Phase helpers extracted from _run_backtest (Phase 6C.2).
+from almanak.framework.backtesting.pnl import _engine_helpers
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
-    HistoricalDataConfig,
     HistoricalDataProvider,
     MarketState,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
-    BacktestErrorConfig,
     BacktestErrorHandler,
-    PreflightValidationError,
 )
 from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
 from almanak.framework.backtesting.pnl.logging_utils import (
@@ -1393,476 +1392,74 @@ class PnLBacktester:
         bt_logger: BacktestLogger,
         run_started_at: datetime,
     ) -> BacktestResult:
-        """Internal backtest implementation. Called by backtest() with guaranteed cleanup."""
-        # Initialize parameter_sources early so it's available in error handling
-        # It will be populated with proper values in the initialization phase
-        parameter_sources: ParameterSourceTracker | None = None
+        """Internal backtest implementation. Called by backtest() with guaranteed cleanup.
 
-        # Run preflight validation if enabled
-        preflight_report: PreflightReport | None = None
-        preflight_passed: bool = True  # Default to True if validation is disabled
-        if config.preflight_validation:
-            with bt_logger.phase("preflight_validation"):
-                bt_logger.info("Running preflight validation checks...")
-                preflight_report = await self.run_preflight_validation(config)
-                preflight_passed = preflight_report.passed
+        Orchestrates the phase helpers extracted in Phase 6C.2. The body is a
+        thin sequencer: preflight -> initialization -> simulation loop ->
+        (error path | data quality gate + finalization). All semantics are
+        preserved byte-for-byte by ``_engine_helpers``; see that module's
+        docstring for details.
+        """
+        # Run preflight validation if enabled (no BacktestState yet, so a
+        # PreflightValidationError propagates straight to the caller -- matches
+        # pre-extraction behavior).
+        preflight_report, preflight_passed = await _engine_helpers.run_preflight(
+            backtester=self,
+            config=config,
+            bt_logger=bt_logger,
+        )
 
-                if preflight_report.passed:
-                    bt_logger.info(
-                        f"Preflight validation passed: "
-                        f"{len(preflight_report.tokens_available)} tokens available, "
-                        f"estimated coverage {preflight_report.estimated_coverage:.1%}"
-                    )
-                else:
-                    # Log details about what failed
-                    bt_logger.warning(
-                        f"Preflight validation issues detected: "
-                        f"{preflight_report.error_count} errors, "
-                        f"{preflight_report.warning_count} warnings"
-                    )
-                    for check in preflight_report.failed_checks:
-                        bt_logger.warning(f"  - [{check.severity.upper()}] {check.check_name}: {check.message}")
-
-                    # Fail fast if configured to do so
-                    if config.fail_on_preflight_error:
-                        failed_check_names = [c.check_name for c in preflight_report.failed_checks]
-                        raise PreflightValidationError(
-                            message=(
-                                f"Preflight validation failed with {preflight_report.error_count} errors "
-                                f"and {preflight_report.warning_count} warnings. "
-                                "Set fail_on_preflight_error=False to continue with degraded mode."
-                            ),
-                            failed_checks=failed_check_names,
-                            recommendations=preflight_report.recommendations,
-                            error_count=preflight_report.error_count,
-                            warning_count=preflight_report.warning_count,
-                        )
-                    else:
-                        bt_logger.warning(
-                            "Continuing in degraded mode (fail_on_preflight_error=False). "
-                            "Results may be inaccurate due to data quality issues."
-                        )
-
-        # Initialization phase
-        with bt_logger.phase("initialization"):
-            # Initialize error handler for consistent error classification
-            self._error_handler = BacktestErrorHandler(BacktestErrorConfig())
-            bt_logger.debug("Initialized BacktestErrorHandler for error classification")
-
-            # Initialize MEV simulator based on config
-            self._init_mev_simulator(config)
-
-            # Initialize strategy adapter for strategy-specific backtesting
-            self._init_adapter(strategy)
-
-            # Create parameter source tracker for audit trail
-            # This must be created after _init_adapter so we can track adapter-specific params
-            parameter_sources = self._create_parameter_source_tracker(config)
-            bt_logger.debug(
-                f"Tracked {len(parameter_sources.records)} parameter sources "
-                f"({len(parameter_sources.config_sources)} config, "
-                f"{len(parameter_sources.liquidation_sources)} liquidation, "
-                f"{len(parameter_sources.apy_funding_sources)} apy/funding)"
-            )
-
-            # Initialize portfolio
-            portfolio = SimulatedPortfolio(
-                initial_capital_usd=config.initial_capital_usd,
-            )
-
-            # Create historical data config
-            data_config = HistoricalDataConfig(
-                start_time=config.start_time,
-                end_time=config.end_time,
-                interval_seconds=config.interval_seconds,
-                tokens=config.tokens,
-                chains=[config.chain],
-            )
-
-            # Collect data source capabilities and generate warnings
-            data_source_capabilities, data_source_warnings = self._collect_data_source_capabilities(bt_logger)
-
-            # Track compliance violations for institutional reporting
-            # These indicate potential issues with backtest accuracy/reproducibility
-            compliance_violations: list[str] = []
-
-            # Check for CURRENT_ONLY providers which affect historical accuracy
-            for provider_name, capability in data_source_capabilities.items():
-                if capability == HistoricalDataCapability.CURRENT_ONLY:
-                    compliance_violations.append(
-                        f"CURRENT_ONLY data provider used: '{provider_name}'. "
-                        "Historical prices are not available; backtest uses runtime prices."
-                    )
-
-            # Track pending intents for inclusion delay simulation
-            # Each entry is (intent, decision_timestamp, blocks_remaining)
-            pending_intents: list[tuple[Any, datetime, int]] = []
-
-            # Store the last market state for executing pending intents at simulation end
-            # This is needed because we need a valid market state to execute delayed intents
-            last_market_state: MarketState | None = None
-
-            # Counter for pending intents executed at simulation end
-            execution_delayed_at_end = 0
-
-            # Initialize gas price records tracking (if enabled)
-            self._gas_price_records = [] if config.track_gas_prices else None
-
-            # Initialize data quality tracker
-            data_quality_tracker = DataQualityTracker(
-                staleness_threshold_seconds=config.staleness_threshold_seconds,
-            )
-
-            # Initialize indicator engine for populating MarketSnapshot with TA indicators
-            # This enables strategies using market.rsi(), market.macd(), market.bollinger_bands()
-            # to work identically in live and backtest modes.
-            indicator_engine = self._create_indicator_engine(strategy)
-            strategy_config = self._get_strategy_config_dict(strategy)
-
-            # Iteration counter for logging
-            tick_count = 0
-            total_ticks = config.estimated_ticks
+        # Initialization phase: build the shared BacktestState.
+        state = _engine_helpers.initialize_backtest(
+            backtester=self,
+            strategy=strategy,
+            config=config,
+            bt_logger=bt_logger,
+        )
 
         # Simulation phase
         try:
-            with bt_logger.phase("simulation"):
-                # Iterate through historical data
-                async for timestamp, market_state in self.data_provider.iterate(data_config):
-                    tick_count += 1
-
-                    # Log progress periodically
-                    if tick_count % 100 == 0 or tick_count == 1:
-                        bt_logger.info(
-                            f"Backtest progress: {tick_count}/{total_ticks} ticks "
-                            f"({100 * tick_count / total_ticks:.1f}%)"
-                        )
-
-                    # Create market snapshot for strategy
-                    snapshot = create_market_snapshot_from_state(
-                        market_state=market_state,
-                        chain=config.chain,
-                        portfolio=portfolio,
-                    )
-
-                    # Append prices to indicator engine and populate snapshot
-                    tick_tokens: set[str] = set()
-                    for token in market_state.available_tokens:
-                        try:
-                            price = market_state.get_price(token)
-                            indicator_engine.append_price(token, price)
-                            tick_tokens.add(token)
-                        except KeyError:
-                            pass
-                    indicator_engine.populate_snapshot(snapshot, strategy_config, active_tokens=tick_tokens)
-
-                    # Track data quality: record successful price lookups
-                    # Count tokens with available prices in this tick
-                    available_tokens = market_state.available_tokens
-                    expected_tokens = config.tokens
-                    provider_name = getattr(self.data_provider, "provider_name", "unknown")
-
-                    # Record successful lookups for each available token
-                    for token in expected_tokens:
-                        if token.upper() in [t.upper() for t in available_tokens]:
-                            data_quality_tracker.record_lookup(
-                                success=True,
-                                source=provider_name,
-                            )
-                        else:
-                            data_quality_tracker.record_lookup(success=False)
-
-                    # Execute any pending intents that have waited long enough
-                    pending_intents = await self._process_pending_intents(
-                        pending_intents=pending_intents,
-                        portfolio=portfolio,
-                        market_state=market_state,
-                        config=config,
-                        data_quality_tracker=data_quality_tracker,
-                        strategy=strategy,
-                    )
-
-                    # Get strategy decision
-                    try:
-                        decide_result = strategy.decide(snapshot)
-                    except Exception as e:
-                        # Check if this is an indicator warm-up error (expected during initial ticks).
-                        # The indicator engine's is_warming_up() is the authoritative signal:
-                        # if the engine hasn't accumulated enough data points AND the strategy
-                        # raised a ValueError, it's almost certainly because indicators aren't
-                        # ready yet (e.g. "Cannot calculate RSI", "MACD data not available").
-                        # We only suppress ValueError to avoid masking real bugs (AttributeError,
-                        # KeyError, etc.).
-                        is_warmup = isinstance(e, ValueError) and any(
-                            indicator_engine.is_warming_up(t, strategy_config) for t in tick_tokens
-                        )
-                        if is_warmup:
-                            # Expected: not enough data points yet for indicators.
-                            # Log at debug (not warning) to avoid alarming users.
-                            bt_logger.debug(f"Tick {tick_count}: indicator warm-up ({e}) - holding")
-                        elif self._error_handler:
-                            # Use error handler for consistent classification
-                            result = self._error_handler.handle_error(
-                                e,
-                                context=f"strategy_decide:tick_{tick_count}:{timestamp.isoformat()}",
-                            )
-                            if result.should_stop:
-                                raise RuntimeError(f"Fatal error in strategy.decide() at tick {tick_count}: {e}") from e
-                            # Non-fatal: log warning and continue with hold
-                            bt_logger.warning(
-                                f"Strategy decide() error at tick {tick_count}: {e} - continuing with hold"
-                            )
-                        else:
-                            bt_logger.warning(f"Strategy decide() raised exception at {timestamp}: {e}")
-                        decide_result = None
-
-                    # Extract intent from decide result
-                    intent = self._extract_intent(decide_result)
-
-                    # Queue intent for execution (with inclusion delay)
-                    if intent is not None and not self._is_hold_intent(intent):
-                        pending_intents.append((intent, timestamp, config.inclusion_delay_blocks))
-
-                    # Update positions via adapter if available
-                    self._update_positions_via_adapter(portfolio, market_state, timestamp)
-
-                    # Mark portfolio to market (uses adapter for valuation if available)
-                    portfolio.mark_to_market(market_state, timestamp, adapter=self._adapter)
-
-                    # Store the market state for use after simulation completes
-                    last_market_state = market_state  # noqa: F841 (used in US-062b)
-
-                # Execute any remaining pending intents at end of simulation
-                # (Use last market state for final execution)
-                if pending_intents and last_market_state is not None:
-                    bt_logger.warning(
-                        f"Executing {len(pending_intents)} pending intent(s) at simulation end "
-                        f"(delayed execution using last market state from {last_market_state.timestamp})"
-                    )
-                    for intent, decision_time, _ in pending_intents:
-                        try:
-                            trade_record = await self._execute_intent(
-                                intent=intent,
-                                portfolio=portfolio,
-                                market_state=last_market_state,
-                                timestamp=last_market_state.timestamp,
-                                config=config,
-                                delayed_at_end=True,
-                                data_quality_tracker=data_quality_tracker,
-                            )
-                            execution_delayed_at_end += 1
-                            # Record successful execution in error handler
-                            if self._error_handler:
-                                self._error_handler.record_success()
-                            bt_logger.debug(
-                                f"Executed pending intent at simulation end "
-                                f"(decided at {decision_time}): "
-                                f"type={trade_record.intent_type.value}, "
-                                f"amount=${trade_record.amount_usd:,.2f}"
-                            )
-                            # Notify strategy of successful execution
-                            if hasattr(strategy, "on_intent_executed"):
-                                try:
-                                    callback_result = self._build_callback_result(intent, trade_record, success=True)
-                                    strategy.on_intent_executed(intent, True, callback_result)
-                                except Exception as notify_err:
-                                    bt_logger.debug(f"on_intent_executed raised: {notify_err}")
-                        except Exception as e:
-                            # Notify strategy of execution failure
-                            if hasattr(strategy, "on_intent_executed"):
-                                try:
-                                    callback_result = self._build_callback_result(
-                                        intent, None, success=False, error=str(e)
-                                    )
-                                    strategy.on_intent_executed(intent, False, callback_result)
-                                except Exception as notify_err:
-                                    bt_logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
-                            # Use error handler for intent execution errors
-                            if self._error_handler:
-                                result = self._error_handler.handle_error(
-                                    e,
-                                    context=f"execute_pending_intent:end:{type(intent).__name__}",
-                                )
-                                if result.should_stop:
-                                    bt_logger.error(f"Fatal error executing pending intent at simulation end: {e}")
-                                    raise
-                                # Non-fatal: log warning and skip this intent
-                                bt_logger.warning(f"Failed to execute pending intent at simulation end: {e} - skipping")
-                            else:
-                                bt_logger.warning(f"Failed to execute pending intent at simulation end: {e}")
-                elif pending_intents:
-                    bt_logger.warning(
-                        f"Cannot execute {len(pending_intents)} remaining pending intents: "
-                        "no valid market state available"
-                    )
-
+            await _engine_helpers.execute_iteration_loop(
+                backtester=self,
+                strategy=strategy,
+                config=config,
+                bt_logger=bt_logger,
+                state=state,
+            )
         except Exception as e:
-            # Use error handler for consistent classification and tracking
-            error_summary: dict[str, Any] = {}
-            if self._error_handler:
-                result = self._error_handler.handle_error(
-                    e,
-                    context="simulation_phase:main_loop",
-                )
-                error_summary = self._error_handler.get_error_summary()
-                bt_logger.error(
-                    f"Backtest failed with {result.error_record.classification.error_type.value if result.error_record else 'unknown'} error: {e}"
-                )
-            else:
-                bt_logger.error(f"Backtest failed with error: {e}")
-
-            run_ended_at = datetime.now(UTC)
-            # On error, compliance is False and we add the error as a violation
-            error_compliance_violations = compliance_violations + [f"Backtest failed with error: {e}"]
-            error_fallback_usage = self._fallback_usage.copy() if self._fallback_usage else {}
-            return BacktestResult(
-                engine=BacktestEngine.PNL,
-                strategy_id=strategy.strategy_id,
-                start_time=config.start_time,
-                end_time=config.end_time,
-                metrics=BacktestMetrics(),
-                initial_capital_usd=config.initial_capital_usd,
-                final_capital_usd=config.initial_capital_usd,
-                chain=config.chain,
-                run_started_at=run_started_at,
-                run_ended_at=run_ended_at,
-                run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),
-                config=config.to_dict_with_metadata(data_provider_info=self._get_data_provider_info()),
-                error=str(e),
+            return _engine_helpers.build_error_result(
+                backtester=self,
+                strategy=strategy,
+                config=config,
                 backtest_id=backtest_id,
-                phase_timings=[t.to_dict() for t in bt_logger.phase_timings],
-                config_hash=config.calculate_config_hash(),
-                errors=self._error_handler.get_errors_as_dicts() if self._error_handler else [],
-                data_source_capabilities=data_source_capabilities,
-                data_source_warnings=data_source_warnings,
-                data_quality=data_quality_tracker.to_data_quality_report(),
-                institutional_compliance=False,
-                compliance_violations=error_compliance_violations,
-                fallback_usage=error_fallback_usage,
+                bt_logger=bt_logger,
+                run_started_at=run_started_at,
+                state=state,
                 preflight_report=preflight_report,
                 preflight_passed=preflight_passed,
-                gas_prices_used=self._gas_price_records or [],
-                gas_price_summary=None,  # No trades on error
-                parameter_sources=parameter_sources,
+                error=e,
             )
 
-        # Data quality gate enforcement - check coverage ratio after simulation
-        coverage_ratio = data_quality_tracker.coverage_ratio
-        if coverage_ratio < config.min_data_coverage:
-            # Track as compliance violation regardless of institutional_mode
-            compliance_violations.append(
-                f"Data coverage below minimum threshold: {coverage_ratio:.2%} < {config.min_data_coverage:.2%} "
-                f"({data_quality_tracker.successful_lookups}/{data_quality_tracker.total_price_lookups} "
-                f"successful price lookups)"
-            )
-
-            if config.institutional_mode:
-                error_msg = (
-                    f"Data quality gate failed in institutional mode: "
-                    f"coverage ratio {coverage_ratio:.2%} is below minimum threshold "
-                    f"{config.min_data_coverage:.2%}. "
-                    f"({data_quality_tracker.successful_lookups}/{data_quality_tracker.total_price_lookups} "
-                    f"successful price lookups)"
-                )
-                bt_logger.error(error_msg)
-                raise ValueError(error_msg)
-            else:
-                # Not in institutional mode - log warning only
-                bt_logger.warning(
-                    f"Data coverage below threshold: {coverage_ratio:.2%} < {config.min_data_coverage:.2%}. "
-                    f"({data_quality_tracker.successful_lookups}/{data_quality_tracker.total_price_lookups} "
-                    f"successful price lookups). "
-                    f"Enable institutional_mode=True to enforce data quality requirements."
-                )
-        elif config.institutional_mode:
-            bt_logger.info(
-                f"Data quality gate passed in institutional mode: "
-                f"coverage ratio {coverage_ratio:.2%} >= {config.min_data_coverage:.2%}"
-            )
-
-        # Metrics calculation phase
-        with bt_logger.phase("metrics_calculation"):
-            metrics = self._calculate_metrics(portfolio, portfolio.trades, config)
-
-            # Get final portfolio value
-            final_value = portfolio.equity_curve[-1].value_usd if portfolio.equity_curve else config.initial_capital_usd
-
-        run_ended_at = datetime.now(UTC)
-
-        bt_logger.info(
-            f"Backtest completed for {strategy.strategy_id}: "
-            f"PnL=${metrics.net_pnl_usd:,.2f}, "
-            f"Return={metrics.total_return_pct:.2f}%, "
-            f"Sharpe={metrics.sharpe_ratio:.3f}"
+        # Data quality gate enforcement - check coverage ratio after simulation.
+        # Raises ValueError in institutional mode; otherwise appends compliance
+        # violation + logs warning.
+        _engine_helpers.enforce_data_quality_gate(
+            config=config,
+            bt_logger=bt_logger,
+            state=state,
         )
 
-        # Log phase summary
-        phase_summary = bt_logger.get_phase_summary()
-        bt_logger.info(f"Phase timing summary - Total: {phase_summary['total_duration_seconds']:.2f}s")
-
-        # Log error summary if any non-fatal errors occurred
-        if self._error_handler and self._error_handler.error_count > 0:
-            error_summary = self._error_handler.get_error_summary()
-            bt_logger.info(
-                f"Error summary: {error_summary['total_errors']} total "
-                f"({error_summary['non_critical_errors']} non-critical, "
-                f"{error_summary['recoverable_errors']} recoverable)"
-            )
-
-        # Get fallback usage and add compliance violations for any fallbacks used
-        fallback_usage = self._fallback_usage.copy() if self._fallback_usage else {}
-
-        if fallback_usage.get("hardcoded_price", 0) > 0:
-            count = fallback_usage["hardcoded_price"]
-            compliance_violations.append(
-                f"Hardcoded price fallback used {count} time(s). "
-                "Set strict_reproducibility=True for institutional-grade backtests."
-            )
-        if fallback_usage.get("default_gas_price", 0) > 0:
-            count = fallback_usage["default_gas_price"]
-            compliance_violations.append(f"Default gas price fallback used {count} time(s).")
-        if fallback_usage.get("default_usd_amount", 0) > 0:
-            count = fallback_usage["default_usd_amount"]
-            compliance_violations.append(
-                f"Default USD amount fallback used {count} time(s). "
-                "Set strict_reproducibility=True for institutional-grade backtests."
-            )
-
-        # Determine institutional compliance status
-        # Compliance is True only if there are no violations
-        institutional_compliance = len(compliance_violations) == 0
-
-        return BacktestResult(
-            engine=BacktestEngine.PNL,
-            strategy_id=strategy.strategy_id,
-            start_time=config.start_time,
-            end_time=config.end_time,
-            metrics=metrics,
-            trades=portfolio.trades,
-            equity_curve=portfolio.equity_curve,
-            initial_capital_usd=config.initial_capital_usd,
-            final_capital_usd=final_value,
-            chain=config.chain,
-            run_started_at=run_started_at,
-            run_ended_at=run_ended_at,
-            run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),
-            config=config.to_dict_with_metadata(data_provider_info=self._get_data_provider_info()),
+        # Metrics calculation + BacktestResult assembly
+        return _engine_helpers.finalize_backtest_result(
+            backtester=self,
+            strategy=strategy,
+            config=config,
             backtest_id=backtest_id,
-            phase_timings=[t.to_dict() for t in bt_logger.phase_timings],
-            config_hash=config.calculate_config_hash(),
-            errors=self._error_handler.get_errors_as_dicts() if self._error_handler else [],
-            execution_delayed_at_end=execution_delayed_at_end,
-            data_source_capabilities=data_source_capabilities,
-            data_source_warnings=data_source_warnings,
-            data_quality=data_quality_tracker.to_data_quality_report(),
-            institutional_compliance=institutional_compliance,
-            compliance_violations=compliance_violations,
-            fallback_usage=fallback_usage,
+            bt_logger=bt_logger,
+            run_started_at=run_started_at,
+            state=state,
             preflight_report=preflight_report,
             preflight_passed=preflight_passed,
-            gas_prices_used=self._gas_price_records or [],
-            gas_price_summary=self._create_gas_price_summary(portfolio.trades),
-            parameter_sources=parameter_sources,
-            data_coverage_metrics=portfolio.calculate_data_coverage_metrics(),
         )
 
     def _extract_intent(self, decide_result: Any) -> Any:
