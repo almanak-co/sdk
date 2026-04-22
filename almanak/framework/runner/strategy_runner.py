@@ -94,6 +94,7 @@ from ..utils.log_formatters import (
 )
 from ..utils.logging import add_context, clear_context
 from ..valuation.portfolio_valuer import PortfolioValuer
+from . import _run_loop_helpers
 
 # ---- Re-exports from runner_models (keeps all existing import paths working) ----
 from .runner_models import (  # noqa: F401
@@ -1408,81 +1409,16 @@ class StrategyRunner:
         max_iter_msg = f", max_iterations={max_iterations}" if max_iterations else ""
         logger.info(f"Starting run loop for strategy {strategy_id} with interval={interval}s{max_iter_msg}")
 
-        # Initialize state if enabled
-        if self.config.enable_state_persistence:
-            try:
-                await self.state_manager.initialize()
-                logger.debug(f"State manager initialized for {strategy_id}")
-            except Exception as e:
-                logger.error(f"Failed to initialize state manager: {e}")
-
-        # Recover incomplete sessions from previous runs
-        try:
-            recovered = await self._recover_incomplete_sessions()
-            if recovered > 0:
-                logger.info(f"Recovered {recovered} incomplete sessions on startup")
-        except Exception as e:
-            logger.error(f"Failed to recover incomplete sessions: {e}")
-
-        # Restore copy trading cursor state if configured
-        activity_provider = cast(
-            StatefulActivityProviderProtocol | None, getattr(strategy, "_wallet_activity_provider", None)
-        )
-        if activity_provider is not None and self.config.enable_state_persistence:
-            try:
-                state = await self.state_manager.load_state(strategy_id)
-                if state is not None and "copy_trading_state" in state.state:
-                    activity_provider.set_state(state.state["copy_trading_state"])
-                    logger.info("Copy trading: cursor state restored from persistence")
-            except Exception as e:
-                logger.warning(f"Failed to restore copy trading state: {e}")
-
-        self._shutdown_requested = False
-        self._signal_received = False
-        self._terminal_lifecycle_state = None
-        self._terminal_lifecycle_error_message = None
-
-        # Set up dual-write for timeline events (gateway persistence)
-        gateway_client = self._get_gateway_client()
-        if gateway_client is not None:
-            from ..api.timeline import set_event_gateway_client
-
-            set_event_gateway_client(gateway_client)
-            logger.debug("Enabled gateway dual-write for timeline events")
-
-        # Register this strategy instance with the gateway
-        self._register_with_gateway(strategy)
-
-        # Write RUNNING state to LifecycleStore
-        self._lifecycle_write_state(strategy_id, "RUNNING")
-
-        # Emit strategy started event
-        start_event = TimelineEvent(
-            timestamp=datetime.now(UTC),
-            event_type=TimelineEventType.STRATEGY_STARTED,
-            description=f"Strategy {strategy_id} started with interval={interval}s",
-            strategy_id=strategy_id,
-            chain=getattr(self.config, "chain", ""),
-            details={
-                "interval_seconds": interval,
-                "enable_state_persistence": self.config.enable_state_persistence,
-            },
-        )
-        add_event(start_event)
-        logger.debug(f"Emitted STRATEGY_STARTED event for {strategy_id}")
+        # Phase 1: setup (state manager init, session recovery, copy-trading
+        # restore, shutdown flag reset, gateway wiring, RUNNING write,
+        # STRATEGY_STARTED event).
+        activity_provider = await _run_loop_helpers.initialize_run_loop(self, strategy, strategy_id, interval)
 
         loop_iteration_count = 0
         while not self._shutdown_requested:
             try:
-                # Pre-iteration callback (e.g., reset Anvil forks)
-                if pre_iteration_callback:
-                    try:
-                        pre_iteration_callback()
-                    except CriticalCallbackError:
-                        # Fail-closed: safety-critical callbacks stop the loop
-                        raise
-                    except Exception as e:
-                        logger.error(f"Pre-iteration callback error: {e}")
+                # Phase 3: pre-iteration callback (e.g., reset Anvil forks).
+                _run_loop_helpers.invoke_pre_iteration_callback(pre_iteration_callback)
 
                 # Snapshot the error-streak flag BEFORE the iteration runs. Successful
                 # iterations reset `_consecutive_errors` to 0 inside `run_iteration`
@@ -1491,7 +1427,7 @@ class StrategyRunner:
                 # below is unreachable.
                 was_in_error_streak = self._consecutive_errors >= self.config.max_consecutive_errors
 
-                # Run iteration
+                # Phase 4: run one iteration.
                 result = await self.run_iteration(strategy)
 
                 # Emit structured iteration summary for JSONL log analysis
@@ -1508,54 +1444,9 @@ class StrategyRunner:
                     except Exception as e:
                         logger.warning(f"Failed to persist copy trading state: {e}")
 
-                # Capture portfolio snapshot for dashboard/PnL tracking.
-                # Always capture regardless of iteration success — failed iterations
-                # don't change the portfolio, but we need continuity in the equity curve.
-                # _capture_portfolio_snapshot handles valuation failures gracefully
-                # (persists UNAVAILABLE snapshots), but real persistence failures
-                # propagate as AccountingPersistenceError (VIB-3157). Catch those
-                # here so snapshot/metrics failures take the same ACCOUNTING_FAILED
-                # path as ledger failures inside run_iteration.
-                if self.config.enable_state_persistence:
-                    snapshot_start = datetime.now(UTC)
-                    try:
-                        await self._capture_portfolio_snapshot(
-                            strategy=strategy,
-                            iteration_number=self._total_iterations,
-                        )
-                    except AccountingPersistenceError as acc_err:
-                        # Mode-aware: only escalate to ACCOUNTING_FAILED in
-                        # live mode, matching the contract used by
-                        # _write_ledger_entry (live raises, paper/dry-run
-                        # logs). In non-live modes, swallow + ERROR-log so
-                        # pre-prod drift is visible without halting the loop.
-                        if self._is_live_mode():
-                            logger.exception(
-                                "Accounting persistence failed in live mode for %s (write_kind=%s)",
-                                strategy_id,
-                                acc_err.write_kind,
-                            )
-                            await self._alert_accounting_failure(strategy, acc_err)
-                            # Build IterationResult directly instead of via
-                            # _create_error_result, which mutates
-                            # _consecutive_errors. The outer run_loop failure
-                            # handler (~line 1150) increments that counter
-                            # for any non-success result; using the helper
-                            # here would double-count the snapshot error.
-                            result = IterationResult(
-                                status=IterationStatus.ACCOUNTING_FAILED,
-                                error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
-                                strategy_id=strategy_id,
-                                duration_ms=self._calculate_duration_ms(snapshot_start),
-                            )
-                        else:
-                            logger.error(
-                                "Snapshot accounting persistence failed in non-live mode for %s "
-                                "(write_kind=%s, continuing; pre-prod drift): %s",
-                                strategy_id,
-                                acc_err.write_kind,
-                                acc_err,
-                            )
+                # Capture portfolio snapshot (possibly rebuilding `result` into
+                # ACCOUNTING_FAILED in live mode on AccountingPersistenceError).
+                result = await _run_loop_helpers.capture_snapshot_with_accounting(self, strategy, strategy_id, result)
 
                 # Call callback if provided
                 if iteration_callback:
@@ -1564,62 +1455,12 @@ class StrategyRunner:
                     except Exception as e:
                         logger.error(f"Iteration callback error: {e}")
 
-                # Handle consecutive errors and circuit breaker recording
+                # Phase 8: post-iteration bookkeeping (consecutive-errors,
+                # circuit breaker, lifecycle recovery writes).
                 if not result.success:
-                    self._consecutive_errors += 1
-                    if self._first_error_at is None:
-                        self._first_error_at = datetime.now(UTC)
-
-                    # Record failure in circuit breaker (skip statuses that already
-                    # recorded inline to avoid double-counting)
-                    if self._circuit_breaker is not None and result.status not in (
-                        IterationStatus.CIRCUIT_BREAKER_OPEN,
-                        IterationStatus.STRATEGY_TIMEOUT,  # already recorded in decide() handler
-                        IterationStatus.STRATEGY_ERROR,  # already recorded in decide() handler
-                    ):
-                        self._circuit_breaker.record_failure(
-                            error_message=result.error or f"Iteration failed: {result.status.value}",
-                        )
-
-                    # Auto-trigger emergency stop if breaker just tripped to OPEN
-                    # (checked after both inline and run_loop recording paths)
-                    if self._circuit_breaker is not None:
-                        await self._maybe_trigger_emergency(strategy, result)
-
-                    if self._consecutive_errors >= self.config.max_consecutive_errors:
-                        await self._alert_consecutive_errors(strategy, result)
-                        self._lifecycle_write_state(
-                            strategy_id, "ERROR", error_message=str(result.error) if result.error else None
-                        )
+                    await _run_loop_helpers.handle_iteration_failure(self, strategy, strategy_id, result)
                 else:
-                    # Recover lifecycle state if we were in an error streak before
-                    # this iteration succeeded. The counter has already been reset to
-                    # 0 inside `run_iteration` via `_record_success`, so we rely on the
-                    # pre-iteration snapshot captured above. Skip the recovery write
-                    # when the same iteration has already transitioned to a terminal
-                    # state (e.g., teardown writes TERMINATED and requests shutdown) —
-                    # otherwise we would clobber that terminal state with RUNNING.
-                    if was_in_error_streak and not self._shutdown_requested and self._terminal_lifecycle_state is None:
-                        self._lifecycle_write_state(strategy_id, "RUNNING")
-                        logger.info(
-                            "Strategy %s recovered after error streak (max_consecutive_errors=%d) "
-                            "- lifecycle state reset to RUNNING",
-                            strategy_id,
-                            self.config.max_consecutive_errors,
-                        )
-                    elif was_in_error_streak:
-                        logger.debug(
-                            "Skipping lifecycle recovery write for %s: shutdown/terminal state active",
-                            strategy_id,
-                        )
-                    self._consecutive_errors = 0
-                    self._first_error_at = None
-                    # Reset emergency guard so a future HALF_OPEN->OPEN relapse can re-fire
-                    if self._circuit_breaker is not None:
-                        from ..execution.circuit_breaker import CircuitBreakerState
-
-                        if self._circuit_breaker.state != CircuitBreakerState.OPEN:
-                            self._emergency_triggered_for_open = False
+                    _run_loop_helpers.handle_iteration_success(self, strategy_id, was_in_error_streak)
 
                 # Report positions and send heartbeat to gateway after each iteration
                 position_protos = self._collect_position_snapshot(strategy)
@@ -1628,32 +1469,9 @@ class StrategyRunner:
                 # Send lifecycle heartbeat
                 self._lifecycle_heartbeat(strategy_id)
 
-                # Poll for lifecycle commands (PAUSE, RESUME, STOP)
+                # Poll for + route lifecycle commands (PAUSE, RESUME, STOP).
                 command = self._lifecycle_poll_command(strategy_id)
-                if command == "STOP":
-                    logger.info("Received STOP command for %s", strategy_id)
-                    self._lifecycle_handle_stop(strategy_id, strategy)
-                elif command == "PAUSE":
-                    logger.info("Received PAUSE command for %s", strategy_id)
-                    self._lifecycle_write_state(strategy_id, "PAUSED")
-                    self._gateway_update_status(strategy_id, "PAUSED")
-                    # Preserve position snapshot so the dashboard doesn't lose it during pause
-                    self._gateway_heartbeat(strategy_id, positions=self._collect_position_snapshot(strategy))
-                    # Wait for RESUME command (send heartbeats so operator sees liveness)
-                    while not self._shutdown_requested:
-                        self._lifecycle_heartbeat(strategy_id)
-                        resume_cmd = self._lifecycle_poll_command(strategy_id)
-                        if resume_cmd == "RESUME":
-                            logger.info("Received RESUME command for %s", strategy_id)
-                            self._lifecycle_write_state(strategy_id, "RUNNING")
-                            self._gateway_update_status(strategy_id, "RUNNING")
-                            self._gateway_heartbeat(strategy_id, positions=self._collect_position_snapshot(strategy))
-                            break
-                        elif resume_cmd == "STOP":
-                            logger.info("Received STOP command while paused for %s", strategy_id)
-                            self._lifecycle_handle_stop(strategy_id, strategy)
-                            break
-                        await asyncio.sleep(self.config.lifecycle_poll_interval)
+                await _run_loop_helpers.handle_lifecycle_command(self, strategy, strategy_id, command)
 
                 # Check max iterations limit
                 loop_iteration_count += 1
@@ -1678,46 +1496,9 @@ class StrategyRunner:
                 if not self._shutdown_requested:
                     await asyncio.sleep(interval)
 
-        # Write final state to LifecycleStore (preserve ERROR if set by circuit breaker)
-        self._lifecycle_write_state(
-            strategy_id,
-            self._terminal_lifecycle_state or "TERMINATED",
-            error_message=self._terminal_lifecycle_error_message,
-        )
-
-        # Deregister from gateway (mark as INACTIVE)
-        self._deregister_from_gateway(strategy_id)
-
-        # Emit strategy stopped event
-        stop_event = TimelineEvent(
-            timestamp=datetime.now(UTC),
-            event_type=TimelineEventType.STRATEGY_STOPPED,
-            description=f"Strategy {strategy_id} stopped",
-            strategy_id=strategy_id,
-            chain=getattr(self.config, "chain", ""),
-            details={
-                "shutdown_requested": self._shutdown_requested,
-                "consecutive_errors": self._consecutive_errors,
-            },
-        )
-        add_event(stop_event)
-        logger.debug(f"Emitted STRATEGY_STOPPED event for {strategy_id}")
-
-        logger.info(f"Run loop ended for strategy {strategy_id}")
-
-        # Flush any pending state saves before cleanup
-        if hasattr(strategy, "flush_pending_saves"):
-            try:
-                await strategy.flush_pending_saves()
-            except Exception as e:
-                logger.warning(f"Error flushing pending saves: {e}")
-
-        # Cleanup
-        if self.config.enable_state_persistence:
-            try:
-                await self.state_manager.close()
-            except Exception as e:
-                logger.error(f"Error closing state manager: {e}")
+        # Phase 12: shutdown drain (final lifecycle write, deregister,
+        # STRATEGY_STOPPED event, flush, state manager close).
+        await _run_loop_helpers.finalize_run_loop(self, strategy, strategy_id)
 
     def _emit_execution_timeline_event(
         self,
@@ -1852,7 +1633,6 @@ class StrategyRunner:
         the cycle and alert the operator. In paper/dry-run mode we log ERROR
         and continue -- the drift is visible but does not block the loop.
         """
-        from ..state.exceptions import AccountingPersistenceError
 
         try:
             from ..observability.context import get_cycle_id
