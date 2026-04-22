@@ -10,10 +10,16 @@ commands rely on:
   no-op when the id is already populated.
 - `resolve_strategy_class_or_mock`: allow-mock fallback warning vs strict
   abort path.
+
+Phase 5B.4 extends coverage across these helpers to >= 85% with focus on
+error paths, `build_pnl_config` kwarg propagation edge cases, and
+`ensure_strategy_id` precedence corner cases.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import patch
 
@@ -21,12 +27,12 @@ import click
 import pytest
 
 from almanak.framework.cli.backtest.run_helpers import (
+    build_pnl_config,
     ensure_strategy_id,
     parse_token_list,
     resolve_strategy_class_or_mock,
     validate_strategy_is_registered,
 )
-
 
 # =============================================================================
 # parse_token_list
@@ -77,9 +83,7 @@ class TestValidateStrategyIsRegistered:
         captured = capsys.readouterr()
         assert "Error: Strategy 'does_not_exist' is not registered." in captured.err
 
-    def test_lists_available_strategies_when_any(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_lists_available_strategies_when_any(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "almanak.framework.cli.backtest.run_helpers.list_strategies_fn",
             return_value=["beta", "alpha"],
@@ -91,9 +95,7 @@ class TestValidateStrategyIsRegistered:
         # Sorted output
         assert "Available strategies: alpha, beta" in captured.err
 
-    def test_omits_available_line_when_registry_empty(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_omits_available_line_when_registry_empty(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "almanak.framework.cli.backtest.run_helpers.list_strategies_fn",
             return_value=[],
@@ -192,9 +194,7 @@ class TestResolveStrategyClassOrMock:
             result = resolve_strategy_class_or_mock("dummy", allow_mock=False)
         assert result is Dummy
 
-    def test_allow_mock_returns_mock_on_value_error(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_allow_mock_returns_mock_on_value_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "almanak.framework.cli.backtest.run_helpers.get_strategy",
             side_effect=ValueError("not registered"),
@@ -211,9 +211,7 @@ class TestResolveStrategyClassOrMock:
         assert "No strategies registered in factory." in captured.err
         assert "Running with mock strategy for demonstration." in captured.err
 
-    def test_no_mock_path_aborts_on_value_error(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_no_mock_path_aborts_on_value_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "almanak.framework.cli.backtest.run_helpers.get_strategy",
             side_effect=ValueError("not registered"),
@@ -235,3 +233,305 @@ class TestResolveStrategyClassOrMock:
         cfg = {"a": 1, "b": 2}
         instance = mock_cls(cfg)
         assert instance.config == cfg
+
+
+# =============================================================================
+# Phase 5B.4 extended coverage
+# =============================================================================
+
+
+class TestEnsureStrategyIdPrecedence:
+    """Extended edge cases for `_strategy_id` vs `strategy_id` precedence."""
+
+    def test_both_private_and_public_prefers_private(self) -> None:
+        """When both attrs exist, assignment goes to `_strategy_id`."""
+
+        class _Both:
+            def __init__(self) -> None:
+                self._strategy_id: str = ""
+                self.strategy_id: str = ""
+
+        strat = _Both()
+        ensure_strategy_id(strat, fallback="priv-id")
+        assert strat._strategy_id == "priv-id"
+        # `strategy_id` is untouched when private channel exists
+        assert strat.strategy_id == ""
+
+    def test_truthy_existing_id_beats_private_channel(self) -> None:
+        """Non-empty public `strategy_id` is respected even when `_strategy_id` exists."""
+
+        class _BothExisting:
+            def __init__(self) -> None:
+                self._strategy_id: str = ""
+                self.strategy_id: str = "already-set"
+
+        strat = _BothExisting()
+        ensure_strategy_id(strat, fallback="ignored")
+        assert strat.strategy_id == "already-set"
+        assert strat._strategy_id == ""  # no write happened
+
+    def test_noop_when_private_channel_already_populated(self) -> None:
+        """IntentStrategy-style: `strategy_id` reads `_strategy_id`; when latter set, no-op."""
+
+        class _Backed:
+            def __init__(self, initial: str) -> None:
+                self._strategy_id = initial
+
+            @property
+            def strategy_id(self) -> str:
+                return self._strategy_id
+
+        strat = _Backed(initial="pre-seeded")
+        ensure_strategy_id(strat, fallback="ignored")
+        assert strat._strategy_id == "pre-seeded"
+
+    def test_falsy_empty_string_triggers_fallback(self) -> None:
+        """Empty string is falsy — triggers the fallback path."""
+
+        class _EmptyPlain:
+            strategy_id: str = ""
+
+        strat = _EmptyPlain()
+        ensure_strategy_id(strat, fallback="from-fallback")
+        assert strat.strategy_id == "from-fallback"
+
+    def test_none_existing_id_triggers_fallback(self) -> None:
+        """None is falsy — triggers the fallback path via public attr."""
+
+        class _NoneId:
+            strategy_id: str | None = None
+
+        strat = _NoneId()
+        ensure_strategy_id(strat, fallback="from-none")
+        assert strat.strategy_id == "from-none"
+
+
+class TestBuildPnlConfigKwargs:
+    """Coverage gaps for `build_pnl_config` kwarg propagation."""
+
+    _start = datetime(2024, 1, 1, tzinfo=UTC)
+    _end = datetime(2024, 2, 1, tzinfo=UTC)
+
+    def test_allow_degraded_data_false_propagates(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=10000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+            allow_degraded_data=False,
+        )
+        assert cfg.allow_degraded_data is False
+        # other sweep kwargs still fall through to dataclass defaults
+        assert cfg.preflight_validation is True
+        assert cfg.fail_on_preflight_error is True
+
+    def test_preflight_validation_false_propagates(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=10000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+            preflight_validation=False,
+        )
+        assert cfg.preflight_validation is False
+        assert cfg.allow_degraded_data is True
+        assert cfg.fail_on_preflight_error is True
+
+    def test_fail_on_preflight_error_false_propagates(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=10000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+            fail_on_preflight_error=False,
+        )
+        assert cfg.fail_on_preflight_error is False
+        assert cfg.allow_degraded_data is True
+        assert cfg.preflight_validation is True
+
+    def test_include_gas_costs_false_propagates(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=10000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+            include_gas_costs=False,
+        )
+        assert cfg.include_gas_costs is False
+
+    def test_explicit_none_kwargs_fall_through_to_defaults(self) -> None:
+        """Passing None explicitly should still retain dataclass defaults."""
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=10000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+            allow_degraded_data=None,
+            preflight_validation=None,
+            fail_on_preflight_error=None,
+        )
+        assert cfg.allow_degraded_data is True
+        assert cfg.preflight_validation is True
+        assert cfg.fail_on_preflight_error is True
+
+    def test_capital_zero_raises_underlying_validation(self) -> None:
+        """Zero initial_capital raises in `PnLBacktestConfig.__post_init__`."""
+        with pytest.raises(ValueError, match="initial_capital_usd must be positive"):
+            build_pnl_config(
+                start_time=self._start,
+                end_time=self._end,
+                interval_seconds=3600,
+                initial_capital=0.0,
+                chain="arbitrum",
+                tokens=["WETH"],
+            )
+
+    def test_tokens_empty_list_raises_underlying_validation(self) -> None:
+        """Empty token list raises in `PnLBacktestConfig.__post_init__`."""
+        with pytest.raises(ValueError, match="tokens list cannot be empty"):
+            build_pnl_config(
+                start_time=self._start,
+                end_time=self._end,
+                interval_seconds=3600,
+                initial_capital=1000.0,
+                chain="arbitrum",
+                tokens=[],
+            )
+
+    def test_gas_price_default_is_30(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=1000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+        )
+        assert cfg.gas_price_gwei == Decimal("30.0")
+
+    def test_interval_seconds_pass_through(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=7200,
+            initial_capital=1000.0,
+            chain="base",
+            tokens=["WETH"],
+        )
+        assert cfg.interval_seconds == 7200
+        assert cfg.chain == "base"
+
+
+class TestParseTokenListExtended:
+    """Extended parsing edge cases."""
+
+    def test_mixed_case_upper_applied(self) -> None:
+        assert parse_token_list("WeTh,UsDc,BtC") == ["WETH", "USDC", "BTC"]
+
+    def test_only_whitespace_token_becomes_empty_string(self) -> None:
+        """Whitespace-only segment strips to empty (behaviour we preserve)."""
+        assert parse_token_list("WETH,   ,USDC") == ["WETH", "", "USDC"]
+
+    def test_trailing_comma_produces_trailing_empty(self) -> None:
+        assert parse_token_list("WETH,") == ["WETH", ""]
+
+    def test_leading_comma_produces_leading_empty(self) -> None:
+        assert parse_token_list(",WETH") == ["", "WETH"]
+
+    def test_hyphen_in_token_preserved(self) -> None:
+        assert parse_token_list("usdc-e,usdt") == ["USDC-E", "USDT"]
+
+
+class TestValidateStrategyIsRegisteredExtended:
+    """Additional error-path tests."""
+
+    def test_error_prefix_exact_string(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Grep-asserted string — the exact prefix must be preserved."""
+        with patch(
+            "almanak.framework.cli.backtest.run_helpers.list_strategies_fn",
+            return_value=[],
+        ):
+            with pytest.raises(click.Abort):
+                validate_strategy_is_registered("nope")
+
+        captured = capsys.readouterr()
+        # Byte-for-byte match on the load-bearing line
+        assert "Error: Strategy 'nope' is not registered." in captured.err
+
+    def test_discovery_guidance_sequence(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify the full guidance block lines are emitted in order."""
+        with patch(
+            "almanak.framework.cli.backtest.run_helpers.list_strategies_fn",
+            return_value=[],
+        ):
+            with pytest.raises(click.Abort):
+                validate_strategy_is_registered("missing")
+
+        err = capsys.readouterr().err
+        # Ordered assertions
+        i_header = err.find("The backtest command discovers strategies by:")
+        i_import = err.find("Importing ./strategy.py")
+        i_scan = err.find("Scanning ./strategies/")
+        i_hint = err.find("See registered strategies with:")
+        i_new = err.find("almanak strat new --name <name>")
+        assert 0 <= i_header < i_import < i_scan < i_hint < i_new
+
+
+class TestResolveStrategyClassOrMockExtended:
+    """Additional edges for the resolver."""
+
+    def test_mock_decide_accepts_any_market(self) -> None:
+        """Mock.decide returns None regardless of input — covers stub branch."""
+        with patch(
+            "almanak.framework.cli.backtest.run_helpers.get_strategy",
+            side_effect=ValueError(),
+        ):
+            mock_cls: Any = resolve_strategy_class_or_mock("x", allow_mock=True)
+
+        inst = mock_cls({})
+        assert inst.decide(market="anything") is None  # type: ignore[arg-type]
+        assert inst.decide(market=None) is None  # type: ignore[arg-type]
+
+    def test_mock_class_attribute_accessible(self) -> None:
+        """Class-level strategy_id is accessible before instantiation."""
+        with patch(
+            "almanak.framework.cli.backtest.run_helpers.get_strategy",
+            side_effect=ValueError(),
+        ):
+            mock_cls: Any = resolve_strategy_class_or_mock("x", allow_mock=True)
+
+        assert mock_cls.strategy_id == "mock-sweep"
+
+    def test_get_strategy_succeeds_ignores_allow_mock_false(self) -> None:
+        """When get_strategy succeeds, allow_mock is irrelevant."""
+
+        class _Real:
+            pass
+
+        with patch(
+            "almanak.framework.cli.backtest.run_helpers.get_strategy",
+            return_value=_Real,
+        ):
+            assert resolve_strategy_class_or_mock("real", allow_mock=False) is _Real
+            assert resolve_strategy_class_or_mock("real", allow_mock=True) is _Real
+
+    def test_allow_mock_emits_blank_line_around_warnings(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Output structure: blank, warning1, warning2, blank."""
+        with patch(
+            "almanak.framework.cli.backtest.run_helpers.get_strategy",
+            side_effect=ValueError(),
+        ):
+            resolve_strategy_class_or_mock("m", allow_mock=True)
+        err = capsys.readouterr().err
+        assert "Warning: No strategies registered in factory." in err
+        assert "Running with mock strategy for demonstration." in err

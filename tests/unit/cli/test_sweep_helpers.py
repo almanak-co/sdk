@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import click
 import pytest
@@ -37,14 +37,13 @@ from almanak.framework.backtesting.models import (
 from almanak.framework.cli.backtest.helpers import SweepParameter, SweepResult
 from almanak.framework.cli.backtest.run_helpers import build_pnl_config
 from almanak.framework.cli.backtest.sweep import (
-    _SweepRunContext,
     _compute_worker_count,
     _handle_sweep_dry_run,
     _parse_sweep_params,
     _resolve_backtest_periods,
+    _SweepRunContext,
     _write_sweep_json,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -429,3 +428,1569 @@ class TestBuildPnlConfig:
         # Decimal via str() preserves literal float formatting; existing behaviour.
         assert cfg.initial_capital_usd == Decimal("12345.67")
         assert cfg.gas_price_gwei == Decimal("42.5")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5B.4 extended coverage
+# ---------------------------------------------------------------------------
+
+
+from almanak.framework.cli.backtest.sweep import (  # noqa: E402
+    _aggregate_multi_period_results,
+    _display_sweep_results,
+    _generate_sweep_report,
+    _print_multi_period_results,
+    _print_sweep_configuration,
+    _run_parallel_sweep,
+    _run_sweep_over_periods,
+    _SweepTask,
+    print_sweep_results_table,
+    run_sweep_backtest,
+)
+
+
+class TestPrintSweepConfiguration:
+    def test_single_period_banner(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1", "2"])],
+            combinations=[{"a": "1"}, {"a": "2"}],
+            periods=[_make_period("single")],
+        )
+        _print_sweep_configuration(ctx, parallel=False, effective_workers=4)
+        out = capsys.readouterr().out
+        assert "PARAMETER SWEEP CONFIGURATION" in out
+        assert "Strategy: demo_strat" in out
+        assert "Chain: arbitrum" in out
+        assert "Interval: 3600s (1.0 hours)" in out
+        assert "Initial Capital: $10,000.00" in out
+        assert "Tokens: WETH, USDC" in out
+        assert "Total combinations: 2" in out
+        assert "Execution mode: Async (concurrent)" in out
+        assert "Concurrency: 4" in out
+
+    def test_multi_period_banner_lists_each_window(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("p1"), _make_period("p2", m1=3, m2=4)],
+            multi=True,
+        )
+        _print_sweep_configuration(ctx, parallel=True, effective_workers=8)
+        out = capsys.readouterr().out
+        assert "Periods: 2024-quarterly (2 windows)" in out
+        assert "- p1:" in out
+        assert "- p2:" in out
+        assert "Total runs: 2 (1 combinations x 2 periods)" in out
+        assert "Execution mode: Parallel (multiprocessing)" in out
+        assert "Workers: 8" in out
+
+    def test_output_path_emitted_when_present(self, capsys: pytest.CaptureFixture[str]) -> None:
+        out_path = Path("/tmp/sweep.json")
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            output_path=out_path,
+        )
+        _print_sweep_configuration(ctx, parallel=False, effective_workers=2)
+        out = capsys.readouterr().out
+        assert f"Output: {out_path}" in out
+
+    def test_output_path_absent_when_none(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            output_path=None,
+        )
+        _print_sweep_configuration(ctx, parallel=False, effective_workers=2)
+        out = capsys.readouterr().out
+        assert "Output:" not in out
+
+
+class TestAggregateMultiPeriodResults:
+    def test_groups_by_param_combination(self) -> None:
+        results = [
+            _make_result({"a": "1"}, sharpe=1.0, period_name="p1"),
+            _make_result({"a": "1"}, sharpe=2.0, period_name="p2"),
+            _make_result({"a": "2"}, sharpe=0.5, period_name="p1"),
+            _make_result({"a": "2"}, sharpe=1.5, period_name="p2"),
+        ]
+        aggregated = _aggregate_multi_period_results(results, [{"a": "1"}, {"a": "2"}])
+        assert len(aggregated) == 2
+        # Sorted by avg_sharpe desc: a=1 (avg 1.5) > a=2 (avg 1.0)
+        assert aggregated[0].params == {"a": "1"}
+        assert aggregated[0].avg_sharpe == 1.5
+        assert aggregated[1].params == {"a": "2"}
+        assert aggregated[1].avg_sharpe == 1.0
+
+    def test_sharpe_std_zero_for_single_period(self) -> None:
+        results = [_make_result({"a": "1"}, sharpe=1.5, period_name="p1")]
+        aggregated = _aggregate_multi_period_results(results, [{"a": "1"}])
+        assert aggregated[0].sharpe_std == 0.0
+
+    def test_sharpe_std_nonzero_for_multi(self) -> None:
+        results = [
+            _make_result({"a": "1"}, sharpe=1.0, period_name="p1"),
+            _make_result({"a": "1"}, sharpe=3.0, period_name="p2"),
+        ]
+        aggregated = _aggregate_multi_period_results(results, [{"a": "1"}])
+        # sample stddev of [1.0, 3.0] with mean 2 is sqrt(((1-2)^2 + (3-2)^2)/1) = sqrt(2) ~ 1.414
+        assert aggregated[0].sharpe_std == pytest.approx(1.4142, abs=0.01)
+
+    def test_empty_results_produces_empty_aggregated(self) -> None:
+        assert _aggregate_multi_period_results([], []) == []
+
+    def test_cumulative_pnl_accumulates_across_periods(self) -> None:
+        results = [
+            _make_result({"a": "1"}, sharpe=1.0, period_name="p1"),
+            _make_result({"a": "1"}, sharpe=2.0, period_name="p2"),
+        ]
+        aggregated = _aggregate_multi_period_results(results, [{"a": "1"}])
+        # Each SweepResult's underlying BacktestResult has net_pnl_usd=123.45
+        assert aggregated[0].cumulative_pnl == pytest.approx(2 * 123.45)
+
+
+class TestPrintMultiPeriodResults:
+    def test_emits_per_period_and_aggregated_sections(self, capsys: pytest.CaptureFixture[str]) -> None:
+        results = [
+            _make_result({"a": "1"}, sharpe=2.0, period_name="p1"),
+            _make_result({"a": "1"}, sharpe=1.0, period_name="p2"),
+            _make_result({"a": "2"}, sharpe=0.5, period_name="p1"),
+            _make_result({"a": "2"}, sharpe=0.3, period_name="p2"),
+        ]
+        aggregated = _aggregate_multi_period_results(results, [{"a": "1"}, {"a": "2"}])
+        params = [SweepParameter(name="a", values=["1", "2"])]
+        _print_multi_period_results(results, aggregated, params)
+        out = capsys.readouterr().out
+        assert "PER-PERIOD DETAIL" in out
+        assert "AGGREGATED RESULTS (sorted by avg Sharpe ratio)" in out
+        assert "WINNER (best avg Sharpe across all periods):" in out
+
+    def test_empty_aggregated_omits_winner_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """If aggregated is empty, no WINNER line is emitted."""
+        params = [SweepParameter(name="a", values=["1"])]
+        _print_multi_period_results([], [], params)
+        out = capsys.readouterr().out
+        assert "WINNER" not in out
+
+
+class TestDisplaySweepResults:
+    def test_single_period_uses_print_sweep_results_table(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            multi=False,
+        )
+        _display_sweep_results(ctx, [_make_result({"a": "1"})])
+        out = capsys.readouterr().out
+        # Single-period heading (sorted by Sharpe)
+        assert "PARAMETER SWEEP RESULTS (sorted by Sharpe ratio)" in out
+
+    def test_multi_period_single_window_falls_through_to_single(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Multi-period mode with only 1 period uses single-period renderer."""
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("only")],
+            multi=True,
+        )
+        _display_sweep_results(ctx, [_make_result({"a": "1"}, period_name="only")])
+        out = capsys.readouterr().out
+        assert "PARAMETER SWEEP RESULTS" in out
+        assert "PER-PERIOD DETAIL" not in out
+
+    def test_multi_period_multiple_windows_renders_aggregated(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("p1"), _make_period("p2", m1=3, m2=4)],
+            multi=True,
+        )
+        _display_sweep_results(
+            ctx,
+            [
+                _make_result({"a": "1"}, sharpe=1.0, period_name="p1"),
+                _make_result({"a": "1"}, sharpe=2.0, period_name="p2"),
+            ],
+        )
+        out = capsys.readouterr().out
+        assert "PER-PERIOD DETAIL" in out
+        assert "AGGREGATED RESULTS" in out
+
+
+class TestRunSweepOverPeriods:
+    def test_async_mode_single_period(self) -> None:
+        """Async mode runs `run_parallel_sweeps` once per period."""
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            multi=False,
+        )
+        fake_results = [_make_result({"a": "1"}, sharpe=1.0)]
+
+        async def _fake_run_parallel_sweeps(*args: Any, **kwargs: Any) -> list:
+            return fake_results
+
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_parallel_sweeps",
+            side_effect=_fake_run_parallel_sweeps,
+        ):
+            results = _run_sweep_over_periods(
+                ctx,
+                strategy_class=MagicMock(),
+                base_config={},
+                data_provider=MagicMock(),
+                parallel=False,
+                effective_workers=4,
+            )
+        assert len(results) == 1
+        assert results[0].period_name == "single"
+
+    def test_parallel_mode_calls_run_parallel_sweep(self) -> None:
+        """Parallel mode invokes `_run_parallel_sweep` (multiprocessing helper)."""
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("p1")],
+            multi=False,
+        )
+        fake_results = [_make_result({"a": "1"}, sharpe=1.5)]
+        with patch(
+            "almanak.framework.cli.backtest.sweep._run_parallel_sweep",
+            return_value=fake_results,
+        ) as mock_rps:
+            results = _run_sweep_over_periods(
+                ctx,
+                strategy_class=MagicMock(),
+                base_config={"chain": "arbitrum"},
+                data_provider=MagicMock(),
+                parallel=True,
+                effective_workers=3,
+            )
+        mock_rps.assert_called_once()
+        assert len(results) == 1
+
+    def test_multi_period_iterates_all_windows(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Multi-period mode emits a period banner and accumulates results."""
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("p1"), _make_period("p2", m1=3, m2=4)],
+            multi=True,
+        )
+
+        async def _fake(*args: Any, **kwargs: Any) -> list:
+            return [_make_result({"a": "1"}, sharpe=1.0)]
+
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_parallel_sweeps",
+            side_effect=_fake,
+        ):
+            results = _run_sweep_over_periods(
+                ctx,
+                strategy_class=MagicMock(),
+                base_config={},
+                data_provider=MagicMock(),
+                parallel=False,
+                effective_workers=2,
+            )
+        assert len(results) == 2  # one per period
+        # Period banners emitted
+        out = capsys.readouterr().out
+        assert "--- Period: p1" in out
+        assert "--- Period: p2" in out
+        # Period names set on results
+        assert {r.period_name for r in results} == {"p1", "p2"}
+
+    def test_exception_in_sweep_aborts_with_sys_exit(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Grep-asserted 'Error during sweep: {e}' + sys.exit(1)."""
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            multi=False,
+        )
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_parallel_sweeps",
+            side_effect=RuntimeError("upstream crash"),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                _run_sweep_over_periods(
+                    ctx,
+                    strategy_class=MagicMock(),
+                    base_config={},
+                    data_provider=MagicMock(),
+                    parallel=False,
+                    effective_workers=4,
+                )
+        assert exc.value.code == 1
+        assert "Error during sweep: upstream crash" in capsys.readouterr().err
+
+    def test_preflight_validation_only_when_single_combination(self) -> None:
+        """preflight_validation heuristic: total_combinations <= 1."""
+        captured_configs = []
+
+        async def _spy(*args: Any, **kwargs: Any) -> list:
+            captured_configs.append(kwargs["pnl_config"])
+            return []
+
+        # 3 combinations -> preflight_validation=False
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1", "2", "3"])],
+            combinations=[{"a": "1"}, {"a": "2"}, {"a": "3"}],
+            periods=[_make_period("single")],
+            multi=False,
+        )
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_parallel_sweeps",
+            side_effect=_spy,
+        ):
+            _run_sweep_over_periods(
+                ctx,
+                strategy_class=MagicMock(),
+                base_config={},
+                data_provider=MagicMock(),
+                parallel=False,
+                effective_workers=1,
+            )
+        assert captured_configs[0].preflight_validation is False
+
+        captured_configs.clear()
+        # 1 combination -> preflight_validation=True
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            multi=False,
+        )
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_parallel_sweeps",
+            side_effect=_spy,
+        ):
+            _run_sweep_over_periods(
+                ctx,
+                strategy_class=MagicMock(),
+                base_config={},
+                data_provider=MagicMock(),
+                parallel=False,
+                effective_workers=1,
+            )
+        assert captured_configs[0].preflight_validation is True
+
+
+class TestRunParallelSweep:
+    """Worker exception paths in `_run_parallel_sweep`.
+
+    LATENT BUG (#1752; pre-existing; Phase 5B.4 pins current behaviour):
+    The error-path in `_run_parallel_sweep` (sweep.py:407-414) calls
+    ``BacktestResult(..., success=False, error=str(e))`` but `BacktestResult`
+    defines `success` as a read-only @property, not a constructor field.
+    When any worker raises, the exception handler itself raises
+    ``TypeError: BacktestResult.__init__() got an unexpected keyword argument 'success'``.
+    This means the happy-path (no worker failure) works, but the very code
+    intended to make the sweep resilient to worker crashes instead propagates
+    as a second-order TypeError. Tests below pin this behaviour.
+    """
+
+    def _build_pnl_config(self) -> Any:
+        from almanak.framework.backtesting import PnLBacktestConfig
+
+        return PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 2, 1, tzinfo=UTC),
+            interval_seconds=3600,
+            initial_capital_usd=Decimal("10000"),
+            chain="arbitrum",
+            tokens=["WETH", "USDC"],
+            gas_price_gwei=Decimal("30"),
+            include_gas_costs=True,
+        )
+
+    def test_worker_exception_path_triggers_known_typeerror(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Pin current behaviour: the error-handler itself raises TypeError.
+
+        This is a latent bug (new GH issue filed). When fixed, update this
+        test to assert the intended SweepResult-with-error contract.
+        """
+        pnl_config = self._build_pnl_config()
+
+        class _FakeFuture:
+            def result(self) -> Any:
+                raise RuntimeError("worker died")
+
+        class _FakeExecutor:
+            def __init__(self, *a: Any, **kw: Any) -> None:
+                pass
+
+            def __enter__(self) -> _FakeExecutor:
+                return self
+
+            def __exit__(self, *a: Any) -> None:
+                pass
+
+            def submit(self, fn: Any, task: Any) -> _FakeFuture:
+                return _FakeFuture()
+
+        class StratClass:
+            strategy_id = "dummy"
+
+        with (
+            patch(
+                "concurrent.futures.ProcessPoolExecutor",
+                _FakeExecutor,
+            ),
+            patch(
+                "concurrent.futures.as_completed",
+                lambda futures: list(futures),
+            ),
+        ):
+            # LATENT BUG: the error-handler's BacktestResult constructor
+            # call raises TypeError. Pin the current behaviour.
+            with pytest.raises(TypeError, match="unexpected keyword argument 'success'"):
+                _run_parallel_sweep(
+                    strategy_class=StratClass,
+                    base_config={},
+                    pnl_config=pnl_config,
+                    combinations=[{"x": "1"}],
+                    workers=1,
+                    sweep_params=[SweepParameter(name="x", values=["1"])],
+                )
+
+        # The pre-TypeError error line IS emitted (via click.echo).
+        err = capsys.readouterr().err
+        assert "Error in worker for params" in err
+        assert "worker died" in err
+
+    def test_happy_path_all_workers_succeed(self) -> None:
+        """When every worker returns a valid SweepResult, no exception path triggers."""
+        pnl_config = self._build_pnl_config()
+        good_results = [
+            _make_result({"x": "1"}, sharpe=1.5),
+            _make_result({"x": "2"}, sharpe=2.5),
+        ]
+
+        class _GoodFuture:
+            def __init__(self, value: Any) -> None:
+                self._value = value
+
+            def result(self) -> Any:
+                return self._value
+
+        class _FakeExecutor:
+            def __init__(self, *a: Any, **kw: Any) -> None:
+                pass
+
+            def __enter__(self) -> _FakeExecutor:
+                return self
+
+            def __exit__(self, *a: Any) -> None:
+                pass
+
+            def submit(self, fn: Any, task: Any) -> _GoodFuture:
+                return _GoodFuture(good_results[task.task_index])
+
+        class StratClass:
+            strategy_id = "dummy"
+
+        with (
+            patch(
+                "concurrent.futures.ProcessPoolExecutor",
+                _FakeExecutor,
+            ),
+            patch(
+                "concurrent.futures.as_completed",
+                lambda futures: list(futures),
+            ),
+        ):
+            results = _run_parallel_sweep(
+                strategy_class=StratClass,
+                base_config={},
+                pnl_config=pnl_config,
+                combinations=[{"x": "1"}, {"x": "2"}],
+                workers=2,
+                sweep_params=[SweepParameter(name="x", values=["1", "2"])],
+            )
+        assert len(results) == 2
+        sharpes = sorted(float(r.sharpe_ratio) for r in results)
+        assert sharpes == [1.5, 2.5]
+
+    def test_task_construction_uses_fqcn(self) -> None:
+        """Pin that the task carries the fully-qualified strategy class name."""
+        pnl_config = self._build_pnl_config()
+        good_result = _make_result({"x": "1"}, sharpe=1.0)
+
+        submitted_tasks: list[Any] = []
+
+        class _GoodFuture:
+            def result(self) -> Any:
+                return good_result
+
+        class _FakeExecutor:
+            def __init__(self, *a: Any, **kw: Any) -> None:
+                pass
+
+            def __enter__(self) -> _FakeExecutor:
+                return self
+
+            def __exit__(self, *a: Any) -> None:
+                pass
+
+            def submit(self, fn: Any, task: Any) -> _GoodFuture:
+                submitted_tasks.append(task)
+                return _GoodFuture()
+
+        class StratClass:
+            strategy_id = "dummy"
+
+        with (
+            patch(
+                "concurrent.futures.ProcessPoolExecutor",
+                _FakeExecutor,
+            ),
+            patch(
+                "concurrent.futures.as_completed",
+                lambda futures: list(futures),
+            ),
+        ):
+            _run_parallel_sweep(
+                strategy_class=StratClass,
+                base_config={"chain": "arbitrum"},
+                pnl_config=pnl_config,
+                combinations=[{"x": "1"}],
+                workers=1,
+                sweep_params=[SweepParameter(name="x", values=["1"])],
+            )
+        assert len(submitted_tasks) == 1
+        assert submitted_tasks[0].strategy_class_name.endswith("StratClass")
+        assert submitted_tasks[0].base_config == {"chain": "arbitrum"}
+        assert submitted_tasks[0].params == {"x": "1"}
+        assert submitted_tasks[0].task_index == 0
+
+
+class TestGenerateSweepReport:
+    def test_noop_when_results_empty(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+        )
+        _generate_sweep_report(ctx, [])
+        # No output at all when empty
+        assert "Generating HTML report" not in capsys.readouterr().out
+
+    def test_single_period_picks_best_by_sharpe(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1", "2"])],
+            combinations=[{"a": "1"}, {"a": "2"}],
+            periods=[_make_period("single")],
+        )
+        results = [
+            _make_result({"a": "1"}, sharpe=0.5, period_name="single"),
+            _make_result({"a": "2"}, sharpe=2.5, period_name="single"),
+        ]
+        report_result = MagicMock(success=True)
+        report_result.file_path = tmp_path / "report.html"
+
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ) as gen:
+            _generate_sweep_report(ctx, results)
+
+        # Best: a=2 (sharpe=2.5)
+        assert gen.call_args.args[0] is results[1].result
+        out = capsys.readouterr().out
+        assert "Generating HTML report for best parameter combination..." in out
+        assert "Best params: {'a': '2'}" in out
+
+    def test_multi_period_picks_aggregated_winner(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1", "2"])],
+            combinations=[{"a": "1"}, {"a": "2"}],
+            periods=[_make_period("p1"), _make_period("p2", m1=3, m2=4)],
+            multi=True,
+        )
+        # a=1: avg(2.0, 1.8) = 1.9 (winner)
+        # a=2: avg(0.5, 1.0) = 0.75
+        results = [
+            _make_result({"a": "1"}, sharpe=2.0, period_name="p1"),
+            _make_result({"a": "1"}, sharpe=1.8, period_name="p2"),
+            _make_result({"a": "2"}, sharpe=0.5, period_name="p1"),
+            _make_result({"a": "2"}, sharpe=1.0, period_name="p2"),
+        ]
+        report_result = MagicMock(success=True)
+        report_result.file_path = tmp_path / "report.html"
+
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ) as gen:
+            _generate_sweep_report(ctx, results)
+        # Winner = a=1; within that, pick highest Sharpe (p1, sharpe=2.0)
+        # generate_report(best_result.result, ...) — first positional arg
+        assert gen.call_args.args[0] is results[0].result
+
+    def test_fallback_report_path_when_no_output(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """When ctx.output_path is None, derives from strategy name."""
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            output_path=None,
+            strategy="my_strat",
+        )
+        report_result = MagicMock(success=True)
+        report_result.file_path = "backtest_report_my_strat_sweep.html"
+
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ) as gen:
+            _generate_sweep_report(ctx, [_make_result({"a": "1"}, period_name="single")])
+        kwargs = gen.call_args.kwargs
+        assert kwargs["output_path"] == Path("backtest_report_my_strat_sweep.html")
+
+    def test_fallback_sanitizes_strategy_name(self) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            output_path=None,
+            strategy="a/b\\c",
+        )
+        report_result = MagicMock(success=True)
+        report_result.file_path = "x"
+
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ) as gen:
+            _generate_sweep_report(ctx, [_make_result({"a": "1"}, period_name="single")])
+        assert gen.call_args.kwargs["output_path"] == Path("backtest_report_a_b_c_sweep.html")
+
+    def test_report_failure_prints_warning(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+        )
+        report_result = MagicMock(success=False, error="template error")
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ):
+            _generate_sweep_report(ctx, [_make_result({"a": "1"}, period_name="single")])
+        err = capsys.readouterr().err
+        assert "Warning: Failed to generate report: template error" in err
+
+    def test_output_path_with_suffix_html(self, tmp_path: Path) -> None:
+        """Report path derived from `ctx.output_path.with_suffix('.html')`."""
+        out = tmp_path / "sweep.json"
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+            output_path=out,
+        )
+        report_result = MagicMock(success=True)
+        report_result.file_path = "x"
+
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ) as gen:
+            _generate_sweep_report(ctx, [_make_result({"a": "1"}, period_name="single")])
+        assert gen.call_args.kwargs["output_path"] == out.with_suffix(".html")
+
+
+class TestRunSweepBacktestCoro:
+    """Unit tests for the public async `run_sweep_backtest` coroutine."""
+
+    def _build_pnl_config(self) -> Any:
+        from almanak.framework.backtesting import PnLBacktestConfig
+
+        return PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 2, 1, tzinfo=UTC),
+            interval_seconds=3600,
+            initial_capital_usd=Decimal("10000"),
+            chain="arbitrum",
+            tokens=["WETH", "USDC"],
+            gas_price_gwei=Decimal("30"),
+            include_gas_costs=True,
+        )
+
+    def test_sweep_sets_fallback_strategy_id(self) -> None:
+        """Strategy without strategy_id gets `sweep-<params>` fallback."""
+        import asyncio as _asyncio
+
+        pnl_config = self._build_pnl_config()
+
+        class BareStrategy:
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+        backtest_result = _make_result({"threshold": "0.02"}, sharpe=1.0).result
+
+        bare_instance = BareStrategy({})
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                return_value=bare_instance,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+        ):
+            result = _asyncio.run(
+                run_sweep_backtest(
+                    strategy_class=BareStrategy,
+                    base_config={},
+                    pnl_config=pnl_config,
+                    data_provider=MagicMock(),
+                    params={"threshold": "0.02"},
+                )
+            )
+
+        # Pin the params contract
+        assert result.params == {"threshold": "0.02"}
+
+        # Strong assertion: verify the fallback strategy_id was set on the
+        # instance that was handed to PnLBacktester.backtest. Production
+        # (sweep.py:88-96) derives `sweep-<k><v>` joined by `_` for multi-key.
+        mock_backtester.backtest.assert_awaited_once()
+        passed_strategy = mock_backtester.backtest.await_args.args[0]
+        assert passed_strategy is bare_instance
+        assert passed_strategy.strategy_id == "sweep-threshold0.02"
+
+    def test_numeric_coercion_of_param_value(self) -> None:
+        """Numeric string values are coerced to float in strategy_config."""
+        import asyncio as _asyncio
+
+        pnl_config = self._build_pnl_config()
+        captured_configs: list[dict[str, Any]] = []
+
+        class WithDictConfig:
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+                self.strategy_id = "wdc"
+
+        def _track_create(strategy_class: Any, config: dict, chain: str) -> Any:
+            captured_configs.append(config)
+            return WithDictConfig(config)
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track_create,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+        ):
+            _asyncio.run(
+                run_sweep_backtest(
+                    strategy_class=WithDictConfig,
+                    base_config={"base_knob": 100},
+                    pnl_config=pnl_config,
+                    data_provider=MagicMock(),
+                    params={"numeric": "0.5", "text": "aggressive"},
+                )
+            )
+        cfg = captured_configs[0]
+        # Float-coerced
+        assert cfg["numeric"] == 0.5
+        # Non-numeric preserved as string
+        assert cfg["text"] == "aggressive"
+        # Base preserved
+        assert cfg["base_knob"] == 100
+
+    def test_strategy_without_config_dict_sets_attributes(self) -> None:
+        """When strategy lacks a `.config` dict, params set as attributes."""
+        import asyncio as _asyncio
+
+        pnl_config = self._build_pnl_config()
+
+        class NoConfigStrategy:
+            # No `config` attribute at all
+            strategy_id = "ncs"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                # Intentionally does NOT store config
+                pass
+
+        created: list[NoConfigStrategy] = []
+
+        def _track_create(strategy_class: Any, config: dict, chain: str) -> Any:
+            inst = NoConfigStrategy(config)
+            created.append(inst)
+            return inst
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track_create,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+        ):
+            _asyncio.run(
+                run_sweep_backtest(
+                    strategy_class=NoConfigStrategy,
+                    base_config={},
+                    pnl_config=pnl_config,
+                    data_provider=MagicMock(),
+                    params={"numeric": "1.5", "text": "mode_a"},
+                )
+            )
+        # Attributes set on the strategy instance
+        inst = created[0]
+        assert inst.numeric == 1.5
+        assert inst.text == "mode_a"
+
+    def test_public_strategy_id_attr_used_when_no_private(self) -> None:
+        """Fallback strategy_id assignment uses public attr when no _strategy_id."""
+        import asyncio as _asyncio
+
+        pnl_config = self._build_pnl_config()
+
+        class PlainStrategy:
+            strategy_id = ""  # Empty → triggers fallback
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+        created: list[PlainStrategy] = []
+
+        def _track_create(strategy_class: Any, config: dict, chain: str) -> Any:
+            inst = PlainStrategy(config)
+            created.append(inst)
+            return inst
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track_create,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+        ):
+            _asyncio.run(
+                run_sweep_backtest(
+                    strategy_class=PlainStrategy,
+                    base_config={},
+                    pnl_config=pnl_config,
+                    data_provider=MagicMock(),
+                    params={"x": "1"},
+                )
+            )
+        inst = created[0]
+        # Falls back to public attr since no _strategy_id
+        assert inst.strategy_id == "sweep-x1"
+
+    def test_private_strategy_id_preferred(self) -> None:
+        """Private `_strategy_id` attr is set when present (IntentStrategy-style)."""
+        import asyncio as _asyncio
+
+        pnl_config = self._build_pnl_config()
+
+        class WithPrivateId:
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+                self._strategy_id = ""
+
+            @property
+            def strategy_id(self) -> str:
+                return self._strategy_id
+
+        created: list[WithPrivateId] = []
+
+        def _track_create(strategy_class: Any, config: dict, chain: str) -> Any:
+            inst = WithPrivateId(config)
+            created.append(inst)
+            return inst
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track_create,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+        ):
+            _asyncio.run(
+                run_sweep_backtest(
+                    strategy_class=WithPrivateId,
+                    base_config={},
+                    pnl_config=pnl_config,
+                    data_provider=MagicMock(),
+                    params={"threshold": "0.02"},
+                )
+            )
+        assert created[0]._strategy_id == "sweep-threshold0.02"
+
+
+class TestRunParallelSweepsCoro:
+    """Cover the async `run_parallel_sweeps` coroutine."""
+
+    def test_runs_all_combos_and_echoes_progress(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify async loop walks all combinations and emits progress lines."""
+        import asyncio as _asyncio
+
+        from almanak.framework.cli.backtest.sweep import run_parallel_sweeps
+
+        call_params: list[dict[str, str]] = []
+
+        async def _fake_run_sweep_backtest(
+            *,
+            strategy_class: Any,
+            base_config: dict[str, Any],
+            pnl_config: Any,
+            data_provider: Any,
+            params: dict[str, str],
+        ) -> SweepResult:
+            call_params.append(params)
+            return _make_result(params, sharpe=1.0)
+
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_sweep_backtest",
+            side_effect=_fake_run_sweep_backtest,
+        ):
+            results = _asyncio.run(
+                run_parallel_sweeps(
+                    strategy_class=MagicMock(),
+                    base_config={},
+                    pnl_config=MagicMock(),
+                    data_provider=MagicMock(),
+                    combinations=[
+                        {"a": "1"},
+                        {"a": "2"},
+                        {"a": "3"},
+                    ],
+                    parallel=2,
+                )
+            )
+        assert len(results) == 3
+        assert len(call_params) == 3
+        out = capsys.readouterr().out
+        # Progress line per completion
+        assert "Completed 1/3" in out
+        assert "Completed 2/3" in out
+        assert "Completed 3/3" in out
+
+    def test_all_combinations_invoked(self) -> None:
+        """Every combination is passed through to run_sweep_backtest."""
+        import asyncio as _asyncio
+
+        from almanak.framework.cli.backtest.sweep import run_parallel_sweeps
+
+        seen_params: list[dict[str, str]] = []
+
+        async def _record(
+            *,
+            strategy_class: Any,
+            base_config: dict[str, Any],
+            pnl_config: Any,
+            data_provider: Any,
+            params: dict[str, str],
+        ) -> SweepResult:
+            seen_params.append(params)
+            return _make_result(params, sharpe=1.0)
+
+        combos = [{"a": "1"}, {"a": "2"}, {"b": "x"}]
+        with patch(
+            "almanak.framework.cli.backtest.sweep.run_sweep_backtest",
+            side_effect=_record,
+        ):
+            results = _asyncio.run(
+                run_parallel_sweeps(
+                    strategy_class=MagicMock(),
+                    base_config={},
+                    pnl_config=MagicMock(),
+                    data_provider=MagicMock(),
+                    combinations=combos,
+                    parallel=2,
+                )
+            )
+        # Order is not deterministic, but every combo is invoked.
+        sort_key = lambda d: sorted(d.items())  # noqa: E731
+        assert sorted(seen_params, key=sort_key) == sorted(combos, key=sort_key)
+        assert len(results) == 3
+
+
+class TestSweepTaskAndWorker:
+    def test_sweep_task_fields(self) -> None:
+        """`_SweepTask` dataclass preserves fields verbatim."""
+        task = _SweepTask(
+            strategy_class_name="mod.ClsName",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict={"start_time": "2024-01-01"},
+            params={"a": "1"},
+            task_index=7,
+        )
+        assert task.strategy_class_name == "mod.ClsName"
+        assert task.base_config["chain"] == "arbitrum"
+        assert task.params["a"] == "1"
+        assert task.task_index == 7
+
+    def _build_pnl_dict(self) -> dict[str, Any]:
+        from almanak.framework.backtesting import PnLBacktestConfig
+
+        cfg = PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 2, 1, tzinfo=UTC),
+            interval_seconds=3600,
+            initial_capital_usd=Decimal("10000"),
+            chain="arbitrum",
+            tokens=["WETH", "USDC"],
+            gas_price_gwei=Decimal("30"),
+            include_gas_costs=True,
+        )
+        return cfg.to_dict()
+
+    def test_worker_importable_strategy_class(self) -> None:
+        """Strategy class resolves via `importlib.import_module`."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        # Use a real-importable class from the standard library-ish scope:
+        # `decimal.Decimal`. The worker will import `decimal` and grab `Decimal`.
+        # We fake everything else to avoid running a real backtest.
+        backtest_result = _make_result({"x": "1"}, sharpe=1.0).result
+
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"x": "1"},
+            task_index=0,
+        )
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        # Fake the strategy factory and chain resolver so we don't actually
+        # call Decimal(...) as a strategy.
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                return_value=_FakeStrategy(),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            result = _run_sweep_task_worker(task)
+
+        assert result.params == {"x": "1"}
+        assert isinstance(result.sharpe_ratio, Decimal)
+
+    def test_worker_import_error_falls_back_to_registry(self) -> None:
+        """When the FQCN module doesn't exist, fall back to `get_strategy`."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="nonexistent_module.Strategy",
+            base_config={},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"a": "1"},
+            task_index=0,
+        )
+
+        class _RegisteredClass:
+            strategy_id = "reg"
+
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.strategies.get_strategy",
+                return_value=_RegisteredClass,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                return_value=_FakeStrategy(),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            result = _run_sweep_task_worker(task)
+        assert result.params == {"a": "1"}
+
+    def test_worker_registry_value_error_falls_back_to_mock(self) -> None:
+        """Both importlib AND registry fail → MockWorkerStrategy fallback."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="no_such_mod.GhostStrategy",
+            base_config={},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"a": "1"},
+            task_index=0,
+        )
+
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.strategies.get_strategy",
+                side_effect=ValueError("not registered"),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                return_value=_FakeStrategy(),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            result = _run_sweep_task_worker(task)
+        assert result.params == {"a": "1"}
+
+    def test_worker_strips_computed_properties(self) -> None:
+        """Worker removes computed properties (duration_*, estimated_ticks) before from_dict."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        # Inject computed properties that should be stripped
+        pnl_dict = self._build_pnl_dict()
+        pnl_dict["duration_seconds"] = 3600
+        pnl_dict["duration_days"] = 30
+        pnl_dict["estimated_ticks"] = 720
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict=pnl_dict,
+            params={"a": "1"},
+            task_index=0,
+        )
+
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                return_value=_FakeStrategy(),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            # Should NOT raise (computed properties stripped pre-from_dict)
+            result = _run_sweep_task_worker(task)
+        assert result.params == {"a": "1"}
+
+    def test_worker_string_param_preserved(self) -> None:
+        """Non-numeric params retain string type in strategy_config."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        backtest_result = _make_result({"mode": "conservative"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"mode": "conservative"},
+            task_index=0,
+        )
+
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        captured_configs: list[dict[str, Any]] = []
+
+        def _spy(cls: Any, cfg: dict, chain: str) -> Any:
+            captured_configs.append(cfg)
+            return _FakeStrategy()
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_spy,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            _run_sweep_task_worker(task)
+        assert captured_configs[0]["mode"] == "conservative"
+
+    def test_worker_attribute_fallback_non_dict_config(self) -> None:
+        """When strategy.config is not a dict, params are set as attributes."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        class NoConfigStrategy:
+            strategy_id = "ncs"
+            # No config attribute
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"numeric": "0.1", "text": "xx"},
+            task_index=0,
+        )
+
+        instances: list[NoConfigStrategy] = []
+
+        def _track(cls: Any, cfg: dict, chain: str) -> Any:
+            inst = NoConfigStrategy()
+            instances.append(inst)
+            return inst
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            _run_sweep_task_worker(task)
+        # attributes set on instance (covers lines 500-504)
+        inst = instances[0]
+        assert inst.numeric == 0.1
+        assert inst.text == "xx"
+
+    def test_worker_sets_private_strategy_id_fallback(self) -> None:
+        """When strategy_id is empty and _strategy_id exists, private attr is set."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        class WithPrivate:
+            def __init__(self) -> None:
+                self._strategy_id = ""
+                self.config: dict[str, Any] = {}
+
+            @property
+            def strategy_id(self) -> str:
+                return self._strategy_id
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"threshold": "0.02"},
+            task_index=0,
+        )
+
+        instances: list[WithPrivate] = []
+
+        def _track(cls: Any, cfg: dict, chain: str) -> Any:
+            inst = WithPrivate()
+            instances.append(inst)
+            return inst
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            _run_sweep_task_worker(task)
+        # Private attr received the fallback (covers lines 508-511)
+        inst = instances[0]
+        assert inst._strategy_id == "sweep-threshold0.02"
+
+    def test_worker_sets_public_strategy_id_fallback(self) -> None:
+        """When no _strategy_id attr exists, public `strategy_id` is set directly."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        class PlainStrat:
+            strategy_id = ""  # empty → triggers fallback
+
+            def __init__(self) -> None:
+                self.config: dict[str, Any] = {}
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "arbitrum"},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"x": "1"},
+            task_index=0,
+        )
+
+        instances: list[PlainStrat] = []
+
+        def _track(cls: Any, cfg: dict, chain: str) -> Any:
+            inst = PlainStrat()
+            instances.append(inst)
+            return inst
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_track,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            _run_sweep_task_worker(task)
+        # Public attr received the fallback (covers line 513)
+        inst = instances[0]
+        assert inst.strategy_id == "sweep-x1"
+
+    def test_worker_mock_strategy_class_instantiable(self) -> None:
+        """MockWorkerStrategy fallback is instantiable with dict config."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        # Both importlib (no_such_mod) AND registry raise → MockWorkerStrategy path
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        task = _SweepTask(
+            strategy_class_name="no_such_mod.Strategy",
+            base_config={},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"a": "1"},
+            task_index=0,
+        )
+
+        captured_classes: list[Any] = []
+
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        def _capture(cls: Any, cfg: dict, chain: str) -> Any:
+            captured_classes.append(cls)
+            return _FakeStrategy()
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+
+        with (
+            patch(
+                "almanak.framework.strategies.get_strategy",
+                side_effect=ValueError("not registered"),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_capture,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="arbitrum",
+            ),
+        ):
+            _run_sweep_task_worker(task)
+
+        # The fallback MockWorkerStrategy was passed to _create_backtest_strategy
+        mock_cls = captured_classes[0]
+        # Instantiate it to cover __init__ + decide (lines 476, 479)
+        inst = mock_cls({"foo": "bar"})
+        assert inst.config == {"foo": "bar"}
+        assert inst.strategy_id == "mock-worker"
+        assert inst.decide(market=None) is None  # type: ignore[arg-type]
+
+    def test_worker_chain_resolution_priority(self) -> None:
+        """base_config.chain > pnl_config_dict.chain > get_default_chain."""
+        from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
+
+        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
+        pnl_dict = self._build_pnl_dict()
+
+        # pnl_dict chain is "arbitrum"; base_config chain is "base" (should win)
+        task = _SweepTask(
+            strategy_class_name="decimal.Decimal",
+            base_config={"chain": "base"},
+            pnl_config_dict=pnl_dict,
+            params={"a": "1"},
+            task_index=0,
+        )
+
+        class _FakeStrategy:
+            strategy_id = "fake"
+            config: dict[str, Any] = {}
+
+        mock_backtester = MagicMock()
+        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
+        captured_chains: list[str] = []
+
+        def _create_tracker(cls: Any, cfg: dict, chain: str) -> Any:
+            captured_chains.append(chain)
+            return _FakeStrategy()
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
+                side_effect=_create_tracker,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.PnLBacktester",
+                return_value=mock_backtester,
+            ),
+            patch(
+                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
+            ),
+            patch(
+                "almanak.framework.cli.run.get_default_chain",
+                return_value="optimism",
+            ),
+        ):
+            _run_sweep_task_worker(task)
+        # base_config.chain wins
+        assert captured_chains == ["base"]
+
+
+class TestPrintSweepResultsTable:
+    def test_renders_header_and_best_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        params = [SweepParameter(name="a", values=["1", "2"])]
+        results = [
+            _make_result({"a": "1"}, sharpe=2.0, period_name="single"),
+            _make_result({"a": "2"}, sharpe=0.5, period_name="single"),
+        ]
+        print_sweep_results_table(results, params)
+        out = capsys.readouterr().out
+        assert "PARAMETER SWEEP RESULTS (sorted by Sharpe ratio)" in out
+        assert "Rank" in out
+        # Best-combination block is emitted
+        assert "Best combination:" in out
+        assert "Sharpe ratio:" in out
+
+    def test_empty_results_no_best_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        print_sweep_results_table([], [SweepParameter(name="a", values=["1"])])
+        out = capsys.readouterr().out
+        # Header + divider still emitted
+        assert "PARAMETER SWEEP RESULTS" in out
+        # But no Best combination block
+        assert "Best combination:" not in out

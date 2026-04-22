@@ -39,7 +39,6 @@ from almanak.framework.cli.backtest.pnl import (
     _write_json_output,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -130,9 +129,7 @@ class TestPrintCacheStats:
         assert "Expired: 3" in captured.out
         assert "Hit Rate: 80.0%" in captured.out
 
-    def test_uses_thousands_separator(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_uses_thousands_separator(self, capsys: pytest.CaptureFixture[str]) -> None:
         _print_cache_stats(_FakeCacheStats(total_entries=1234567))  # type: ignore[arg-type]
         captured = capsys.readouterr()
         assert "Total Entries: 1,234,567" in captured.out
@@ -144,9 +141,7 @@ class TestPrintCacheStats:
 
 
 class TestPrintVerboseTrades:
-    def test_noop_when_verbose_false(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_noop_when_verbose_false(self, capsys: pytest.CaptureFixture[str]) -> None:
         trade = _FakeTrade(
             timestamp=datetime(2024, 1, 1, 12, 30, tzinfo=UTC),
             intent_type=_FakeIntentType("swap"),
@@ -157,15 +152,11 @@ class TestPrintVerboseTrades:
         _print_verbose_trades(_make_result([trade]), verbose=False)
         assert capsys.readouterr().out == ""
 
-    def test_noop_when_no_trades(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_noop_when_no_trades(self, capsys: pytest.CaptureFixture[str]) -> None:
         _print_verbose_trades(_make_result([]), verbose=True)
         assert capsys.readouterr().out == ""
 
-    def test_renders_trade_block(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_renders_trade_block(self, capsys: pytest.CaptureFixture[str]) -> None:
         trades = [
             _FakeTrade(
                 timestamp=datetime(2024, 1, 1, 12, 30, tzinfo=UTC),
@@ -193,9 +184,7 @@ class TestPrintVerboseTrades:
         assert "$-5.00" in captured.out
         assert "add_liquidity" in captured.out
 
-    def test_index_is_one_based(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_index_is_one_based(self, capsys: pytest.CaptureFixture[str]) -> None:
         trade = _FakeTrade(
             timestamp=datetime(2024, 1, 1, 12, 30, tzinfo=UTC),
             intent_type=_FakeIntentType("swap"),
@@ -261,9 +250,7 @@ class TestWriteJsonOutput:
         assert "cache_stats" in payload
         assert payload["cache_stats"]["total_entries"] == 100
 
-    def test_emits_written_line(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_emits_written_line(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         out = tmp_path / "result.json"
         _write_json_output(
             _make_result(),
@@ -309,9 +296,7 @@ class TestChartOutputPath:
 
 
 class TestGenerateChart:
-    def test_success_path_echoes_saved_line(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_success_path_echoes_saved_line(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         chart_result = MagicMock(success=True)
         chart_result.file_path = tmp_path / "equity.png"
         chart_result.drawdown_periods = []
@@ -333,9 +318,7 @@ class TestGenerateChart:
         assert "Generating equity curve chart..." in captured.out
         assert "Chart saved to:" in captured.out
 
-    def test_failure_path_emits_warning_on_stderr(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_failure_path_emits_warning_on_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
         chart_result = MagicMock(success=False, error="disk full")
 
         with patch(
@@ -352,9 +335,7 @@ class TestGenerateChart:
         captured = capsys.readouterr()
         assert "Warning: Failed to generate chart: disk full" in captured.err
 
-    def test_reports_drawdown_and_trade_markers(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_reports_drawdown_and_trade_markers(self, capsys: pytest.CaptureFixture[str]) -> None:
         chart_result = MagicMock(success=True)
         chart_result.file_path = "equity.png"
         chart_result.drawdown_periods = [1, 2]
@@ -382,9 +363,7 @@ class TestGenerateChart:
 
 
 class TestGenerateHtmlReport:
-    def test_success_path_echoes_saved_line(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_success_path_echoes_saved_line(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         report_result = MagicMock(success=True)
         report_result.file_path = tmp_path / "report.html"
 
@@ -403,9 +382,7 @@ class TestGenerateHtmlReport:
         assert "Generating HTML report..." in captured.out
         assert "Report saved to:" in captured.out
 
-    def test_failure_path_emits_warning_on_stderr(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_failure_path_emits_warning_on_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
         report_result = MagicMock(success=False, error="template missing")
 
         with patch(
@@ -419,13 +396,9 @@ class TestGenerateHtmlReport:
             )
 
         captured = capsys.readouterr()
-        assert (
-            "Warning: Failed to generate report: template missing" in captured.err
-        )
+        assert "Warning: Failed to generate report: template missing" in captured.err
 
-    def test_uses_fallback_name_when_no_output_path(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_uses_fallback_name_when_no_output_path(self, capsys: pytest.CaptureFixture[str]) -> None:
         report_result = MagicMock(success=True)
         report_result.file_path = "backtest_report_demo.html"
 
@@ -477,3 +450,264 @@ class TestGenerateHtmlReport:
 
         call_kwargs = gen_mock.call_args.kwargs
         assert call_kwargs["output_path"] == output_path.with_suffix(".html")
+
+
+# ===========================================================================
+# Phase 5B.4 extended coverage
+# ===========================================================================
+
+
+class TestWriteJsonOutputExtended:
+    """Coverage gaps for `_write_json_output`."""
+
+    def test_permission_error_on_readonly_path_propagates(self, tmp_path: Path) -> None:
+        """JSON-output write surfaces PermissionError from the underlying open.
+
+        Uses ``patch("builtins.open")`` rather than ``chmod(0o500)`` so the
+        test is independent of the process UID. Root/DAC-override contexts
+        (common in CI containers) bypass file-mode bits, which would make a
+        filesystem-based check flaky.
+        """
+        out = tmp_path / "result.json"
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.pnl.open",
+                side_effect=PermissionError("denied"),
+                create=True,
+            ),
+            pytest.raises(PermissionError),
+        ):
+            _write_json_output(
+                _make_result(),
+                output_path=out,
+                benchmark="eth_hold",
+                cache_stats=None,
+            )
+
+    def test_nonexistent_parent_raises_filenotfound(self, tmp_path: Path) -> None:
+        """Writing into a missing directory surfaces FileNotFoundError."""
+        out = tmp_path / "does_not_exist" / "r.json"
+        with pytest.raises(FileNotFoundError):
+            _write_json_output(
+                _make_result(),
+                output_path=out,
+                benchmark="eth_hold",
+                cache_stats=None,
+            )
+
+    def test_json_is_indented_two_spaces(self, tmp_path: Path) -> None:
+        out = tmp_path / "r.json"
+        _write_json_output(
+            _make_result(),
+            output_path=out,
+            benchmark="eth_hold",
+            cache_stats=None,
+        )
+        text = out.read_text()
+        # Indent=2 rendering: nested value lines start with two spaces.
+        assert "\n  " in text
+
+    def test_metadata_generated_at_is_iso(self, tmp_path: Path) -> None:
+        """_meta.generated_at must be ISO-8601 UTC string."""
+        out = tmp_path / "r.json"
+        _write_json_output(
+            _make_result(),
+            output_path=out,
+            benchmark="eth_hold",
+            cache_stats=None,
+        )
+        payload = json.loads(out.read_text())
+        gen_at = payload["_meta"]["generated_at"]
+        # Parses as ISO
+        parsed = datetime.fromisoformat(gen_at)
+        assert parsed.tzinfo is not None
+
+    def test_default_str_coerces_non_json_types(self, tmp_path: Path) -> None:
+        """json.dump(default=str) means Decimal/datetime serialize as strings."""
+        out = tmp_path / "r.json"
+        _write_json_output(
+            _make_result(),
+            output_path=out,
+            benchmark="eth_hold",
+            cache_stats=_FakeCacheStats(),  # type: ignore[arg-type]
+        )
+        payload = json.loads(out.read_text())
+        # metrics.total_return_pct coerced via default=str → stringified
+        assert isinstance(payload["metrics"]["total_return_pct"], str)
+
+
+class TestGenerateChartExtended:
+    """Coverage gaps for `_generate_chart`."""
+
+    def test_empty_equity_curve_does_not_raise(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Chart generation tolerates an empty equity curve by delegating to save_chart."""
+
+        @dataclass
+        class _EmptyResult:
+            equity_curve: list[Any] = None  # type: ignore[assignment]
+
+            def __post_init__(self) -> None:
+                if self.equity_curve is None:
+                    self.equity_curve = []
+
+        chart_result = MagicMock(success=False, error="no data to plot")
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.save_chart",
+            return_value=chart_result,
+        ) as save_mock:
+            _generate_chart(
+                _EmptyResult(),  # type: ignore[arg-type]
+                strategy="demo",
+                output_path=None,
+                chart_format="png",
+            )
+
+        save_mock.assert_called_once()
+        err = capsys.readouterr().err
+        assert "Warning: Failed to generate chart: no data to plot" in err
+
+    def test_html_format_produces_html_extension(self, tmp_path: Path) -> None:
+        chart_result = MagicMock(success=True)
+        chart_result.file_path = tmp_path / "equity.html"
+        chart_result.drawdown_periods = []
+        chart_result.trade_markers = []
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.save_chart",
+            return_value=chart_result,
+        ) as save_mock:
+            _generate_chart(
+                _make_result(),
+                strategy="demo",
+                output_path=tmp_path / "r.json",
+                chart_format="html",
+            )
+
+        # save_chart called with format="html" and a .html suffix path
+        call_kwargs = save_mock.call_args.kwargs
+        assert call_kwargs["format"] == "html"
+        assert str(call_kwargs["path"]).endswith(".html")
+
+    def test_show_drawdown_and_show_trades_flags_true(self) -> None:
+        """Flags always passed as True to save_chart (load-bearing)."""
+        chart_result = MagicMock(success=True)
+        chart_result.file_path = "x.png"
+        chart_result.drawdown_periods = []
+        chart_result.trade_markers = []
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.save_chart",
+            return_value=chart_result,
+        ) as save_mock:
+            _generate_chart(
+                _make_result(),
+                strategy="demo",
+                output_path=None,
+                chart_format="png",
+            )
+
+        call_kwargs = save_mock.call_args.kwargs
+        assert call_kwargs["show_drawdown"] is True
+        assert call_kwargs["show_trades"] is True
+
+
+class TestGenerateHtmlReportExtended:
+    def test_permission_error_path_unaffected_by_wrapper(self, tmp_path: Path) -> None:
+        """When generate_report raises, the wrapper does not swallow the error."""
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            side_effect=OSError("disk full"),
+        ):
+            with pytest.raises(OSError, match="disk full"):
+                _generate_html_report(
+                    _make_result(),
+                    strategy="demo",
+                    output_path=tmp_path / "r.json",
+                )
+
+    def test_none_strategy_falls_back_to_backtest_name(self, tmp_path: Path) -> None:
+        """strategy=None falls back to 'backtest_report_backtest.html'."""
+        report_result = MagicMock(success=True)
+        report_result.file_path = "backtest_report_backtest.html"
+
+        with patch(
+            "almanak.framework.backtesting.report_generator.generate_report",
+            return_value=report_result,
+        ) as gen_mock:
+            _generate_html_report(
+                _make_result(),
+                strategy=None,
+                output_path=None,
+            )
+
+        call_kwargs = gen_mock.call_args.kwargs
+        assert call_kwargs["output_path"] == Path("backtest_report_backtest.html")
+
+
+class TestPrintCacheStatsExtended:
+    def test_zero_counts_render_zeros(self, capsys: pytest.CaptureFixture[str]) -> None:
+        stats = _FakeCacheStats(total_entries=0, hits=0, misses=0, expired=0)
+        _print_cache_stats(stats)  # type: ignore[arg-type]
+        out = capsys.readouterr().out
+        assert "Total Entries: 0" in out
+        assert "Cache Hits: 0" in out
+
+    def test_divider_bars_emitted(self, capsys: pytest.CaptureFixture[str]) -> None:
+        _print_cache_stats(_FakeCacheStats())  # type: ignore[arg-type]
+        out = capsys.readouterr().out
+        assert "-" * 60 in out
+
+
+class TestPrintVerboseTradesExtended:
+    def test_exact_format_fee_gas_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        trade = _FakeTrade(
+            timestamp=datetime(2024, 5, 10, 14, 25, tzinfo=UTC),
+            intent_type=_FakeIntentType("swap"),
+            pnl_usd=Decimal("0.00"),
+            fee_usd=Decimal("0.12"),
+            gas_cost_usd=Decimal("3.45"),
+        )
+        _print_verbose_trades(_make_result([trade]), verbose=True)
+        out = capsys.readouterr().out
+        # Zero PnL gets + sign (>= 0)
+        assert "+$0.00" in out
+        assert "(fee: $0.12, gas: $3.45)" in out
+
+    def test_multiple_trades_numbered_correctly(self, capsys: pytest.CaptureFixture[str]) -> None:
+        trades = [
+            _FakeTrade(
+                timestamp=datetime(2024, 1, d, 0, 0, tzinfo=UTC),
+                intent_type=_FakeIntentType("swap"),
+                pnl_usd=Decimal("0"),
+                fee_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+            )
+            for d in (1, 2, 3)
+        ]
+        _print_verbose_trades(_make_result(trades), verbose=True)
+        out = capsys.readouterr().out
+        assert "  1." in out
+        assert "  2." in out
+        assert "  3." in out
+
+
+class TestChartOutputPathExtended:
+    def test_special_chars_in_strategy_name_sanitized(self) -> None:
+        """Multiple slash/backslash characters all replaced with underscore."""
+        p = _chart_output_path("foo/bar\\baz/qux", None, "html")
+        assert p == Path("equity_curve_foo_bar_baz_qux.html")
+
+    def test_empty_strategy_name_becomes_backtest(self) -> None:
+        """Falsy strategy (empty string) falls through to 'backtest' fallback."""
+        p = _chart_output_path("", None, "png")
+        assert p == Path("equity_curve_backtest.png")
+
+    def test_output_path_is_absolute(self, tmp_path: Path) -> None:
+        """Alongside output_path preserves directory."""
+        out = tmp_path / "results" / "run.json"
+        out.parent.mkdir()
+        chart = _chart_output_path("demo", out, "html")
+        assert chart.parent == out.parent
+        assert chart.name == "run.html"

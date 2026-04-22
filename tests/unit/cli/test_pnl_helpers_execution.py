@@ -43,7 +43,6 @@ from almanak.framework.cli.backtest.pnl import (
     _warm_cache_async,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -135,9 +134,7 @@ class TestRunBacktest:
         result = _run_backtest(backtester, MagicMock(), _make_pnl_config())
         assert result is expected
 
-    def test_prints_error_and_exits_on_failure(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_prints_error_and_exits_on_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
         backtester = MagicMock()
         backtester.backtest = AsyncMock(side_effect=RuntimeError("boom"))
 
@@ -148,9 +145,7 @@ class TestRunBacktest:
         captured = capsys.readouterr()
         assert "Error running backtest: boom" in captured.err
 
-    def test_preserves_exact_error_string_format(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_preserves_exact_error_string_format(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Grep-asserted string — must not change."""
         backtester = MagicMock()
         backtester.backtest = AsyncMock(side_effect=ValueError("kaboom"))
@@ -203,9 +198,7 @@ class TestWarmCacheAsync:
         assert "Cached 1 data points for WETH" in captured.out
         data_provider.close.assert_awaited_once()
 
-    def test_swallows_per_token_error(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_swallows_per_token_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Issue #1698 — per-token failures warn but do not abort."""
         data_provider = MagicMock()
         data_provider.close = AsyncMock()
@@ -284,17 +277,13 @@ class TestWarmCacheAsync:
 
 
 class TestWarmCache:
-    def test_returns_cache_on_success(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_returns_cache_on_success(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch(
                 "almanak.framework.cli.backtest.pnl._warm_cache_async",
                 new=AsyncMock(return_value=42),
             ),
-            patch(
-                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
-            ),
+            patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         ):
             result = _warm_cache(
                 _make_ctx(),
@@ -309,9 +298,7 @@ class TestWarmCache:
         assert "Warming data cache..." in captured.out
         assert "Cache warming complete: 42 total data points" in captured.out
 
-    def test_preserves_fallback_line_on_overall_failure(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_preserves_fallback_line_on_overall_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Issue #1698 — overall warming failure logs fallback and does not raise."""
 
         async def _blow(*a: Any, **kw: Any) -> int:
@@ -322,9 +309,7 @@ class TestWarmCache:
                 "almanak.framework.cli.backtest.pnl._warm_cache_async",
                 new=AsyncMock(side_effect=_blow),
             ),
-            patch(
-                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
-            ),
+            patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         ):
             result = _warm_cache(
                 _make_ctx(),
@@ -338,17 +323,13 @@ class TestWarmCache:
         assert "Warning: Cache warming failed: event-loop boom" in captured.err
         assert "Proceeding with backtest without pre-warmed cache..." in captured.out
 
-    def test_emits_warming_banner(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_emits_warming_banner(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch(
                 "almanak.framework.cli.backtest.pnl._warm_cache_async",
                 new=AsyncMock(return_value=0),
             ),
-            patch(
-                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
-            ),
+            patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         ):
             _warm_cache(
                 _make_ctx(),
@@ -402,9 +383,7 @@ class TestFetchBenchmarkReturns:
         fake_total = Decimal("0.5")
 
         with (
-            patch(
-                "almanak.framework.backtesting.pnl.providers.benchmark.Benchmark"
-            ) as mock_benchmark,
+            patch("almanak.framework.backtesting.pnl.providers.benchmark.Benchmark") as mock_benchmark,
             patch(
                 "almanak.framework.backtesting.pnl.providers.benchmark.get_benchmark_returns",
                 new=AsyncMock(return_value=fake_returns),
@@ -435,9 +414,7 @@ class TestFetchBenchmarkReturns:
 
 
 class TestPrintBenchmarkComparison:
-    def test_noop_when_benchmark_empty(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_noop_when_benchmark_empty(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx = _make_ctx()
         _print_benchmark_comparison(
             ctx,
@@ -451,9 +428,7 @@ class TestPrintBenchmarkComparison:
         assert captured.out == ""
         assert captured.err == ""
 
-    def test_noop_when_start_missing(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_noop_when_start_missing(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx = _make_ctx()
         _print_benchmark_comparison(
             ctx,
@@ -466,9 +441,7 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "BENCHMARK COMPARISON" not in captured.out
 
-    def test_noop_when_end_missing(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_noop_when_end_missing(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx = _make_ctx()
         _print_benchmark_comparison(
             ctx,
@@ -481,18 +454,14 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "BENCHMARK COMPARISON" not in captured.out
 
-    def test_renders_block_when_data_available(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_renders_block_when_data_available(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx = _make_ctx()
         result = _make_result_with_equity(["100", "110", "121"], total_return_pct="21")
 
         # benchmark_returns needs min_len>=2 along with strategy_returns.
         with patch(
             "almanak.framework.cli.backtest.pnl._fetch_benchmark_returns",
-            new=AsyncMock(
-                return_value=([Decimal("0.05"), Decimal("0.05")], Decimal("0.1"))
-            ),
+            new=AsyncMock(return_value=([Decimal("0.05"), Decimal("0.05")], Decimal("0.1"))),
         ):
             _print_benchmark_comparison(
                 ctx,
@@ -512,9 +481,7 @@ class TestPrintBenchmarkComparison:
         assert "Beta:" in captured.out
         assert "Alpha:" in captured.out
 
-    def test_insufficient_data_when_min_len_below_two(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_insufficient_data_when_min_len_below_two(self, capsys: pytest.CaptureFixture[str]) -> None:
         """min_len = min(len(strategy_returns), len(benchmark_returns)); need >= 2."""
         ctx = _make_ctx()
         result = _make_result_with_equity(["100", "110"])
@@ -535,9 +502,7 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "Insufficient data for benchmark comparison." in captured.out
 
-    def test_no_equity_curve_message_when_curve_short(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_no_equity_curve_message_when_curve_short(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx = _make_ctx()
         result = _make_result_with_equity(["100"])
 
@@ -557,9 +522,7 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "No equity curve data for benchmark comparison." in captured.out
 
-    def test_preserves_could_not_calculate_error_string(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_preserves_could_not_calculate_error_string(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Issue #1699 — bare-except fallback must print 'Could not calculate...'."""
         ctx = _make_ctx()
         result = _make_result_with_equity(["100", "110"])
@@ -580,9 +543,7 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "Could not calculate benchmark metrics: provider down" in captured.out
 
-    def test_uppercases_benchmark_name_in_heading(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_uppercases_benchmark_name_in_heading(self, capsys: pytest.CaptureFixture[str]) -> None:
         ctx = _make_ctx()
         result = _make_result_with_equity(["100"])
 
@@ -601,3 +562,506 @@ class TestPrintBenchmarkComparison:
 
         captured = capsys.readouterr()
         assert "BENCHMARK COMPARISON (BTC_HOLD)" in captured.out
+
+
+# ===========================================================================
+# Phase 5B.4 extended coverage — Phase 5B.1 helpers
+# ===========================================================================
+
+
+from almanak.framework.backtesting import PnLBacktestConfig as _PnLConfig  # noqa: E402
+from almanak.framework.backtesting.pnl.config_loader import ConfigLoadError  # noqa: E402
+from almanak.framework.cli.backtest.pnl import (  # noqa: E402
+    _handle_list_strategies,
+    _load_config_from_result,
+    _print_pnl_configuration,
+    _validate_and_build_context,
+)
+
+# ---------------------------------------------------------------------------
+# _handle_list_strategies
+# ---------------------------------------------------------------------------
+
+
+class TestHandleListStrategies:
+    def test_lists_registered_strategies_sorted(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(
+            "almanak.framework.cli.backtest.pnl.list_strategies_fn",
+            return_value=["beta_lp", "alpha_rsi", "gamma_arb"],
+        ):
+            result = _handle_list_strategies()
+
+        assert result is True
+        out = capsys.readouterr().out
+        assert "Available strategies:" in out
+        # Sorted alphabetically
+        i_alpha = out.find("- alpha_rsi")
+        i_beta = out.find("- beta_lp")
+        i_gamma = out.find("- gamma_arb")
+        assert 0 <= i_alpha < i_beta < i_gamma
+
+    def test_empty_registry_shows_help_message(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(
+            "almanak.framework.cli.backtest.pnl.list_strategies_fn",
+            return_value=[],
+        ):
+            result = _handle_list_strategies()
+
+        assert result is True
+        out = capsys.readouterr().out
+        assert "No strategies registered." in out
+        assert "almanak strat new --help" in out
+
+    def test_always_returns_true(self) -> None:
+        with patch(
+            "almanak.framework.cli.backtest.pnl.list_strategies_fn",
+            return_value=["x"],
+        ):
+            assert _handle_list_strategies() is True
+
+
+# ---------------------------------------------------------------------------
+# _load_config_from_result
+# ---------------------------------------------------------------------------
+
+
+def _make_load_result(
+    config: _PnLConfig,
+    warnings: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    """Build a fake LoadConfigResult-like object."""
+
+    @dataclass
+    class _Stub:
+        config: _PnLConfig
+        metadata: dict[str, Any]
+        warnings: list[str]
+
+    return _Stub(
+        config=config,
+        metadata=metadata or {},
+        warnings=warnings or [],
+    )
+
+
+class TestLoadConfigFromResult:
+    def test_returns_config_metadata_and_true_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
+        cfg = _make_pnl_config()
+        load_result = _make_load_result(
+            cfg,
+            metadata={"sdk_version": "1.0.0", "config_created_at": "2024-01-01T00:00:00Z"},
+        )
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_config_from_result",
+            return_value=load_result,
+        ):
+            config, meta, loaded = _load_config_from_result("results/prev.json")
+
+        assert config is cfg
+        assert meta["sdk_version"] == "1.0.0"
+        assert loaded is True
+        out = capsys.readouterr().out
+        assert "Loading config from previous result: results/prev.json" in out
+        assert "Original SDK version: 1.0.0" in out
+
+    def test_emits_warnings_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
+        cfg = _make_pnl_config()
+        load_result = _make_load_result(cfg, warnings=["w1", "w2"])
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_config_from_result",
+            return_value=load_result,
+        ):
+            _load_config_from_result("results/prev.json")
+
+        captured = capsys.readouterr()
+        assert "Warnings:" in captured.err
+        assert "- w1" in captured.err
+        assert "- w2" in captured.err
+
+    def test_metadata_unknown_defaults_emitted(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """When metadata has non-empty dict but missing keys, 'unknown' is emitted."""
+        cfg = _make_pnl_config()
+        load_result = _make_load_result(cfg, metadata={"other": "x"})
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_config_from_result",
+            return_value=load_result,
+        ):
+            _load_config_from_result("r.json")
+
+        out = capsys.readouterr().out
+        assert "Original SDK version: unknown" in out
+        assert "Config created at: unknown" in out
+
+    def test_file_not_found_raises_abort(self, capsys: pytest.CaptureFixture[str]) -> None:
+        import click
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_config_from_result",
+            side_effect=FileNotFoundError("/tmp/missing.json"),
+        ):
+            with pytest.raises(click.Abort):
+                _load_config_from_result("/tmp/missing.json")
+
+        assert "Error: /tmp/missing.json" in capsys.readouterr().err
+
+    def test_config_load_error_raises_abort_with_prefix(self, capsys: pytest.CaptureFixture[str]) -> None:
+        import click
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_config_from_result",
+            side_effect=ConfigLoadError("schema mismatch"),
+        ):
+            with pytest.raises(click.Abort):
+                _load_config_from_result("bad.json")
+
+        # Grep-asserted prefix; must match original exactly.
+        assert "Error loading config: schema mismatch" in capsys.readouterr().err
+
+    def test_empty_metadata_dict_suppresses_version_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Empty metadata dict skips the SDK version echo (falsy guard)."""
+        cfg = _make_pnl_config()
+        load_result = _make_load_result(cfg, metadata={})
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_config_from_result",
+            return_value=load_result,
+        ):
+            _load_config_from_result("r.json")
+
+        out = capsys.readouterr().out
+        assert "Original SDK version:" not in out
+
+
+# ---------------------------------------------------------------------------
+# _validate_and_build_context
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAndBuildContext:
+    def _patch_registered(self, names: list[str]) -> Any:
+        return patch(
+            "almanak.framework.cli.backtest.run_helpers.list_strategies_fn",
+            return_value=names,
+        )
+
+    def test_missing_strategy_raises_usage_error(self) -> None:
+        import click
+
+        with pytest.raises(click.UsageError, match="--strategy"):
+            _validate_and_build_context(
+                strategy=None,
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+                initial_capital=10000.0,
+                chain="arbitrum",
+                tokens="WETH",
+                gas_price=30.0,
+                output=None,
+                loaded_from_result=False,
+                pnl_config=None,
+            )
+
+    def test_missing_start_raises_usage_error(self) -> None:
+        import click
+
+        with self._patch_registered(["demo"]):
+            with pytest.raises(click.UsageError, match="--start"):
+                _validate_and_build_context(
+                    strategy="demo",
+                    start=None,
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                    interval=3600,
+                    initial_capital=10000.0,
+                    chain="arbitrum",
+                    tokens="WETH",
+                    gas_price=30.0,
+                    output=None,
+                    loaded_from_result=False,
+                    pnl_config=None,
+                )
+
+    def test_missing_end_raises_usage_error(self) -> None:
+        import click
+
+        with self._patch_registered(["demo"]):
+            with pytest.raises(click.UsageError, match="--end"):
+                _validate_and_build_context(
+                    strategy="demo",
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=None,
+                    interval=3600,
+                    initial_capital=10000.0,
+                    chain="arbitrum",
+                    tokens="WETH",
+                    gas_price=30.0,
+                    output=None,
+                    loaded_from_result=False,
+                    pnl_config=None,
+                )
+
+    def test_loaded_from_result_uses_existing_config(self) -> None:
+        cfg = _make_pnl_config(tokens=["WETH", "USDC"])
+        with self._patch_registered(["demo"]):
+            ctx = _validate_and_build_context(
+                strategy="demo",
+                start=None,
+                end=None,
+                interval=3600,
+                initial_capital=10000.0,
+                chain="arbitrum",
+                tokens="IGNORED",  # should be ignored since loaded_from_result
+                gas_price=30.0,
+                output="r.json",
+                loaded_from_result=True,
+                pnl_config=cfg,
+            )
+        assert ctx.pnl_config is cfg
+        # token_list comes from the loaded config, not the CLI arg
+        assert ctx.token_list == ["WETH", "USDC"]
+        assert ctx.output_path == Path("r.json")
+        assert ctx.loaded_from_result is True
+        assert ctx.strategy == "demo"
+
+    def test_fresh_config_built_from_cli_args(self) -> None:
+        with self._patch_registered(["demo"]):
+            ctx = _validate_and_build_context(
+                strategy="demo",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+                initial_capital=5000.0,
+                chain="base",
+                tokens="weth, usdc",
+                gas_price=25.0,
+                output=None,
+                loaded_from_result=False,
+                pnl_config=None,
+            )
+        assert ctx.pnl_config.chain == "base"
+        assert ctx.pnl_config.initial_capital_usd == Decimal("5000.0")
+        assert ctx.pnl_config.gas_price_gwei == Decimal("25.0")
+        assert ctx.token_list == ["WETH", "USDC"]
+        assert ctx.output_path is None
+        assert ctx.loaded_from_result is False
+
+    def test_unregistered_strategy_aborts(self) -> None:
+        import click
+
+        with self._patch_registered(["other"]):
+            with pytest.raises(click.Abort):
+                _validate_and_build_context(
+                    strategy="ghost",
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                    interval=3600,
+                    initial_capital=10000.0,
+                    chain="arbitrum",
+                    tokens="WETH",
+                    gas_price=30.0,
+                    output=None,
+                    loaded_from_result=False,
+                    pnl_config=None,
+                )
+
+    def test_loaded_from_result_but_missing_strategy_raises_usage_error(self) -> None:
+        """When pnl_config is loaded but --strategy is still missing, redundant guard fires."""
+        import click
+
+        cfg = _make_pnl_config()
+        with pytest.raises(click.UsageError, match="--strategy"):
+            _validate_and_build_context(
+                strategy=None,
+                start=None,
+                end=None,
+                interval=3600,
+                initial_capital=10000.0,
+                chain="arbitrum",
+                tokens="WETH",
+                gas_price=30.0,
+                output=None,
+                loaded_from_result=True,  # config loaded
+                pnl_config=cfg,
+            )
+
+
+# ---------------------------------------------------------------------------
+# _print_pnl_configuration
+# ---------------------------------------------------------------------------
+
+
+class TestPrintPnlConfiguration:
+    def test_prints_banner_for_fresh_run(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx()
+        _print_pnl_configuration(ctx, from_result=None, warm_cache=False)
+        out = capsys.readouterr().out
+        assert "PNL BACKTEST CONFIGURATION" in out
+        assert "Strategy: demo_strat" in out
+        assert "Chain: arbitrum" in out
+        assert "Warm Cache: No" in out
+        # Output line absent when no output_path
+        assert "Output:" not in out
+        # Loaded-from line absent for fresh run
+        assert "(Loaded from:" not in out
+
+    def test_loaded_from_result_banner(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx()
+        ctx.loaded_from_result = True
+        _print_pnl_configuration(ctx, from_result="results/prev.json", warm_cache=True)
+        out = capsys.readouterr().out
+        assert "(Loaded from: results/prev.json)" in out
+        assert "Warm Cache: Yes" in out
+
+    def test_output_line_emitted_when_path_set(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(output_path=Path("out.json"))
+        _print_pnl_configuration(ctx, from_result=None, warm_cache=False)
+        out = capsys.readouterr().out
+        assert "Output: out.json" in out
+
+    def test_tokens_joined_with_comma(self, capsys: pytest.CaptureFixture[str]) -> None:
+        ctx = _make_ctx(tokens=["WETH", "USDC", "BTC"])
+        _print_pnl_configuration(ctx, from_result=None, warm_cache=False)
+        out = capsys.readouterr().out
+        assert "Tokens: WETH, USDC, BTC" in out
+
+    def test_interval_hours_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Sanity-check that interval is rendered in seconds and hours."""
+        ctx = _make_ctx()
+        _print_pnl_configuration(ctx, from_result=None, warm_cache=False)
+        out = capsys.readouterr().out
+        assert "Interval: 3600s (1.0 hours)" in out
+
+
+# ===========================================================================
+# Phase 5B.4 extended coverage — additional error/edge paths
+# ===========================================================================
+
+
+class TestFetchBenchmarkReturnsExtended:
+    def test_raises_when_underlying_provider_raises(self) -> None:
+        """Underlying provider failure propagates (caller wraps try/except)."""
+        with (
+            patch("almanak.framework.backtesting.pnl.providers.benchmark.Benchmark") as mock_benchmark,
+            patch(
+                "almanak.framework.backtesting.pnl.providers.benchmark.get_benchmark_returns",
+                new=AsyncMock(side_effect=RuntimeError("API down")),
+            ),
+            patch(
+                "almanak.framework.backtesting.pnl.providers.benchmark.get_benchmark_total_return",
+                new=AsyncMock(return_value=Decimal("0.0")),
+            ),
+        ):
+            mock_benchmark.from_string = MagicMock(return_value="ETH_HOLD")
+            with pytest.raises(RuntimeError, match="API down"):
+                asyncio.run(
+                    _fetch_benchmark_returns(
+                        "eth_hold",
+                        datetime(2024, 1, 1, tzinfo=UTC),
+                        datetime(2024, 2, 1, tzinfo=UTC),
+                        3600,
+                    )
+                )
+
+
+class TestWarmCacheAsyncExtended:
+    def test_mixed_success_and_failure_tokens(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Warm-cache partial failure: some tokens succeed, others fail."""
+        data_provider = MagicMock()
+        data_provider.close = AsyncMock()
+
+        async def _variable(token: str, *args: Any, **kwargs: Any) -> list[_FakeOHLCV]:
+            if token == "FAIL":
+                raise RuntimeError("rate-limited")
+            return [
+                _FakeOHLCV(
+                    timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                    open=Decimal("100"),
+                    high=Decimal("110"),
+                    low=Decimal("90"),
+                    close=Decimal("105"),
+                )
+            ]
+
+        data_provider.get_ohlcv = AsyncMock(side_effect=_variable)
+        cache = MagicMock()
+        # 3 points cached per call
+        cache.set_batch = MagicMock(return_value=3)
+
+        total = asyncio.run(
+            _warm_cache_async(
+                data_provider=data_provider,
+                cache=cache,
+                token_list=["OK1", "FAIL", "OK2"],
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+                pnl_config=_make_pnl_config(),
+            )
+        )
+        # 3 (OK1) + 0 (FAIL) + 3 (OK2) = 6
+        assert total == 6
+        captured = capsys.readouterr()
+        assert "Cached 3 data points for OK1" in captured.out
+        assert "Cached 3 data points for OK2" in captured.out
+        assert "Warning: Failed to cache data for FAIL: rate-limited" in captured.err
+
+    def test_uses_pnl_config_as_range_fallback_when_start_none(self) -> None:
+        """start=None falls through to pnl_config.start_time."""
+        data_provider = MagicMock()
+        data_provider.close = AsyncMock()
+        data_provider.get_ohlcv = AsyncMock(return_value=[])
+        cache = MagicMock()
+        cache.set_batch = MagicMock(return_value=0)
+
+        pnl_cfg = _make_pnl_config()
+        asyncio.run(
+            _warm_cache_async(
+                data_provider=data_provider,
+                cache=cache,
+                token_list=["WETH"],
+                start=None,
+                end=None,
+                interval=3600,
+                pnl_config=pnl_cfg,
+            )
+        )
+
+        # get_ohlcv called with (token, cfg.start_time, cfg.end_time, interval)
+        data_provider.get_ohlcv.assert_awaited_once_with("WETH", pnl_cfg.start_time, pnl_cfg.end_time, 3600)
+
+    def test_volume_extracted_when_attribute_present(self) -> None:
+        data_provider = MagicMock()
+        data_provider.close = AsyncMock()
+        data_provider.get_ohlcv = AsyncMock(
+            return_value=[
+                _FakeOHLCV(
+                    timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                    open=Decimal("100"),
+                    high=Decimal("110"),
+                    low=Decimal("90"),
+                    close=Decimal("105"),
+                    volume=Decimal("5000"),
+                )
+            ]
+        )
+        cache = MagicMock()
+        cache.set_batch = MagicMock(return_value=1)
+
+        asyncio.run(
+            _warm_cache_async(
+                data_provider=data_provider,
+                cache=cache,
+                token_list=["WETH"],
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+                pnl_config=_make_pnl_config(),
+            )
+        )
+        call_args = cache.set_batch.call_args[0][0]
+        assert len(call_args) == 1
+        _key, ohlcv = call_args[0]
+        assert ohlcv.volume == Decimal("5000")
