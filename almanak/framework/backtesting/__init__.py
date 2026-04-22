@@ -42,6 +42,9 @@ from .lp_performance import (
     LPPerformanceTracker,
     LPSnapshot,
 )
+
+# Mock strategy (shared fallback — see #1701)
+from .mock_strategy import MockBacktestStrategy, make_mock_strategy_class
 from .models import (
     BacktestEngine as BacktestEngineType,
 )
@@ -181,6 +184,9 @@ __all__ = [
     "LPPerformanceTracker",
     "LPPerformanceReport",
     "LPSnapshot",
+    # Mock strategy (CLI fallback)
+    "MockBacktestStrategy",
+    "make_mock_strategy_class",
     # Report generation
     "ReportResult",
     "generate_report",

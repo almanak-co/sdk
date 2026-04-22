@@ -5,12 +5,15 @@ This module provides the `pnl` subcommand for historical price-based backtesting
 
 import asyncio
 import json
+import logging
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import click
 
 from ...backtesting import (
@@ -37,6 +40,41 @@ from .run_helpers import (
     parse_token_list,
     validate_strategy_is_registered,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# Threshold below which a partial warm-cache run emits a prominent warning.
+# A dedicated constant keeps the CI/reproducibility contract visible — if we
+# ever want this tunable it becomes a flag rather than a magic number.
+_WARM_CACHE_SUCCESS_RATIO_WARN_THRESHOLD = 0.5
+
+
+@dataclass
+class WarmCacheOutcome:
+    """Summary of a warm-cache run.
+
+    Previously `_warm_cache_async` returned just `total_cached` (int),
+    which silently discarded per-token + overall failure information.
+    Issue #1698 surfaces both counts so callers can (a) warn operators
+    below a success-ratio threshold and (b) abort under `--strict-warm`.
+    """
+
+    total_cached: int
+    successful_warms: int
+    total_tokens: int
+    # True iff the outer `asyncio.run` / outer loop failed catastrophically
+    # (separate from per-token errors which increment `total_tokens` but
+    # leave `successful_warms` unchanged).
+    overall_failed: bool = False
+    overall_error: str | None = None
+
+    @property
+    def success_ratio(self) -> float:
+        if self.total_tokens == 0:
+            return 1.0
+        return self.successful_warms / self.total_tokens
+
 
 # =============================================================================
 # Phase helpers (Phase 5B.1 extractions)
@@ -158,13 +196,23 @@ def _validate_and_build_context(
             gas_price_gwei=Decimal(str(gas_price)),
             include_gas_costs=True,
         )
-    else:
-        # Use loaded config's values for display
-        token_list = pnl_config.tokens  # type: ignore[union-attr]
 
-    # Preserve the existing runtime guard (issue #1700 tracks migrating this
-    # to an explicit exception; intentionally not changed in 5B.1).
-    assert pnl_config is not None, "Config must be set at this point"
+    # Explicit runtime guard. `pnl_config` can only be None at this point if
+    # `--from-result` neither loaded one (earlier branch) nor did we build one
+    # from CLI args (the `loaded_from_result` branch above) — in practice that
+    # state should be unreachable, but `-O` would strip a bare `assert`, so we
+    # raise a `click.Abort` with a user-visible stderr line instead (#1700).
+    if pnl_config is None:
+        click.echo(
+            "Error: internal error — PnL backtest config was not constructed. "
+            "Pass --strategy/--start/--end or --from-result.",
+            err=True,
+        )
+        raise click.Abort()
+
+    if loaded_from_result:
+        # Use loaded config's values for display (guard above proves non-None).
+        token_list = pnl_config.tokens
 
     return PnLBacktestContext(
         strategy=strategy,
@@ -224,16 +272,25 @@ async def _warm_cache_async(
     end: datetime | None,
     interval: int,
     pnl_config: PnLBacktestConfig,
-) -> int:
-    """Pre-fetch OHLCV data into `cache`. Returns total cached data points.
+) -> WarmCacheOutcome:
+    """Pre-fetch OHLCV data into `cache` and return a structured outcome.
 
-    Preserves issue #1698 (silent per-token swallow): per-token failures log a
-    warning on stderr but do not halt the warm-up. The outer `DataProvider`
-    `close()` still runs in the `finally` block regardless of per-token errors.
+    Issue #1698: previous contract returned just `total_cached` (int),
+    silently losing per-token failure info. We now track
+    `successful_warms / total_tokens` so the caller can:
+
+    - emit a warning below a success threshold, and
+    - honour a `--strict-warm` flag that makes any per-token failure fatal.
+
+    Per-token failures still log a warning on stderr (unchanged stderr
+    contract), and the outer `DataProvider.close()` still runs in the
+    `finally` block regardless of per-token errors.
     """
     from ...data.cache import CacheKey, OHLCVData
 
     total_cached = 0
+    successful_warms = 0
+    total_tokens = len(token_list)
     try:
         for token in token_list:
             try:
@@ -258,6 +315,7 @@ async def _warm_cache_async(
 
                 cached_count = cache.set_batch(items)
                 total_cached += cached_count
+                successful_warms += 1
                 click.echo(f"  Cached {cached_count} data points for {token}")
 
             except Exception as e:
@@ -265,7 +323,11 @@ async def _warm_cache_async(
     finally:
         await data_provider.close()
 
-    return total_cached
+    return WarmCacheOutcome(
+        total_cached=total_cached,
+        successful_warms=successful_warms,
+        total_tokens=total_tokens,
+    )
 
 
 def _warm_cache(
@@ -273,6 +335,8 @@ def _warm_cache(
     start: datetime | None,
     end: datetime | None,
     interval: int,
+    *,
+    strict: bool = False,
 ) -> DataCache | None:
     """Phase 9: pre-warm the OHLCV cache for the backtest.
 
@@ -281,15 +345,26 @@ def _warm_cache(
     caller creates its own provider for the backtest run itself — we do NOT
     reuse the warming provider.
 
-    Preserves issue #1698 (silent overall swallow): if `asyncio.run` raises,
-    the backtest continues without a pre-warmed cache and the original
-    "Proceeding with backtest without pre-warmed cache..." fallback is
-    emitted byte-for-byte.
+    Issue #1698:
+    - Tracks `successful_warms / total_tokens` via `WarmCacheOutcome`.
+    - When `strict=True` (driven by `--strict-warm` on the CLI), any
+      per-token failure OR any overall `asyncio.run` failure aborts with
+      `click.Abort` — critical for CI/reproducibility runs where a silently
+      partial cache changes downstream results.
+    - When `strict=False` (default, preserves historical behaviour), failures
+      emit the original banner strings byte-for-byte, and a new prominent
+      warning is added when the success ratio falls below
+      `_WARM_CACHE_SUCCESS_RATIO_WARN_THRESHOLD`.
 
     Returns:
-        The `DataCache` instance (populated or empty) on success. `None` is
-        never returned today because warming failures fall through — the
-        return type allows a future tightening without changing callers.
+        The `DataCache` instance (populated or empty) on success.
+        Returns `None` when overall warming fails (e.g. `asyncio.run` raises,
+        including provider-close errors inside `_warm_cache_async`'s
+        `finally`). Returning `None` avoids handing callers a partially
+        populated cache that would misrepresent downstream cache-stat
+        reporting. Callers already treat `None`/missing cache safely by
+        building a fresh provider/cache for the backtest run. In strict mode
+        we still raise `click.Abort` before returning.
     """
     from ...backtesting.pnl.providers.coingecko import RetryConfig
 
@@ -304,8 +379,10 @@ def _warm_cache(
         historical_cache_ttl=0,
     )
 
+    outcome: WarmCacheOutcome
+    overall_failed = False
     try:
-        total_points = asyncio.run(
+        outcome = asyncio.run(
             _warm_cache_async(
                 data_provider=data_provider,
                 cache=cache,
@@ -316,10 +393,55 @@ def _warm_cache(
                 pnl_config=ctx.pnl_config,
             )
         )
-        click.echo(f"Cache warming complete: {total_points} total data points")
+        click.echo(
+            f"Cache warming complete: {outcome.total_cached} total data points "
+            f"({outcome.successful_warms}/{outcome.total_tokens} tokens successful)"
+        )
     except Exception as e:
+        # Preserved stderr + stdout strings — external log scrapers grep both.
         click.echo(f"Warning: Cache warming failed: {e}", err=True)
         click.echo("Proceeding with backtest without pre-warmed cache...")
+        outcome = WarmCacheOutcome(
+            total_cached=0,
+            successful_warms=0,
+            total_tokens=len(ctx.token_list),
+            overall_failed=True,
+            overall_error=str(e),
+        )
+        overall_failed = True
+
+    partial = outcome.successful_warms < outcome.total_tokens
+    if strict and (outcome.overall_failed or partial):
+        # CI / reproducibility contract: do not silently continue with a
+        # partial cache when the user explicitly opted into strict mode.
+        if outcome.overall_failed:
+            msg = f"Strict warm-cache: overall warming failed ({outcome.overall_error})."
+        else:
+            msg = (
+                f"Strict warm-cache: only {outcome.successful_warms}/{outcome.total_tokens} tokens warmed successfully."
+            )
+        click.echo(f"Error: {msg}", err=True)
+        raise click.Abort()
+
+    if not strict and partial and outcome.total_tokens > 0:
+        ratio = outcome.success_ratio
+        if ratio < _WARM_CACHE_SUCCESS_RATIO_WARN_THRESHOLD:
+            click.echo(
+                f"Warning: warm cache only succeeded for {outcome.successful_warms}/"
+                f"{outcome.total_tokens} tokens ({ratio:.0%}). Results may be unreliable. "
+                "Use --strict-warm to fail fast on partial cache warms.",
+                err=True,
+            )
+
+    # On overall failure (e.g. `asyncio.run` raised, including provider-close
+    # errors in `_warm_cache_async`'s `finally`) we cannot reliably report how
+    # many tokens were cached before the exception. Returning the partial
+    # `cache` object would make the downstream `Proceeding with backtest
+    # without pre-warmed cache...` message contradict `cache.stats`, so drop
+    # the cache here. Callers already handle `None` safely (they build a
+    # fresh provider/cache for the backtest run regardless).
+    if overall_failed:
+        return None
 
     return cache
 
@@ -396,8 +518,13 @@ def _print_benchmark_comparison(
     """Phase 12: render the benchmark comparison block.
 
     No-op when `benchmark`/`start`/`end` are not all present (matches the
-    original guard). Preserves issue #1699 (bare `except Exception` emitting
-    `"Could not calculate benchmark metrics: {e}"`) byte-for-byte.
+    original guard). Catches a narrow tuple of expected network / data
+    errors (#1699) — `TimeoutError` (builtin alias for
+    `asyncio.TimeoutError`), `aiohttp.ClientError`, `ValueError`, and
+    `KeyError`. Unexpected exceptions propagate so they surface as bugs
+    instead of being silently masked by the banner line. The full traceback
+    is logged at DEBUG so operators running under `--verbose` still see
+    exactly what went wrong.
     """
     if not (benchmark and start and end):
         return
@@ -449,8 +576,10 @@ def _print_benchmark_comparison(
         else:
             click.echo("No equity curve data for benchmark comparison.")
 
-    except Exception as e:
+    except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as e:
+        # Preserved error string — external log scrapers grep this line.
         click.echo(f"Could not calculate benchmark metrics: {e}")
+        logger.debug("Benchmark comparison failed", exc_info=True)
 
     click.echo("-" * 60)
     # Note: ctx param is accepted for signature symmetry with other helpers.
@@ -713,6 +842,16 @@ def _generate_html_report(
     help="Pre-warm data cache before running backtest. Reduces API calls during backtest.",
 )
 @click.option(
+    "--strict-warm",
+    is_flag=True,
+    default=False,
+    help=(
+        "With --warm-cache, abort if any token fails to warm (or the overall "
+        "warm-up fails). Intended for CI / reproducibility runs where a "
+        "partially warmed cache would silently change results."
+    ),
+)
+@click.option(
     "--chart",
     is_flag=True,
     default=False,
@@ -757,6 +896,7 @@ def pnl_backtest(
     dry_run: bool,
     config_file: str | None,
     warm_cache: bool,
+    strict_warm: bool,
     chart: bool,
     chart_format: str,
     report: bool,
@@ -835,6 +975,16 @@ def pnl_backtest(
     # Phase 5: display configuration banner
     _print_pnl_configuration(ctx, from_result, warm_cache)
 
+    # `--strict-warm` without `--warm-cache` is inert — surface it on every
+    # invocation path (including `--dry-run`) so the contract is uniform.
+    # Must run BEFORE the dry-run early return; otherwise dry-run invocations
+    # silently swallow the warning even though the flag is equally inert.
+    if strict_warm and not warm_cache:
+        click.echo(
+            "Warning: --strict-warm has no effect without --warm-cache.",
+            err=True,
+        )
+
     # Phase 6: --dry-run early exit
     if dry_run:
         click.echo()
@@ -867,10 +1017,12 @@ def pnl_backtest(
     click.echo("Initializing CoinGecko data provider...")
     from ...backtesting.pnl.providers.coingecko import RetryConfig
 
-    # Phase 9: warm cache (uses its own provider internally; closes it when done)
+    # Phase 9: warm cache (uses its own provider internally; closes it when done).
+    # The `--strict-warm without --warm-cache` no-op warning is emitted earlier,
+    # before the dry-run early return, so it fires on every invocation path.
     cache: DataCache | None = None
     if warm_cache:
-        cache = _warm_cache(ctx, start, end, interval)
+        cache = _warm_cache(ctx, start, end, interval, strict=strict_warm)
 
     # Fresh data provider for the backtest run. Matches the original two-step
     # sequence: warming uses a throwaway provider (closed in its own finally),

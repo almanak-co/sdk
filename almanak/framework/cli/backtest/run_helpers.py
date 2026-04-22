@@ -97,11 +97,12 @@ def resolve_strategy_class_or_mock(strategy: str, *, allow_mock: bool) -> Any:
     Args:
         strategy: Strategy name (must already pass
             `validate_strategy_is_registered` when `allow_mock=False`).
-        allow_mock: If True, fall back to a minimal `MockSweepStrategy`
-            when the factory has no registered strategy — preserves the
-            existing sweep fallback path (sweep.py:978-1000). If False,
-            a missing strategy escalates to `click.Abort` so pnl retains
-            its VIB-2917 no-silent-fallback contract.
+        allow_mock: If True, fall back to the shared
+            `MockBacktestStrategy` (bound to id ``mock-sweep``) when the
+            factory has no registered strategy — preserves the existing
+            sweep fallback path. If False, a missing strategy escalates
+            to `click.Abort` so pnl retains its VIB-2917 no-silent-
+            fallback contract.
 
     Returns:
         The strategy class (real or mock).
@@ -122,20 +123,11 @@ def resolve_strategy_class_or_mock(strategy: str, *, allow_mock: bool) -> Any:
         click.echo("Running with mock strategy for demonstration.", err=True)
         click.echo()
 
-        from ...strategies import MarketSnapshot
+        # Issue #1701: single consolidated mock. Preserved id "mock-sweep"
+        # to keep external output byte-for-byte identical.
+        from ...backtesting import make_mock_strategy_class
 
-        class MockSweepStrategy:
-            """Mock strategy for sweep demonstration."""
-
-            strategy_id: str = "mock-sweep"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                return None
-
-        return MockSweepStrategy
+        return make_mock_strategy_class("mock-sweep")
 
 
 def build_pnl_config(

@@ -35,6 +35,7 @@ from almanak.framework.backtesting.models import (
 )
 from almanak.framework.cli.backtest._backtest_context import PnLBacktestContext
 from almanak.framework.cli.backtest.pnl import (
+    WarmCacheOutcome,
     _compute_strategy_returns,
     _fetch_benchmark_returns,
     _print_benchmark_comparison,
@@ -181,7 +182,7 @@ class TestWarmCacheAsync:
         cache = MagicMock()
         cache.set_batch = MagicMock(return_value=1)
 
-        total = asyncio.run(
+        outcome = asyncio.run(
             _warm_cache_async(
                 data_provider=data_provider,
                 cache=cache,
@@ -193,13 +194,22 @@ class TestWarmCacheAsync:
             )
         )
 
-        assert total == 1
+        assert isinstance(outcome, WarmCacheOutcome)
+        assert outcome.total_cached == 1
+        assert outcome.successful_warms == 1
+        assert outcome.total_tokens == 1
         captured = capsys.readouterr()
         assert "Cached 1 data points for WETH" in captured.out
         data_provider.close.assert_awaited_once()
 
-    def test_swallows_per_token_error(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Issue #1698 — per-token failures warn but do not abort."""
+    def test_swallows_per_token_error(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1698 — per-token failures warn but do not abort.
+
+        The warning stderr text is preserved, and the failure is now surfaced
+        via `successful_warms < total_tokens` so callers can act on it.
+        """
         data_provider = MagicMock()
         data_provider.close = AsyncMock()
 
@@ -212,7 +222,7 @@ class TestWarmCacheAsync:
         cache = MagicMock()
         cache.set_batch = MagicMock(return_value=0)
 
-        total = asyncio.run(
+        outcome = asyncio.run(
             _warm_cache_async(
                 data_provider=data_provider,
                 cache=cache,
@@ -224,7 +234,10 @@ class TestWarmCacheAsync:
             )
         )
 
-        assert total == 0
+        assert outcome.total_cached == 0
+        assert outcome.successful_warms == 1  # USDC succeeded (empty data but no error)
+        assert outcome.total_tokens == 2
+        assert outcome.success_ratio == 0.5
         captured = capsys.readouterr()
         assert "Warning: Failed to cache data for WETH: API down" in captured.err
 
@@ -238,7 +251,7 @@ class TestWarmCacheAsync:
 
         # inner swallow + finally close — even though get_ohlcv raises,
         # the per-token try/except swallows it so total==0 and close runs.
-        total = asyncio.run(
+        outcome = asyncio.run(
             _warm_cache_async(
                 data_provider=data_provider,
                 cache=cache,
@@ -249,14 +262,16 @@ class TestWarmCacheAsync:
                 pnl_config=_make_pnl_config(),
             )
         )
-        assert total == 0
+        assert outcome.total_cached == 0
+        assert outcome.successful_warms == 0
+        assert outcome.total_tokens == 1
         data_provider.close.assert_awaited_once()
 
     def test_empty_token_list_still_closes(self) -> None:
         data_provider = MagicMock()
         data_provider.close = AsyncMock()
 
-        total = asyncio.run(
+        outcome = asyncio.run(
             _warm_cache_async(
                 data_provider=data_provider,
                 cache=MagicMock(),
@@ -267,7 +282,11 @@ class TestWarmCacheAsync:
                 pnl_config=_make_pnl_config(),
             )
         )
-        assert total == 0
+        assert outcome.total_cached == 0
+        assert outcome.successful_warms == 0
+        assert outcome.total_tokens == 0
+        # Empty-token success_ratio defaults to 1.0 (nothing to fail on).
+        assert outcome.success_ratio == 1.0
         data_provider.close.assert_awaited_once()
 
 
@@ -277,11 +296,16 @@ class TestWarmCacheAsync:
 
 
 class TestWarmCache:
-    def test_returns_cache_on_success(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_returns_cache_on_success(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        outcome = WarmCacheOutcome(
+            total_cached=42, successful_warms=2, total_tokens=2
+        )
         with (
             patch(
                 "almanak.framework.cli.backtest.pnl._warm_cache_async",
-                new=AsyncMock(return_value=42),
+                new=AsyncMock(return_value=outcome),
             ),
             patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         ):
@@ -296,12 +320,25 @@ class TestWarmCache:
         assert result is not None
         captured = capsys.readouterr()
         assert "Warming data cache..." in captured.out
+        # Success-count now surfaced alongside total points (issue #1698).
         assert "Cache warming complete: 42 total data points" in captured.out
+        assert "2/2 tokens successful" in captured.out
 
-    def test_preserves_fallback_line_on_overall_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Issue #1698 — overall warming failure logs fallback and does not raise."""
+    def test_preserves_fallback_line_on_overall_failure(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1698 — overall warming failure logs fallback and does not raise.
 
-        async def _blow(*a: Any, **kw: Any) -> int:
+        Non-strict mode preserves the original stderr + stdout lines
+        byte-for-byte. Only `--strict-warm` changes the failure path.
+
+        On overall failure we now return `None` rather than the partially
+        populated `DataCache` — handing back a partial cache would
+        misrepresent the `Proceeding with backtest without pre-warmed cache...`
+        contract that downstream code / log scrapers rely on.
+        """
+
+        async def _blow(*a: Any, **kw: Any) -> WarmCacheOutcome:
             raise RuntimeError("event-loop boom")
 
         with (
@@ -318,7 +355,7 @@ class TestWarmCache:
                 interval=3600,
             )
 
-        assert result is not None
+        assert result is None
         captured = capsys.readouterr()
         assert "Warning: Cache warming failed: event-loop boom" in captured.err
         assert "Proceeding with backtest without pre-warmed cache..." in captured.out
@@ -327,7 +364,11 @@ class TestWarmCache:
         with (
             patch(
                 "almanak.framework.cli.backtest.pnl._warm_cache_async",
-                new=AsyncMock(return_value=0),
+                new=AsyncMock(
+                    return_value=WarmCacheOutcome(
+                        total_cached=0, successful_warms=2, total_tokens=2
+                    )
+                ),
             ),
             patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         ):
@@ -339,6 +380,126 @@ class TestWarmCache:
             )
         captured = capsys.readouterr()
         assert "Warming data cache..." in captured.out
+
+    def test_strict_mode_aborts_on_partial_warm(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1698 — `--strict-warm` must abort when any token fails."""
+        import click
+
+        outcome = WarmCacheOutcome(
+            total_cached=10, successful_warms=1, total_tokens=2
+        )
+        with (
+            patch(
+                "almanak.framework.cli.backtest.pnl._warm_cache_async",
+                new=AsyncMock(return_value=outcome),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
+            ),
+        ):
+            with pytest.raises(click.Abort):
+                _warm_cache(
+                    _make_ctx(),
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                    interval=3600,
+                    strict=True,
+                )
+
+        captured = capsys.readouterr()
+        assert "Strict warm-cache" in captured.err
+        assert "1/2 tokens warmed successfully" in captured.err
+
+    def test_strict_mode_aborts_on_overall_failure(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1698 — `--strict-warm` also aborts on overall asyncio failure."""
+        import click
+
+        async def _blow(*a: Any, **kw: Any) -> WarmCacheOutcome:
+            raise RuntimeError("event-loop boom")
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.pnl._warm_cache_async",
+                new=AsyncMock(side_effect=_blow),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
+            ),
+        ):
+            with pytest.raises(click.Abort):
+                _warm_cache(
+                    _make_ctx(),
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                    interval=3600,
+                    strict=True,
+                )
+
+        captured = capsys.readouterr()
+        # Original "Warning: Cache warming failed" is still emitted first
+        # (preserves external log scrapers), then the strict error.
+        assert "Warning: Cache warming failed: event-loop boom" in captured.err
+        assert "Strict warm-cache: overall warming failed" in captured.err
+
+    def test_strict_mode_accepts_fully_successful_warm(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`--strict-warm` does nothing when every token succeeds."""
+        outcome = WarmCacheOutcome(
+            total_cached=100, successful_warms=2, total_tokens=2
+        )
+        with (
+            patch(
+                "almanak.framework.cli.backtest.pnl._warm_cache_async",
+                new=AsyncMock(return_value=outcome),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
+            ),
+        ):
+            result = _warm_cache(
+                _make_ctx(),
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+                strict=True,
+            )
+        assert result is not None
+
+    def test_non_strict_warns_on_low_success_ratio(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1698 — below the threshold, non-strict mode surfaces a warning.
+
+        Default threshold is 50%. 1/4 = 25% triggers the warning. We only need
+        `outcome.total_tokens == 4` for the ratio check — the ctx tokens list
+        is not touched by `_warm_cache` after the async helper returns.
+        """
+        outcome = WarmCacheOutcome(
+            total_cached=10, successful_warms=1, total_tokens=4
+        )
+        with (
+            patch(
+                "almanak.framework.cli.backtest.pnl._warm_cache_async",
+                new=AsyncMock(return_value=outcome),
+            ),
+            patch(
+                "almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"
+            ),
+        ):
+            _warm_cache(
+                _make_ctx(tokens=["WETH", "USDC"]),
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+            )
+        captured = capsys.readouterr()
+        assert "warm cache only succeeded for 1/4 tokens" in captured.err
+        assert "--strict-warm" in captured.err
 
 
 # ===========================================================================
@@ -522,14 +683,21 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "No equity curve data for benchmark comparison." in captured.out
 
-    def test_preserves_could_not_calculate_error_string(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Issue #1699 — bare-except fallback must print 'Could not calculate...'."""
+    def test_preserves_could_not_calculate_error_string(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1699 — narrow-except fallback must print 'Could not calculate...'.
+
+        Historically this caught bare `Exception`; we now catch a narrow tuple
+        of expected data/network errors. `ValueError` is representative of the
+        "bad data from provider" path and must still produce the banner line.
+        """
         ctx = _make_ctx()
         result = _make_result_with_equity(["100", "110"])
 
         with patch(
             "almanak.framework.cli.backtest.pnl._fetch_benchmark_returns",
-            new=AsyncMock(side_effect=RuntimeError("provider down")),
+            new=AsyncMock(side_effect=ValueError("provider down")),
         ):
             _print_benchmark_comparison(
                 ctx,
@@ -543,7 +711,65 @@ class TestPrintBenchmarkComparison:
         captured = capsys.readouterr()
         assert "Could not calculate benchmark metrics: provider down" in captured.out
 
-    def test_uppercases_benchmark_name_in_heading(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_unexpected_exception_propagates(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1699 — exceptions outside the narrow tuple must propagate.
+
+        A plain `RuntimeError` is NOT expected from the benchmark path and must
+        now surface rather than being swallowed behind the banner line.
+        """
+        ctx = _make_ctx()
+        result = _make_result_with_equity(["100", "110"])
+
+        with patch(
+            "almanak.framework.cli.backtest.pnl._fetch_benchmark_returns",
+            new=AsyncMock(side_effect=RuntimeError("bug!")),
+        ):
+            with pytest.raises(RuntimeError, match="bug!"):
+                _print_benchmark_comparison(
+                    ctx,
+                    result,
+                    benchmark="eth_hold",
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                    interval=3600,
+                )
+
+    def test_network_errors_in_narrow_tuple_are_caught(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue #1699 — TimeoutError / aiohttp.ClientError get caught.
+
+        Python 3.12 aliases `asyncio.TimeoutError` to the builtin
+        `TimeoutError`; the narrow except tuple uses the builtin (ruff
+        UP041).
+        """
+        import aiohttp
+
+        ctx = _make_ctx()
+        result = _make_result_with_equity(["100", "110"])
+
+        for exc in (TimeoutError("timeout"), aiohttp.ClientError("net down")):
+            with patch(
+                "almanak.framework.cli.backtest.pnl._fetch_benchmark_returns",
+                new=AsyncMock(side_effect=exc),
+            ):
+                _print_benchmark_comparison(
+                    ctx,
+                    result,
+                    benchmark="eth_hold",
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                    interval=3600,
+                )
+
+        captured = capsys.readouterr()
+        assert captured.out.count("Could not calculate benchmark metrics:") == 2
+
+    def test_uppercases_benchmark_name_in_heading(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         ctx = _make_ctx()
         result = _make_result_with_equity(["100"])
 
@@ -990,7 +1216,7 @@ class TestWarmCacheAsyncExtended:
         # 3 points cached per call
         cache.set_batch = MagicMock(return_value=3)
 
-        total = asyncio.run(
+        outcome = asyncio.run(
             _warm_cache_async(
                 data_provider=data_provider,
                 cache=cache,
@@ -1001,8 +1227,10 @@ class TestWarmCacheAsyncExtended:
                 pnl_config=_make_pnl_config(),
             )
         )
-        # 3 (OK1) + 0 (FAIL) + 3 (OK2) = 6
-        assert total == 6
+        # 3 (OK1) + 0 (FAIL) + 3 (OK2) = 6; 2 successful warms out of 3 (#1698).
+        assert outcome.total_cached == 6
+        assert outcome.successful_warms == 2
+        assert outcome.total_tokens == 3
         captured = capsys.readouterr()
         assert "Cached 3 data points for OK1" in captured.out
         assert "Cached 3 data points for OK2" in captured.out

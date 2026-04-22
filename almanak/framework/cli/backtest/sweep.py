@@ -16,6 +16,105 @@ from typing import Any
 
 import click
 
+
+def _coerce_sweep_value(
+    name: str,
+    value: str,
+    *,
+    numeric_param_names: frozenset[str],
+    warned_ambiguous: set[tuple[str, str]],
+) -> Any:
+    """Coerce a sweep parameter value to an appropriate Python type.
+
+    Issue #1702: the original behaviour was a blanket ``float(value)`` inside
+    a ``try/except ValueError``. That silently coerces strings the author
+    intended as categorical identifiers — e.g. a zero-padded token id
+    ``"0001"`` becomes ``1.0``, ``"1e5"`` becomes ``100000.0``, and the
+    special strings ``"inf"`` / ``"nan"`` become float infinities / NaN
+    without any indication to the caller.
+
+    The narrow fix here preserves the public CLI surface byte-for-byte:
+
+    - When ``name`` is in ``numeric_param_names`` (``--numeric-param`` flag),
+      we require a strict numeric parse. Any ``ValueError`` is re-raised as
+      ``click.UsageError`` so the run fails fast.
+    - Otherwise we replicate the historical ``float()`` coercion but emit a
+      one-line stderr warning when the coerced value does not round-trip
+      back to the exact original string (i.e. the coercion changed semantics),
+      and a distinct warning for ``inf`` / ``nan`` which are almost never
+      intentional sweep values. Warnings are emitted once per (name, value)
+      pair to avoid spamming when the same combo appears across periods.
+
+    Full type-tagging (``--param 'name:val1,val2:str'``) would be a cleaner
+    long-term fix but breaks the current CLI contract — deferred to a
+    dedicated deprecation cycle.
+    """
+    if name in numeric_param_names:
+        # Strict: must be numeric. Empty string and other garbage become
+        # explicit UsageErrors with the problematic value visible.
+        try:
+            return float(value)
+        except (ValueError, TypeError) as e:
+            raise click.UsageError(f"--numeric-param '{name}': value {value!r} is not numeric ({e}).") from e
+
+    try:
+        coerced = float(value)
+    except (ValueError, TypeError):
+        # Non-numeric: keep the raw string (original behaviour).
+        return value
+
+    # Warn on semantically-changed coercion. We compare against the
+    # original string to catch "0001" → 1.0, "1e5" → 100000.0, etc.
+    key = (name, value)
+    if key not in warned_ambiguous:
+        if math.isnan(coerced) or math.isinf(coerced):
+            warned_ambiguous.add(key)
+            click.echo(
+                f"Warning: sweep param '{name}={value}' was coerced to {coerced}; "
+                "this is almost certainly not what you meant. "
+                "Pass --numeric-param to enforce numeric typing, or quote the "
+                "value as a categorical string (no sibling floats) to keep it as-is.",
+                err=True,
+            )
+        elif str(coerced) != value and f"{coerced:g}" != value:
+            warned_ambiguous.add(key)
+            click.echo(
+                f"Warning: sweep param '{name}={value}' was coerced to float "
+                f"{coerced}; the string no longer round-trips. "
+                f"Use --numeric-param {name} to opt in explicitly, or keep it "
+                "categorical by ensuring no value in the list is numeric.",
+                err=True,
+            )
+    return coerced
+
+
+def _preflight_validate_numeric_params(
+    combinations: list[dict[str, str]],
+    numeric_param_names: frozenset[str],
+) -> None:
+    """Fail fast if any combination contains a non-numeric ``--numeric-param`` value.
+
+    Issue #1702: without this parent-side check, invalid numeric values only
+    get rejected inside worker subprocesses (via ``_coerce_sweep_value``),
+    where ``click.UsageError`` is caught by the broad ``except Exception`` in
+    ``_run_parallel_sweep``'s result loop and converted into a synthetic
+    failed ``SweepResult``. The overall command then exits 0 and produces
+    ranked output from a misconfigured sweep — breaking the "run aborts"
+    contract documented for ``--numeric-param``.
+
+    Running the strict ``float()`` parse up here, once, guarantees the same
+    abort semantics in sequential and ``--parallel`` modes.
+    """
+    for combo in combinations:
+        for name, value in combo.items():
+            if name not in numeric_param_names:
+                continue
+            try:
+                float(value)
+            except (ValueError, TypeError) as e:
+                raise click.UsageError(f"--numeric-param '{name}': value {value!r} is not numeric ({e}).") from e
+
+
 from ...backtesting import (
     BacktestResult,
     CoinGeckoDataProvider,
@@ -23,6 +122,7 @@ from ...backtesting import (
     PnLBacktester,
 )
 from ...strategies import get_strategy
+from ..chain_resolution import get_default_chain
 from .group import backtest
 from .helpers import (
     AggregatedParamResult,
@@ -51,6 +151,8 @@ async def run_sweep_backtest(
     pnl_config: PnLBacktestConfig,
     data_provider: CoinGeckoDataProvider,
     params: dict[str, str],
+    *,
+    numeric_param_names: frozenset[str] = frozenset(),
 ) -> SweepResult:
     """Run a single backtest with specific parameter values.
 
@@ -60,30 +162,38 @@ async def run_sweep_backtest(
         pnl_config: PnL backtest configuration
         data_provider: Historical data provider
         params: Parameter values for this run
+        numeric_param_names: Set of parameter names the caller has marked
+            as strictly numeric via ``--numeric-param`` (#1702). Values for
+            those names must parse as float or the call raises
+            ``click.UsageError``.
 
     Returns:
         SweepResult with backtest results and key metrics
     """
-    # Create strategy config with overridden parameters
+    # Create strategy config with overridden parameters. See
+    # `_coerce_sweep_value` for the #1702 coercion semantics.
+    warned: set[tuple[str, str]] = set()
     strategy_config = base_config.copy()
     for name, value in params.items():
-        # Try to convert value to appropriate type
-        try:
-            # Try float first (covers Decimal too)
-            strategy_config[name] = float(value)
-        except ValueError:
-            # Keep as string if not numeric
-            strategy_config[name] = value
+        strategy_config[name] = _coerce_sweep_value(
+            name, value, numeric_param_names=numeric_param_names, warned_ambiguous=warned
+        )
 
     # Create strategy instance
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, pnl_config.chain)
     # Set params as attributes for strategies that don't read config dict
     if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
         for name, value in params.items():
-            try:
-                setattr(strategy_instance, name, float(value))
-            except ValueError:
-                setattr(strategy_instance, name, value)
+            setattr(
+                strategy_instance,
+                name,
+                _coerce_sweep_value(
+                    name,
+                    value,
+                    numeric_param_names=numeric_param_names,
+                    warned_ambiguous=warned,
+                ),
+            )
 
     # Ensure strategy has a non-empty strategy_id (same pattern as PnL backtest)
     existing_id = getattr(strategy_instance, "strategy_id", "")
@@ -126,6 +236,8 @@ async def run_parallel_sweeps(
     data_provider: CoinGeckoDataProvider,
     combinations: list[dict[str, str]],
     parallel: int,
+    *,
+    numeric_param_names: frozenset[str] = frozenset(),
 ) -> list[SweepResult]:
     """Run multiple backtests in parallel.
 
@@ -136,6 +248,8 @@ async def run_parallel_sweeps(
         data_provider: Historical data provider
         combinations: List of parameter combinations to test
         parallel: Number of parallel workers
+        numeric_param_names: Forwarded to ``run_sweep_backtest`` — see
+            issue #1702 for the float coercion semantics.
 
     Returns:
         List of SweepResult objects
@@ -153,6 +267,7 @@ async def run_parallel_sweeps(
                 pnl_config=pnl_config,
                 data_provider=data_provider,
                 params=params,
+                numeric_param_names=numeric_param_names,
             )
 
     # Create tasks for all combinations
@@ -351,6 +466,8 @@ def _run_parallel_sweep(
     combinations: list[dict[str, str]],
     workers: int,
     sweep_params: list[SweepParameter],
+    *,
+    numeric_param_names: frozenset[str] = frozenset(),
 ) -> list[SweepResult]:
     """Run parameter sweep using true parallel execution (multiprocessing).
 
@@ -372,6 +489,10 @@ def _run_parallel_sweep(
 
     from tqdm import tqdm
 
+    # Resolve the strategy's default chain in the parent process so workers
+    # do not need to re-import ``..run`` inside each subprocess (#1703).
+    parent_default_chain = get_default_chain(strategy_class)
+
     # Create tasks with all necessary data for worker processes
     tasks = [
         _SweepTask(
@@ -380,6 +501,8 @@ def _run_parallel_sweep(
             pnl_config_dict=pnl_config.to_dict(),
             params=combo,
             task_index=i,
+            default_chain=parent_default_chain,
+            numeric_param_names=numeric_param_names,
         )
         for i, combo in enumerate(combinations)
     ]
@@ -430,6 +553,14 @@ class _SweepTask:
 
     Contains all data needed to run a single backtest in a worker process.
     Must be picklable for multiprocessing.
+
+    ``default_chain`` is resolved once in the parent process (via
+    ``get_default_chain(strategy_class)``) and passed down explicitly so
+    workers never have to re-import ``..run`` and re-derive it from the
+    class's ``STRATEGY_METADATA`` (#1703). When the dynamic re-import
+    of the strategy class succeeds and its metadata is still accessible,
+    the worker still prefers ``base_config`` / ``pnl_config_dict`` values
+    before falling back to ``default_chain``.
     """
 
     strategy_class_name: str  # Fully qualified class name for import
@@ -437,6 +568,11 @@ class _SweepTask:
     pnl_config_dict: dict[str, Any]
     params: dict[str, str]
     task_index: int
+    default_chain: str = "arbitrum"
+    # Names marked via `--numeric-param`; forwarded through the pickle
+    # boundary so workers apply the same strict coercion as the parent
+    # process would (#1702).
+    numeric_param_names: frozenset[str] = frozenset()
 
 
 def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
@@ -466,42 +602,45 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
         try:
             strategy_class = get_strategy(class_name.lower().replace("strategy", ""))
         except ValueError:
-            # Create a mock if all else fails
-            from ...strategies import MarketSnapshot
+            # Issue #1701: shared mock (preserves id "mock-worker" exactly).
+            from ...backtesting import make_mock_strategy_class
 
-            class MockWorkerStrategy:
-                strategy_id = "mock-worker"
+            strategy_class = make_mock_strategy_class("mock-worker")
 
-                def __init__(self, config: dict[str, Any]) -> None:
-                    self.config = config
-
-                def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                    return None
-
-            strategy_class = MockWorkerStrategy
-
-    # Create strategy config with overridden parameters
+    # Create strategy config with overridden parameters. #1702: shared
+    # coercion helper replaces the raw `float()` calls so numeric-param
+    # contracts and ambiguity warnings are honoured in workers too.
+    warned: set[tuple[str, str]] = set()
     strategy_config = task.base_config.copy()
     for name, value in task.params.items():
-        try:
-            strategy_config[name] = float(value)
-        except ValueError:
-            strategy_config[name] = value
+        strategy_config[name] = _coerce_sweep_value(
+            name,
+            value,
+            numeric_param_names=task.numeric_param_names,
+            warned_ambiguous=warned,
+        )
 
-    # Create strategy instance - resolve chain from config override, then decorator metadata
-    from ..run import get_default_chain
-
-    worker_chain = (
-        task.base_config.get("chain") or task.pnl_config_dict.get("chain") or get_default_chain(strategy_class)
-    )
+    # Resolve chain. Config overrides win; the parent-provided
+    # `default_chain` is used as the final fallback so the worker never has
+    # to re-import `..run` (#1703). If for some reason `default_chain` is
+    # missing (e.g. an older _SweepTask pickle), fall back to the
+    # dependency-free `get_default_chain` re-derivation.
+    fallback_chain = task.default_chain or get_default_chain(strategy_class)
+    worker_chain = task.base_config.get("chain") or task.pnl_config_dict.get("chain") or fallback_chain
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, worker_chain)
     # Set params as attributes for strategies that don't read config dict
     if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
         for name, value in task.params.items():
-            try:
-                setattr(strategy_instance, name, float(value))
-            except ValueError:
-                setattr(strategy_instance, name, value)
+            setattr(
+                strategy_instance,
+                name,
+                _coerce_sweep_value(
+                    name,
+                    value,
+                    numeric_param_names=task.numeric_param_names,
+                    warned_ambiguous=warned,
+                ),
+            )
 
     existing_id = getattr(strategy_instance, "strategy_id", "")
     if not existing_id:
@@ -774,6 +913,9 @@ class _SweepRunContext:
     sweep_params: list[SweepParameter]
     combinations: list[dict[str, str]]
     periods_spec: str | None  # raw --periods arg, used only for banner echo
+    # Names marked with `--numeric-param` (#1702). Empty by default so the
+    # historical "try-float-then-fallback-to-string" behaviour is retained.
+    numeric_param_names: frozenset[str] = frozenset()
 
 
 def _print_sweep_configuration(
@@ -917,6 +1059,7 @@ def _run_sweep_over_periods(
                     combinations=ctx.combinations,
                     workers=effective_workers,
                     sweep_params=ctx.sweep_params,
+                    numeric_param_names=ctx.numeric_param_names,
                 )
             else:
                 period_results = asyncio.run(
@@ -927,6 +1070,7 @@ def _run_sweep_over_periods(
                         data_provider=data_provider,
                         combinations=ctx.combinations,
                         parallel=effective_workers,
+                        numeric_param_names=ctx.numeric_param_names,
                     )
                 )
 
@@ -1122,6 +1266,18 @@ def _generate_sweep_report(
     help="Parameter to sweep (format: 'name:val1,val2,val3'). Can be used multiple times.",
 )
 @click.option(
+    "--numeric-param",
+    "-P",
+    "numeric_params",
+    multiple=True,
+    help=(
+        "Mark a sweep parameter as strictly numeric. Values must parse as "
+        "float or the run aborts (vs the historical silent float() coercion "
+        "which could turn '0001' into 1.0). Pass the parameter name, e.g. "
+        "-P threshold. Repeatable."
+    ),
+)
+@click.option(
     "--parallel",
     is_flag=True,
     default=False,
@@ -1184,6 +1340,7 @@ def sweep_backtest(
     end: datetime | None,
     periods: str | None,
     params: tuple[str, ...],
+    numeric_params: tuple[str, ...],
     parallel: bool,
     workers: int | None,
     interval: int,
@@ -1253,6 +1410,8 @@ def sweep_backtest(
     """
     # Phase S1: parse --param flags
     sweep_params = _parse_sweep_params(params)
+    # #1702: normalise `--numeric-param` names (strip + de-duplicate).
+    numeric_param_names = frozenset(n.strip() for n in numeric_params if n.strip())
 
     # Phase S2: resolve --periods vs --start/--end
     multi_period_mode, backtest_periods = _resolve_backtest_periods(periods, start, end)
@@ -1269,6 +1428,30 @@ def sweep_backtest(
     combinations = generate_combinations(sweep_params)
     token_list = parse_token_list(tokens)
 
+    # #1702: reject `--numeric-param` names that aren't in the sweep.
+    known_names = {p.name for p in sweep_params}
+    unknown_numeric = numeric_param_names - known_names
+    if unknown_numeric:
+        raise click.UsageError(
+            f"--numeric-param refers to unknown sweep parameter(s): "
+            f"{', '.join(sorted(unknown_numeric))}. Known params: "
+            f"{', '.join(sorted(known_names)) or '(none)'}."
+        )
+
+    # #1702: validate every numeric-param value up front, in the PARENT
+    # process, before we dispatch any work.
+    #
+    # Why parent-side: the worker path below (`_run_parallel_sweep`) runs
+    # `_coerce_sweep_value` inside subprocesses. Any `click.UsageError`
+    # raised there is pickled back to the parent and caught by the broad
+    # `except Exception` in the results loop, which degrades the error
+    # into a synthetic failed `SweepResult` — the command then exits 0
+    # and produces ranked output from a misconfigured sweep. By failing
+    # fast here we uphold the `--numeric-param` "run aborts" contract in
+    # both sequential and parallel modes.
+    if numeric_param_names:
+        _preflight_validate_numeric_params(combinations, numeric_param_names)
+
     ctx = _SweepRunContext(
         strategy=strategy,
         chain=chain,
@@ -1281,6 +1464,7 @@ def sweep_backtest(
         sweep_params=sweep_params,
         combinations=combinations,
         periods_spec=periods,
+        numeric_param_names=numeric_param_names,
     )
 
     # Phase S5: compute worker count + print configuration banner
@@ -1662,20 +1846,10 @@ def optimize_backtest(
         click.echo("Running with mock strategy for demonstration.", err=True)
         click.echo()
 
-        from ...strategies import MarketSnapshot
+        # Issue #1701: shared mock (preserves id "mock-optimize" exactly).
+        from ...backtesting import make_mock_strategy_class
 
-        class MockOptimizeStrategy:
-            """Mock strategy for optimization demonstration."""
-
-            strategy_id: str = "mock-optimize"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                return None
-
-        strategy_class = MockOptimizeStrategy
+        strategy_class = make_mock_strategy_class("mock-optimize")
 
     # Load base strategy config
     base_config = load_strategy_config(strategy, chain)

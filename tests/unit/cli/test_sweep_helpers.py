@@ -1377,6 +1377,7 @@ class TestRunParallelSweepsCoro:
             pnl_config: Any,
             data_provider: Any,
             params: dict[str, str],
+            numeric_param_names: frozenset[str] = frozenset(),
         ) -> SweepResult:
             call_params.append(params)
             return _make_result(params, sharpe=1.0)
@@ -1422,6 +1423,7 @@ class TestRunParallelSweepsCoro:
             pnl_config: Any,
             data_provider: Any,
             params: dict[str, str],
+            numeric_param_names: frozenset[str] = frozenset(),
         ) -> SweepResult:
             seen_params.append(params)
             return _make_result(params, sharpe=1.0)

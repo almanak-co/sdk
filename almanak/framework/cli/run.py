@@ -299,23 +299,10 @@ def load_strategy_config(
     }
 
 
-def get_default_chain(strategy_class: type) -> str:
-    """Get the default chain for a strategy from decorator metadata.
-
-    Reads STRATEGY_METADATA.default_chain, falling back to supported_chains[0],
-    then to "arbitrum" as a last resort.
-    """
-    metadata = getattr(strategy_class, "STRATEGY_METADATA", None)
-    if metadata:
-        if metadata.default_chain:
-            return metadata.default_chain
-        if metadata.supported_chains:
-            return metadata.supported_chains[0]
-    # Legacy fallback
-    supported = getattr(strategy_class, "SUPPORTED_CHAINS", None)
-    if supported:
-        return supported[0]
-    return "arbitrum"
+# Re-exported from `chain_resolution` for back-compat. The canonical
+# definition lives there so that sweep workers can import it without
+# pulling in the heavy CLI module tree (#1703).
+from .chain_resolution import get_default_chain  # noqa: E402, F401
 
 
 def resolve_strategy_chain(
