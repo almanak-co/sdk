@@ -23,6 +23,7 @@ class PositionType(StrEnum):
     BORROW = "BORROW"
     SUPPLY = "SUPPLY"
     PERP = "PERP"
+    VAULT = "VAULT"
 
 
 @dataclass
@@ -35,7 +36,7 @@ class PositionRecord:
     Attributes:
         position_id: Unique identifier for this position
         chain: The blockchain this position is on (e.g., 'arbitrum', 'optimism')
-        position_type: Type of position (TOKEN, LP, BORROW, SUPPLY, PERP)
+        position_type: Type of position (TOKEN, LP, BORROW, SUPPLY, PERP, VAULT)
         protocol: Protocol where position is held (e.g., 'aave_v3', 'uniswap_v3')
         token: Primary token symbol (or pool identifier for LP)
         amount: Amount of tokens or liquidity

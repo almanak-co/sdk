@@ -2232,7 +2232,10 @@ class PnLBacktester:
             except KeyError:
                 amount = amount_usd
 
-            # MetaMorpho vaults typically yield ~3-8% APY
+            # ERC-4626 vault yield: pending PPFS-curve replay via gateway
+            # MarketService.GetSharePriceHistory (VIB-3367). Until that ships,
+            # honour the strategy-supplied `apy` field on the intent and fall
+            # back to a neutral 5% surrogate so existing backtests keep running.
             apy = getattr(intent, "apy", Decimal("0.05"))
             if isinstance(apy, int | float):
                 apy = Decimal(str(apy))

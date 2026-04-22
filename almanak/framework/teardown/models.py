@@ -69,11 +69,12 @@ class PositionType(StrEnum):
     1. PERP - Close perpetuals first (highest liquidation risk)
     2. BORROW - Repay borrows (frees collateral)
     3. SUPPLY - Withdraw collateral
-    4. LP - Close LP positions
-    5. STAKE - Unstake staked tokens
-    6. PREDICTION - Close prediction market positions
-    7. CEX - Withdraw from CEX
-    8. TOKEN - Swap to target token last
+    4. VAULT - Redeem ERC-4626 vault shares (must close before LP — vaults often wrap LPs)
+    5. LP - Close LP positions
+    6. STAKE - Unstake staked tokens
+    7. PREDICTION - Close prediction market positions
+    8. CEX - Withdraw from CEX
+    9. TOKEN - Swap to target token last
 
     Note: STAKE, PREDICTION, CEX added for portfolio tracking.
     They have lower priority than core DeFi positions.
@@ -82,6 +83,7 @@ class PositionType(StrEnum):
     PERP = "PERP"
     BORROW = "BORROW"
     SUPPLY = "SUPPLY"
+    VAULT = "VAULT"  # ERC-4626 vaults (MetaMorpho, Beefy, Yearn V3, ...)
     LP = "LP"
     STAKE = "STAKE"  # Staked tokens (Lido, Ethena)
     PREDICTION = "PREDICTION"  # Prediction market positions (Polymarket)
@@ -95,11 +97,12 @@ class PositionType(StrEnum):
             PositionType.PERP: 1,
             PositionType.BORROW: 2,
             PositionType.SUPPLY: 3,
-            PositionType.LP: 4,
-            PositionType.STAKE: 5,
-            PositionType.PREDICTION: 6,
-            PositionType.CEX: 7,
-            PositionType.TOKEN: 8,
+            PositionType.VAULT: 4,
+            PositionType.LP: 5,
+            PositionType.STAKE: 6,
+            PositionType.PREDICTION: 7,
+            PositionType.CEX: 8,
+            PositionType.TOKEN: 9,
         }
         return priorities[self]
 

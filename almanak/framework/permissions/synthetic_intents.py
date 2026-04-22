@@ -37,7 +37,7 @@ from ..intents.vocabulary import (
     VaultRedeemIntent,
     WithdrawIntent,
 )
-from .constants import METAMORPHO_VAULTS
+from .constants import VAULT_PROTOCOL_REPRESENTATIVE
 from .hints import get_permission_hints
 
 logger = logging.getLogger(__name__)
@@ -358,14 +358,15 @@ def _build_flash_loan_intents(protocol: str, chain: str, usdc: str) -> list[AnyI
 
 
 def _build_vault_deposit_intents(protocol: str, chain: str) -> list[AnyIntent]:
-    if protocol != "metamorpho":
+    vault_chains = VAULT_PROTOCOL_REPRESENTATIVE.get(protocol.lower())
+    if not vault_chains:
         return []
-    vault_info = METAMORPHO_VAULTS.get(chain)
+    vault_info = vault_chains.get(chain)
     if not vault_info:
         return []
     return [
         VaultDepositIntent(
-            protocol="metamorpho",
+            protocol=protocol,
             vault_address=vault_info["vault"],
             amount=Decimal("100"),
             chain=chain,
@@ -374,14 +375,15 @@ def _build_vault_deposit_intents(protocol: str, chain: str) -> list[AnyIntent]:
 
 
 def _build_vault_redeem_intents(protocol: str, chain: str) -> list[AnyIntent]:
-    if protocol != "metamorpho":
+    vault_chains = VAULT_PROTOCOL_REPRESENTATIVE.get(protocol.lower())
+    if not vault_chains:
         return []
-    vault_info = METAMORPHO_VAULTS.get(chain)
+    vault_info = vault_chains.get(chain)
     if not vault_info:
         return []
     return [
         VaultRedeemIntent(
-            protocol="metamorpho",
+            protocol=protocol,
             vault_address=vault_info["vault"],
             shares=Decimal("100"),
             chain=chain,

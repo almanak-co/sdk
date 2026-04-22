@@ -47,6 +47,19 @@ FlashLoanCallbackIntent = (
 )
 
 
+def _validate_vault_protocol(protocol: str) -> None:
+    """Validate ``protocol`` against the vault adapter registry.
+
+    Lazy import keeps the intents module free of compile-time dependencies on
+    connector packages.
+    """
+    from ..connectors.vaults import supported_vault_protocols
+
+    supported = supported_vault_protocols()
+    if protocol.lower() not in supported:
+        raise ValueError(f"Invalid vault protocol: {protocol!r}. Supported: {sorted(supported)}")
+
+
 class FlashLoanIntent(AlmanakImmutableModel):
     """Intent to execute a flash loan with nested callback operations.
 
@@ -357,11 +370,15 @@ class UnstakeIntent(AlmanakImmutableModel):
 
 
 class VaultDepositIntent(AlmanakImmutableModel):
-    """Intent to deposit assets into a MetaMorpho ERC-4626 vault.
+    """Intent to deposit assets into an ERC-4626 vault.
+
+    Supports any vault protocol registered with
+    :mod:`almanak.framework.connectors.vaults` (e.g. ``metamorpho``; future:
+    ``beefy``, ``yearn_v3``). The ``protocol`` field is the dispatch key.
 
     Attributes:
-        protocol: Vault protocol (must be "metamorpho")
-        vault_address: MetaMorpho vault contract address
+        protocol: Registered vault protocol name (case-insensitive)
+        vault_address: ERC-4626 vault contract address
         amount: Amount of underlying assets to deposit (in token units), or "all"
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
@@ -393,8 +410,7 @@ class VaultDepositIntent(AlmanakImmutableModel):
             raise ValueError("amount must be a positive Decimal or 'all'")
         if not self.vault_address.startswith("0x") or len(self.vault_address) != 42:
             raise ValueError(f"Invalid vault_address: {self.vault_address}. Must be 0x-prefixed 40 hex chars.")
-        if self.protocol.lower() != "metamorpho":
-            raise ValueError(f"Invalid protocol: {self.protocol}. Must be 'metamorpho'.")
+        _validate_vault_protocol(self.protocol)
         return self
 
     @property
@@ -425,11 +441,14 @@ class VaultDepositIntent(AlmanakImmutableModel):
 
 
 class VaultRedeemIntent(AlmanakImmutableModel):
-    """Intent to redeem shares from a MetaMorpho ERC-4626 vault.
+    """Intent to redeem shares from an ERC-4626 vault.
+
+    Supports any vault protocol registered with
+    :mod:`almanak.framework.connectors.vaults`.
 
     Attributes:
-        protocol: Vault protocol (must be "metamorpho")
-        vault_address: MetaMorpho vault contract address
+        protocol: Registered vault protocol name (case-insensitive)
+        vault_address: ERC-4626 vault contract address
         shares: Number of vault shares to redeem, or "all" to redeem all
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
@@ -470,8 +489,7 @@ class VaultRedeemIntent(AlmanakImmutableModel):
             raise ValueError("shares must be a positive Decimal or 'all'")
         if not self.vault_address.startswith("0x") or len(self.vault_address) != 42:
             raise ValueError(f"Invalid vault_address: {self.vault_address}. Must be 0x-prefixed 40 hex chars.")
-        if self.protocol.lower() != "metamorpho":
-            raise ValueError(f"Invalid protocol: {self.protocol}. Must be 'metamorpho'.")
+        _validate_vault_protocol(self.protocol)
         return self
 
     @property

@@ -17,3 +17,10 @@ METAMORPHO_VAULTS: Final[dict[str, dict[str, str]]] = {
         "underlying": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC
     },
 }
+
+# Per-protocol vault registry for synthetic intent generation.
+# Each entry maps chain → {vault, underlying}. Add a new entry when registering
+# a vault adapter via almanak.framework.connectors.vaults.register_vault_adapter.
+VAULT_PROTOCOL_REPRESENTATIVE: Final[dict[str, dict[str, dict[str, str]]]] = {
+    "metamorpho": METAMORPHO_VAULTS,
+}

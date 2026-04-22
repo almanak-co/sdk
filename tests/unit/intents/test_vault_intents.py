@@ -84,12 +84,20 @@ class TestVaultDepositIntent:
             )
 
     def test_invalid_protocol(self):
-        with pytest.raises(ValueError, match="Must be 'metamorpho'"):
+        with pytest.raises(ValueError, match="Invalid vault protocol"):
             VaultDepositIntent(
                 protocol="aave_v3",
                 vault_address=VAULT_ADDR,
                 amount=Decimal("1000"),
             )
+
+    def test_protocol_case_insensitive(self):
+        intent = VaultDepositIntent(
+            protocol="MetaMorpho",
+            vault_address=VAULT_ADDR,
+            amount=Decimal("1000"),
+        )
+        assert intent.protocol == "MetaMorpho"
 
     def test_serialize(self):
         intent = VaultDepositIntent(
@@ -207,12 +215,20 @@ class TestVaultRedeemIntent:
             )
 
     def test_invalid_protocol(self):
-        with pytest.raises(ValueError, match="Must be 'metamorpho'"):
+        with pytest.raises(ValueError, match="Invalid vault protocol"):
             VaultRedeemIntent(
                 protocol="compound",
                 vault_address=VAULT_ADDR,
                 shares=Decimal("100"),
             )
+
+    def test_protocol_case_insensitive(self):
+        intent = VaultRedeemIntent(
+            protocol="MetaMorpho",
+            vault_address=VAULT_ADDR,
+            shares=Decimal("100"),
+        )
+        assert intent.protocol == "MetaMorpho"
 
     def test_serialize(self):
         intent = VaultRedeemIntent(

@@ -21,7 +21,7 @@ from .backtesting import (
     BacktestResult,
     TradeRecord,
 )
-from .cli import new_strategy
+from .cli import new_strategy  # type: ignore[no-redef]
 
 # Quant Data Layer - key public types
 from .data.exceptions import DataUnavailableError, LowConfidenceError

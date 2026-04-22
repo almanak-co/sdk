@@ -32,6 +32,7 @@ from almanak.framework.valuation.position_discovery import (
     PositionDiscoveryService,
 )
 from almanak.framework.valuation.spot_valuer import total_value, value_tokens
+from almanak.framework.valuation.vault_position_reader import VaultPositionReader
 
 if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownPositionSummary
@@ -98,6 +99,7 @@ class PortfolioValuer:
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
+        self._vault_reader = VaultPositionReader(gateway_client)
         self._discovery = PositionDiscoveryService(gateway_client)
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
@@ -109,6 +111,7 @@ class PortfolioValuer:
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
+        self._vault_reader.set_gateway_client(gateway_client)
         self._discovery.set_gateway_client(gateway_client)
 
     def value(
@@ -452,6 +455,8 @@ class PortfolioValuer:
             return PositionType.BORROW
         if "supply" in normalized or "deposit" in normalized or "lend" in normalized:
             return PositionType.SUPPLY
+        if "vault" in normalized or "yield" in normalized or "earn" in normalized:
+            return PositionType.VAULT
         if "stake" in normalized or "farm" in normalized:
             return PositionType.STAKE
         if "predict" in normalized:
@@ -694,6 +699,8 @@ class PortfolioValuer:
 
         For LP positions: query on-chain V3 data and re-calculate value.
         For SUPPLY/BORROW: query on-chain Aave data and re-calculate value.
+        For VAULT: query ERC-4626 share balance + convertToAssets via the
+            vault adapter registry.
         For other types: pass through strategy-reported value.
 
         Falls back to strategy-reported value_usd on any failure.
@@ -718,6 +725,12 @@ class PortfolioValuer:
 
         if position.position_type == PositionType.PERP:
             repriced = self._reprice_perps_on_chain(position, chain, market)
+            if repriced is not None:
+                return repriced
+            return position.value_usd
+
+        if position.position_type == PositionType.VAULT:
+            repriced = self._reprice_vault_on_chain(position, chain, market)
             if repriced is not None:
                 return repriced
             return position.value_usd
@@ -754,6 +767,12 @@ class PortfolioValuer:
 
         if position.position_type == PositionType.PERP:
             result = self._reprice_perps_on_chain_enriched(position, chain, market)
+            if result is not None:
+                return result
+            return position.value_usd, {}
+
+        if position.position_type == PositionType.VAULT:
+            result = self._reprice_vault_on_chain_enriched(position, chain, market)
             if result is not None:
                 return result
             return position.value_usd, {}
@@ -1397,6 +1416,121 @@ class PortfolioValuer:
         except Exception:
             logger.debug(
                 "Perps on-chain re-pricing failed for %s",
+                position.position_id,
+                exc_info=True,
+            )
+            return None
+
+    def _reprice_vault_on_chain(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> Decimal | None:
+        """Attempt to re-price an ERC-4626 vault position using on-chain data.
+
+        Reads share balance via the vault registry and converts to underlying
+        asset amount using the vault's PPFS / convertToAssets. Closes the
+        silent zero-valuation gap that today affects MetaMorpho positions.
+
+        Returns USD value if successful, None to signal fallback needed.
+        """
+        result = self._reprice_vault_on_chain_enriched(position, chain, market)
+        if result is None:
+            return None
+        return result[0]
+
+    def _reprice_vault_on_chain_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Re-price a vault position and return enriched details for snapshots."""
+        try:
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+            )
+            vault_address = position.details.get("vault_address") or position.details.get("vault")
+            protocol = position.protocol
+            if not wallet_address or not vault_address or not protocol:
+                return None
+
+            on_chain = self._vault_reader.read_position(
+                protocol=protocol,
+                chain=chain,
+                vault_address=vault_address,
+                wallet_address=wallet_address,
+            )
+            if on_chain is None:
+                return None
+
+            if not on_chain.is_active:
+                return Decimal("0"), {
+                    "vault_address": vault_address,
+                    "shares_wei": "0",
+                    "asset_amount_wei": "0",
+                }
+
+            # Resolve underlying asset symbol for pricing
+            asset_symbol = self._resolve_token_symbol(on_chain.asset_address, position, "asset")
+            if not asset_symbol:
+                asset_symbol = position.details.get("asset")
+            if not asset_symbol:
+                logger.debug(
+                    "Vault re-pricing: cannot resolve asset symbol for %s (asset=%s)",
+                    position.position_id,
+                    on_chain.asset_address,
+                )
+                return None
+
+            try:
+                asset_price = Decimal(str(market.price(asset_symbol)))
+            except Exception:
+                logger.debug("Could not get price for vault asset %s", asset_symbol)
+                return None
+
+            if asset_price <= 0:
+                return None
+
+            asset_decimals = on_chain.asset_decimals
+            if asset_decimals <= 0:
+                # Defensive: fall back to token resolver if the on-chain decimals() read returned 0.
+                resolved = self._get_token_decimals(asset_symbol, chain)
+                if resolved is None:
+                    return None
+                asset_decimals = resolved
+
+            asset_amount = Decimal(on_chain.asset_amount_wei) / Decimal(10**asset_decimals)
+            value_usd = asset_amount * asset_price
+
+            details: dict[str, Any] = {
+                "vault_address": vault_address,
+                "asset_address": on_chain.asset_address,
+                "asset_symbol": asset_symbol,
+                "shares_wei": str(on_chain.shares_wei),
+                "asset_amount_wei": str(on_chain.asset_amount_wei),
+                "asset_amount": str(asset_amount),
+                "asset_price_usd": str(asset_price),
+            }
+
+            logger.debug(
+                "Vault re-priced: position=%s protocol=%s value=$%s (shares=%s assets=%s %s)",
+                position.position_id,
+                protocol,
+                value_usd,
+                on_chain.shares_wei,
+                asset_amount,
+                asset_symbol,
+            )
+
+            return value_usd, details
+
+        except Exception:
+            logger.debug(
+                "Vault on-chain re-pricing failed for %s",
                 position.position_id,
                 exc_info=True,
             )

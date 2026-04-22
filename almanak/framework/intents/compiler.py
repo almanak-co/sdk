@@ -6715,18 +6715,13 @@ class IntentCompiler:
     def _compile_vault_deposit(self, intent: VaultDepositIntent) -> CompilationResult:
         """Compile a VAULT_DEPOSIT intent into an ActionBundle.
 
-        This method:
-        1. Creates MetaMorpho adapter with gateway client
-        2. Queries vault asset address
-        3. Resolves asset token for decimals
-        4. Builds approve TX for the vault
-        5. Builds deposit TX
+        Dispatches to a vault adapter registered for ``intent.protocol`` (see
+        :mod:`almanak.framework.connectors.vaults`). Steps:
 
-        Args:
-            intent: VaultDepositIntent to compile
-
-        Returns:
-            CompilationResult with vault deposit ActionBundle
+        1. Resolve adapter for the protocol via the vault registry.
+        2. Query vault asset address and decimals.
+        3. Build approve TX for the vault.
+        4. Build deposit TX via the adapter SDK.
         """
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -6750,23 +6745,20 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
-            if self._gateway_client is None:
+            if self._gateway_client is None or not self._gateway_client.is_connected:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error="GatewayClient is required for MetaMorpho vault compilation (on-chain reads).",
+                    error="A connected GatewayClient is required for vault compilation (on-chain reads).",
                     intent_id=intent.intent_id,
                 )
 
             # Lazy import to avoid circular import
-            from ..connectors.morpho_vault.adapter import MetaMorphoAdapter, MetaMorphoConfig
+            from ..connectors.vaults import build_vault_adapter
 
-            # Create adapter with gateway client
-            vault_config = MetaMorphoConfig(
+            adapter = build_vault_adapter(
+                intent.protocol,
                 chain=self.chain,
                 wallet_address=self.wallet_address,
-            )
-            adapter = MetaMorphoAdapter(
-                vault_config,
                 gateway_client=self._gateway_client,
                 token_resolver=self._token_resolver,
             )
@@ -6805,7 +6797,7 @@ class IntentCompiler:
                 value=deposit_tx_data["value"],
                 data=deposit_tx_data["data"],
                 gas_estimate=deposit_tx_data["gas_estimate"],
-                description=f"Deposit {amount_decimal} {asset_token.symbol} into MetaMorpho vault {intent.vault_address[:10]}...",
+                description=f"Deposit {amount_decimal} {asset_token.symbol} into {intent.protocol} vault {intent.vault_address[:10]}...",
                 tx_type="vault_deposit",
             )
             transactions.append(deposit_tx)
@@ -6831,7 +6823,8 @@ class IntentCompiler:
             result.total_gas_estimate = total_gas
 
             logger.info(
-                f"Compiled VAULT_DEPOSIT: {amount_decimal} {asset_token.symbol} into vault {intent.vault_address[:10]}..."
+                f"Compiled VAULT_DEPOSIT: {amount_decimal} {asset_token.symbol} into "
+                f"{intent.protocol} vault {intent.vault_address[:10]}..."
             )
             return result
 
@@ -6844,16 +6837,12 @@ class IntentCompiler:
     def _compile_vault_redeem(self, intent: VaultRedeemIntent) -> CompilationResult:
         """Compile a VAULT_REDEEM intent into an ActionBundle.
 
-        This method:
-        1. Creates MetaMorpho adapter with gateway client
-        2. If shares="all", queries maxRedeem to get share count
-        3. Builds redeem TX (no approve needed)
+        Dispatches to a vault adapter registered for ``intent.protocol`` (see
+        :mod:`almanak.framework.connectors.vaults`). Steps:
 
-        Args:
-            intent: VaultRedeemIntent to compile
-
-        Returns:
-            CompilationResult with vault redeem ActionBundle
+        1. Resolve adapter for the protocol via the vault registry.
+        2. If shares="all", query maxRedeem to get share count.
+        3. Build redeem TX (no approve needed — redeeming own shares).
         """
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -6862,23 +6851,20 @@ class IntentCompiler:
         transactions: list[TransactionData] = []
 
         try:
-            if self._gateway_client is None:
+            if self._gateway_client is None or not self._gateway_client.is_connected:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
-                    error="GatewayClient is required for MetaMorpho vault compilation (on-chain reads).",
+                    error="A connected GatewayClient is required for vault compilation (on-chain reads).",
                     intent_id=intent.intent_id,
                 )
 
             # Lazy import to avoid circular import
-            from ..connectors.morpho_vault.adapter import MetaMorphoAdapter, MetaMorphoConfig
+            from ..connectors.vaults import build_vault_adapter
 
-            # Create adapter with gateway client
-            vault_config = MetaMorphoConfig(
+            adapter = build_vault_adapter(
+                intent.protocol,
                 chain=self.chain,
                 wallet_address=self.wallet_address,
-            )
-            adapter = MetaMorphoAdapter(
-                vault_config,
                 gateway_client=self._gateway_client,
                 token_resolver=self._token_resolver,
             )
@@ -6919,7 +6905,7 @@ class IntentCompiler:
                 value=redeem_tx_data["value"],
                 data=redeem_tx_data["data"],
                 gas_estimate=redeem_tx_data["gas_estimate"],
-                description=f"Redeem {'all' if intent.shares == 'all' else intent.shares} shares from MetaMorpho vault {intent.vault_address[:10]}...",
+                description=f"Redeem {'all' if intent.shares == 'all' else intent.shares} shares from {intent.protocol} vault {intent.vault_address[:10]}...",
                 tx_type="vault_redeem",
             )
             transactions.append(redeem_tx)
