@@ -29,7 +29,6 @@ Example:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -251,6 +250,12 @@ class IntentExecutionService:
 
         Compile -> Execute -> Enrich -> Retry on failure.
 
+        Phase helpers live in :mod:`_inner_runner_helpers` (extracted in
+        Phase 6A.3 to keep this method's cyclomatic complexity manageable).
+        The helpers preserve the original compile-then-execute ordering,
+        log levels, sadflow ``is_final`` semantics, and the broadcast-but-
+        failed short-circuit byte-for-byte.
+
         Args:
             intent_type: Intent type string (e.g., "swap", "lp_open").
             intent_params: Intent parameters dict.
@@ -264,7 +269,12 @@ class IntentExecutionService:
         Returns:
             EnrichedExecutionResult with enriched data from ResultEnricher.
         """
-        from almanak.gateway.proto import gateway_pb2
+        from ._inner_runner_helpers import (
+            build_success_result,
+            compile_intent_phase,
+            execute_bundle_phase,
+            handle_execution_failure,
+        )
 
         effective_chain = chain or self._chain
         effective_wallet = wallet_address or self._wallet_address
@@ -280,198 +290,82 @@ class IntentExecutionService:
         for attempt in range(max_retries + 1):
             attempts = attempt + 1
 
-            # Step 1: Compile intent
-            try:
-                compile_resp = self._client.execution.CompileIntent(
-                    gateway_pb2.CompileIntentRequest(
-                        intent_type=intent_type,
-                        intent_data=json.dumps(intent_params).encode(),
-                        chain=effective_chain,
-                        wallet_address=effective_wallet,
-                        price_map=price_map,
-                    )
-                )
-            except Exception as e:
-                last_error = f"Compilation RPC error: {e}"
-                is_last_rpc = attempt == max_retries or not _is_retryable(str(e))
-                log_fn = logger.warning if is_last_rpc else logger.debug
-                log_fn(
-                    "Intent compilation failed (attempt %d/%d): %s",
-                    attempts,
-                    max_retries + 1,
-                    last_error,
-                )
-                if not _is_retryable(str(e)):
-                    self._fire_sadflow(
-                        intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
-                    )
-                    break
-                self._fire_sadflow(
-                    intent_type,
-                    intent_params,
-                    last_error,
-                    attempt,
-                    max_retries,
-                    is_last_rpc,
-                    effective_chain,
-                    tool_name,
-                )
-                if attempt < max_retries:
-                    delay = self._retry_policy.delay_for_attempt(attempt)
-                    logger.debug("Retrying in %.1fs...", delay)
-                    await asyncio.sleep(delay)
-                continue
-
-            if not compile_resp.success:
-                last_error = f"Compilation failed: {compile_resp.error}"
-                is_last = attempt == max_retries or not _is_retryable(compile_resp.error or "")
-                log_fn = logger.warning if is_last else logger.debug
-                log_fn(
-                    "Intent compilation failed (attempt %d/%d): %s",
-                    attempts,
-                    max_retries + 1,
-                    last_error,
-                )
-                if not _is_retryable(compile_resp.error or ""):
-                    self._fire_sadflow(
-                        intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
-                    )
-                    break
-                is_last = attempt == max_retries
-                self._fire_sadflow(
-                    intent_type, intent_params, last_error, attempt, max_retries, is_last, effective_chain, tool_name
-                )
-                if attempt < max_retries:
-                    delay = self._retry_policy.delay_for_attempt(attempt)
-                    await asyncio.sleep(delay)
-                continue
-
-            # Step 2: Execute
-            try:
-                exec_resp = self._client.execution.Execute(
-                    gateway_pb2.ExecuteRequest(
-                        action_bundle=compile_resp.action_bundle,
-                        dry_run=dry_run,
-                        simulation_enabled=simulate,
-                        strategy_id=self._strategy_id,
-                        chain=effective_chain,
-                        wallet_address=effective_wallet,
-                    )
-                )
-            except Exception as e:
-                last_error = f"Execution RPC error: {e}"
-                is_last_exec = attempt == max_retries or not _is_retryable(str(e))
-                log_fn = logger.warning if is_last_exec else logger.debug
-                log_fn(
-                    "Intent execution failed (attempt %d/%d): %s",
-                    attempts,
-                    max_retries + 1,
-                    last_error,
-                )
-                if not _is_retryable(str(e)):
-                    self._fire_sadflow(
-                        intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
-                    )
-                    break
-                self._fire_sadflow(
-                    intent_type,
-                    intent_params,
-                    last_error,
-                    attempt,
-                    max_retries,
-                    is_last_exec,
-                    effective_chain,
-                    tool_name,
-                )
-                if attempt < max_retries:
-                    delay = self._retry_policy.delay_for_attempt(attempt)
-                    await asyncio.sleep(delay)
-                continue
-
-            if exec_resp.success or dry_run:
-                # Success! Build result and enrich.
-                tx_hashes = list(exec_resp.tx_hashes) if exec_resp.tx_hashes else []
-                result = EnrichedExecutionResult(
-                    success=exec_resp.success,
-                    tx_hashes=tx_hashes,
-                    error=None if exec_resp.success else (exec_resp.error or "Unknown execution error"),
-                    attempts=attempts,
-                    dry_run=dry_run,
-                    raw_receipts=getattr(exec_resp, "receipts", None),
-                )
-
-                # Step 3: Enrich result
-                if exec_resp.success and not dry_run:
-                    self._enrich_result(
-                        result,
-                        intent_type,
-                        intent_params,
-                        effective_chain,
-                        effective_wallet,
-                        protocol,
-                        compile_resp=compile_resp,
-                    )
-                elif dry_run and intent_type.lower() == "swap":
-                    self._enrich_dry_run_swap(result, compile_resp, intent_params)
-
-                if attempts > 1:
-                    logger.info(
-                        "Intent %s succeeded after %d attempts",
-                        tool_name or intent_type,
-                        attempts,
-                    )
-
-                return result
-
-            # Execution failed
-            last_error = exec_resp.error or "Unknown execution error"
-            is_final_attempt = attempt == max_retries or not _is_retryable(last_error) or bool(exec_resp.tx_hashes)
-            log_fn = logger.warning if is_final_attempt else logger.debug
-            log_fn(
-                "Intent execution failed (attempt %d/%d): %s",
-                attempts,
-                max_retries + 1,
-                last_error,
+            # Phase 1: Compile intent (RPC + response validation + retry).
+            compile_outcome = await compile_intent_phase(
+                self,
+                intent_type=intent_type,
+                intent_params=intent_params,
+                chain=effective_chain,
+                wallet=effective_wallet,
+                price_map=price_map,
+                tool_name=tool_name,
+                attempt=attempt,
+                max_retries=max_retries,
             )
-
-            # Never retry if the transaction was already broadcast (tx_hashes present).
-            # Retrying could duplicate on-chain actions (e.g., double swap).
-            if exec_resp.tx_hashes:
-                logger.warning(
-                    "Transaction was broadcast (tx_hashes=%s) but execution reported failure. "
-                    "Skipping retry to avoid duplicate on-chain actions.",
-                    list(exec_resp.tx_hashes),
-                )
-                self._fire_sadflow(
-                    intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
-                )
-                return EnrichedExecutionResult(
-                    success=False,
-                    tx_hashes=list(exec_resp.tx_hashes),
-                    error=last_error,
-                    attempts=attempts,
-                )
-
-            if not _is_retryable(last_error):
-                self._fire_sadflow(
-                    intent_type, intent_params, last_error, attempt, max_retries, True, effective_chain, tool_name
-                )
+            if compile_outcome.kind == "break":
+                last_error = compile_outcome.last_error
                 break
+            if compile_outcome.kind == "continue":
+                last_error = compile_outcome.last_error
+                continue
+            compile_resp = compile_outcome.payload
 
-            self._fire_sadflow(
-                intent_type,
-                intent_params,
-                last_error,
-                attempt,
-                max_retries,
-                attempt == max_retries,
-                effective_chain,
-                tool_name,
+            # Phase 2: Execute compiled bundle (RPC + retry on transport error).
+            execute_outcome = await execute_bundle_phase(
+                self,
+                compile_resp=compile_resp,
+                intent_type=intent_type,
+                intent_params=intent_params,
+                chain=effective_chain,
+                wallet=effective_wallet,
+                dry_run=dry_run,
+                simulate=simulate,
+                tool_name=tool_name,
+                attempt=attempt,
+                max_retries=max_retries,
             )
-            if attempt < max_retries:
-                delay = self._retry_policy.delay_for_attempt(attempt)
-                logger.debug("Retrying in %.1fs...", delay)
-                await asyncio.sleep(delay)
+            if execute_outcome.kind == "break":
+                last_error = execute_outcome.last_error
+                break
+            if execute_outcome.kind == "continue":
+                last_error = execute_outcome.last_error
+                continue
+            exec_resp = execute_outcome.payload
+
+            # Phase 3: Success branch — build, enrich, and return.
+            if exec_resp.success or dry_run:
+                return build_success_result(
+                    self,
+                    exec_resp=exec_resp,
+                    compile_resp=compile_resp,
+                    intent_type=intent_type,
+                    intent_params=intent_params,
+                    chain=effective_chain,
+                    wallet=effective_wallet,
+                    dry_run=dry_run,
+                    protocol=protocol,
+                    tool_name=tool_name,
+                    attempts=attempts,
+                )
+
+            # Phase 4: Execution failed — classify and route (break / continue / return).
+            fail_outcome = await handle_execution_failure(
+                self,
+                exec_resp=exec_resp,
+                intent_type=intent_type,
+                intent_params=intent_params,
+                chain=effective_chain,
+                tool_name=tool_name,
+                attempt=attempt,
+                max_retries=max_retries,
+                attempts=attempts,
+            )
+            if fail_outcome.kind == "return":
+                return fail_outcome.payload
+            last_error = fail_outcome.last_error
+            if fail_outcome.kind == "break":
+                break
+            # "continue" falls through — loop-end naturally advances to next attempt.
 
         # All retries exhausted
         return EnrichedExecutionResult(
