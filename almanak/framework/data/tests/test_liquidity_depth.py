@@ -967,3 +967,347 @@ class TestMarketSnapshotLiquidity:
             chain="arbitrum",
             protocol="pancakeswap_v3",
         )
+
+
+# ---------------------------------------------------------------------------
+# Characterization tests for SlippageEstimator._simulate_v3_swap
+# ---------------------------------------------------------------------------
+#
+# These tests are intentionally behavior-pinning: they lock in the current
+# shape of the v3 swap simulator so that the upcoming tick-step helper
+# extraction cannot silently change results.  Every test builds a realistic
+# fixture pool (tick-spacing-aligned, monotonic liquidity_net signs) and
+# asserts on observable fields of the returned SlippageEstimate.  Values are
+# not bit-for-bit asserts against hand-computed V3 math (the simulator uses
+# an approximation, not the reference Uniswap math).  They are instead
+# invariants that any correct refactor MUST preserve.
+
+
+def _make_v3_estimator() -> SlippageEstimator:
+    """Build a SlippageEstimator with a no-op reader for direct _simulate_v3_swap calls."""
+    reader = LiquidityDepthReader(rpc_call=lambda *a: b"\x00" * 32)
+    return SlippageEstimator(liquidity_reader=reader)
+
+
+def _tick_band(
+    lower_tick: int,
+    upper_tick: int,
+    liquidity_per_side: int,
+    price_at_lower: Decimal,
+    price_at_upper: Decimal,
+) -> list[TickData]:
+    """Build a symmetric liquidity band: +L at lower tick, -L at upper tick.
+
+    This is the shape a V3 pool presents to the simulator: liquidity is added
+    when crossing ``lower_tick`` moving up, and removed when crossing
+    ``upper_tick``.  For the opposite direction the sign is mirrored by the
+    simulator.
+    """
+    return [
+        TickData(tick_index=lower_tick, liquidity_net=liquidity_per_side, price_at_tick=price_at_lower),
+        TickData(tick_index=upper_tick, liquidity_net=-liquidity_per_side, price_at_tick=price_at_upper),
+    ]
+
+
+class TestSimulateV3SwapCharacterization:
+    """Characterization tests for SlippageEstimator._simulate_v3_swap.
+
+    Each fixture pool is a realistic mini V3 pool: tick-spacing-aligned
+    bands of liquidity, a current tick, and a current in-range liquidity.
+    Tests pin down observable behavior (direction, fee accumulation,
+    boundary crossing, error paths).
+    """
+
+    # --- small swap, fully within first tick range ------------------------
+
+    def test_small_swap_zero_for_one_within_first_range(self):
+        """A tiny zeroForOne swap well within the current range: positive
+        exec_price and effective_slippage_bps == price_impact_bps (V3 path
+        pins these equal).
+
+        Note on units/fees: the simulator treats ``fee_bps`` literally as
+        "reduce input by fee_bps basis points" — i.e. ``fee_factor =
+        (10000 - fee_bps) / 10000``.  It expects fee_bps to already be in
+        bps (30 for 0.3%), NOT the Uniswap-style fee_tier (3000 for 0.3%).
+        Tests below use ``fee_bps`` in true basis points and pin current
+        behavior; the caller-side fee_tier-vs-bps interpretation is a
+        separate tracked concern, out of scope for this refactor.
+        """
+        est = _make_v3_estimator()
+        ticks = _tick_band(
+            lower_tick=-60,
+            upper_tick=60,
+            liquidity_per_side=10**18,
+            price_at_lower=Decimal("0.994"),
+            price_at_upper=Decimal("1.006"),
+        )
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.001"),
+            zero_for_one=True,
+            mid_price=Decimal("1"),
+            current_tick=0,
+            current_liquidity=10**18,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=18,
+            fee_bps=30,
+        )
+        assert isinstance(result, SlippageEstimate)
+        assert result.expected_price > Decimal(0)
+        # Small trade vs deep liquidity → modest impact (< 1%).
+        assert result.price_impact_bps < 100
+        # Effective slippage mirrors price impact for V3 path.
+        assert result.effective_slippage_bps == result.price_impact_bps
+
+    def test_small_swap_one_for_zero_within_first_range(self):
+        """A tiny oneForZero swap: positive exec_price, small impact."""
+        est = _make_v3_estimator()
+        ticks = _tick_band(
+            lower_tick=-60,
+            upper_tick=60,
+            liquidity_per_side=10**18,
+            price_at_lower=Decimal("0.994"),
+            price_at_upper=Decimal("1.006"),
+        )
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.001"),
+            zero_for_one=False,
+            mid_price=Decimal("1"),
+            current_tick=0,
+            current_liquidity=10**18,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=18,
+            fee_bps=30,
+        )
+        assert result.expected_price > Decimal(0)
+        assert result.price_impact_bps < 100
+        assert result.effective_slippage_bps == result.price_impact_bps
+
+    # --- large swap, crosses multiple ticks -------------------------------
+
+    def test_large_swap_zero_for_one_crosses_multiple_ticks(self):
+        """A large zeroForOne swap that must cross several tick boundaries:
+        result still well-formed, impact non-negative, recommended_max_size
+        stays finite."""
+        est = _make_v3_estimator()
+        # Tight ladder of bands below current tick to force multiple crosses.
+        ticks = [
+            TickData(tick_index=-60, liquidity_net=-(10**17), price_at_tick=Decimal("1794")),
+            TickData(tick_index=-120, liquidity_net=-(10**17), price_at_tick=Decimal("1788")),
+            TickData(tick_index=-180, liquidity_net=-(10**17), price_at_tick=Decimal("1782")),
+            TickData(tick_index=-240, liquidity_net=-(10**17), price_at_tick=Decimal("1776")),
+        ]
+        result = est._simulate_v3_swap(
+            amount=Decimal("100"),  # 100 WETH: large vs per-band liquidity
+            zero_for_one=True,
+            mid_price=Decimal("1800"),
+            current_tick=0,
+            current_liquidity=10**17,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=6,
+            fee_bps=3000,
+        )
+        assert result.price_impact_bps >= 0
+        assert result.recommended_max_size >= Decimal(0)
+
+    # --- exact boundary: current_tick equals a tick_data entry -----------
+
+    def test_swap_at_pool_boundary_current_tick_equals_tick(self):
+        """current_tick sits exactly on an initialized tick: simulator must
+        not double-consume or crash."""
+        est = _make_v3_estimator()
+        ticks = [
+            TickData(tick_index=0, liquidity_net=10**18, price_at_tick=Decimal("1800")),
+            TickData(tick_index=60, liquidity_net=-(10**18), price_at_tick=Decimal("1806")),
+        ]
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.01"),
+            zero_for_one=False,
+            mid_price=Decimal("1800"),
+            current_tick=0,
+            current_liquidity=10**18,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=6,
+            fee_bps=500,
+        )
+        assert isinstance(result, SlippageEstimate)
+        assert result.expected_price >= Decimal(0)
+
+    # --- zero liquidity: error path --------------------------------------
+
+    def test_zero_liquidity_returns_max_impact(self):
+        """No liquidity anywhere: simulator returns 100% impact sentinel."""
+        est = _make_v3_estimator()
+        result = est._simulate_v3_swap(
+            amount=Decimal("1"),
+            zero_for_one=True,
+            mid_price=Decimal("1800"),
+            current_tick=0,
+            current_liquidity=0,
+            ticks=[],
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=6,
+            fee_bps=3000,
+        )
+        assert result.price_impact_bps == 10000
+        assert result.effective_slippage_bps == 10000
+        assert result.recommended_max_size == Decimal(0)
+        assert result.expected_price == Decimal("1800")  # falls back to mid
+
+    # --- fee tier coverage ------------------------------------------------
+
+    @pytest.mark.parametrize("fee_bps", [1, 5, 30, 100])
+    def test_v3_fee_tiers_all_produce_wellformed_estimates(self, fee_bps):
+        """Canonical Uniswap V3 fee tiers (100/500/3000/10000 pips =
+        1/5/30/100 bps) run end-to-end and produce finite, non-negative
+        results."""
+        est = _make_v3_estimator()
+        ticks = _tick_band(
+            lower_tick=-60,
+            upper_tick=60,
+            liquidity_per_side=10**18,
+            price_at_lower=Decimal("0.994"),
+            price_at_upper=Decimal("1.006"),
+        )
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.01"),
+            zero_for_one=True,
+            mid_price=Decimal("1"),
+            current_tick=0,
+            current_liquidity=10**18,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=18,
+            fee_bps=fee_bps,
+        )
+        assert result.price_impact_bps >= 0
+        assert result.effective_slippage_bps >= 0
+        assert result.recommended_max_size >= Decimal(0)
+
+    def test_higher_fee_reduces_output_relative_to_lower_fee(self):
+        """Fee accumulation semantics: raising fee_bps should never produce
+        MORE output for the same input (fee is deducted before tick-walk)."""
+        est = _make_v3_estimator()
+        ticks = _tick_band(
+            lower_tick=-60,
+            upper_tick=60,
+            liquidity_per_side=10**18,
+            price_at_lower=Decimal("0.994"),
+            price_at_upper=Decimal("1.006"),
+        )
+        kwargs = {
+            "amount": Decimal("0.01"),
+            "zero_for_one": True,
+            "mid_price": Decimal("1"),
+            "current_tick": 0,
+            "current_liquidity": 10**18,
+            "ticks": ticks,
+            "tick_spacing": 60,
+            "token0_decimals": 18,
+            "token1_decimals": 18,
+        }
+        low = est._simulate_v3_swap(fee_bps=1, **kwargs)
+        high = est._simulate_v3_swap(fee_bps=100, **kwargs)
+        # Higher fee → exec_price (output/input) for zeroForOne should be <= lower fee's.
+        assert high.expected_price <= low.expected_price
+
+    # --- crossed sqrt_price edge case ------------------------------------
+
+    def test_crossed_sqrt_price_skips_noncontributing_tick(self):
+        """Tick above current_tick on a zeroForOne swap is not on the traversal
+        path and must not produce spurious output.  This pins the ``if
+        target_sqrt_price >= current_sqrt_price: continue`` guard."""
+        est = _make_v3_estimator()
+        # Ticks include one above current that should be filtered by direction.
+        ticks = [
+            TickData(tick_index=-60, liquidity_net=-(10**18), price_at_tick=Decimal("1794")),
+            TickData(tick_index=60, liquidity_net=-(10**18), price_at_tick=Decimal("1806")),
+        ]
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.001"),
+            zero_for_one=True,
+            mid_price=Decimal("1800"),
+            current_tick=0,
+            current_liquidity=10**18,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=6,
+            fee_bps=3000,
+        )
+        assert result.expected_price > Decimal(0)
+        assert result.price_impact_bps >= 0
+
+    # --- zero current_liquidity with ticks present -----------------------
+
+    def test_zero_current_liquidity_but_ticks_present(self):
+        """current_liquidity=0 but tick list non-empty: the loop's liquidity
+        replenishment branch must run; we just assert no crash and sensible
+        shape."""
+        est = _make_v3_estimator()
+        ticks = [
+            TickData(tick_index=-60, liquidity_net=-(10**18), price_at_tick=Decimal("1794")),
+            TickData(tick_index=60, liquidity_net=10**18, price_at_tick=Decimal("1806")),
+        ]
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.001"),
+            zero_for_one=True,
+            mid_price=Decimal("1800"),
+            current_tick=0,
+            current_liquidity=0,
+            ticks=ticks,
+            tick_spacing=60,
+            token0_decimals=18,
+            token1_decimals=6,
+            fee_bps=3000,
+        )
+        assert isinstance(result, SlippageEstimate)
+
+    # --- V3-family protocols (sushiswap_v3, pancakeswap_v3, aerodrome-CL) -
+    # The simulator is protocol-agnostic: it only cares about fee_bps,
+    # tick_spacing and liquidity_net.  We exercise the three dominant
+    # variants by passing their canonical tick_spacing + fee combinations.
+
+    @pytest.mark.parametrize(
+        "label,fee_bps,tick_spacing",
+        [
+            ("sushiswap_v3_030", 30, 60),
+            ("pancakeswap_v3_025", 25, 50),
+            ("aerodrome_cl_005", 5, 10),
+        ],
+    )
+    def test_v3_family_variants_end_to_end(self, label, fee_bps, tick_spacing):
+        """All V3-family protocols pinning: each (fee, tick_spacing) combo
+        runs end-to-end and returns a well-formed estimate."""
+        est = _make_v3_estimator()
+        ticks = _tick_band(
+            lower_tick=-tick_spacing,
+            upper_tick=tick_spacing,
+            liquidity_per_side=10**18,
+            price_at_lower=Decimal("0.994"),
+            price_at_upper=Decimal("1.006"),
+        )
+        result = est._simulate_v3_swap(
+            amount=Decimal("0.01"),
+            zero_for_one=True,
+            mid_price=Decimal("1"),
+            current_tick=0,
+            current_liquidity=10**18,
+            ticks=ticks,
+            tick_spacing=tick_spacing,
+            token0_decimals=18,
+            token1_decimals=18,
+            fee_bps=fee_bps,
+        )
+        assert result.price_impact_bps >= 0, f"{label}: negative impact"
+        assert result.effective_slippage_bps == result.price_impact_bps, f"{label}: slippage != impact"
+        assert result.recommended_max_size >= Decimal(0), f"{label}: negative max size"

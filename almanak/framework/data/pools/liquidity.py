@@ -447,6 +447,270 @@ class LiquidityDepthReader:
 
 
 # ---------------------------------------------------------------------------
+# V3 swap simulation -- pure helpers
+#
+# Pulled out of SlippageEstimator._simulate_v3_swap so each tick-step phase
+# (direction filtering, sqrt-price derivation, per-step math, tick crossing,
+# result finalization) is independently readable and testable.  These
+# helpers preserve the original V3 math and fee-accumulation semantics
+# exactly: the outer loop composes them in the same order as the original
+# monolithic implementation.
+# ---------------------------------------------------------------------------
+
+
+def _tick_sqrt_price(tick: int) -> Decimal:
+    """Return ``sqrt(1.0001^tick) = 1.0001^(tick/2)`` as a Decimal.
+
+    Matches the original simulator's derivation: ``Decimal(str(math.pow(
+    1.0001, tick / 2)))``. Kept as a standalone helper because both the
+    outer loop (for ``current_tick``) and the step math (for each
+    ``tick_data.tick_index``) need the same conversion.
+    """
+    return Decimal(str(math.pow(1.0001, tick / 2)))
+
+
+def _empty_pool_estimate(mid_price: Decimal) -> SlippageEstimate:
+    """Sentinel result for a pool with zero current liquidity AND no ticks.
+
+    Returns 100% price impact / slippage and a zero recommended max size.
+    ``expected_price`` is the mid_price (the simulator cannot improve on
+    it without any liquidity information).
+    """
+    return SlippageEstimate(
+        expected_price=mid_price,
+        price_impact_bps=10000,
+        effective_slippage_bps=10000,
+        recommended_max_size=Decimal(0),
+    )
+
+
+def _zero_output_estimate() -> SlippageEstimate:
+    """Sentinel result for "amount > 0 but simulator produced no output".
+
+    Returns zero expected_price and 100% impact. Caller uses this when
+    the tick walk exhausted all relevant liquidity without filling the
+    input.
+    """
+    return SlippageEstimate(
+        expected_price=Decimal(0),
+        price_impact_bps=10000,
+        effective_slippage_bps=10000,
+        recommended_max_size=Decimal(0),
+    )
+
+
+def _scaled_amount_after_fee(
+    amount: Decimal,
+    zero_for_one: bool,
+    token0_decimals: int,
+    token1_decimals: int,
+    fee_bps: int,
+) -> Decimal:
+    """Return the raw-unit input amount after fee deduction.
+
+    Scales ``amount`` by 10^decimals for the input-side token, then applies
+    ``fee_factor = (10000 - fee_bps) / 10000``. Preserves the original
+    fee-accumulation convention exactly (fees are deducted up-front, before
+    any tick-walk).
+    """
+    if zero_for_one:
+        raw_amount = amount * Decimal(10) ** token0_decimals
+    else:
+        raw_amount = amount * Decimal(10) ** token1_decimals
+
+    fee_factor = Decimal(10000 - fee_bps) / Decimal(10000)
+    return raw_amount * fee_factor
+
+
+def _relevant_ticks_for_direction(
+    ticks: list[TickData],
+    current_tick: int,
+    zero_for_one: bool,
+) -> list[TickData]:
+    """Filter + sort ticks for direction-aware traversal.
+
+    zeroForOne (price decreases): ticks at-or-below current, sorted
+      descending (we walk left).
+    oneForZero (price increases): ticks at-or-above current, sorted
+      ascending (we walk right).
+    """
+    if zero_for_one:
+        return sorted(
+            [t for t in ticks if t.tick_index <= current_tick],
+            key=lambda t: t.tick_index,
+            reverse=True,
+        )
+    return sorted(
+        [t for t in ticks if t.tick_index >= current_tick],
+        key=lambda t: t.tick_index,
+    )
+
+
+def _cross_tick(liquidity: Decimal, liquidity_net: int, zero_for_one: bool) -> Decimal:
+    """Apply the ``liquidity_net`` crossing sign for the given direction.
+
+    Moving up (oneForZero) adds ``liquidity_net``; moving down (zeroForOne)
+    subtracts it. This mirrors the Uniswap V3 invariant and is used both
+    for the "cross into next range" branch and the "below-active-range
+    replenishment" branch.
+    """
+    if zero_for_one:
+        return liquidity - Decimal(liquidity_net)
+    return liquidity + Decimal(liquidity_net)
+
+
+def _consume_v3_step(
+    current_sqrt_price: Decimal,
+    target_sqrt_price: Decimal,
+    liquidity: Decimal,
+    remaining_amount: Decimal,
+    zero_for_one: bool,
+) -> tuple[Decimal, Decimal, Decimal, str]:
+    """Consume one tick-step of a V3 swap.
+
+    Returns ``(step_output, step_consumed, new_sqrt_price, flag)`` where
+    ``flag`` is one of:
+
+      - ``"skip"``: target tick is on the wrong side of ``current_sqrt_price``
+        for this direction -- caller should ``continue`` without changing
+        state.
+      - ``"abort"``: non-positive sqrt prices encountered -- caller should
+        stop the walk.
+      - ``"within"``: the remaining input fits entirely inside this step;
+        ``step_consumed`` equals the pre-step ``remaining_amount`` and the
+        caller should zero-out remaining and break.
+      - ``"cross"``: this entire range was consumed; caller should
+        subtract ``step_consumed``, update ``current_sqrt_price`` to
+        ``new_sqrt_price`` and cross the tick.
+
+    For ``"skip"`` / ``"abort"`` the caller ignores the numeric return
+    values (they are returned as zeros + the original ``current_sqrt_price``
+    for type consistency).
+    """
+    if zero_for_one:
+        return _consume_v3_step_zero_for_one(current_sqrt_price, target_sqrt_price, liquidity, remaining_amount)
+    return _consume_v3_step_one_for_zero(current_sqrt_price, target_sqrt_price, liquidity, remaining_amount)
+
+
+def _consume_v3_step_zero_for_one(
+    current_sqrt_price: Decimal,
+    target_sqrt_price: Decimal,
+    liquidity: Decimal,
+    remaining_amount: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, str]:
+    """zeroForOne single-tick step: price moves DOWN, caller consumes token0.
+
+    delta_x_to_next = L * (sqrt_cur - sqrt_tgt) / (sqrt_cur * sqrt_tgt)
+    delta_y         = L * (sqrt_cur - sqrt_tgt)     (whole range)
+                    = L * sqrt_diff * fraction      (partial range)
+    """
+    if target_sqrt_price >= current_sqrt_price:
+        return Decimal(0), Decimal(0), current_sqrt_price, "skip"
+
+    sqrt_diff = current_sqrt_price - target_sqrt_price
+    if current_sqrt_price <= 0 or target_sqrt_price <= 0:
+        return Decimal(0), Decimal(0), current_sqrt_price, "abort"
+
+    amount_to_next = liquidity * sqrt_diff / (current_sqrt_price * target_sqrt_price)
+
+    if amount_to_next >= remaining_amount:
+        fraction = remaining_amount / amount_to_next
+        output = liquidity * sqrt_diff * fraction
+        return output, remaining_amount, current_sqrt_price, "within"
+
+    output = liquidity * sqrt_diff
+    return output, amount_to_next, target_sqrt_price, "cross"
+
+
+def _consume_v3_step_one_for_zero(
+    current_sqrt_price: Decimal,
+    target_sqrt_price: Decimal,
+    liquidity: Decimal,
+    remaining_amount: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, str]:
+    """oneForZero single-tick step: price moves UP, caller consumes token1.
+
+    delta_y_to_next = L * (sqrt_tgt - sqrt_cur)
+    delta_x         = L * sqrt_diff / (sqrt_cur * sqrt_tgt)                       (whole)
+                    = L * sqrt_diff * f / (sqrt_cur * (sqrt_cur + sqrt_diff*f))   (partial)
+    """
+    if target_sqrt_price <= current_sqrt_price:
+        return Decimal(0), Decimal(0), current_sqrt_price, "skip"
+
+    sqrt_diff = target_sqrt_price - current_sqrt_price
+    amount_to_next = liquidity * sqrt_diff
+
+    if amount_to_next >= remaining_amount:
+        fraction = remaining_amount / amount_to_next
+        if liquidity > 0 and current_sqrt_price > 0:
+            output = (
+                liquidity * sqrt_diff * fraction / (current_sqrt_price * (current_sqrt_price + sqrt_diff * fraction))
+            )
+        else:
+            output = Decimal(0)
+        return output, remaining_amount, current_sqrt_price, "within"
+
+    if current_sqrt_price > 0 and target_sqrt_price > 0:
+        output = liquidity * sqrt_diff / (current_sqrt_price * target_sqrt_price)
+    else:
+        output = Decimal(0)
+    return output, amount_to_next, target_sqrt_price, "cross"
+
+
+def _finalize_slippage_estimate(
+    amount: Decimal,
+    zero_for_one: bool,
+    total_output: Decimal,
+    mid_price: Decimal,
+    token0_decimals: int,
+    token1_decimals: int,
+) -> SlippageEstimate:
+    """Project tick-walk output into human units and build a SlippageEstimate.
+
+    Mirrors the original tail of ``_simulate_v3_swap`` exactly:
+      - human_output = total_output / 10^decimals (output-side token).
+      - amount > 0 + human_output > 0: exec_price = ratio.
+      - amount > 0 + human_output <= 0: 100% slippage sentinel.
+      - else: exec_price falls back to mid_price (idempotent).
+      - price_impact_bps = |1 - exec/mid| * 10000 (when mid_price > 0).
+      - recommended_max_size = amount * 100 / bps (linearized 1% target),
+        or amount * 10 when impact is zero.
+    """
+    if zero_for_one:
+        human_output = total_output / Decimal(10) ** token1_decimals
+    else:
+        human_output = total_output / Decimal(10) ** token0_decimals
+
+    if amount > 0 and human_output > 0:
+        if zero_for_one:
+            exec_price = human_output / amount
+        else:
+            exec_price = amount / human_output
+    elif amount > 0 and human_output <= 0:
+        return _zero_output_estimate()
+    else:
+        exec_price = mid_price
+
+    if mid_price > 0:
+        price_impact_bps = int(abs(Decimal(1) - exec_price / mid_price) * 10000)
+    else:
+        price_impact_bps = 0
+    effective_slippage_bps = price_impact_bps
+
+    if price_impact_bps > 0 and amount > 0:
+        recommended_max = amount * Decimal(100) / Decimal(price_impact_bps)
+    else:
+        recommended_max = amount * Decimal(10)
+
+    return SlippageEstimate(
+        expected_price=exec_price,
+        price_impact_bps=price_impact_bps,
+        effective_slippage_bps=effective_slippage_bps,
+        recommended_max_size=recommended_max,
+    )
+
+
+# ---------------------------------------------------------------------------
 # SlippageEstimator
 # ---------------------------------------------------------------------------
 
@@ -793,168 +1057,72 @@ class SlippageEstimator:
         For a oneForZero swap (token1 -> token0):
             - Price increases (tick moves up)
             - We consume liquidity moving right through ticks
+
+        Implementation is split into pure module-level helpers:
+          - ``_empty_pool_estimate`` / ``_zero_output_estimate`` for sentinel
+            early-return paths.
+          - ``_scaled_amount_after_fee`` prepares the remaining input.
+          - ``_relevant_ticks_for_direction`` filters + sorts tick data.
+          - ``_consume_v3_step`` advances one tick step (direction-aware
+            math for how far we move + how much we output).
+          - ``_cross_tick`` applies the liquidity_net crossing sign.
+          - ``_finalize_slippage_estimate`` projects total_output back to
+            human units and builds the final SlippageEstimate.
+        Preserving these pieces separately keeps the outer loop readable
+        while the tick-step math stays a single testable unit.
         """
         if current_liquidity == 0 and not ticks:
-            # No liquidity at all
-            return SlippageEstimate(
-                expected_price=mid_price,
-                price_impact_bps=10000,  # 100% impact
-                effective_slippage_bps=10000,
-                recommended_max_size=Decimal(0),
-            )
+            return _empty_pool_estimate(mid_price)
 
-        # Convert amount to raw units for simulation
-        if zero_for_one:
-            raw_amount = amount * Decimal(10) ** token0_decimals
-        else:
-            raw_amount = amount * Decimal(10) ** token1_decimals
+        remaining_amount = _scaled_amount_after_fee(
+            amount=amount,
+            zero_for_one=zero_for_one,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+            fee_bps=fee_bps,
+        )
 
-        # Apply fee
-        fee_factor = Decimal(10000 - fee_bps) / Decimal(10000)
-        remaining_amount = raw_amount * fee_factor
-
-        # Track total output
         total_output = Decimal(0)
         liquidity = Decimal(current_liquidity)
+        current_sqrt_price = _tick_sqrt_price(current_tick)
 
-        # Sort ticks for traversal direction
-        if zero_for_one:
-            # Moving down: need ticks below current, sorted descending
-            relevant_ticks = sorted(
-                [t for t in ticks if t.tick_index <= current_tick],
-                key=lambda t: t.tick_index,
-                reverse=True,
-            )
-        else:
-            # Moving up: need ticks above current, sorted ascending
-            relevant_ticks = sorted(
-                [t for t in ticks if t.tick_index >= current_tick],
-                key=lambda t: t.tick_index,
-            )
-
-        # Walk through ticks
-        current_sqrt_price = Decimal(str(math.pow(1.0001, current_tick / 2)))
-
-        for tick_data in relevant_ticks:
+        for tick_data in _relevant_ticks_for_direction(ticks, current_tick, zero_for_one):
             if remaining_amount <= 0:
                 break
 
             if liquidity <= 0:
-                # Update liquidity from this tick
-                if zero_for_one:
-                    liquidity -= Decimal(tick_data.liquidity_net)
-                else:
-                    liquidity += Decimal(tick_data.liquidity_net)
+                # Below-active-range replenishment: apply the tick's
+                # liquidity_net to re-enter a positive-L region and move on.
+                liquidity = _cross_tick(liquidity, tick_data.liquidity_net, zero_for_one)
                 continue
 
-            target_sqrt_price = Decimal(str(math.pow(1.0001, tick_data.tick_index / 2)))
-
-            if zero_for_one:
-                # Amount of token0 needed to move from current to target sqrt price
-                # delta_x = L * (1/sqrt_target - 1/sqrt_current) -- but simplified
-                if target_sqrt_price >= current_sqrt_price:
-                    continue
-                sqrt_diff = current_sqrt_price - target_sqrt_price
-                if current_sqrt_price > 0 and target_sqrt_price > 0:
-                    amount_to_next = liquidity * sqrt_diff / (current_sqrt_price * target_sqrt_price)
-                else:
-                    break
-
-                if amount_to_next >= remaining_amount:
-                    # Swap completes within this tick range
-                    # Compute output: delta_y = L * (sqrt_current - sqrt_target)
-                    fraction = remaining_amount / amount_to_next
-                    output = liquidity * sqrt_diff * fraction
-                    total_output += output
-                    remaining_amount = Decimal(0)
-                else:
-                    # Consume entire range
-                    output = liquidity * sqrt_diff
-                    total_output += output
-                    remaining_amount -= amount_to_next
-                    current_sqrt_price = target_sqrt_price
-                    # Cross tick: update liquidity
-                    liquidity -= Decimal(tick_data.liquidity_net)
-
-            else:
-                # Amount of token1 needed to move from current to target sqrt price
-                if target_sqrt_price <= current_sqrt_price:
-                    continue
-                sqrt_diff = target_sqrt_price - current_sqrt_price
-                amount_to_next = liquidity * sqrt_diff
-
-                if amount_to_next >= remaining_amount:
-                    fraction = remaining_amount / amount_to_next
-                    if liquidity > 0 and current_sqrt_price > 0:
-                        output = (
-                            liquidity
-                            * sqrt_diff
-                            * fraction
-                            / (current_sqrt_price * (current_sqrt_price + sqrt_diff * fraction))
-                        )
-                    else:
-                        output = Decimal(0)
-                    total_output += output
-                    remaining_amount = Decimal(0)
-                else:
-                    if current_sqrt_price > 0 and target_sqrt_price > 0:
-                        output = liquidity * sqrt_diff / (current_sqrt_price * target_sqrt_price)
-                    else:
-                        output = Decimal(0)
-                    total_output += output
-                    remaining_amount -= amount_to_next
-                    current_sqrt_price = target_sqrt_price
-                    liquidity += Decimal(tick_data.liquidity_net)
-
-        # Convert output to human-readable units
-        if zero_for_one:
-            # Output is in token1 raw units -> divide by 10^token1_decimals
-            human_output = total_output / Decimal(10) ** token1_decimals
-        else:
-            # Output is in token0 raw units -> divide by 10^token0_decimals
-            human_output = total_output / Decimal(10) ** token0_decimals
-
-        # Compute execution price
-        if amount > 0 and human_output > 0:
-            if zero_for_one:
-                # Execution price = output_token1 / input_token0
-                exec_price = human_output / amount
-            else:
-                # Execution price = input_token1 / output_token0
-                exec_price = amount / human_output
-        elif amount > 0 and human_output <= 0:
-            # No output produced -- 100% slippage (insufficient liquidity)
-            return SlippageEstimate(
-                expected_price=Decimal(0),
-                price_impact_bps=10000,
-                effective_slippage_bps=10000,
-                recommended_max_size=Decimal(0),
+            step_output, step_consumed, new_sqrt_price, flag = _consume_v3_step(
+                current_sqrt_price=current_sqrt_price,
+                target_sqrt_price=_tick_sqrt_price(tick_data.tick_index),
+                liquidity=liquidity,
+                remaining_amount=remaining_amount,
+                zero_for_one=zero_for_one,
             )
-        else:
-            exec_price = mid_price
 
-        # Price impact (vs mid-market)
-        if mid_price > 0:
-            price_impact_bps = int(abs(Decimal(1) - exec_price / mid_price) * 10000)
-            effective_slippage_bps = price_impact_bps
-        else:
-            price_impact_bps = 0
-            effective_slippage_bps = 0
+            total_output += step_output
 
-        # Recommended max size: binary search for 1% slippage
-        # Approximate: proportional to current liquidity coverage
-        if price_impact_bps > 0 and amount > 0:
-            # Linear approximation: max_size ~ amount * (100 bps / actual_bps)
-            if price_impact_bps > 0:
-                recommended_max = amount * Decimal(100) / Decimal(price_impact_bps)
-            else:
-                recommended_max = amount * Decimal(10)
-        else:
-            recommended_max = amount * Decimal(10)
+            if flag == "skip":
+                continue
+            if flag == "abort":
+                break
+            if flag == "within":
+                remaining_amount = Decimal(0)
+                break
+            # flag == "cross"
+            remaining_amount -= step_consumed
+            current_sqrt_price = new_sqrt_price
+            liquidity = _cross_tick(liquidity, tick_data.liquidity_net, zero_for_one)
 
-        return SlippageEstimate(
-            expected_price=exec_price,
-            price_impact_bps=price_impact_bps,
-            effective_slippage_bps=effective_slippage_bps,
-            recommended_max_size=recommended_max,
+        return _finalize_slippage_estimate(
+            amount=amount,
+            zero_for_one=zero_for_one,
+            total_output=total_output,
+            mid_price=mid_price,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
         )
