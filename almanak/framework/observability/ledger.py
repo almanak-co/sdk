@@ -6,6 +6,31 @@ structured, queryable format.  This replaces grepping through timeline event
 
 The ledger is populated by ``StrategyRunner`` after result enrichment and
 stored alongside timeline events in the gateway state store.
+
+Phase 5k -- helper extraction layout
+------------------------------------
+``build_ledger_entry`` is composed from small phase helpers that each
+return a piece of the final ``LedgerEntry``.  The helpers run in a fixed
+order; ordering is NOT load-bearing (unlike the position-events pipeline)
+because none of the helpers depend on output of earlier phases:
+
+    alpha  _extract_intent_type          : enum-or-string dispatch
+    beta   _extract_tokens_and_amounts   : dispatch between two sub-helpers:
+             _extract_from_swap_amounts       (SwapAmounts + intent fallback
+                                               for empty token sides)
+             _extract_from_intent_fallback    (intent-attr precedence chain
+                                               from_token > borrow_token >
+                                               supply_token > token;
+                                               amount > borrow_amount >
+                                               supply_amount > amount_usd).
+    gamma  _extract_tx_and_gas           : first tx_hash + total gas + gas USD
+    delta  _coalesce_error               : failure + empty-error -> result.error
+    epsilon _build_extracted_data_json   : serialize + multi-tx augmentation
+
+The SQLite INSERT at ``backends/sqlite.py:2291-2322`` names 21 columns and
+pairs each with a specific ``entry.<attribute>`` read.  The refactor
+preserves every LedgerEntry field-value semantic byte-identical so the
+write contract is unaffected.
 """
 
 import json
@@ -103,6 +128,159 @@ class LedgerEntry:
         )
 
 
+def _extract_intent_type(intent: Any) -> str:
+    """Phase alpha -- normalize intent_type to a string.
+
+    Supports both enum-like payloads (``.value`` present) and raw strings.
+    Missing ``intent_type`` attribute maps to ``""``.
+    """
+    if not hasattr(intent, "intent_type"):
+        return ""
+    it = intent.intent_type
+    return it.value if hasattr(it, "value") else str(it)
+
+
+# Tuple returned by the token/amount phase -- kept as a plain tuple to avoid
+# another tiny dataclass and to match the positional assignment style in
+# the final LedgerEntry(...) constructor.
+_TokensAndAmounts = tuple[str, str, str, str, str, float | None]
+
+
+def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmounts:
+    """Phase beta-primary -- all fields from ``result.swap_amounts``.
+
+    Token sides fall back to ``intent.from_token`` / ``intent.to_token`` when
+    the swap_amounts side is falsy (empty string). Amount sides use
+    truthiness coercion to stringify -- matches the pre-Phase-5k contract
+    (Decimal(0) -> "" is a latent bug pinned by the characterization tests;
+    NOT fixed in this refactor).
+    """
+    token_in = swap_amounts.token_in or getattr(intent, "from_token", "") or ""
+    token_out = swap_amounts.token_out or getattr(intent, "to_token", "") or ""
+    amount_in = str(swap_amounts.amount_in_decimal) if swap_amounts.amount_in_decimal else ""
+    amount_out = str(swap_amounts.amount_out_decimal) if swap_amounts.amount_out_decimal else ""
+    effective_price = str(swap_amounts.effective_price) if swap_amounts.effective_price is not None else ""
+    return (
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        effective_price,
+        swap_amounts.slippage_bps,
+    )
+
+
+def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
+    """Phase beta-fallback -- no swap_amounts; walk the intent-attr chain.
+
+    Token precedence:
+        ``from_token > borrow_token > supply_token > token``
+    Amount precedence:
+        ``amount > borrow_amount > supply_amount > amount_usd``
+
+    Supports swap-style (from_token/to_token), lending
+    (borrow_token/supply_token) and generic (token/amount) intents.
+    """
+    token_in = (
+        getattr(intent, "from_token", "")
+        or getattr(intent, "borrow_token", "")
+        or getattr(intent, "supply_token", "")
+        or getattr(intent, "token", "")
+        or ""
+    )
+    token_out = getattr(intent, "to_token", "") or ""
+    amt = (
+        getattr(intent, "amount", None)
+        or getattr(intent, "borrow_amount", None)
+        or getattr(intent, "supply_amount", None)
+        or getattr(intent, "amount_usd", None)
+    )
+    amount_in = str(amt) if amt is not None else ""
+    return (token_in, token_out, amount_in, "", "", None)
+
+
+def _extract_tokens_and_amounts(intent: Any, result: Any) -> _TokensAndAmounts:
+    """Phase beta -- dispatch between SwapAmounts and intent-attr fallback.
+
+    A truthy ``result.swap_amounts`` drives every field (used by SWAP,
+    LP_CLOSE, and anything whose receipt parser emits SwapAmounts). Falsy
+    or absent swap_amounts walks the intent-attr precedence chain.
+    """
+    swap_amounts = getattr(result, "swap_amounts", None) if result else None
+    if swap_amounts:
+        return _extract_from_swap_amounts(swap_amounts, intent)
+    return _extract_from_intent_fallback(intent)
+
+
+def _extract_tx_and_gas(result: Any) -> tuple[str, int, str]:
+    """Phase gamma -- (tx_hash, gas_used, gas_usd) from the result envelope.
+
+    - ``tx_hash`` = ``result.transaction_results[0].tx_hash or ""`` when the
+      list is non-empty; empty-list or missing attr -> ``""``.
+    - ``gas_used`` = ``result.total_gas_used or 0`` (None coalesces to 0).
+    - ``gas_usd`` = ``str(result.gas_cost_usd)`` when not None; else ``""``.
+    """
+    if not result:
+        return ("", 0, "")
+
+    tx_hash = ""
+    tx_results = getattr(result, "transaction_results", None)
+    if tx_results:
+        tx_hash = tx_results[0].tx_hash or ""
+
+    gas_used = getattr(result, "total_gas_used", 0) or 0
+    gas_cost = getattr(result, "gas_cost_usd", None)
+    gas_usd = str(gas_cost) if gas_cost is not None else ""
+    return (tx_hash, gas_used, gas_usd)
+
+
+def _coalesce_error(success: bool, error: str, result: Any) -> str:
+    """Phase delta -- if the caller said "failed" and supplied no error
+    string, fall back to ``result.error`` (coalescing None -> "").
+
+    Caller-supplied error always wins; success=True skips the branch.
+    """
+    if not success and not error and result:
+        return getattr(result, "error", "") or ""
+    return error
+
+
+def _build_extracted_data_json(result: Any) -> str:
+    """Phase epsilon -- serialize ``result.extracted_data`` with type tags,
+    and for multi-tx bundles augment the payload with an ``all_tx_results``
+    array capturing every leg's hash/gas/success.
+
+    Returns ``""`` when the result lacks extracted_data (attribute absent or
+    dict empty). Single-tx results skip the augmentation branch.
+
+    Defensive ``try/except`` around the augmentation keeps the original
+    serialization on any JSON decode failure (today unreachable from prod,
+    but the safety net is cheap and matches the pre-refactor contract).
+    """
+    if not result or not getattr(result, "extracted_data", None):
+        return ""
+
+    extracted_data_json = serialize_extracted_data(result.extracted_data)
+
+    tx_results = getattr(result, "transaction_results", None) or []
+    if not extracted_data_json or len(tx_results) <= 1:
+        return extracted_data_json
+
+    try:
+        parsed = json.loads(extracted_data_json)
+        parsed["all_tx_results"] = [
+            {
+                "tx_hash": getattr(tr, "tx_hash", "") or "",
+                "gas_used": getattr(tr, "gas_used", 0) or 0,
+                "success": getattr(tr, "success", True),
+            }
+            for tr in tx_results
+        ]
+        return json.dumps(parsed)
+    except (json.JSONDecodeError, TypeError):
+        return extracted_data_json  # keep existing serialization on failure
+
+
 def build_ledger_entry(
     *,
     strategy_id: str,
@@ -117,94 +295,22 @@ def build_ledger_entry(
 
     Extracts structured trade data from the enriched result object
     (swap_amounts, lp_close_data, etc.) so callers don't need to
-    know the extraction details.
+    know the extraction details. Sequences the phase helpers
+    alpha -> beta -> gamma -> delta -> epsilon; see module docstring.
     """
-    intent_type = ""
-    if hasattr(intent, "intent_type"):
-        it = intent.intent_type
-        intent_type = it.value if hasattr(it, "value") else str(it)
-
-    token_in = ""
-    amount_in = ""
-    token_out = ""
-    amount_out = ""
-    effective_price = ""
-    slippage_bps: float | None = None
+    intent_type = _extract_intent_type(intent)
+    (
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        effective_price,
+        slippage_bps,
+    ) = _extract_tokens_and_amounts(intent, result)
+    tx_hash, gas_used, gas_usd = _extract_tx_and_gas(result)
+    final_error = _coalesce_error(success, error, result)
+    extracted_data_json = _build_extracted_data_json(result)
     protocol = getattr(intent, "protocol", "") or ""
-
-    # Extract from SwapAmounts (swap, LP close, etc.)
-    swap_amounts = getattr(result, "swap_amounts", None) if result else None
-    if swap_amounts:
-        token_in = swap_amounts.token_in or getattr(intent, "from_token", "") or ""
-        token_out = swap_amounts.token_out or getattr(intent, "to_token", "") or ""
-        amount_in = str(swap_amounts.amount_in_decimal) if swap_amounts.amount_in_decimal else ""
-        amount_out = str(swap_amounts.amount_out_decimal) if swap_amounts.amount_out_decimal else ""
-        if swap_amounts.effective_price is not None:
-            effective_price = str(swap_amounts.effective_price)
-        slippage_bps = swap_amounts.slippage_bps
-    else:
-        # Fallback: extract tokens from the intent itself.
-        # Supports swap-style (from_token/to_token), lending (borrow_token/supply_token),
-        # and generic (token/amount) intents.
-        token_in = (
-            getattr(intent, "from_token", "")
-            or getattr(intent, "borrow_token", "")
-            or getattr(intent, "supply_token", "")
-            or getattr(intent, "token", "")
-            or ""
-        )
-        token_out = getattr(intent, "to_token", "") or ""
-        amt = (
-            getattr(intent, "amount", None)
-            or getattr(intent, "borrow_amount", None)
-            or getattr(intent, "supply_amount", None)
-            or getattr(intent, "amount_usd", None)
-        )
-        if amt is not None:
-            amount_in = str(amt)
-
-    # Extract tx details from result
-    tx_hash = ""
-    gas_used = 0
-    gas_usd = ""
-    if result:
-        if hasattr(result, "transaction_results") and result.transaction_results:
-            first_tx = result.transaction_results[0]
-            tx_hash = first_tx.tx_hash or ""
-        gas_used = getattr(result, "total_gas_used", 0) or 0
-        gas_cost = getattr(result, "gas_cost_usd", None)
-        if gas_cost is not None:
-            gas_usd = str(gas_cost)
-
-    if not success and not error and result:
-        error = getattr(result, "error", "") or ""
-
-    # Serialize extracted_data with type tags for round-trip fidelity
-    extracted_data_json = ""
-    if result and hasattr(result, "extracted_data") and result.extracted_data:
-        extracted_data_json = serialize_extracted_data(result.extracted_data)
-
-    # Capture all tx results for multi-action bundles (approve+swap, etc.)
-    if (
-        extracted_data_json
-        and result
-        and hasattr(result, "transaction_results")
-        and result.transaction_results
-        and len(result.transaction_results) > 1
-    ):
-        try:
-            parsed = json.loads(extracted_data_json)
-            parsed["all_tx_results"] = [
-                {
-                    "tx_hash": getattr(tr, "tx_hash", "") or "",
-                    "gas_used": getattr(tr, "gas_used", 0) or 0,
-                    "success": getattr(tr, "success", True),
-                }
-                for tr in result.transaction_results
-            ]
-            extracted_data_json = json.dumps(parsed)
-        except (json.JSONDecodeError, TypeError):
-            pass  # Keep existing serialization on failure
 
     return LedgerEntry(
         cycle_id=cycle_id,
@@ -222,7 +328,7 @@ def build_ledger_entry(
         chain=chain,
         protocol=protocol,
         success=success,
-        error=error,
+        error=final_error,
         extracted_data_json=extracted_data_json,
     )
 
