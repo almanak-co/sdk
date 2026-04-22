@@ -29,9 +29,12 @@ from web3.providers.rpc.async_rpc import AsyncHTTPProvider
 
 # Local Anvil RPC calls should return quickly; when they don't, the fork is usually stalled.
 # Keep these defaults aggressive to avoid 10+ minute cascades when an Anvil instance hangs.
+# Read timeout was bumped 10s -> 30s (#1738) to absorb the legitimate long calls the
+# ethereum fork makes when executing LP close action bundles (eth_call heavy path);
+# connect timeout stays tight because connect-stalls genuinely indicate a dead fork.
 TEST_RPC_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_RPC_CONNECT_TIMEOUT_SECONDS", "3"))
-TEST_RPC_READ_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_RPC_READ_TIMEOUT_SECONDS", "10"))
-TEST_WEB3_DEFAULT_HTTP_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_WEB3_HTTP_TIMEOUT_SECONDS", "10"))
+TEST_RPC_READ_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_RPC_READ_TIMEOUT_SECONDS", "30"))
+TEST_WEB3_DEFAULT_HTTP_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_WEB3_HTTP_TIMEOUT_SECONDS", "30"))
 TEST_CAST_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_CAST_TIMEOUT_SECONDS", "15"))
 
 # ExecutionOrchestrator / Submitter confirmation timeout (upper bound for receipt polling).
@@ -1017,6 +1020,18 @@ _module_baselines: dict[tuple[int, str], str] = {}
 _session_pristine: dict[int, str] = {}
 
 
+class _PristineTransportError(RuntimeError):
+    """Raised by `_ensure_pristine_and_rearm` when an evm_snapshot/evm_revert RPC
+    call fails with a transport-level exception on a path where retrying is safe
+    (i.e. the session pristine map has not yet been committed to a new state, so
+    a second attempt cannot corrupt isolation).
+
+    Distinct from a `False` return, which means the helper completed but could
+    not guarantee pristine state for the current module — retrying `False` would
+    risk flipping a definitive isolation-loss verdict into a misleading `True`.
+    """
+
+
 def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
     """Revert fork to session pristine state, then recapture pristine for next module.
 
@@ -1036,17 +1051,26 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
         successfully reverted + recaptured). False if the fork is unhealthy
         enough that pristine state could not be established; callers may
         continue but cross-module isolation is degraded.
+
+    Raises:
+        _PristineTransportError: if an evm_snapshot/evm_revert RPC call fails
+            with a transport-level exception on a path where retrying is safe.
+            The caller (`reset_fork_to_pristine`) catches this to drive its
+            retry-with-backoff loop against transient RPC flakes.
     """
     snap_id = _session_pristine.get(chain_id)
 
     if snap_id is None:
         # First time for this chain — capture current state as pristine.
+        # A transport exception here is safe to retry: no state has been
+        # mutated yet and `_session_pristine[chain_id]` has not been written.
         try:
             resp = web3_instance.provider.make_request("evm_snapshot", [])
-            new_snap = resp.get("result") if isinstance(resp, dict) else None
         except Exception as e:
-            print(f"WARNING: could not capture initial pristine snapshot for chain {chain_id}: {e}")
-            return False
+            raise _PristineTransportError(
+                f"initial pristine snapshot transport error for chain {chain_id}: {e}"
+            ) from e
+        new_snap = resp.get("result") if isinstance(resp, dict) else None
         if new_snap is None:
             print(f"WARNING: evm_snapshot returned no result for chain {chain_id}: {resp}")
             return False
@@ -1057,12 +1081,20 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
     # Revert to pristine. `evm_revert` consumes snap_id AND any snapshots taken
     # after it on this fork, so stale module baselines for this chain are now
     # invalid and must be purged regardless of revert outcome.
+    #
+    # A transport exception on evm_revert here is safe to retry: either the
+    # RPC call never reached Anvil (snap_id still valid for a retry) or it
+    # did reach Anvil and consumed the snapshot (in which case the retry will
+    # find `reverted=False` and fall through to the best-effort recapture
+    # branch deterministically). Either way, retrying cannot silently upgrade
+    # a definitive `False` into `True`.
     try:
         resp = web3_instance.provider.make_request("evm_revert", [snap_id])
         reverted = bool(resp.get("result")) if isinstance(resp, dict) else False
     except Exception as e:
-        print(f"WARNING: pristine revert raised for chain {chain_id}: {e}")
-        reverted = False
+        raise _PristineTransportError(
+            f"pristine revert transport error for chain {chain_id}: {e}"
+        ) from e
 
     for old_key in list(_module_baselines):
         if old_key[0] == chain_id:
@@ -1070,8 +1102,14 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
 
     if not reverted:
         # Pristine snapshot gone (fork was restarted mid-session, or anvil_revert
-        # failed). Recapture current state so the NEXT module at least gets a
-        # stable reference; cross-module isolation for THIS module is degraded.
+        # returned false). Recapture current state so the NEXT module at least
+        # gets a stable reference; cross-module isolation for THIS module is
+        # degraded. We intentionally do NOT re-raise transport errors here:
+        # the current module's pristine guarantee is already lost once we know
+        # `evm_revert` did not succeed, so a retry cannot restore it — retrying
+        # would only risk masking this definitive isolation-loss with a later
+        # lucky `True`. Keep it deterministic: on any recapture trouble, clear
+        # the map and return False.
         print(
             f"WARNING: pristine snapshot {snap_id} for chain {chain_id} invalid; "
             "recapturing current state as best-effort pristine"
@@ -1090,16 +1128,20 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
         return False
 
     # Recapture pristine at the just-reverted state so the next module can revert.
-    # If recapture fails, report False so callers can surface degraded isolation —
-    # the CURRENT module is fine (we already reverted), but the NEXT module would
-    # lose its pristine anchor and potentially see this module's residue.
+    # A transport exception here is safe to retry: the revert already succeeded,
+    # `snap_id` has been consumed by Anvil, and `_session_pristine[chain_id]`
+    # still holds the now-stale id. On retry, the next attempt will see
+    # `evm_revert(stale_id) -> False` and fall deterministically into the
+    # best-effort recapture branch above — no path exists where a retry turns
+    # a definitive failure into an accidental `True`. So raise and let the
+    # retry loop absorb the transient flake.
     try:
         resp = web3_instance.provider.make_request("evm_snapshot", [])
-        new_snap = resp.get("result") if isinstance(resp, dict) else None
     except Exception as e:
-        print(f"WARNING: could not recapture pristine after revert for chain {chain_id}: {e}")
-        _session_pristine.pop(chain_id, None)
-        return False
+        raise _PristineTransportError(
+            f"post-revert pristine recapture transport error for chain {chain_id}: {e}"
+        ) from e
+    new_snap = resp.get("result") if isinstance(resp, dict) else None
     if new_snap is None:
         print(f"WARNING: evm_snapshot returned no result after revert for chain {chain_id}: {resp}")
         _session_pristine.pop(chain_id, None)
@@ -1109,7 +1151,13 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
     return True
 
 
-def reset_fork_to_pristine(web3_instance: Web3, *, strict: bool = True) -> bool:
+def reset_fork_to_pristine(
+    web3_instance: Web3,
+    *,
+    strict: bool = True,
+    attempts: int = 3,
+    backoff_s: float = 5.0,
+) -> bool:
     """Helper for per-chain `funded_wallet` fixtures: revert to session pristine.
 
     Call this at the top of a module-scoped `funded_wallet` fixture, BEFORE
@@ -1125,6 +1173,23 @@ def reset_fork_to_pristine(web3_instance: Web3, *, strict: bool = True) -> bool:
     surface infrastructure problems rather than silently running with degraded
     isolation. Pass ``strict=False`` if the caller wants to attempt best-effort
     seeding on a partially healthy fork (returns False on failure in that case).
+
+    To absorb intermittent RPC read-timeouts against long-running Anvil forks
+    (#1739), the pristine reset is retried up to ``attempts`` times with a
+    fixed ``backoff_s`` delay between attempts — BUT ONLY on a
+    ``_PristineTransportError`` raised from inside
+    ``_ensure_pristine_and_rearm`` (the transient-flake signal the helper emits
+    on paths where a retry is provably safe: no state mutation has been
+    committed yet, or the committed mutation makes the retry deterministically
+    fall into the best-effort-recapture branch).
+
+    A ``False`` return from ``_ensure_pristine_and_rearm`` is NOT retried: that
+    already means the module's pristine-revert guarantee was lost (the session
+    pristine was either cleared or only recaptured for future modules), so
+    retrying it cannot restore isolation for the current module — it would only
+    risk masking a genuine isolation failure by accidentally returning ``True``
+    on a subsequent attempt. Narrowing the retry to ``_PristineTransportError``
+    preserves the strict isolation contract intent tests depend on.
     """
     try:
         chain_id = int(web3_instance.eth.chain_id)
@@ -1135,12 +1200,38 @@ def reset_fork_to_pristine(web3_instance: Web3, *, strict: bool = True) -> bool:
             raise RuntimeError(msg) from e
         return False
 
-    ok = _ensure_pristine_and_rearm(web3_instance, chain_id)
+    last_err: BaseException | None = None
+    ok = False
+    for attempt in range(max(1, attempts)):
+        try:
+            ok = _ensure_pristine_and_rearm(web3_instance, chain_id)
+            # Any result (True OR False) is a definitive verdict from the
+            # helper and must be returned as-is. False already means the
+            # pristine-revert guarantee is lost for this module; retrying
+            # can only hide that failure.
+            break
+        except _PristineTransportError as e:
+            last_err = e
+            print(
+                f"WARNING: pristine reset attempt {attempt + 1}/{attempts} "
+                f"hit transport flake for chain {chain_id}: {e}"
+            )
+            if attempt + 1 < attempts:
+                print(
+                    f"  [pristine] retrying reset for chain {chain_id} in {backoff_s}s "
+                    f"(attempt {attempt + 2}/{attempts})"
+                )
+                time.sleep(backoff_s)
+
     if strict and not ok:
-        raise RuntimeError(
-            f"pristine reset could not be established for chain_id={chain_id}; "
-            "fork appears unhealthy and module isolation cannot be guaranteed"
+        msg = (
+            f"pristine reset could not be established for chain_id={chain_id} "
+            f"after {attempts} attempt(s); fork appears unhealthy and module "
+            "isolation cannot be guaranteed"
         )
+        if last_err is not None:
+            raise RuntimeError(msg) from last_err
+        raise RuntimeError(msg)
     return ok
 
 

@@ -13,6 +13,7 @@ from tests.intents import conftest as intents_conftest
 from tests.intents.conftest import (
     _ensure_pristine_and_rearm,
     _module_baselines,
+    _PristineTransportError,
     _session_pristine,
     reset_fork_to_pristine,
 )
@@ -176,3 +177,126 @@ def test_reset_fork_to_pristine_strict_raises_when_pristine_fails() -> None:
 
     with pytest.raises(RuntimeError, match="pristine reset could not be established"):
         reset_fork_to_pristine(fake)
+
+
+def test_ensure_pristine_raises_transport_error_on_initial_capture_flake() -> None:
+    """A transport exception on the initial snapshot capture must surface as
+    `_PristineTransportError` so the retry loop in `reset_fork_to_pristine`
+    can absorb it."""
+    _reset_module_state()
+
+    fake = MagicMock()
+    fake.eth.chain_id = 8453
+    fake.provider.make_request.side_effect = ConnectionError("rpc read timeout")
+
+    with pytest.raises(_PristineTransportError, match="initial pristine snapshot"):
+        _ensure_pristine_and_rearm(fake, chain_id=8453)
+    # No state should have been recorded on a transport failure.
+    assert 8453 not in _session_pristine
+
+
+def test_ensure_pristine_raises_transport_error_on_revert_flake() -> None:
+    """A transport exception raised from `evm_revert` must surface as
+    `_PristineTransportError` (not silently degrade to `False`), so retries
+    can actually engage."""
+    _reset_module_state()
+    _session_pristine[8453] = "0x1"
+
+    fake = MagicMock()
+    fake.eth.chain_id = 8453
+
+    def _make_request(method: str, params: list) -> dict:
+        if method == "evm_revert":
+            raise ConnectionError("rpc read timeout on revert")
+        raise AssertionError(f"unexpected RPC {method!r}")
+
+    fake.provider.make_request.side_effect = _make_request
+
+    with pytest.raises(_PristineTransportError, match="pristine revert"):
+        _ensure_pristine_and_rearm(fake, chain_id=8453)
+
+
+def test_ensure_pristine_raises_transport_error_on_post_revert_recapture_flake() -> None:
+    """A transport exception raised from the post-revert recapture must surface
+    as `_PristineTransportError`; on retry the now-stale snap id will
+    deterministically fall into the best-effort recapture branch."""
+    _reset_module_state()
+    _session_pristine[8453] = "0x1"
+
+    fake = MagicMock()
+    fake.eth.chain_id = 8453
+    call_log: list[str] = []
+
+    def _make_request(method: str, params: list) -> dict:
+        call_log.append(method)
+        if method == "evm_revert":
+            return {"result": True}
+        if method == "evm_snapshot":
+            raise ConnectionError("rpc read timeout on recapture")
+        raise AssertionError(f"unexpected RPC {method!r}")
+
+    fake.provider.make_request.side_effect = _make_request
+
+    with pytest.raises(_PristineTransportError, match="post-revert pristine recapture"):
+        _ensure_pristine_and_rearm(fake, chain_id=8453)
+    # Revert already succeeded, so the retry path relies on the stale id
+    # being left in `_session_pristine` to drive deterministic fall-through
+    # on the next attempt.
+    assert call_log == ["evm_revert", "evm_snapshot"]
+
+
+def test_reset_fork_to_pristine_retries_on_transport_error_and_succeeds() -> None:
+    """The retry-with-backoff loop must absorb a transient transport error
+    and succeed on a subsequent attempt — this is the whole reason #1739
+    exists. Attempts-1 transport flakes followed by a real success means the
+    loop returns `True`, with no sleep on the final attempt."""
+    _reset_module_state()
+
+    fake = MagicMock()
+    fake.eth.chain_id = 8453
+
+    call_count = {"evm_snapshot": 0}
+
+    def _make_request(method: str, params: list) -> dict:
+        if method == "evm_snapshot":
+            call_count["evm_snapshot"] += 1
+            if call_count["evm_snapshot"] < 2:
+                raise ConnectionError("transient rpc read timeout")
+            return {"result": "0xfresh"}
+        raise AssertionError(f"unexpected RPC {method!r}")
+
+    fake.provider.make_request.side_effect = _make_request
+
+    ok = reset_fork_to_pristine(fake, attempts=3, backoff_s=0.0)
+
+    assert ok is True
+    assert _session_pristine[8453] == "0xfresh"
+    assert call_count["evm_snapshot"] == 2
+
+
+def test_reset_fork_to_pristine_does_not_retry_on_definitive_false() -> None:
+    """A definitive `False` return (e.g. post-revert snapshot returns no result)
+    must short-circuit the retry loop so strict mode raises on the first attempt
+    — retrying a `False` verdict risks silently upgrading a lost-isolation
+    outcome into an accidental `True`."""
+    _reset_module_state()
+    _session_pristine[8453] = "0x1"
+
+    fake = MagicMock()
+    fake.eth.chain_id = 8453
+    calls: list[str] = []
+
+    def _make_request(method: str, params: list) -> dict:
+        calls.append(method)
+        if method == "evm_revert":
+            return {"result": True}
+        if method == "evm_snapshot":
+            return {}  # post-revert snapshot returns no result
+        raise AssertionError(f"unexpected RPC {method!r}")
+
+    fake.provider.make_request.side_effect = _make_request
+
+    with pytest.raises(RuntimeError, match="pristine reset could not be established"):
+        reset_fork_to_pristine(fake, attempts=3, backoff_s=0.0)
+    # Only one attempt happened — no retry on definitive False.
+    assert calls == ["evm_revert", "evm_snapshot"]

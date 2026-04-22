@@ -784,15 +784,13 @@ class TestRunSweepOverPeriods:
 class TestRunParallelSweep:
     """Worker exception paths in `_run_parallel_sweep`.
 
-    LATENT BUG (#1752; pre-existing; Phase 5B.4 pins current behaviour):
-    The error-path in `_run_parallel_sweep` (sweep.py:407-414) calls
+    #1752 FIXED: the error handler used to call
     ``BacktestResult(..., success=False, error=str(e))`` but `BacktestResult`
-    defines `success` as a read-only @property, not a constructor field.
-    When any worker raises, the exception handler itself raises
-    ``TypeError: BacktestResult.__init__() got an unexpected keyword argument 'success'``.
-    This means the happy-path (no worker failure) works, but the very code
-    intended to make the sweep resilient to worker crashes instead propagates
-    as a second-order TypeError. Tests below pin this behaviour.
+    defines `success` as a read-only @property, not a constructor field -- so
+    any worker exception raised ``TypeError: unexpected keyword argument 'success'``
+    instead of recording a failed SweepResult. The handler now sets `error=...`
+    and lets `success` derive. Tests below assert the fixed contract: a failed
+    worker now produces a SweepResult with a non-success BacktestResult.
     """
 
     def _build_pnl_config(self) -> Any:
@@ -809,11 +807,17 @@ class TestRunParallelSweep:
             include_gas_costs=True,
         )
 
-    def test_worker_exception_path_triggers_known_typeerror(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Pin current behaviour: the error-handler itself raises TypeError.
+    def test_worker_exception_is_recorded_as_failed_sweep_result(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """#1752 fix: a failed worker is recorded, not re-raised.
 
-        This is a latent bug (new GH issue filed). When fixed, update this
-        test to assert the intended SweepResult-with-error contract.
+        The error-handler previously tried to pass ``success=False`` into
+        ``BacktestResult(...)`` (which has ``success`` as a @property, not a
+        field), so any worker exception crashed the handler with TypeError.
+        Fix: set ``error=str(e)`` and let ``success`` derive from it. The
+        resulting SweepResult carries a non-success BacktestResult whose
+        ``error`` string surfaces the worker failure.
         """
         pnl_config = self._build_pnl_config()
 
@@ -847,19 +851,46 @@ class TestRunParallelSweep:
                 lambda futures: list(futures),
             ),
         ):
-            # LATENT BUG: the error-handler's BacktestResult constructor
-            # call raises TypeError. Pin the current behaviour.
-            with pytest.raises(TypeError, match="unexpected keyword argument 'success'"):
-                _run_parallel_sweep(
-                    strategy_class=StratClass,
-                    base_config={},
-                    pnl_config=pnl_config,
-                    combinations=[{"x": "1"}],
-                    workers=1,
-                    sweep_params=[SweepParameter(name="x", values=["1"])],
-                )
+            results = _run_parallel_sweep(
+                strategy_class=StratClass,
+                base_config={},
+                pnl_config=pnl_config,
+                combinations=[{"x": "1"}],
+                workers=1,
+                sweep_params=[SweepParameter(name="x", values=["1"])],
+            )
 
-        # The pre-TypeError error line IS emitted (via click.echo).
+        # The error handler produced exactly one failed SweepResult, not a raise.
+        assert len(results) == 1
+        sr = results[0]
+        assert sr.params == {"x": "1"}
+        # BacktestResult.success is a @property: `error is None` -> success.
+        assert sr.result.error is not None
+        assert "worker died" in sr.result.error
+        assert sr.result.success is False
+        # Required BacktestResult constructor fields must be populated so the
+        # failed-result contract matches the successful-result contract
+        # (engine tag, strategy_id sentinel, time range, metrics instance)
+        # and downstream consumers of the error SweepResult never hit
+        # MissingFieldError on a failure record. Chain + capital metadata
+        # must propagate from pnl_config rather than falling back to the
+        # BacktestResult dataclass defaults (arbitrum / 10k USD).
+        assert sr.result.engine == BacktestEngine.PNL
+        assert sr.result.strategy_id == "error"
+        assert sr.result.start_time == pnl_config.start_time
+        assert sr.result.end_time == pnl_config.end_time
+        assert isinstance(sr.result.metrics, BacktestMetrics)
+        assert sr.result.chain == pnl_config.chain
+        assert sr.result.initial_capital_usd == pnl_config.initial_capital_usd
+        assert sr.result.final_capital_usd == pnl_config.initial_capital_usd
+        # Zeroed performance fields on the SweepResult wrapper.
+        assert sr.sharpe_ratio == Decimal("0")
+        assert sr.total_return_pct == Decimal("0")
+        assert sr.max_drawdown_pct == Decimal("0")
+        assert sr.win_rate == Decimal("0")
+        assert sr.total_trades == 0
+
+        # The click.echo error line is still emitted on the error path.
         err = capsys.readouterr().err
         assert "Error in worker for params" in err
         assert "worker died" in err

@@ -116,11 +116,13 @@ def _preflight_validate_numeric_params(
 
 
 from ...backtesting import (
+    BacktestMetrics,
     BacktestResult,
     CoinGeckoDataProvider,
     PnLBacktestConfig,
     PnLBacktester,
 )
+from ...backtesting.models import BacktestEngine
 from ...strategies import get_strategy
 from ..chain_resolution import get_default_chain
 from .group import backtest
@@ -522,17 +524,32 @@ def _run_parallel_sweep(
                     result = future.result()
                     results.append(result)
                 except Exception as e:
-                    # Handle worker exceptions
+                    # Handle worker exceptions.
+                    # #1752: `BacktestResult.success` is a @property derived from
+                    # `error is None`, NOT a constructor field. Passing `success=False`
+                    # previously raised TypeError, meaning the error-handler itself
+                    # crashed and propagated rather than recording a failed SweepResult.
+                    # Correct pattern: set `error=str(e)` and let `success` derive from it.
+                    # Required BacktestResult fields (engine, strategy_id, start_time,
+                    # end_time, metrics) are populated explicitly, and the metadata
+                    # fields (chain, initial/final capital) are propagated from
+                    # pnl_config so failed results carry the same run metadata as
+                    # successful ones rather than silently falling back to the
+                    # dataclass defaults (arbitrum / 10k USD).
                     click.echo(f"  Error in worker for params {task.params}: {e}", err=True)
                     results.append(
                         SweepResult(
                             params=task.params,
-                            result=BacktestResult(  # type: ignore[call-arg]
+                            result=BacktestResult(
+                                engine=BacktestEngine.PNL,
                                 strategy_id="error",
                                 start_time=pnl_config.start_time,
                                 end_time=pnl_config.end_time,
+                                metrics=BacktestMetrics(),
                                 trades=[],
-                                success=False,
+                                initial_capital_usd=pnl_config.initial_capital_usd,
+                                final_capital_usd=pnl_config.initial_capital_usd,
+                                chain=pnl_config.chain,
                                 error=str(e),
                             ),
                             sharpe_ratio=Decimal("0"),
