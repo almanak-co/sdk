@@ -19,6 +19,7 @@ import pytest
 
 from almanak.framework.cli.backtest.sweep import (
     _coerce_sweep_value,
+    _preflight_emit_ambiguous_warnings,
     _preflight_validate_numeric_params,
 )
 
@@ -261,3 +262,166 @@ class TestPreflightValidateNumericParams:
         # Sanity-check consistency with `float()`'s own semantics.
         assert math.isinf(float("inf"))
         assert math.isnan(float("nan"))
+
+
+class TestPreflightEmitAmbiguousWarnings:
+    """#1756: sweep-scoped dedup of ambiguous-coercion warnings.
+
+    The previous ``warned_ambiguous`` set was recreated per backtest call and
+    per worker task, so a single ambiguous ``(name, value)`` pair could emit
+    N × M duplicate stderr lines on a N-period × M-worker sweep. The parent
+    now walks ``combinations`` once before any worker / period is dispatched
+    and emits each unique ambiguous pair exactly once; workers run with
+    ``emit_warnings=False`` and stay silent.
+    """
+
+    def test_single_ambiguous_value_across_simulated_periods_and_workers_emits_once(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Simulate a 2-period × 2-worker sweep carrying the same ``1e5``
+        value through every worker invocation. Before #1756 this produced 4
+        duplicate warnings; after #1756 the parent pre-pass emits exactly 1.
+        """
+        combinations = [{"size": "1e5"}, {"size": "1e5"}]  # 2 combos
+        # Parent pre-pass runs once, before any worker spawns.
+        _preflight_emit_ambiguous_warnings(combinations, frozenset())
+        parent_stderr = capsys.readouterr().err
+
+        # Simulate worker-side coercion across 2 periods × 2 workers. With
+        # `emit_warnings=False` these must be silent.
+        for _period in range(2):
+            for combo in combinations:
+                worker_warned: set[tuple[str, str]] = set()
+                for name, value in combo.items():
+                    _coerce_sweep_value(
+                        name,
+                        value,
+                        numeric_param_names=frozenset(),
+                        warned_ambiguous=worker_warned,
+                        emit_warnings=False,
+                    )
+        worker_stderr = capsys.readouterr().err
+
+        assert parent_stderr.count("size=1e5") == 1, (
+            f"Expected exactly 1 parent-side warning, got:\n{parent_stderr!r}"
+        )
+        assert worker_stderr == "", (
+            f"Workers must not emit duplicate warnings, got:\n{worker_stderr!r}"
+        )
+
+    def test_multiple_ambiguous_values_each_warn_once(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Each distinct ambiguous ``(name, value)`` pair warns once. A
+        repeated combination in the sweep matrix does not re-warn."""
+        combinations = [
+            {"size": "1e5", "token_id": "0001"},
+            {"size": "2e5", "token_id": "0001"},  # token_id repeats, size differs
+            {"size": "1e5", "token_id": "0002"},  # size repeats, token_id differs
+        ]
+        _preflight_emit_ambiguous_warnings(combinations, frozenset())
+        err = capsys.readouterr().err
+
+        # Each unique ambiguous pair warns exactly once.
+        assert err.count("size=1e5") == 1
+        assert err.count("size=2e5") == 1
+        assert err.count("token_id=0001") == 1
+        assert err.count("token_id=0002") == 1
+        # Total: 4 unique warnings, no duplicates.
+        assert err.count("Warning:") == 4
+
+    def test_clean_values_emit_no_warnings(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Round-tripping numeric strings and pure categorical strings must
+        not trip the warning pre-pass."""
+        combinations = [
+            {"threshold": "1.5", "mode": "aggressive"},
+            {"threshold": "2.5", "mode": "conservative"},
+        ]
+        _preflight_emit_ambiguous_warnings(combinations, frozenset())
+        assert capsys.readouterr().err == ""
+
+    def test_numeric_param_names_are_skipped(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Names marked via ``--numeric-param`` are author opt-in: the
+        preflight must not second-guess them with an ambiguity warning.
+        Strict-numeric validation lives in ``_preflight_validate_numeric_params``.
+        """
+        combinations = [{"token_id": "0001"}, {"token_id": "1e5"}]
+        _preflight_emit_ambiguous_warnings(
+            combinations, numeric_param_names=frozenset({"token_id"})
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_empty_combinations_is_a_noop(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _preflight_emit_ambiguous_warnings([], frozenset())
+        assert capsys.readouterr().err == ""
+
+    def test_worker_silent_mode_still_coerces_identically(self) -> None:
+        """``emit_warnings=False`` must not change the resulting Python value
+        — only the stderr side effect is suppressed."""
+        warned: set[tuple[str, str]] = set()
+        loud = _coerce_sweep_value(
+            "x", "1e5", numeric_param_names=frozenset(), warned_ambiguous=set()
+        )
+        silent = _coerce_sweep_value(
+            "x",
+            "1e5",
+            numeric_param_names=frozenset(),
+            warned_ambiguous=warned,
+            emit_warnings=False,
+        )
+        assert loud == silent == 100000.0
+        # The silent-mode call still populates the dedup set so repeat calls
+        # within the same worker stay idempotent.
+        assert ("x", "1e5") in warned
+
+
+class TestPublicHelpersStillWarnByDefault:
+    """Regression guard: public `run_sweep_backtest` / `run_parallel_sweeps`
+    helpers must keep the #1702 warning surface for direct programmatic
+    callers (notebooks, tests, library usage) that do not go through the
+    ``sweep_backtest`` CLI command. The #1756 dedup hoist only silences the
+    CLI code path; it must not regress the helpers to the original hidden
+    ``"0001" -> 1.0`` / ``"1e5" -> 100000.0`` behaviour that #1702 surfaced.
+    """
+
+    def test_run_sweep_backtest_signature_defaults_to_warning(self) -> None:
+        """``run_sweep_backtest(emit_ambiguity_warnings=...)`` defaults to
+        True. We introspect the parameter at the signature level rather than
+        instantiating the full coroutine (which requires a live data
+        provider) — this keeps the test hermetic while still pinning the
+        public contract."""
+        import inspect
+
+        from almanak.framework.cli.backtest.sweep import run_sweep_backtest
+
+        sig = inspect.signature(run_sweep_backtest)
+        param = sig.parameters["emit_ambiguity_warnings"]
+        assert param.default is True, (
+            "Direct callers of run_sweep_backtest must keep #1702 warnings by default"
+        )
+
+    def test_run_parallel_sweeps_signature_defaults_to_warning(self) -> None:
+        import inspect
+
+        from almanak.framework.cli.backtest.sweep import run_parallel_sweeps
+
+        sig = inspect.signature(run_parallel_sweeps)
+        param = sig.parameters["emit_ambiguity_warnings"]
+        assert param.default is True
+
+    def test_run_parallel_sweep_signature_defaults_to_warning(self) -> None:
+        """Internal multiprocessing helper also keeps the warnings-on default
+        so a direct caller outside the CLI path still sees #1702 output."""
+        import inspect
+
+        from almanak.framework.cli.backtest.sweep import _run_parallel_sweep
+
+        sig = inspect.signature(_run_parallel_sweep)
+        param = sig.parameters["emit_ambiguity_warnings"]
+        assert param.default is True

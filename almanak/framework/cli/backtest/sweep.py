@@ -23,6 +23,7 @@ def _coerce_sweep_value(
     *,
     numeric_param_names: frozenset[str],
     warned_ambiguous: set[tuple[str, str]],
+    emit_warnings: bool = True,
 ) -> Any:
     """Coerce a sweep parameter value to an appropriate Python type.
 
@@ -44,6 +45,20 @@ def _coerce_sweep_value(
       and a distinct warning for ``inf`` / ``nan`` which are almost never
       intentional sweep values. Warnings are emitted once per (name, value)
       pair to avoid spamming when the same combo appears across periods.
+
+    Issue #1756: ``emit_warnings`` gates the ``click.echo`` side effect.
+    ``warned_ambiguous`` is process-local (workers cannot share a set across
+    the pickle boundary), so per-worker dedup is insufficient when a sweep
+    runs N periods × M workers — the same ``(name, value)`` pair still emits
+    up to N×M duplicate warnings. The sweep command now emits warnings once
+    in a parent-side pre-pass (``_preflight_emit_ambiguous_warnings``) before
+    any worker spawns, then invokes worker-side coercion with
+    ``emit_warnings=False``. The coercion logic itself is unchanged so the
+    resulting Python value is identical in either mode. ``warned_ambiguous``
+    is retained and still populated even when ``emit_warnings`` is False so
+    that any in-process re-invocation (e.g. the same combo appearing for
+    strategy-config and strategy-instance attribute assignment) remains
+    idempotent.
 
     Full type-tagging (``--param 'name:val1,val2:str'``) would be a cleaner
     long-term fix but breaks the current CLI contract — deferred to a
@@ -69,23 +84,71 @@ def _coerce_sweep_value(
     if key not in warned_ambiguous:
         if math.isnan(coerced) or math.isinf(coerced):
             warned_ambiguous.add(key)
-            click.echo(
-                f"Warning: sweep param '{name}={value}' was coerced to {coerced}; "
-                "this is almost certainly not what you meant. "
-                "Pass --numeric-param to enforce numeric typing, or quote the "
-                "value as a categorical string (no sibling floats) to keep it as-is.",
-                err=True,
-            )
+            if emit_warnings:
+                click.echo(
+                    f"Warning: sweep param '{name}={value}' was coerced to {coerced}; "
+                    "this is almost certainly not what you meant. "
+                    "Pass --numeric-param to enforce numeric typing, or quote the "
+                    "value as a categorical string (no sibling floats) to keep it as-is.",
+                    err=True,
+                )
         elif str(coerced) != value and f"{coerced:g}" != value:
             warned_ambiguous.add(key)
-            click.echo(
-                f"Warning: sweep param '{name}={value}' was coerced to float "
-                f"{coerced}; the string no longer round-trips. "
-                f"Use --numeric-param {name} to opt in explicitly, or keep it "
-                "categorical by ensuring no value in the list is numeric.",
-                err=True,
-            )
+            if emit_warnings:
+                click.echo(
+                    f"Warning: sweep param '{name}={value}' was coerced to float "
+                    f"{coerced}; the string no longer round-trips. "
+                    f"Use --numeric-param {name} to opt in explicitly, or keep it "
+                    "categorical by ensuring no value in the list is numeric.",
+                    err=True,
+                )
     return coerced
+
+
+def _preflight_emit_ambiguous_warnings(
+    combinations: list[dict[str, str]],
+    numeric_param_names: frozenset[str],
+) -> None:
+    """Emit the #1702 ambiguous-coercion warnings once per sweep run (#1756).
+
+    Walks the full sweep-param matrix in the parent process and invokes
+    ``_coerce_sweep_value`` with a single shared ``warned_ambiguous`` set so
+    that each unique ``(name, value)`` ambiguous pair is warned about exactly
+    once. Workers (sequential or ``ProcessPoolExecutor``) subsequently run
+    the same coercion with ``emit_warnings=False``, producing the same
+    coerced Python values without duplicating the stderr output.
+
+    Design decisions:
+
+    - UX choice: warnings fire **once per sweep run** (not per period). The
+      same ambiguity is a static property of the ``--param`` input and does
+      not become more informative when re-emitted per period. This matches
+      the bar of #1756 ("hoist to sweep-scoped parent pass").
+    - Parent-only: the shared dedup set never crosses the pickle boundary
+      into ``ProcessPoolExecutor`` workers, sidestepping both inter-process
+      mutability and startup cost.
+    - Exception neutrality: this helper is a side-effect-only pre-pass. If a
+      value would raise (e.g. a ``--numeric-param`` value fails strict
+      parsing), ``_preflight_validate_numeric_params`` is the authoritative
+      check — numeric-param names are skipped here to avoid double-raising.
+    """
+    if not combinations:
+        return
+    warned: set[tuple[str, str]] = set()
+    for combo in combinations:
+        for name, value in combo.items():
+            if name in numeric_param_names:
+                # Strict-numeric coercion is not ambiguous — the author
+                # opted in. `_preflight_validate_numeric_params` owns the
+                # fail-fast path for invalid numeric values.
+                continue
+            _coerce_sweep_value(
+                name,
+                value,
+                numeric_param_names=numeric_param_names,
+                warned_ambiguous=warned,
+                emit_warnings=True,
+            )
 
 
 def _preflight_validate_numeric_params(
@@ -155,6 +218,7 @@ async def run_sweep_backtest(
     params: dict[str, str],
     *,
     numeric_param_names: frozenset[str] = frozenset(),
+    emit_ambiguity_warnings: bool = True,
 ) -> SweepResult:
     """Run a single backtest with specific parameter values.
 
@@ -168,17 +232,33 @@ async def run_sweep_backtest(
             as strictly numeric via ``--numeric-param`` (#1702). Values for
             those names must parse as float or the call raises
             ``click.UsageError``.
+        emit_ambiguity_warnings: When True (default), the #1702 ambiguous-
+            coercion warnings are emitted on stderr so direct programmatic
+            callers (not going through the ``sweep_backtest`` CLI command)
+            still see ``"0001" -> 1.0`` / ``"1e5" -> 100000.0`` noted. The
+            CLI passes False after running its sweep-scoped parent pre-pass
+            (``_preflight_emit_ambiguous_warnings``, #1756) so workers and
+            per-period loops do not duplicate the stderr output.
 
     Returns:
         SweepResult with backtest results and key metrics
     """
     # Create strategy config with overridden parameters. See
     # `_coerce_sweep_value` for the #1702 coercion semantics.
+    # #1756: when the CLI invokes this helper it sets
+    # `emit_ambiguity_warnings=False` because it has already emitted the
+    # warnings once in the parent pre-pass. Direct programmatic callers
+    # (tests, notebooks, library users) keep the #1702 default so the
+    # coercion surface stays visible.
     warned: set[tuple[str, str]] = set()
     strategy_config = base_config.copy()
     for name, value in params.items():
         strategy_config[name] = _coerce_sweep_value(
-            name, value, numeric_param_names=numeric_param_names, warned_ambiguous=warned
+            name,
+            value,
+            numeric_param_names=numeric_param_names,
+            warned_ambiguous=warned,
+            emit_warnings=emit_ambiguity_warnings,
         )
 
     # Create strategy instance
@@ -194,6 +274,7 @@ async def run_sweep_backtest(
                     value,
                     numeric_param_names=numeric_param_names,
                     warned_ambiguous=warned,
+                    emit_warnings=emit_ambiguity_warnings,
                 ),
             )
 
@@ -240,6 +321,7 @@ async def run_parallel_sweeps(
     parallel: int,
     *,
     numeric_param_names: frozenset[str] = frozenset(),
+    emit_ambiguity_warnings: bool = True,
 ) -> list[SweepResult]:
     """Run multiple backtests in parallel.
 
@@ -252,6 +334,10 @@ async def run_parallel_sweeps(
         parallel: Number of parallel workers
         numeric_param_names: Forwarded to ``run_sweep_backtest`` — see
             issue #1702 for the float coercion semantics.
+        emit_ambiguity_warnings: Forwarded to ``run_sweep_backtest``. Default
+            True preserves the #1702 warning surface for direct callers;
+            the sweep CLI passes False after running the sweep-scoped
+            parent pre-pass (#1756).
 
     Returns:
         List of SweepResult objects
@@ -261,8 +347,33 @@ async def run_parallel_sweeps(
     results: list[SweepResult] = []
     semaphore = asyncio.Semaphore(parallel)
 
+    # Wrap the shared dedup set so that when the caller opts into warnings
+    # via `emit_ambiguity_warnings=True`, an ambiguous (name, value) pair
+    # emits once across all semaphore-serialised concurrent sweeps — not
+    # once per combination. Previously each call built its own `warned` set
+    # inside `run_sweep_backtest`, so a single ambiguous value shared across
+    # M combinations could still produce M duplicate warnings in the async
+    # path. When warnings are disabled (CLI path), the set is ignored.
+    shared_warned: set[tuple[str, str]] = set()
+
     async def run_with_semaphore(params: dict[str, str]) -> SweepResult:
         async with semaphore:
+            # First-pass: surface #1702 warnings once across the shared set
+            # using the current call's parameter values. This is a parallel-
+            # to-sweep-scoped-pre-pass at the async helper level, so direct
+            # callers of `run_parallel_sweeps` see deduped warnings even
+            # without running `_preflight_emit_ambiguous_warnings`.
+            if emit_ambiguity_warnings:
+                for name, value in params.items():
+                    if name in numeric_param_names:
+                        continue
+                    _coerce_sweep_value(
+                        name,
+                        value,
+                        numeric_param_names=numeric_param_names,
+                        warned_ambiguous=shared_warned,
+                        emit_warnings=True,
+                    )
             return await run_sweep_backtest(
                 strategy_class=strategy_class,
                 base_config=base_config,
@@ -270,6 +381,9 @@ async def run_parallel_sweeps(
                 data_provider=data_provider,
                 params=params,
                 numeric_param_names=numeric_param_names,
+                # Inner call is always silent: we just emitted the warnings
+                # above (or the caller disabled them entirely).
+                emit_ambiguity_warnings=False,
             )
 
     # Create tasks for all combinations
@@ -470,6 +584,7 @@ def _run_parallel_sweep(
     sweep_params: list[SweepParameter],
     *,
     numeric_param_names: frozenset[str] = frozenset(),
+    emit_ambiguity_warnings: bool = True,
 ) -> list[SweepResult]:
     """Run parameter sweep using true parallel execution (multiprocessing).
 
@@ -483,6 +598,14 @@ def _run_parallel_sweep(
         combinations: List of parameter combinations to test
         workers: Number of worker processes
         sweep_params: List of swept parameters
+        emit_ambiguity_warnings: When True (default), the parent process
+            walks ``combinations`` once before spawning workers and emits
+            the #1702 ambiguous-coercion warnings (deduped). The ``_SweepTask``
+            then crosses the pickle boundary with its own
+            ``emit_ambiguity_warnings=False``, so workers never duplicate
+            the stderr output. The CLI passes False here because
+            ``_preflight_emit_ambiguous_warnings`` has already run at the
+            top-level sweep entry point (#1756).
 
     Returns:
         List of SweepResult objects
@@ -495,7 +618,16 @@ def _run_parallel_sweep(
     # do not need to re-import ``..run`` inside each subprocess (#1703).
     parent_default_chain = get_default_chain(strategy_class)
 
-    # Create tasks with all necessary data for worker processes
+    # #1756: fire the sweep-scoped ambiguity warnings from this parent
+    # process before any worker spawns, exactly once per unique (name,
+    # value) pair. When the CLI invoked us, the top-level pre-pass has
+    # already run and `emit_ambiguity_warnings` is False.
+    if emit_ambiguity_warnings:
+        _preflight_emit_ambiguous_warnings(combinations, numeric_param_names)
+
+    # Create tasks with all necessary data for worker processes. Workers
+    # always receive `emit_ambiguity_warnings=False`: either this parent
+    # just emitted the warnings, or the caller (CLI) already did.
     tasks = [
         _SweepTask(
             strategy_class_name=strategy_class.__module__ + "." + strategy_class.__name__,
@@ -505,6 +637,7 @@ def _run_parallel_sweep(
             task_index=i,
             default_chain=parent_default_chain,
             numeric_param_names=numeric_param_names,
+            emit_ambiguity_warnings=False,
         )
         for i, combo in enumerate(combinations)
     ]
@@ -590,6 +723,12 @@ class _SweepTask:
     # boundary so workers apply the same strict coercion as the parent
     # process would (#1702).
     numeric_param_names: frozenset[str] = frozenset()
+    # #1756: workers default to silent coercion because the parent-side
+    # pre-pass in `_run_parallel_sweep` already emitted the deduped warnings.
+    # Preserved as an explicit field so the shape of the task is auditable
+    # at the pickle boundary and so old-pickle compatibility (defaulting to
+    # False) keeps behaviour consistent with the hosted path.
+    emit_ambiguity_warnings: bool = False
 
 
 def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
@@ -626,7 +765,12 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
 
     # Create strategy config with overridden parameters. #1702: shared
     # coercion helper replaces the raw `float()` calls so numeric-param
-    # contracts and ambiguity warnings are honoured in workers too.
+    # contracts are honoured in workers too. #1756: ambiguity warnings are
+    # emitted once in the parent process before workers spawn, so workers
+    # default to `emit_warnings=False` to avoid duplicating the stderr
+    # output across N periods × M workers. The `task.emit_ambiguity_warnings`
+    # flag preserves the opt-in path for programmatic callers that want
+    # workers to warn (e.g. a test harness bypassing the parent preflight).
     warned: set[tuple[str, str]] = set()
     strategy_config = task.base_config.copy()
     for name, value in task.params.items():
@@ -635,6 +779,7 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
             value,
             numeric_param_names=task.numeric_param_names,
             warned_ambiguous=warned,
+            emit_warnings=task.emit_ambiguity_warnings,
         )
 
     # Resolve chain. Config overrides win; the parent-provided
@@ -645,7 +790,10 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
     fallback_chain = task.default_chain or get_default_chain(strategy_class)
     worker_chain = task.base_config.get("chain") or task.pnl_config_dict.get("chain") or fallback_chain
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, worker_chain)
-    # Set params as attributes for strategies that don't read config dict
+    # Set params as attributes for strategies that don't read config dict.
+    # #1756: same `emit_warnings` contract as above — the `warned` set is
+    # shared with the first pass so even when `task.emit_ambiguity_warnings`
+    # is True, each (name, value) pair still warns exactly once per worker.
     if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
         for name, value in task.params.items():
             setattr(
@@ -656,6 +804,7 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
                     value,
                     numeric_param_names=task.numeric_param_names,
                     warned_ambiguous=warned,
+                    emit_warnings=task.emit_ambiguity_warnings,
                 ),
             )
 
@@ -1068,6 +1217,10 @@ def _run_sweep_over_periods(
             if ctx.multi_period_mode:
                 click.echo(f"--- Period: {bp.name} ({bp.start.date()} -> {bp.end.date()}) ---")
 
+            # #1756: the CLI entry point (`sweep_backtest`) already ran
+            # `_preflight_emit_ambiguous_warnings` once before entering the
+            # period loop. Pass `emit_ambiguity_warnings=False` so neither
+            # mode re-emits the warnings per period / per worker.
             if parallel:
                 period_results = _run_parallel_sweep(
                     strategy_class=strategy_class,
@@ -1077,6 +1230,7 @@ def _run_sweep_over_periods(
                     workers=effective_workers,
                     sweep_params=ctx.sweep_params,
                     numeric_param_names=ctx.numeric_param_names,
+                    emit_ambiguity_warnings=False,
                 )
             else:
                 period_results = asyncio.run(
@@ -1088,6 +1242,7 @@ def _run_sweep_over_periods(
                         combinations=ctx.combinations,
                         parallel=effective_workers,
                         numeric_param_names=ctx.numeric_param_names,
+                        emit_ambiguity_warnings=False,
                     )
                 )
 
@@ -1468,6 +1623,16 @@ def sweep_backtest(
     # both sequential and parallel modes.
     if numeric_param_names:
         _preflight_validate_numeric_params(combinations, numeric_param_names)
+
+    # #1756: emit the #1702 ambiguous-coercion warnings once per sweep run
+    # from the parent process, BEFORE any worker or period dispatch. This
+    # replaces the previous per-worker dedup which produced N×M duplicate
+    # warnings on a N-period × M-worker sweep (the `warned_ambiguous` set is
+    # process-local and cannot be shared across `ProcessPoolExecutor` workers
+    # without plumbing it through the pickle boundary). Workers still run
+    # `_coerce_sweep_value`, but with `emit_warnings=False` so the coerced
+    # value is identical while the stderr output stays a single, unique set.
+    _preflight_emit_ambiguous_warnings(combinations, numeric_param_names)
 
     ctx = _SweepRunContext(
         strategy=strategy,

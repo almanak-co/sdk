@@ -1409,6 +1409,7 @@ class TestRunParallelSweepsCoro:
             data_provider: Any,
             params: dict[str, str],
             numeric_param_names: frozenset[str] = frozenset(),
+            emit_ambiguity_warnings: bool = True,
         ) -> SweepResult:
             call_params.append(params)
             return _make_result(params, sharpe=1.0)
@@ -1455,6 +1456,7 @@ class TestRunParallelSweepsCoro:
             data_provider: Any,
             params: dict[str, str],
             numeric_param_names: frozenset[str] = frozenset(),
+            emit_ambiguity_warnings: bool = True,
         ) -> SweepResult:
             seen_params.append(params)
             return _make_result(params, sharpe=1.0)
