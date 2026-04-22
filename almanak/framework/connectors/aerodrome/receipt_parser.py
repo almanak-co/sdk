@@ -324,6 +324,24 @@ class ParsedLiquidityResult:
 
 
 @dataclass
+class _SwapSeed:
+    """Internal shared-state bundle for ``extract_swap_amounts`` phases.
+
+    Not part of the public API — holds raw amounts + token hints carried
+    between phase helpers so each helper stays small and individually
+    testable. See ``AerodromeReceiptParser._seed_swap_fields``.
+    """
+
+    raw_in: int
+    raw_out: int
+    token_in_hint: str
+    token_out_hint: str
+    token_in_symbol: str
+    token_out_symbol: str
+    slippage_bps: int | None
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a receipt."""
 
@@ -1178,94 +1196,178 @@ class AerodromeReceiptParser:
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
+
+        Implementation note:
+            This method is intentionally thin — each logical phase is a
+            dedicated helper so the control flow stays CC-bounded and
+            individually testable (Phase 7.3 refactor). Preserves:
+            (1) first-swap-event-wins multi-hop semantics,
+            (2) sign conventions for amount0/amount1 (V1 + CL),
+            (3) SwapAmounts field surface.
         """
         from almanak.framework.execution.extracted_data import SwapAmounts
 
         try:
             parse_result = self.parse_receipt(receipt)
 
-            # Extract raw amounts from swap_result if available, otherwise
-            # fall back to raw swap_events (swap_result may be None when
-            # _build_swap_result fails closed due to unresolved decimals).
-            sr = parse_result.swap_result
-            if sr:
-                raw_in = sr.amount_in
-                raw_out = sr.amount_out
-                token_in_hint = sr.token_in
-                token_out_hint = sr.token_out
-                token_in_symbol = sr.token_in_symbol
-                token_out_symbol = sr.token_out_symbol
-                slippage_bps = sr.slippage_bps if sr.slippage_bps else None
-            elif parse_result.swap_events:
-                se = parse_result.swap_events[0]
-                raw_in = se.amount_in
-                raw_out = se.amount_out
-                token_in_hint = (self.token0_address or "") if se.token0_is_input else (self.token1_address or "")
-                token_out_hint = (self.token1_address or "") if se.token0_is_input else (self.token0_address or "")
-                token_in_symbol = (self.token0_symbol or "") if se.token0_is_input else (self.token1_symbol or "")
-                token_out_symbol = (self.token1_symbol or "") if se.token0_is_input else (self.token0_symbol or "")
-                slippage_bps = None
-            else:
+            seed = self._seed_swap_fields(parse_result)
+            if seed is None:
                 return None
 
-            # Resolve token addresses from Transfer events in the receipt.
-            token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
+            token_in_addr, token_out_addr = self._resolve_swap_token_addresses(receipt, parse_result, seed)
 
-            # Fallback: identify tokens by pool address from the Swap event.
-            # In Solidly V2, the pool always receives token_in and sends token_out.
-            # Only safe for single-hop swaps; multi-hop would pick the intermediate token.
-            if (not token_in_addr or not token_out_addr) and len(parse_result.swap_events) == 1:
-                pool_addr = parse_result.swap_events[0].pool_address
-                if pool_addr:
-                    p_in, p_out = self._extract_tokens_by_pool(receipt, pool_addr)
-                    if not token_in_addr and p_in:
-                        token_in_addr = p_in
-                    if not token_out_addr and p_out:
-                        token_out_addr = p_out
-
-            if not token_in_addr:
-                token_in_addr = token_in_hint
-            if not token_out_addr:
-                token_out_addr = token_out_hint
-
-            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
-            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
-
-            if in_decimals is None or out_decimals is None:
-                logger.warning(
-                    f"Cannot compute swap amounts: token decimals unknown "
-                    f"(in={token_in_addr}:{in_decimals}, out={token_out_addr}:{out_decimals})"
-                )
+            decimals = self._resolve_swap_decimals(token_in_addr, token_out_addr)
+            if decimals is None:
                 return None
+            in_decimals, out_decimals = decimals
 
-            amount_in_decimal = Decimal(str(raw_in)) / Decimal(10**in_decimals)
-            amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
+            amount_in_decimal = Decimal(str(seed.raw_in)) / Decimal(10**in_decimals)
+            amount_out_decimal = Decimal(str(seed.raw_out)) / Decimal(10**out_decimals)
             effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
 
-            # VIB-3203: compute realized slippage when the framework supplies the
-            # compiler's pre-slippage-discount quote. This overrides any
-            # parser-side slippage value, which is generally None on the
-            # enrichment path since constructor-supplied ``quoted_price``
-            # isn't set when ReceiptParserRegistry builds the parser.
-            if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
-                realized_slippage = (expected_out - amount_out_decimal) / expected_out
-                slippage_bps = int(realized_slippage * Decimal(10_000))
+            slippage_bps = self._apply_expected_out_slippage(seed.slippage_bps, expected_out, amount_out_decimal)
 
             return SwapAmounts(
-                amount_in=raw_in,
-                amount_out=raw_out,
+                amount_in=seed.raw_in,
+                amount_out=seed.raw_out,
                 amount_in_decimal=amount_in_decimal,
                 amount_out_decimal=amount_out_decimal,
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
                 expected_out_decimal=expected_out,
-                token_in=token_in_symbol or token_in_addr or token_in_hint,
-                token_out=token_out_symbol or token_out_addr or token_out_hint,
+                token_in=seed.token_in_symbol or token_in_addr or seed.token_in_hint,
+                token_out=seed.token_out_symbol or token_out_addr or seed.token_out_hint,
             )
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # Extraction helpers — keep each CC small and individually testable.
+    # ------------------------------------------------------------------
+
+    def _seed_swap_fields(self, parse_result: ParseResult) -> "_SwapSeed | None":
+        """Extract raw amounts + token hints from the parsed result.
+
+        ``parse_result.swap_result`` is None when ``_build_swap_result`` fails
+        closed on unresolved decimals, so fall back to the first raw Swap event.
+        Returns None if no Swap event is present (multi-hop semantics still
+        honoured: first swap event wins).
+        """
+        sr = parse_result.swap_result
+        if sr:
+            return _SwapSeed(
+                raw_in=sr.amount_in,
+                raw_out=sr.amount_out,
+                token_in_hint=sr.token_in,
+                token_out_hint=sr.token_out,
+                token_in_symbol=sr.token_in_symbol,
+                token_out_symbol=sr.token_out_symbol,
+                slippage_bps=sr.slippage_bps if sr.slippage_bps else None,
+            )
+        if parse_result.swap_events:
+            se = parse_result.swap_events[0]
+            in_addr, out_addr, in_sym, out_sym = self._pick_token_hints(se.token0_is_input)
+            return _SwapSeed(
+                raw_in=se.amount_in,
+                raw_out=se.amount_out,
+                token_in_hint=in_addr,
+                token_out_hint=out_addr,
+                token_in_symbol=in_sym,
+                token_out_symbol=out_sym,
+                slippage_bps=None,
+            )
+        return None
+
+    def _pick_token_hints(self, token0_is_input: bool) -> tuple[str, str, str, str]:
+        """Pick ``(in_addr, out_addr, in_symbol, out_symbol)`` constructor hints.
+
+        Returns empty strings for any unset field on the parser (constructor
+        did not receive token metadata for that side).
+        """
+        if token0_is_input:
+            return (
+                self.token0_address or "",
+                self.token1_address or "",
+                self.token0_symbol or "",
+                self.token1_symbol or "",
+            )
+        return (
+            self.token1_address or "",
+            self.token0_address or "",
+            self.token1_symbol or "",
+            self.token0_symbol or "",
+        )
+
+    def _resolve_swap_token_addresses(
+        self,
+        receipt: dict[str, Any],
+        parse_result: ParseResult,
+        seed: "_SwapSeed",
+    ) -> tuple[str, str]:
+        """Resolve ``(token_in_addr, token_out_addr)`` for the swap.
+
+        Resolution order (same behaviour as the pre-refactor monolith):
+        1. ``_extract_swap_tokens_from_transfers`` — wallet<->pool Transfers.
+        2. Pool fallback via ``_extract_tokens_by_pool`` — only when there is
+           exactly ONE Swap event (multi-hop would pick the intermediate).
+        3. Hints carried on the seed (token0/token1 metadata from constructor).
+        """
+        token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
+
+        if (not token_in_addr or not token_out_addr) and len(parse_result.swap_events) == 1:
+            pool_addr = parse_result.swap_events[0].pool_address
+            if pool_addr:
+                p_in, p_out = self._extract_tokens_by_pool(receipt, pool_addr)
+                if not token_in_addr and p_in:
+                    token_in_addr = p_in
+                if not token_out_addr and p_out:
+                    token_out_addr = p_out
+
+        if not token_in_addr:
+            token_in_addr = seed.token_in_hint
+        if not token_out_addr:
+            token_out_addr = seed.token_out_hint
+
+        return token_in_addr, token_out_addr
+
+    def _resolve_swap_decimals(
+        self,
+        token_in_addr: str,
+        token_out_addr: str,
+    ) -> tuple[int, int] | None:
+        """Resolve ``(in_decimals, out_decimals)`` or return None when unknown.
+
+        Fails closed with a WARNING log when either side can't be resolved —
+        silent zero-decimal output would corrupt PnL calculations downstream.
+        """
+        in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
+        out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+        if in_decimals is None or out_decimals is None:
+            logger.warning(
+                f"Cannot compute swap amounts: token decimals unknown "
+                f"(in={token_in_addr}:{in_decimals}, out={token_out_addr}:{out_decimals})"
+            )
+            return None
+        return in_decimals, out_decimals
+
+    @staticmethod
+    def _apply_expected_out_slippage(
+        current_slippage_bps: int | None,
+        expected_out: Decimal | None,
+        amount_out_decimal: Decimal,
+    ) -> int | None:
+        """VIB-3203: override slippage_bps with realized slippage vs expected_out.
+
+        Guards against expected_out <= 0 and amount_out_decimal <= 0 to avoid
+        division by zero / negative-denominator math. When guards don't pass,
+        preserves whatever slippage_bps the parser already produced.
+        """
+        if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
+            realized_slippage = (expected_out - amount_out_decimal) / expected_out
+            return int(realized_slippage * Decimal(10_000))
+        return current_slippage_bps
 
     def _extract_swap_tokens_from_transfers(self, receipt: dict[str, Any]) -> tuple[str, str, int, int]:
         """Extract token addresses and amounts from ERC-20 Transfer events.
