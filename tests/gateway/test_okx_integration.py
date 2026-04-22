@@ -8,7 +8,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from almanak.gateway.integrations.base import IntegrationError
-from almanak.gateway.integrations.okx import OkxIntegration
+from almanak.gateway.integrations.okx import (
+    OkxDefiContext,
+    OkxIntegration,
+    _extract_data_entries,
+    _extract_position_rows,
+    _extract_reward_rows_from_network,
+    _extract_reward_rows_from_position,
+    _resolve_protocol_and_symbols,
+    _safe_decimal,
+    _sum_position_values,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -1257,3 +1267,570 @@ class TestNormalizeDefiDetails:
                 ]
             },
         }
+
+
+class TestNormalizeDefiExtractors:
+    """Isolation tests for the module-level helpers extracted in Phase 5f.
+
+    These helpers were pulled out of ``OkxIntegration._normalize_defi_details``
+    to make the per-level shape-walking testable without having to construct
+    full, realistic OKX payloads. Each helper is a pure function of its inputs
+    plus an immutable :class:`OkxDefiContext`, so we verify them directly with
+    small inline dict/list fixtures.
+
+    Scope:
+      - ``_extract_data_entries``         (level-0 shape normalizer)
+      - ``_resolve_protocol_and_symbols`` (investLogo walk + tokenList fallback)
+      - ``_extract_position_rows``        (level-3 primary row builder)
+      - ``_extract_reward_rows_from_position``  (level-3b inner rewards)
+      - ``_extract_reward_rows_from_network``   (level-2a top-level rewards)
+      - ``_safe_decimal``, ``_sum_position_values`` (supporting utilities)
+
+    Known latent bugs pinned at current behavior (do NOT fix here):
+      - Issue #1707: measured ``totalValue == "0"`` triggers recompute.
+      - Issue #1708: duplicate rewards across position/network levels.
+    """
+
+    @pytest.fixture
+    def ctx(self) -> OkxDefiContext:
+        """Standard context: Aave V3 on Arbitrum."""
+        return OkxDefiContext(
+            platform_names={"44": "Aave V3", "123": "Uniswap V3"},
+            platform_id="44",
+            chain_index="42161",
+        )
+
+    # ------------------------------------------------------------------
+    # _extract_data_entries
+    # ------------------------------------------------------------------
+
+    def test_extract_data_entries_dict_shape(self):
+        """``data`` as a dict yields a single-element list."""
+        entry = {"walletIdPlatformDetailList": []}
+        assert _extract_data_entries({"code": "0", "data": entry}) == [entry]
+
+    def test_extract_data_entries_list_shape(self):
+        """``data`` as a list returns the list, filtering non-dict items."""
+        entries = [{"a": 1}, {"b": 2}]
+        assert _extract_data_entries({"code": "0", "data": entries}) == entries
+
+    def test_extract_data_entries_list_with_non_dict_items_filtered(self):
+        """List entries that are not dicts are silently dropped."""
+        entries = [{"a": 1}, "not-a-dict", 42, None, {"b": 2}]
+        assert _extract_data_entries({"code": "0", "data": entries}) == [{"a": 1}, {"b": 2}]
+
+    def test_extract_data_entries_missing_data_key(self):
+        """Payload with no ``data`` key yields an empty list."""
+        assert _extract_data_entries({"code": "0"}) == []
+
+    def test_extract_data_entries_non_dict_non_list_data(self):
+        """``data`` that is neither a dict nor a list yields an empty list."""
+        assert _extract_data_entries({"code": "0", "data": "oops"}) == []
+        assert _extract_data_entries({"code": "0", "data": 42}) == []
+        assert _extract_data_entries({"code": "0", "data": None}) == []
+
+    def test_extract_data_entries_empty_list(self):
+        """``data: []`` yields an empty list."""
+        assert _extract_data_entries({"code": "0", "data": []}) == []
+
+    def test_extract_data_entries_non_dict_payload(self):
+        """Non-dict payloads (None, string, list, int) yield an empty list."""
+        assert _extract_data_entries(None) == []
+        assert _extract_data_entries("oops") == []
+        assert _extract_data_entries([1, 2, 3]) == []
+        assert _extract_data_entries(42) == []
+
+    # ------------------------------------------------------------------
+    # _resolve_protocol_and_symbols
+    # ------------------------------------------------------------------
+
+    def test_resolve_protocol_no_invest_logo(self, ctx):
+        """No investLogo: protocol from platform_names, symbols from tokenList."""
+        invest = {"tokenList": [{"tokenSymbol": "USDC"}]}
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Aave V3"
+        assert symbols == ["USDC"]
+
+    @pytest.mark.parametrize("bad_logo", ["string", 42, ["list"], None])
+    def test_resolve_protocol_non_dict_invest_logo(self, ctx, bad_logo):
+        """Non-dict investLogo: falls back to platform_names + tokenList."""
+        invest = {"investLogo": bad_logo, "tokenList": [{"tokenSymbol": "DAI"}]}
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Aave V3"
+        assert symbols == ["DAI"]
+
+    def test_resolve_protocol_only_bottom_right(self, ctx):
+        """bottomRightLogoList sets protocol; missing middleLogoList falls back to tokenList."""
+        invest = {
+            "investLogo": {"bottomRightLogoList": [{"tokenName": "Morpho"}]},
+            "tokenList": [{"tokenSymbol": "USDT"}],
+        }
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Morpho"
+        assert symbols == ["USDT"]
+
+    def test_resolve_protocol_only_middle(self, ctx):
+        """middleLogoList sets symbols; missing bottomRightLogoList falls back to platform_names."""
+        invest = {
+            "investLogo": {
+                "middleLogoList": [{"tokenName": "WBTC"}, {"tokenName": "WETH"}],
+            },
+            "tokenList": [{"tokenSymbol": "SHOULD_NOT_APPEAR"}],
+        }
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Aave V3"
+        # middleLogoList wins over tokenList fallback.
+        assert symbols == ["WBTC", "WETH"]
+
+    def test_resolve_protocol_both_logos_present(self, ctx):
+        """Both logo lists present: protocol from bottomRight, symbols from middle."""
+        invest = {
+            "investLogo": {
+                "bottomRightLogoList": [{"tokenName": "Balancer"}],
+                "middleLogoList": [{"tokenName": "ETH"}, {"tokenName": "OP"}],
+            },
+        }
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Balancer"
+        assert symbols == ["ETH", "OP"]
+
+    def test_resolve_protocol_empty_middle_triggers_token_list_fallback(self, ctx):
+        """Empty middleLogoList: tokenList fallback activates even with a logo dict."""
+        invest = {
+            "investLogo": {
+                "bottomRightLogoList": [{"tokenName": "Morpho"}],
+                "middleLogoList": [],
+            },
+            "tokenList": [{"tokenSymbol": "FRAX"}],
+        }
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Morpho"
+        assert symbols == ["FRAX"]
+
+    def test_resolve_protocol_unknown_platform_id(self):
+        """Unknown platform_id yields ``"unknown"`` when investLogo is absent."""
+        ctx_unknown = OkxDefiContext(platform_names={}, platform_id="999", chain_index="1")
+        invest = {"tokenList": [{"tokenSymbol": "USDC"}]}
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx_unknown)
+        assert protocol == "unknown"
+        assert symbols == ["USDC"]
+
+    def test_resolve_protocol_bottom_right_empty_list_keeps_platform_name(self, ctx):
+        """bottomRightLogoList as empty list does NOT override platform_names."""
+        invest = {
+            "investLogo": {
+                "bottomRightLogoList": [],
+                "middleLogoList": [{"tokenName": "WETH"}],
+            },
+        }
+        protocol, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert protocol == "Aave V3"
+        assert symbols == ["WETH"]
+
+    def test_resolve_protocol_middle_logo_skips_entries_without_token_name(self, ctx):
+        """Middle-logo entries missing ``tokenName`` are silently skipped."""
+        invest = {
+            "investLogo": {
+                "middleLogoList": [
+                    {"tokenName": "A"},
+                    {},                 # skipped
+                    "not-a-dict",       # skipped
+                    {"tokenName": ""},  # skipped (falsy)
+                    {"tokenName": "B"},
+                ]
+            }
+        }
+        _, symbols = _resolve_protocol_and_symbols(invest, ctx)
+        assert symbols == ["A", "B"]
+
+    # ------------------------------------------------------------------
+    # _extract_position_rows
+    # ------------------------------------------------------------------
+
+    def test_extract_position_rows_happy_path(self, ctx):
+        """Valid invest produces exactly one WalletPosition with correct fields."""
+        invest = {
+            "investmentName": "Supply",
+            "investmentId": "inv-1",
+            "investType": 6,
+            "totalValue": "1500.75",
+            "poolAddress": "0xpool",
+            "investLogo": {
+                "bottomRightLogoList": [{"tokenName": "Aave"}],
+                "middleLogoList": [{"tokenName": "USDC"}],
+            },
+        }
+        rows = _extract_position_rows(invest, ctx)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.position_id == "okx:defi:44:inv-1"
+        assert row.protocol == "Aave"
+        assert row.label == "Supply"
+        assert row.position_type == "lending"  # investType 6
+        assert row.value_usd == "1500.75"
+        assert row.pool_address == "0xpool"
+        assert row.token_symbols == ["USDC"]
+        assert row.details == {
+            "invest_type": "lending",
+            "invest_type_id": 6,
+            "investment_id": "inv-1",
+            "chain_index": "42161",
+            "platform_id": "44",
+        }
+
+    def test_extract_position_rows_label_defaults_when_name_missing(self, ctx):
+        """Missing investmentName: label falls back to ``"<protocol> <type>"``."""
+        invest = {"investmentId": "i", "investType": 2, "totalValue": "1"}
+        rows = _extract_position_rows(invest, ctx)
+        assert rows[0].label == "Aave V3 pool"
+
+    def test_extract_position_rows_pool_address_falls_back_to_token_address(self, ctx):
+        """When poolAddress is absent, tokenAddress is used instead."""
+        invest = {
+            "investmentName": "x",
+            "investmentId": "i",
+            "investType": 2,
+            "totalValue": "1",
+            "tokenAddress": "0xtoken",
+        }
+        rows = _extract_position_rows(invest, ctx)
+        assert rows[0].pool_address == "0xtoken"
+
+    def test_extract_position_rows_empty_position_list_with_missing_total_value(self, ctx):
+        """Missing totalValue + empty positionList: sum fallback yields ``"0"``."""
+        invest = {
+            "investmentName": "empty",
+            "investmentId": "i",
+            "investType": 1,
+            # no totalValue
+            "positionList": [],
+        }
+        rows = _extract_position_rows(invest, ctx)
+        assert len(rows) == 1
+        assert rows[0].value_usd == "0"
+
+    def test_extract_position_rows_malformed_invest_still_produces_row(self, ctx):
+        """Malformed/minimal invest dict still produces a single row with defaults."""
+        invest = {}
+        rows = _extract_position_rows(invest, ctx)
+        # Always exactly one row; no crash.
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.position_id == "okx:defi:44:"
+        assert row.protocol == "Aave V3"
+        # investType missing defaults to 0 -> "type_0".
+        assert row.position_type == "type_0"
+        # label = "" (investmentName empty) is falsy so fallback kicks in
+        # to "<protocol> <type>". Here: "Aave V3 type_0".
+        assert row.label == "Aave V3 type_0"
+        # totalValue absent -> ""; _sum_position_values(None) -> "0".
+        assert row.value_usd == "0"
+        assert row.pool_address == ""
+        assert row.token_symbols == []
+
+    def test_extract_position_rows_measured_zero_total_value_recomputes(self, ctx):
+        """Issue #1707 (pinned): measured totalValue=="0" silently recomputes from positionList."""
+        invest = {
+            "investmentName": "z",
+            "investmentId": "z",
+            "investType": 1,
+            "totalValue": "0",
+            "positionList": [
+                {"assetsTokenList": [{"currencyAmount": "42.00"}]},
+            ],
+        }
+        rows = _extract_position_rows(invest, ctx)
+        assert rows[0].value_usd == "42.00"
+
+    def test_extract_position_rows_multi_invocation_distinct_contexts(self):
+        """The same invest dict under two contexts produces distinct position_ids/chain rows."""
+        invest = {
+            "investmentName": "n",
+            "investmentId": "iid",
+            "investType": 1,
+            "totalValue": "1",
+        }
+        ctx_a = OkxDefiContext(platform_names={"44": "A"}, platform_id="44", chain_index="1")
+        ctx_b = OkxDefiContext(platform_names={"99": "B"}, platform_id="99", chain_index="42161")
+        row_a = _extract_position_rows(invest, ctx_a)[0]
+        row_b = _extract_position_rows(invest, ctx_b)[0]
+        assert row_a.position_id == "okx:defi:44:iid"
+        assert row_b.position_id == "okx:defi:99:iid"
+        assert row_a.details["chain_index"] == "1"
+        assert row_b.details["chain_index"] == "42161"
+
+    # ------------------------------------------------------------------
+    # _extract_reward_rows_from_position
+    # ------------------------------------------------------------------
+
+    def test_extract_reward_rows_from_position_happy_path(self, ctx):
+        """Two non-zero rewards produce two rows with inherited protocol attribution."""
+        invest = {
+            "investmentId": "inv-r",
+            "investLogo": {"bottomRightLogoList": [{"tokenName": "Aave"}]},
+            "positionList": [
+                {
+                    "unclaimFeesDefiTokenInfo": [
+                        {
+                            "baseDefiTokenInfos": [
+                                {
+                                    "tokenSymbol": "REW1",
+                                    "coinAmount": "1.0",
+                                    "currencyAmount": "5.00",
+                                },
+                                {
+                                    "tokenSymbol": "REW2",
+                                    "coinAmount": "2.0",
+                                    "currencyAmount": "3.00",
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+        rows = _extract_reward_rows_from_position(invest, ctx)
+        assert len(rows) == 2
+        assert rows[0].position_id == "okx:reward:44:inv-r:REW1"
+        # Rewards inherit investLogo protocol, not platform_names.
+        assert rows[0].protocol == "Aave"
+        assert rows[0].value_usd == "5.00"
+        assert rows[0].token_symbols == ["REW1"]
+        assert rows[0].details == {"reward_amount": "1.0", "chain_index": "42161"}
+        assert rows[1].position_id == "okx:reward:44:inv-r:REW2"
+
+    def test_extract_reward_rows_from_position_zero_value_filtered(self, ctx):
+        """Rewards with currencyAmount <= 0 are dropped."""
+        invest = {
+            "investmentId": "inv",
+            "positionList": [
+                {
+                    "unclaimFeesDefiTokenInfo": [
+                        {
+                            "baseDefiTokenInfos": [
+                                {"tokenSymbol": "KEEP", "coinAmount": "1", "currencyAmount": "5"},
+                                {"tokenSymbol": "DROP", "coinAmount": "0", "currencyAmount": "0"},
+                                {"tokenSymbol": "NEG", "coinAmount": "0", "currencyAmount": "-1"},
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+        rows = _extract_reward_rows_from_position(invest, ctx)
+        assert [r.token_symbols[0] for r in rows] == ["KEEP"]
+
+    def test_extract_reward_rows_from_position_missing_position_list(self, ctx):
+        """Missing/non-list positionList returns an empty list."""
+        assert _extract_reward_rows_from_position({}, ctx) == []
+        assert _extract_reward_rows_from_position({"positionList": None}, ctx) == []
+        assert _extract_reward_rows_from_position({"positionList": "str"}, ctx) == []
+
+    def test_extract_reward_rows_from_position_missing_unclaim_fees(self, ctx):
+        """Missing/non-list unclaimFeesDefiTokenInfo skips the position entry."""
+        invest = {
+            "positionList": [
+                {},                                     # no unclaim
+                {"unclaimFeesDefiTokenInfo": None},     # non-list
+                {"unclaimFeesDefiTokenInfo": "bad"},    # non-list
+            ],
+        }
+        assert _extract_reward_rows_from_position(invest, ctx) == []
+
+    def test_extract_reward_rows_from_position_skips_non_dict_entries_at_every_level(self, ctx):
+        """Every defensive type-guard at the 4 nested loop levels is exercised.
+
+        Covers the guard-branch ``continue`` at non-dict position, non-dict
+        fee_group, non-list baseDefiTokenInfos, and non-dict reward. A valid
+        tail entry proves the loop continues after each guard rather than
+        short-circuiting.
+        """
+        invest = {
+            "investmentId": "inv",
+            "positionList": [
+                "not-a-dict-position",  # skipped: not a dict
+                {
+                    "unclaimFeesDefiTokenInfo": [
+                        "not-a-dict-fee-group",        # skipped
+                        {"baseDefiTokenInfos": "oh"},  # non-list baseDefiTokenInfos
+                        {
+                            "baseDefiTokenInfos": [
+                                "not-a-dict-reward",   # skipped
+                                {
+                                    "tokenSymbol": "OK",
+                                    "coinAmount": "1",
+                                    "currencyAmount": "5",
+                                },
+                            ]
+                        },
+                    ]
+                },
+            ],
+        }
+        rows = _extract_reward_rows_from_position(invest, ctx)
+        assert [r.token_symbols[0] for r in rows] == ["OK"]
+
+    def test_extract_reward_rows_from_network_skips_non_dict_entries(self, ctx):
+        """Non-dict reward entries inside the list are silently skipped."""
+        rewards = [
+            "not-a-dict",
+            {"tokenSymbol": "KEEP", "tokenAmount": "1", "currencyAmount": "5"},
+        ]
+        rows = _extract_reward_rows_from_network(rewards, ctx)
+        assert [r.token_symbols[0] for r in rows] == ["KEEP"]
+
+    # ------------------------------------------------------------------
+    # _extract_reward_rows_from_network
+    # ------------------------------------------------------------------
+
+    def test_extract_reward_rows_from_network_happy_path(self, ctx):
+        """Network-level rewards use platform_names for protocol (not investLogo)."""
+        rewards = [
+            {"tokenSymbol": "ARB", "tokenAmount": "5.0", "currencyAmount": "15.50"},
+        ]
+        rows = _extract_reward_rows_from_network(rewards, ctx)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.position_id == "okx:reward:44:ARB"
+        # NOTE: network-level rewards resolve protocol via platform_names.
+        assert row.protocol == "Aave V3"
+        assert row.label == "Aave V3 reward"
+        assert row.value_usd == "15.50"
+        assert row.token_symbols == ["ARB"]
+        assert row.details == {"reward_amount": "5.0", "chain_index": "42161"}
+
+    def test_extract_reward_rows_from_network_token_amount_preferred_over_coin_amount(self, ctx):
+        """``tokenAmount`` wins when both tokenAmount and coinAmount are present."""
+        rewards = [
+            {"tokenSymbol": "A", "tokenAmount": "1.0", "coinAmount": "99.9", "currencyAmount": "5"},
+            {"tokenSymbol": "B", "coinAmount": "2.0", "currencyAmount": "6"},
+            {"tokenSymbol": "C", "currencyAmount": "7"},  # no amount -> default "0"
+        ]
+        rows = _extract_reward_rows_from_network(rewards, ctx)
+        amounts = {r.token_symbols[0]: r.details["reward_amount"] for r in rows}
+        assert amounts == {"A": "1.0", "B": "2.0", "C": "0"}
+
+    def test_extract_reward_rows_from_network_missing_rewards(self, ctx):
+        """Non-list (None, str, int, dict) availableRewards returns empty."""
+        assert _extract_reward_rows_from_network(None, ctx) == []
+        assert _extract_reward_rows_from_network("oops", ctx) == []
+        assert _extract_reward_rows_from_network(42, ctx) == []
+        assert _extract_reward_rows_from_network({"k": "v"}, ctx) == []
+
+    def test_extract_reward_rows_from_network_empty_list(self, ctx):
+        """Empty rewards list returns empty."""
+        assert _extract_reward_rows_from_network([], ctx) == []
+
+    def test_extract_reward_rows_from_network_unknown_platform_labels_unknown(self):
+        """Unknown platform_id produces ``"unknown"`` protocol/label on rewards."""
+        ctx_unknown = OkxDefiContext(platform_names={}, platform_id="zz", chain_index="1")
+        rewards = [{"tokenSymbol": "X", "tokenAmount": "1", "currencyAmount": "2"}]
+        rows = _extract_reward_rows_from_network(rewards, ctx_unknown)
+        assert rows[0].protocol == "unknown"
+        assert rows[0].label == "unknown reward"
+
+    def test_extract_reward_rows_from_network_zero_value_filtered(self, ctx):
+        """Currency amount <= 0 drops the reward."""
+        rewards = [
+            {"tokenSymbol": "A", "tokenAmount": "1", "currencyAmount": "0"},
+            {"tokenSymbol": "B", "tokenAmount": "1", "currencyAmount": "-0.5"},
+            {"tokenSymbol": "C", "tokenAmount": "1", "currencyAmount": "0.01"},
+        ]
+        rows = _extract_reward_rows_from_network(rewards, ctx)
+        assert [r.token_symbols[0] for r in rows] == ["C"]
+
+    # ------------------------------------------------------------------
+    # _safe_decimal
+    # ------------------------------------------------------------------
+
+    def test_safe_decimal_valid_strings(self):
+        """Valid numeric strings parse into Decimal."""
+        assert _safe_decimal("0") == Decimal("0")
+        assert _safe_decimal("1.23") == Decimal("1.23")
+        assert _safe_decimal("-4.5") == Decimal("-4.5")
+        assert _safe_decimal("1e3") == Decimal("1000")
+
+    def test_safe_decimal_none_returns_zero(self):
+        """None input yields Decimal("0")."""
+        assert _safe_decimal(None) == Decimal("0")
+
+    def test_safe_decimal_empty_string_returns_zero(self):
+        """Empty string yields Decimal("0") (InvalidOperation path)."""
+        assert _safe_decimal("") == Decimal("0")
+
+    def test_safe_decimal_invalid_string_returns_zero(self):
+        """Non-numeric strings yield Decimal("0")."""
+        assert _safe_decimal("not-a-number") == Decimal("0")
+        assert _safe_decimal("abc") == Decimal("0")
+
+    def test_safe_decimal_non_finite_returns_zero(self):
+        """Non-finite values (NaN, Infinity) are treated as zero."""
+        assert _safe_decimal("NaN") == Decimal("0")
+        assert _safe_decimal("Infinity") == Decimal("0")
+        assert _safe_decimal("-Infinity") == Decimal("0")
+
+    def test_safe_decimal_already_decimal(self):
+        """A Decimal input is returned via ``Decimal(str(value))`` and is preserved."""
+        assert _safe_decimal(Decimal("3.14")) == Decimal("3.14")
+
+    def test_safe_decimal_numeric_types(self):
+        """int/float numeric types are parsed via str() roundtrip."""
+        assert _safe_decimal(42) == Decimal("42")
+        assert _safe_decimal(1.5) == Decimal("1.5")
+
+    # ------------------------------------------------------------------
+    # _sum_position_values
+    # ------------------------------------------------------------------
+
+    def test_sum_position_values_multi_position(self):
+        """Sums currencyAmount across every asset in every position."""
+        positions = [
+            {"assetsTokenList": [
+                {"currencyAmount": "10.25"},
+                {"currencyAmount": "5.75"},
+            ]},
+            {"assetsTokenList": [{"currencyAmount": "4.00"}]},
+        ]
+        assert _sum_position_values(positions) == "20.00"
+
+    def test_sum_position_values_empty_list(self):
+        """Empty list yields ``"0"``."""
+        assert _sum_position_values([]) == "0"
+
+    def test_sum_position_values_single_position(self):
+        """Single position with a single asset."""
+        positions = [{"assetsTokenList": [{"currencyAmount": "7"}]}]
+        assert _sum_position_values(positions) == "7"
+
+    def test_sum_position_values_non_list_input(self):
+        """Non-list input returns the string ``"0"``."""
+        assert _sum_position_values(None) == "0"
+        assert _sum_position_values("oops") == "0"
+        assert _sum_position_values(42) == "0"
+        assert _sum_position_values({"k": "v"}) == "0"
+
+    def test_sum_position_values_malformed_entries_tolerated(self):
+        """Non-dict positions and non-list assetsTokenList entries are skipped."""
+        positions = [
+            "not-a-dict",                                 # skipped
+            {"assetsTokenList": None},                    # skipped
+            {"assetsTokenList": "bad"},                   # skipped
+            {},                                           # skipped (no assets)
+            {"assetsTokenList": [
+                "not-a-dict",                             # skipped
+                {"currencyAmount": "1.50"},
+                {"currencyAmount": "invalid"},            # parses to 0
+                {"currencyAmount": "2.50"},
+            ]},
+        ]
+        assert _sum_position_values(positions) == "4.00"
+
+    def test_sum_position_values_missing_currency_amount_defaults_to_zero(self):
+        """Assets missing currencyAmount contribute 0 to the sum."""
+        positions = [
+            {"assetsTokenList": [
+                {"tokenSymbol": "A"},  # no currencyAmount
+                {"currencyAmount": "3.50"},
+            ]},
+        ]
+        assert _sum_position_values(positions) == "3.50"
