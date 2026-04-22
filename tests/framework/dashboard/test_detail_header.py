@@ -173,6 +173,65 @@ def _drive_single_chain() -> None:
     render_chain_info_row(strategy)
 
 
+def _drive_zero_health_factor() -> None:
+    """Issue #1724: health_factor == 0 must render as a Health Factor metric,
+    not fall through to ``Positions N/A``.
+
+    This mirrors the truthiness bug: ``Decimal("0")`` is falsy, so the old
+    ``elif strategy.position.health_factor:`` guard skipped the Health Factor
+    metric whenever a lending position had fully repaid its debt. The fix
+    checks ``is not None`` explicitly.
+    """
+    from decimal import Decimal
+
+    from almanak.framework.dashboard.models import (
+        PositionSummary,
+        Strategy,
+        StrategyStatus,
+    )
+    from almanak.framework.dashboard.pages._detail_header import render_key_metrics
+
+    strategy = Strategy(
+        id="s",
+        name="Lending Strat (no debt)",
+        status=StrategyStatus.RUNNING,
+        pnl_24h_usd=Decimal("0"),
+        total_value_usd=Decimal("1000"),
+        chain="arbitrum",
+        protocol="Aave V3",
+        position=PositionSummary(
+            health_factor=Decimal("0"),  # fully repaid -> HF == 0, NOT missing data
+        ),
+    )
+    render_key_metrics(strategy)
+
+
+def _drive_nonzero_health_factor() -> None:
+    """Positive health factor still renders the usual two-decimal value."""
+    from decimal import Decimal
+
+    from almanak.framework.dashboard.models import (
+        PositionSummary,
+        Strategy,
+        StrategyStatus,
+    )
+    from almanak.framework.dashboard.pages._detail_header import render_key_metrics
+
+    strategy = Strategy(
+        id="s",
+        name="Lending Strat (healthy)",
+        status=StrategyStatus.RUNNING,
+        pnl_24h_usd=Decimal("0"),
+        total_value_usd=Decimal("1000"),
+        chain="arbitrum",
+        protocol="Aave V3",
+        position=PositionSummary(
+            health_factor=Decimal("1.5"),
+        ),
+    )
+    render_key_metrics(strategy)
+
+
 def _drive_missing_optionals() -> None:
     from decimal import Decimal
 
@@ -272,6 +331,35 @@ def test_apptest_single_chain_strategy_renders_single_chain_label() -> None:
     assert "Chains:" not in text
     assert "Protocols:" not in text
     assert "Last Action:" in text
+
+
+def test_apptest_zero_health_factor_renders_no_debt_metric() -> None:
+    """Regression for #1724: ``health_factor == 0`` renders a Health Factor metric.
+
+    The pre-fix code used ``elif strategy.position.health_factor:`` which is
+    falsy for ``Decimal("0")``, silently rerouting fully-repaid lending
+    positions into the ``Positions N/A`` fallback. The fix uses ``is not None``
+    and annotates the zero case as ``0 (no debt)``.
+    """
+    at = AppTest.from_function(_drive_zero_health_factor).run(timeout=30)
+
+    assert not at.exception, f"Unexpected exception: {at.exception}"
+    metric_labels = [m.label for m in at.metric]
+    assert "Health Factor" in metric_labels
+    assert "Positions" not in metric_labels  # no N/A fallback
+    # The zero case is annotated so operators can tell it apart from missing data.
+    hf_metric = next(m for m in at.metric if m.label == "Health Factor")
+    assert "0" in hf_metric.value
+    assert "no debt" in hf_metric.value
+
+
+def test_apptest_nonzero_health_factor_renders_two_decimal_value() -> None:
+    """Positive ``health_factor`` still renders the formatted two-decimal value."""
+    at = AppTest.from_function(_drive_nonzero_health_factor).run(timeout=30)
+
+    assert not at.exception, f"Unexpected exception: {at.exception}"
+    hf_metric = next(m for m in at.metric if m.label == "Health Factor")
+    assert hf_metric.value == "1.50"
 
 
 def test_apptest_strategy_with_missing_optional_fields_does_not_raise() -> None:

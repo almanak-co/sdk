@@ -6,6 +6,7 @@ Wires action buttons to real API endpoints.
 
 import html
 import logging
+import os
 from decimal import Decimal
 from typing import Any
 
@@ -108,8 +109,22 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
             return {"success": False, "error": str(e)}
 
     # Fallback to REST API for non-migrated actions.
+    api_key = os.environ.get("ALMANAK_DASHBOARD_API_KEY")
+    if not api_key:
+        logger.error(
+            "ALMANAK_DASHBOARD_API_KEY is not set. "
+            "Refusing to call the strategy action REST API with an unauthenticated request."
+        )
+        return {
+            "success": False,
+            "error": (
+                "ALMANAK_DASHBOARD_API_KEY environment variable is not set. "
+                "Set it to a valid API key before invoking dashboard actions."
+            ),
+        }
+
     url = f"{API_BASE_URL}/api/strategies/{strategy_id}/{action}"
-    headers = {"Content-Type": "application/json", "X-API-Key": "demo-key"}
+    headers = {"Content-Type": "application/json", "X-API-Key": api_key}
 
     try:
         response = requests.post(
@@ -511,8 +526,22 @@ def render_timeline_events(strategy: Strategy, limit: int = 10) -> None:
                 tx_hash = event.details.get("tx_hash", "") if event.details else ""
                 time_str = event.timestamp.strftime("%H:%M:%S")
                 tx_short = tx_hash[:10] + "..." if tx_hash else ""
-                # Get chain from event for explorer link
-                chain = getattr(event, "chain", None) or strategy.chain or "arbitrum"
+                # Resolve chain for the explorer link in per-event priority
+                # order (#1733). Multi-chain strategies produce events on
+                # different chains, so falling through to ``strategy.chain``
+                # too early sends the operator to the wrong block explorer.
+                #
+                # Priority:
+                #   1. ``event.chain`` - typed top-level field, populated by
+                #      the gateway timeline service for multi-chain events.
+                #   2. ``event.details["chain"]`` - legacy / custom events
+                #      that stuffed the chain into the free-form details bag.
+                #   3. ``strategy.chain`` - single-chain strategies where
+                #      every event is on the primary chain.
+                #   4. ``"arbitrum"`` - last-resort fallback kept for
+                #      backwards compatibility with existing renderer output.
+                event_details_chain = (event.details or {}).get("chain") if event.details else None
+                chain = getattr(event, "chain", None) or event_details_chain or strategy.chain or "arbitrum"
                 explorer_url = get_explorer_url(chain, tx_hash) if tx_hash else ""
 
                 # Make TX hash a clickable link
@@ -572,9 +601,25 @@ def render_position_lifecycle(strategy: Strategy) -> None:
 
         config = SQLiteConfig(db_path=db_path)
         store = SQLiteStore(config)
-        asyncio.get_event_loop().run_until_complete(store.initialize())
-        events = asyncio.get_event_loop().run_until_complete(store.get_position_events(strategy.id, limit=200))
-        asyncio.get_event_loop().run_until_complete(store.close())
+
+        async def _fetch_position_events() -> list[dict]:
+            """Run the store lifecycle + fetch in a single event loop.
+
+            Previously used ``asyncio.get_event_loop().run_until_complete(...)``
+            three separate times, which is deprecated under Python 3.10+ (will
+            raise ``DeprecationWarning`` and eventually ``RuntimeError`` once
+            there is no running loop in the current thread). Wrapping the
+            sequence in a single coroutine and dispatching through
+            ``asyncio.run`` (#1712) makes lifecycle cleanup deterministic
+            and removes the three-loop-spin-up overhead on every render.
+            """
+            await store.initialize()
+            try:
+                return await store.get_position_events(strategy.id, limit=200)
+            finally:
+                await store.close()
+
+        events = asyncio.run(_fetch_position_events())
     except Exception:
         return  # Silently skip if SQLite not available
 
@@ -649,31 +694,78 @@ def render_position_lifecycle(strategy: Strategy) -> None:
 def _find_state_db(strategy_id: str) -> str | None:
     """Find the SQLite state DB for a strategy.
 
-    Looks in the standard location used by the framework runner.
+    Resolution order (deterministic-first, issue #1713):
+
+    1. ``ALMANAK_STATE_DB`` environment variable. Matches
+       ``state_manager.py``, ``run.py``, ``teardown/state_manager.py`` - this
+       is the canonical production override and wins unconditionally when set
+       and pointing at an existing file.
+    2. ``./almanak_state.db`` (CLI default). Matches
+       ``state_manager.StateManagerConfig.db_path`` default and is where
+       ``almanak strat run`` writes state.
+    3. Deployment-id lookup: ``~/.almanak/state/<strategy_id>/state.db`` and
+       ``~/.almanak/state/<base_name>/state.db`` (base name = strategy id with
+       the deployment suffix stripped).
+    4. Legacy flat locations: ``~/.almanak/state/state.db`` and
+       ``./.almanak/state.db``.
+
+    When more than one candidate outside of (1)-(3) exists (i.e. multiple
+    fallback paths match), a warning is logged identifying every match; the
+    first hit is still returned so the dashboard stays usable, but the
+    operator is alerted to the ambiguity instead of the old code silently
+    picking one path from six without surfacing the conflict.
     """
     import os
 
-    # Canonical env var check first (matches run.py / state_service.py / state_manager.py)
+    # 1. Canonical env var check (matches run.py / state_service.py /
+    #    state_manager.py). Explicit operator override; always wins.
     env_db = os.environ.get("ALMANAK_STATE_DB")
     if env_db and os.path.exists(env_db):
         return env_db
 
-    # Standard location: .almanak/state/<strategy_id>/state.db
+    # 2. CLI default (matches StateManagerConfig.db_path default). This is
+    #    where ``almanak strat run`` places state when the env var is unset.
+    cli_default = os.path.join(".", "almanak_state.db")
+    if os.path.exists(cli_default):
+        return cli_default
+
+    # 3. Deterministic deployment_id lookup. If the caller passed a full
+    #    deployment id (``StrategyName:abc123``) we prefer an exact match on
+    #    that id over anything derived from the base strategy name.
     home = os.path.expanduser("~")
-    candidates = [
-        os.path.join(".", "almanak_state.db"),  # Default CLI path
+    deployment_candidates: list[str] = [
         os.path.join(home, ".almanak", "state", strategy_id, "state.db"),
+    ]
+    if ":" in strategy_id:
+        base_name = strategy_id.split(":", 1)[0]
+        deployment_candidates.append(
+            os.path.join(home, ".almanak", "state", base_name, "state.db"),
+        )
+
+    for path in deployment_candidates:
+        if os.path.exists(path):
+            return path
+
+    # 4. Pattern-search fallback - legacy flat locations. If more than one
+    #    of these exists we have no way to know which one belongs to the
+    #    strategy being viewed; warn loudly and return the first match so the
+    #    operator can investigate instead of silently picking a winner.
+    fallback_candidates = [
         os.path.join(home, ".almanak", "state", "state.db"),
         os.path.join(".", ".almanak", "state.db"),
     ]
-
-    # Also check for strategy name without deployment suffix
-    base_name = strategy_id.split(":")[0] if ":" in strategy_id else strategy_id
-    candidates.append(os.path.join(home, ".almanak", "state", base_name, "state.db"))
-
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    matches = [p for p in fallback_candidates if os.path.exists(p)]
+    if len(matches) > 1:
+        logger.warning(
+            "Multiple legacy state DB candidates matched for strategy %s: %s. "
+            "Returning the first match (%s). Set ALMANAK_STATE_DB to disambiguate "
+            "or migrate the DB to ~/.almanak/state/<strategy_id>/state.db.",
+            strategy_id,
+            matches,
+            matches[0],
+        )
+    if matches:
+        return matches[0]
 
     return None
 

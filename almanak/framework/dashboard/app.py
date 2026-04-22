@@ -8,7 +8,6 @@ This is the main entry point that sets up navigation and routing.
 
 import logging
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -199,7 +198,11 @@ def main() -> None:
         # Auto-refresh when interval elapsed
         if elapsed >= st.session_state.refresh_interval:
             st.session_state.last_refresh = datetime.now()
-            time.sleep(0.1)  # Small delay to prevent rapid loops
+            # No artificial delay: ``st.rerun()`` reschedules the script
+            # synchronously and the elapsed-time gate above already prevents
+            # the tight loop the original ``time.sleep(0.1)`` guarded
+            # against. Blocking the Streamlit render thread for 100ms per
+            # rerun was stale guarding work (issue #1715).
             st.rerun()
     else:
         st.caption(f"Last refreshed: {st.session_state.last_refresh.strftime('%H:%M:%S')}")

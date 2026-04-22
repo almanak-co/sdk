@@ -208,7 +208,55 @@ def test_tx_display_fields_failed_uses_error_detail_or_default() -> None:
     assert failed_with_error is not None
     assert failed_with_error.detail == "insufficient funds"
     assert reverted_without_error is not None
-    assert reverted_without_error.detail == "Transaction failed"
+    # Reverts use a dedicated default message (#1732) - they are not the same
+    # as generic TX_FAILED events.
+    assert reverted_without_error.detail == "Transaction reverted"
+
+
+def test_tx_display_fields_reverted_prefers_revert_reason_over_error() -> None:
+    """Regression for #1732: ``revert_reason`` wins over generic ``error``."""
+    fields = tx_display_fields(
+        _event(
+            0,
+            {
+                "execution_event": "TX_REVERTED",
+                "revert_reason": "ERC20: insufficient allowance",
+                "error": "execution reverted",  # generic fallback
+            },
+        )
+    )
+
+    assert fields is not None
+    assert fields.detail == "ERC20: insufficient allowance"
+
+
+def test_tx_display_fields_reverted_falls_back_to_error_when_no_revert_reason() -> None:
+    """When ``revert_reason`` is absent, ``error`` is still surfaced."""
+    fields = tx_display_fields(
+        _event(0, {"execution_event": "TX_REVERTED", "error": "out of gas"})
+    )
+
+    assert fields is not None
+    assert fields.detail == "out of gas"
+
+
+def test_tx_display_fields_failed_ignores_revert_reason() -> None:
+    """TX_FAILED events do not use ``revert_reason`` - the field is revert-specific."""
+    fields = tx_display_fields(
+        _event(
+            0,
+            {
+                "execution_event": "TX_FAILED",
+                "revert_reason": "should be ignored for TX_FAILED",
+                "error": "submission error",
+            },
+        )
+    )
+
+    assert fields is not None
+    # TX_FAILED is a pre-mining failure (signing / submission) and has no
+    # on-chain revert reason. Keep the old ``error``-only semantics.
+    assert fields.detail == "submission error"
 
 
 def test_status_badge_returns_stable_mapping_for_every_literal() -> None:

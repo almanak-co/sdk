@@ -161,8 +161,16 @@ def render_key_metrics(strategy: Strategy) -> None:
     with col3:
         if strategy.position and strategy.position.total_lp_value_usd > 0:
             st.metric("LP Value", format_usd(strategy.position.total_lp_value_usd))
-        elif strategy.position and strategy.position.health_factor:
-            st.metric("Health Factor", f"{strategy.position.health_factor:.2f}")
+        elif strategy.position and strategy.position.health_factor is not None:
+            # ``health_factor == 0`` is a valid "no debt / fully collateralised"
+            # signal and must not be coerced to ``Positions N/A`` (#1724).
+            # The renderer annotates the zero case so operators can tell it
+            # apart from "data not available".
+            hf = strategy.position.health_factor
+            if hf == 0:
+                st.metric("Health Factor", "0 (no debt)")
+            else:
+                st.metric("Health Factor", f"{hf:.2f}")
         else:
             st.metric("Positions", "N/A")
 

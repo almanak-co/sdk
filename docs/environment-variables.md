@@ -43,6 +43,7 @@ Set these based on which protocols and features your strategy uses.
 | `ENSO_API_KEY` | Swap routing via Enso Finance aggregator | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | Improves rate limits for price data (works without key) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
 | `ALMANAK_API_KEY` | Almanak platform authentication | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_DASHBOARD_API_KEY` | API key used by the operator dashboard when calling non-gateway REST endpoints (pause/resume go through gateway; `bump-gas` / `cancel-tx` still use REST). Must match a key listed in `ALMANAK_API_KEYS` on the API server. | `dash_abc123...` |
 | `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

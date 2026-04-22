@@ -125,7 +125,14 @@ def tx_display_fields(event: TimelineEvent) -> TxDisplay | None:
         return TxDisplay(icon="✓", color="#00c853", detail=detail)
     if exec_event == TX_EVENT_SENT:
         return TxDisplay(icon="→", color="#2196f3", detail="Submitted to mempool")
-    if exec_event in (TX_EVENT_FAILED, TX_EVENT_REVERTED):
+    if exec_event == TX_EVENT_REVERTED:
+        # Reverts carry a decoded ``revert_reason`` (e.g. "ERC20: insufficient
+        # allowance") that is strictly more actionable than the generic
+        # ``error`` field (often a raw exception string). Prefer it when
+        # present (#1732); fall back to ``error`` then the generic literal.
+        detail = details.get("revert_reason") or details.get("error") or "Transaction reverted"
+        return TxDisplay(icon="✗", color="#f44336", detail=detail)
+    if exec_event == TX_EVENT_FAILED:
         return TxDisplay(
             icon="✗",
             color="#f44336",

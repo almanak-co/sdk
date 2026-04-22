@@ -6,6 +6,7 @@ that accept an optional ``DashboardDataClient`` for live data injection.
 """
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -94,22 +95,28 @@ def render_strategy_detail(
     Otherwise renders with whatever data is already on the Strategy object
     (offline/cached mode).
 
+    The caller's ``Strategy`` instance is **never mutated** (#1716). When
+    live timeline data is fetched it is merged onto a shallow-copy built via
+    ``dataclasses.replace``; the caller keeps its original object intact so
+    re-rendering the same ``Strategy`` from multiple callers (PM caches, custom
+    UIs) does not see timeline events from a previous render leak through.
+
     Args:
-        strategy: Strategy to render.
+        strategy: Strategy to render. Not modified in place.
         client: Optional DashboardDataClient for live data.
     """
 
     from almanak.framework.dashboard.pages.detail import page
 
+    render_strategy = strategy
     if client and client.is_connected:
         try:
             detail = client.get_strategy_detail(strategy.id, include_timeline=True, include_pnl_history=True)
-            # Merge live data onto the strategy object
             if detail.timeline:
                 from almanak.framework.dashboard.models import TimelineEvent as ModelEvent
                 from almanak.framework.dashboard.models import TimelineEventType
 
-                strategy.timeline_events = [
+                fresh_events = [
                     ModelEvent(
                         timestamp=e.timestamp,
                         event_type=TimelineEventType(e.event_type)
@@ -123,11 +130,13 @@ def render_strategy_detail(
                     for e in detail.timeline
                     if e.timestamp is not None
                 ]
+                # Copy-on-write: the caller's strategy object is untouched.
+                render_strategy = replace(strategy, timeline_events=fresh_events)
         except Exception:
             logger.debug("Live data fetch failed for %s, using cached data", strategy.id, exc_info=True)
 
     # Render using the existing detail page with the strategy in a list
-    page([strategy])
+    page([render_strategy])
 
 
 def render_strategy_timeline(
@@ -136,20 +145,25 @@ def render_strategy_timeline(
 ) -> None:
     """Render strategy timeline page in Streamlit.
 
+    The caller's ``Strategy`` instance is never mutated (#1716) - a shallow
+    copy via ``dataclasses.replace`` carries the fresh timeline events to the
+    page renderer.
+
     Args:
-        strategy: Strategy to render.
+        strategy: Strategy to render. Not modified in place.
         client: Optional DashboardDataClient for live data.
     """
 
     from almanak.framework.dashboard.pages.timeline import page
 
+    render_strategy = strategy
     if client and client.is_connected:
         try:
             events = client.get_timeline(strategy.id, limit=200)
             from almanak.framework.dashboard.models import TimelineEvent as ModelEvent
             from almanak.framework.dashboard.models import TimelineEventType
 
-            strategy.timeline_events = [
+            fresh_events = [
                 ModelEvent(
                     timestamp=e.timestamp,
                     event_type=TimelineEventType(e.event_type)
@@ -163,7 +177,8 @@ def render_strategy_timeline(
                 for e in events
                 if e.timestamp is not None
             ]
+            render_strategy = replace(strategy, timeline_events=fresh_events)
         except Exception:
             logger.debug("Live timeline fetch failed for %s", strategy.id, exc_info=True)
 
-    page([strategy])
+    page([render_strategy])
