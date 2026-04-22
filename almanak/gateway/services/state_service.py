@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -860,3 +861,189 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("internal server error")
                 return gateway_pb2.PortfolioMetricsData(found=False)
+
+    # =========================================================================
+    # Transaction Ledger RPC (VIB-3201)
+    # =========================================================================
+
+    async def SaveLedgerEntry(
+        self,
+        request: gateway_pb2.SaveLedgerEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveLedgerEntryResponse:
+        """Persist a transaction ledger entry (VIB-3201).
+
+        Closes the VIB-3157 gateway gap: before this RPC existed,
+        ``GatewayStateManager.save_ledger_entry`` raised NotImplementedError
+        and live gateway deployments produced no durable trade records. The
+        handler mirrors ``SavePortfolioSnapshot``: fail-closed on DB error
+        (``success=false, error=...``) so the client raises
+        ``AccountingPersistenceError`` and the runner halts with
+        ``ACCOUNTING_FAILED``.
+
+        Note: ``extracted_data_json`` is accepted over the wire but is not
+        written to the deployed ``transaction_ledger`` Postgres table yet --
+        the column lives in the SQLite reference DDL and the metrics-database
+        migration that adds it to Postgres is tracked separately. SQLite
+        (local dev) persists the full payload via the warm backend.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SaveLedgerEntryResponse(success=False, error=str(e))
+
+        entry_id = (request.id or "").strip()
+        if not entry_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("id is required")
+            return gateway_pb2.SaveLedgerEntryResponse(success=False, error="id is required")
+        try:
+            uuid.UUID(entry_id)
+        except ValueError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("id must be a valid UUID")
+            return gateway_pb2.SaveLedgerEntryResponse(success=False, error="id must be a valid UUID")
+
+        if request.timestamp <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp must be positive")
+            return gateway_pb2.SaveLedgerEntryResponse(success=False, error="timestamp must be positive")
+
+        strategy_id = resolve_agent_id(strategy_id)
+        await self._ensure_snapshot_pool()
+
+        try:
+            ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
+        except (ValueError, OSError, OverflowError):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp out of range")
+            return gateway_pb2.SaveLedgerEntryResponse(success=False, error="timestamp out of range")
+
+        if request.extracted_data_json:
+            try:
+                extracted_json = request.extracted_data_json.decode("utf-8")
+            except UnicodeDecodeError:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("extracted_data_json must be valid UTF-8")
+                return gateway_pb2.SaveLedgerEntryResponse(
+                    success=False, error="extracted_data_json must be valid UTF-8"
+                )
+        else:
+            extracted_json = ""
+
+        slippage_bps = request.slippage_bps if request.HasField("slippage_bps") else None
+
+        if self._snapshot_pool is not None:
+            # PostgreSQL mode (deployed) -- columns match the transaction_ledger
+            # reference DDL in almanak/gateway/database.py. ``extracted_data_json``
+            # is intentionally excluded: it lives on the SDK-local SQLite schema
+            # but has not yet been added to the metrics-database Postgres
+            # migration. Proto carries it forward-compat so the wire format is
+            # stable once the column lands.
+            try:
+                await self._snapshot_execute(
+                    """
+                    INSERT INTO transaction_ledger (
+                        id, cycle_id, agent_id, deployment_id, execution_mode,
+                        timestamp, intent_type,
+                        token_in, amount_in, token_out, amount_out,
+                        effective_price, slippage_bps, gas_used, gas_usd,
+                        tx_hash, chain, protocol, success, error
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        cycle_id = EXCLUDED.cycle_id,
+                        deployment_id = EXCLUDED.deployment_id,
+                        execution_mode = EXCLUDED.execution_mode,
+                        timestamp = EXCLUDED.timestamp,
+                        intent_type = EXCLUDED.intent_type,
+                        token_in = EXCLUDED.token_in,
+                        amount_in = EXCLUDED.amount_in,
+                        token_out = EXCLUDED.token_out,
+                        amount_out = EXCLUDED.amount_out,
+                        effective_price = EXCLUDED.effective_price,
+                        slippage_bps = EXCLUDED.slippage_bps,
+                        gas_used = EXCLUDED.gas_used,
+                        gas_usd = EXCLUDED.gas_usd,
+                        tx_hash = EXCLUDED.tx_hash,
+                        chain = EXCLUDED.chain,
+                        protocol = EXCLUDED.protocol,
+                        success = EXCLUDED.success,
+                        error = EXCLUDED.error
+                    """,
+                    entry_id,
+                    request.cycle_id,
+                    strategy_id,
+                    request.deployment_id,
+                    request.execution_mode,
+                    ts,
+                    request.intent_type,
+                    request.token_in,
+                    request.amount_in,
+                    request.token_out,
+                    request.amount_out,
+                    request.effective_price,
+                    slippage_bps,
+                    request.gas_used,
+                    request.gas_usd,
+                    request.tx_hash,
+                    request.chain,
+                    request.protocol,
+                    request.success,
+                    request.error,
+                )
+                return gateway_pb2.SaveLedgerEntryResponse(success=True)
+            except Exception as e:
+                logger.error("SaveLedgerEntry failed for %s (id=%s): %s", strategy_id, request.id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveLedgerEntryResponse(success=False, error="internal server error")
+        else:
+            # SQLite mode (local dev) — delegate to StateManager's warm backend.
+            try:
+                await self._ensure_initialized()
+                assert self._state_manager is not None
+                warm = self._state_manager.warm_backend
+                if warm is None or not hasattr(warm, "save_ledger_entry"):
+                    error = "warm backend does not support save_ledger_entry"
+                    logger.error("SaveLedgerEntry (SQLite) unsupported for %s: %s", strategy_id, error)
+                    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                    context.set_details(error)
+                    return gateway_pb2.SaveLedgerEntryResponse(success=False, error=error)
+
+                from almanak.framework.observability.ledger import LedgerEntry
+
+                entry = LedgerEntry(
+                    id=entry_id,
+                    cycle_id=request.cycle_id,
+                    strategy_id=strategy_id,
+                    deployment_id=request.deployment_id,
+                    execution_mode=request.execution_mode,
+                    timestamp=ts,
+                    intent_type=request.intent_type,
+                    token_in=request.token_in,
+                    amount_in=request.amount_in,
+                    token_out=request.token_out,
+                    amount_out=request.amount_out,
+                    effective_price=request.effective_price,
+                    slippage_bps=slippage_bps,
+                    gas_used=request.gas_used,
+                    gas_usd=request.gas_usd,
+                    tx_hash=request.tx_hash,
+                    chain=request.chain,
+                    protocol=request.protocol,
+                    success=request.success,
+                    error=request.error,
+                    extracted_data_json=extracted_json,
+                )
+                await warm.save_ledger_entry(entry)
+                return gateway_pb2.SaveLedgerEntryResponse(success=True)
+            except Exception as e:
+                logger.error("SaveLedgerEntry (SQLite) failed for %s (id=%s): %s", strategy_id, request.id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveLedgerEntryResponse(success=False, error="internal server error")

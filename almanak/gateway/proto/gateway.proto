@@ -158,6 +158,13 @@ service StateService {
 
   // Get portfolio metrics for a strategy.
   rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData);
+
+  // Save a transaction ledger entry (VIB-3201).
+  // Persists a single structured trade record to the transaction_ledger table.
+  // Fail-closed: on DB failure the server returns success=false and the client
+  // is expected to raise AccountingPersistenceError so the runner halts the
+  // iteration with ACCOUNTING_FAILED (see VIB-3157).
+  rpc SaveLedgerEntry(SaveLedgerEntryRequest) returns (SaveLedgerEntryResponse);
 }
 
 message LoadStateRequest {
@@ -280,6 +287,39 @@ message PortfolioMetricsData {
   string cycle_id = 10;
   string execution_mode = 11;
   bool is_complete = 12;
+}
+
+// Ledger entry messages (VIB-3201) -- mirrors the LedgerEntry dataclass in
+// almanak/framework/observability/ledger.py. Field order follows the dataclass
+// so drift between the two is easy to spot in review.
+message SaveLedgerEntryRequest {
+  string id = 1;                   // UUID primary key (idempotent ON CONFLICT target)
+  string cycle_id = 2;
+  string strategy_id = 3;
+  string deployment_id = 4;        // Phase 4 identity (VIB-2835)
+  string execution_mode = 5;       // "live" | "paper" | "dry_run" (VIB-2837)
+  int64 timestamp = 6;             // Unix epoch seconds
+  string intent_type = 7;
+  string token_in = 8;
+  string amount_in = 9;            // Decimal string (preserves precision)
+  string token_out = 10;
+  string amount_out = 11;          // Decimal string
+  string effective_price = 12;     // Decimal string, "" when not applicable
+  // Optional so "no slippage" (None in the dataclass) is distinguishable from 0.0.
+  optional double slippage_bps = 13;
+  int64 gas_used = 14;
+  string gas_usd = 15;              // Decimal string, "" when unknown
+  string tx_hash = 16;
+  string chain = 17;
+  string protocol = 18;
+  bool success = 19;
+  string error = 20;
+  bytes extracted_data_json = 21;   // Serialised extracted_data dict (may be empty)
+}
+
+message SaveLedgerEntryResponse {
+  bool success = 1;
+  string error = 2;
 }
 
 // =============================================================================

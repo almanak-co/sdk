@@ -474,6 +474,11 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.GetMetricsRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PortfolioMetricsData.FromString,
                 _registered_method=True)
+        self.SaveLedgerEntry = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SaveLedgerEntry',
+                request_serializer=gateway__pb2.SaveLedgerEntryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveLedgerEntryResponse.FromString,
+                _registered_method=True)
 
 
 class StateServiceServicer(object):
@@ -539,6 +544,17 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SaveLedgerEntry(self, request, context):
+        """Save a transaction ledger entry (VIB-3201).
+        Persists a single structured trade record to the transaction_ledger table.
+        Fail-closed: on DB failure the server returns success=false and the client
+        is expected to raise AccountingPersistenceError so the runner halts the
+        iteration with ACCOUNTING_FAILED (see VIB-3157).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -581,6 +597,11 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.GetPortfolioMetrics,
                     request_deserializer=gateway__pb2.GetMetricsRequest.FromString,
                     response_serializer=gateway__pb2.PortfolioMetricsData.SerializeToString,
+            ),
+            'SaveLedgerEntry': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveLedgerEntry,
+                    request_deserializer=gateway__pb2.SaveLedgerEntryRequest.FromString,
+                    response_serializer=gateway__pb2.SaveLedgerEntryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -803,6 +824,33 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/GetPortfolioMetrics',
             gateway__pb2.GetMetricsRequest.SerializeToString,
             gateway__pb2.PortfolioMetricsData.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveLedgerEntry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SaveLedgerEntry',
+            gateway__pb2.SaveLedgerEntryRequest.SerializeToString,
+            gateway__pb2.SaveLedgerEntryResponse.FromString,
             options,
             channel_credentials,
             insecure,

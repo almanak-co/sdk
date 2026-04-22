@@ -871,6 +871,121 @@ class PortfolioMetricsData(_message.Message):
 Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015
 
 @_typing.final
+class SaveLedgerEntryRequest(_message.Message):
+    """Ledger entry messages (VIB-3201) -- mirrors the LedgerEntry dataclass in
+    almanak/framework/observability/ledger.py. Field order follows the dataclass
+    so drift between the two is easy to spot in review.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    TOKEN_IN_FIELD_NUMBER: _builtins.int
+    AMOUNT_IN_FIELD_NUMBER: _builtins.int
+    TOKEN_OUT_FIELD_NUMBER: _builtins.int
+    AMOUNT_OUT_FIELD_NUMBER: _builtins.int
+    EFFECTIVE_PRICE_FIELD_NUMBER: _builtins.int
+    SLIPPAGE_BPS_FIELD_NUMBER: _builtins.int
+    GAS_USED_FIELD_NUMBER: _builtins.int
+    GAS_USD_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    EXTRACTED_DATA_JSON_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """UUID primary key (idempotent ON CONFLICT target)"""
+    cycle_id: _builtins.str
+    strategy_id: _builtins.str
+    deployment_id: _builtins.str
+    """Phase 4 identity (VIB-2835)"""
+    execution_mode: _builtins.str
+    """"live" | "paper" | "dry_run" (VIB-2837)"""
+    timestamp: _builtins.int
+    """Unix epoch seconds"""
+    intent_type: _builtins.str
+    token_in: _builtins.str
+    amount_in: _builtins.str
+    """Decimal string (preserves precision)"""
+    token_out: _builtins.str
+    amount_out: _builtins.str
+    """Decimal string"""
+    effective_price: _builtins.str
+    """Decimal string, "" when not applicable"""
+    slippage_bps: _builtins.float
+    """Optional so "no slippage" (None in the dataclass) is distinguishable from 0.0."""
+    gas_used: _builtins.int
+    gas_usd: _builtins.str
+    """Decimal string, "" when unknown"""
+    tx_hash: _builtins.str
+    chain: _builtins.str
+    protocol: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    extracted_data_json: _builtins.bytes
+    """Serialised extracted_data dict (may be empty)"""
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        intent_type: _builtins.str = ...,
+        token_in: _builtins.str = ...,
+        amount_in: _builtins.str = ...,
+        token_out: _builtins.str = ...,
+        amount_out: _builtins.str = ...,
+        effective_price: _builtins.str = ...,
+        slippage_bps: _builtins.float | None = ...,
+        gas_used: _builtins.int = ...,
+        gas_usd: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        extracted_data_json: _builtins.bytes = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "slippage_bps", b"slippage_bps"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__slippage_bps: _TypeAlias = _typing.Literal["slippage_bps"]  # noqa: Y015
+    _WhichOneofArgType__slippage_bps: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__slippage_bps) -> _WhichOneofReturnType__slippage_bps | None: ...
+
+Global___SaveLedgerEntryRequest: _TypeAlias = SaveLedgerEntryRequest  # noqa: Y015
+
+@_typing.final
+class SaveLedgerEntryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveLedgerEntryResponse: _TypeAlias = SaveLedgerEntryResponse  # noqa: Y015
+
+@_typing.final
 class CompileIntentRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

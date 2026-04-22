@@ -308,25 +308,69 @@ class GatewayStateManager:
             return []
 
     async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
-        """Save a transaction ledger entry via the gateway.
+        """Save a transaction ledger entry via gateway gRPC → PostgreSQL.
 
-        VIB-3157 known gap (tracked in follow-up): the gateway service does
-        not yet expose a ``SaveLedgerEntry`` RPC. The gateway's
-        ``transaction_ledger`` table has a read handler (``GetLedgerEntries``
-        via ``dashboard_service``) but no writer. Until the write RPC lands,
-        this method signals the gap explicitly with ``NotImplementedError``
-        rather than silently returning. ``StrategyRunner._write_ledger_entry``
-        catches ``NotImplementedError`` as a KNOWN GAP: it CRITICAL-logs but
-        does not halt the live iteration, so gateway-backed deployments keep
-        running while the ops team prioritises the write path.
-
-        See ``docs/internal/vib-3157-gateway-ledger-followup.md``.
+        VIB-3201 closes the VIB-3157 gap. Mirrors
+        :meth:`save_portfolio_snapshot`: on ``response.success == False`` or
+        any gRPC/transport exception, raises
+        :class:`AccountingPersistenceError` so the runner halts the iteration
+        with ``ACCOUNTING_FAILED`` rather than losing the trade record.
         """
-        raise NotImplementedError(
-            "Gateway-backed deployments do not yet support ledger writes. "
-            "Follow-up tracked in docs/internal/vib-3157-gateway-ledger-followup.md "
-            "— implement SaveLedgerEntry RPC to close the silent-accounting gap."
-        )
+        try:
+            request = gateway_pb2.SaveLedgerEntryRequest(
+                id=getattr(entry, "id", "") or "",
+                cycle_id=getattr(entry, "cycle_id", "") or "",
+                strategy_id=getattr(entry, "strategy_id", "") or "",
+                deployment_id=getattr(entry, "deployment_id", "") or "",
+                execution_mode=getattr(entry, "execution_mode", "") or "",
+                timestamp=int(entry.timestamp.timestamp()),
+                intent_type=getattr(entry, "intent_type", "") or "",
+                token_in=getattr(entry, "token_in", "") or "",
+                amount_in=getattr(entry, "amount_in", "") or "",
+                token_out=getattr(entry, "token_out", "") or "",
+                amount_out=getattr(entry, "amount_out", "") or "",
+                effective_price=getattr(entry, "effective_price", "") or "",
+                gas_used=int(getattr(entry, "gas_used", 0) or 0),
+                gas_usd=getattr(entry, "gas_usd", "") or "",
+                tx_hash=getattr(entry, "tx_hash", "") or "",
+                chain=getattr(entry, "chain", "") or "",
+                protocol=getattr(entry, "protocol", "") or "",
+                success=bool(getattr(entry, "success", True)),
+                error=getattr(entry, "error", "") or "",
+                extracted_data_json=(getattr(entry, "extracted_data_json", "") or "").encode("utf-8"),
+            )
+            # slippage_bps is ``optional`` in the proto so None stays
+            # distinguishable from 0.0 on the wire.
+            slippage = getattr(entry, "slippage_bps", None)
+            if slippage is not None:
+                request.slippage_bps = float(slippage)
+
+            response = self._client.state.SaveLedgerEntry(request, timeout=self._timeout)
+
+            if not response.success:
+                logger.error("SaveLedgerEntry failed: %s", response.error)
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.LEDGER,
+                    strategy_id=getattr(entry, "strategy_id", "") or "",
+                    message=f"SaveLedgerEntry failed: {response.error}",
+                )
+
+            logger.debug(
+                "Ledger entry saved via gateway: strategy=%s, id=%s, intent=%s, success=%s",
+                getattr(entry, "strategy_id", ""),
+                getattr(entry, "id", ""),
+                getattr(entry, "intent_type", ""),
+                getattr(entry, "success", True),
+            )
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            logger.exception("Failed to save ledger entry via gateway")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=getattr(entry, "strategy_id", "") or "",
+                cause=e,
+            ) from e
 
     async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
         """Save portfolio metrics via gateway gRPC.

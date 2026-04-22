@@ -1733,33 +1733,11 @@ class StrategyRunner:
                     strategy.strategy_id,
                 )
             else:
-                try:
-                    await self.state_manager.save_ledger_entry(entry)
-                except NotImplementedError as nie:
-                    # VIB-3157 known gap (tracked in
-                    # docs/internal/vib-3157-gateway-ledger-followup.md): the
-                    # gateway state manager does not yet implement a
-                    # SaveLedgerEntry RPC. Tighten the swallow to ONLY the
-                    # GatewayStateManager case so unrelated NotImplementedError
-                    # bugs from other backends still escalate as accounting
-                    # failures.
-                    from ..state.gateway_state_manager import GatewayStateManager
-
-                    if isinstance(self.state_manager, GatewayStateManager):
-                        logger.critical(
-                            "KNOWN GAP: ledger write skipped for %s — %s",
-                            strategy.strategy_id,
-                            nie,
-                        )
-                    else:
-                        raise AccountingPersistenceError(
-                            write_kind="ledger",
-                            strategy_id=strategy.strategy_id,
-                            cause=nie,
-                            message=(
-                                "Backend save_ledger_entry raised NotImplementedError outside the known gateway gap"
-                            ),
-                        ) from nie
+                # VIB-3201 closed the gateway ledger gap (SaveLedgerEntry RPC).
+                # The fail-closed contract now applies uniformly: any exception
+                # propagates to the AccountingPersistenceError path below. No
+                # backend-specific NotImplementedError escape hatch remains.
+                await self.state_manager.save_ledger_entry(entry)
 
             # Emit position event for LP/perp intents (Phase 2, VIB-2775)
             if success and self.state_manager and hasattr(self.state_manager, "save_position_event"):

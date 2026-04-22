@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.runner.runner_models import IterationStatus
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 from almanak.framework.state.exceptions import AccountingPersistenceError
@@ -171,66 +172,138 @@ async def test_state_manager_save_portfolio_metrics_false_raises() -> None:
     assert "returned False" in str(excinfo.value)
 
 
-@pytest.mark.asyncio
-async def test_gateway_state_manager_ledger_is_known_gap() -> None:
-    """GatewayStateManager stubs save_ledger_entry with NotImplementedError.
-
-    The runner catches NotImplementedError specifically and logs CRITICAL
-    without halting the iteration (VIB-3157 follow-up — see
-    docs/internal/vib-3157-gateway-ledger-followup.md).
-    """
-    from almanak.framework.state.gateway_state_manager import GatewayStateManager
-
-    gsm = GatewayStateManager(client=MagicMock())
-    entry = MagicMock()
-
-    with pytest.raises(NotImplementedError) as excinfo:
-        await gsm.save_ledger_entry(entry)
-    assert "SaveLedgerEntry" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_write_ledger_entry_gateway_known_gap_does_not_halt_live(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Live mode + NotImplementedError from GatewayStateManager = CRITICAL log, no raise.
-
-    Uses a real ``GatewayStateManager`` (with a mock client) so the
-    runner's tightened ``isinstance(GatewayStateManager)`` check
-    identifies this as the known gap and swallows. Any other backend
-    raising NotImplementedError would (correctly) escalate.
-    """
-    from almanak.framework.state.gateway_state_manager import GatewayStateManager
-
-    gsm = GatewayStateManager(client=MagicMock())
-    cfg = RunnerConfig(dry_run=False)
-    runner = _Runner(state_manager=gsm, config=cfg)
-
-    with caplog.at_level(logging.CRITICAL, logger="almanak.framework.runner.strategy_runner"):
-        # Must not raise even in live mode.
-        await runner._write_ledger_entry(strategy=_Strategy(), intent=_swap_intent(), result=None, success=True)
-
-    assert any("KNOWN GAP" in rec.message and rec.levelname == "CRITICAL" for rec in caplog.records), (
-        "gateway ledger gap must CRITICAL-log for ops visibility"
+def _ledger_entry(strategy_id: str = "s1") -> LedgerEntry:
+    """Build a valid LedgerEntry for gateway client tests."""
+    return LedgerEntry(
+        id="entry-1",
+        cycle_id="c1",
+        strategy_id=strategy_id,
+        deployment_id="d1",
+        execution_mode="live",
+        timestamp=datetime.now(UTC),
+        intent_type="SWAP",
+        slippage_bps=12.5,
+        gas_used=21000,
     )
 
 
 @pytest.mark.asyncio
-async def test_write_ledger_entry_unknown_backend_notimplemented_escalates() -> None:
-    """A non-gateway backend raising NotImplementedError must escalate.
+async def test_gateway_state_manager_ledger_rpc_success() -> None:
+    """VIB-3201: save_ledger_entry now issues a real SaveLedgerEntry RPC.
 
-    Tightening on the gateway isinstance check is what makes the swallow
-    safe: ONLY the documented gap is tolerated; any other backend raising
-    NotImplementedError is a genuine bug and must halt live iterations.
+    The pre-VIB-3201 behaviour (raise NotImplementedError as a known gap)
+    is gone. The client now returns cleanly when the gateway response is
+    successful.
     """
-    state_mgr = MagicMock()
-    state_mgr.save_ledger_entry = AsyncMock(side_effect=NotImplementedError("custom backend bug"))
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    response = MagicMock()
+    response.success = True
+    response.error = ""
+
+    client = MagicMock()
+    client.state.SaveLedgerEntry = MagicMock(return_value=response)
+
+    entry = _ledger_entry()
+    gsm = GatewayStateManager(client=client)
+    await gsm.save_ledger_entry(entry)
+    client.state.SaveLedgerEntry.assert_called_once()
+    req = client.state.SaveLedgerEntry.call_args.args[0]
+    assert req.id == "entry-1"
+    assert req.strategy_id == "s1"
+    assert req.deployment_id == "d1"
+    assert req.execution_mode == "live"
+    assert req.intent_type == "SWAP"
+    assert req.gas_used == 21000
+    assert req.timestamp > 0
+    assert req.HasField("slippage_bps")
+    assert req.slippage_bps == pytest.approx(12.5)
+
+
+@pytest.mark.asyncio
+async def test_gateway_state_manager_ledger_rpc_failure_raises() -> None:
+    """Gateway response.success=False raises AccountingPersistenceError(ledger)."""
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    response = MagicMock()
+    response.success = False
+    response.error = "db down"
+
+    client = MagicMock()
+    client.state.SaveLedgerEntry = MagicMock(return_value=response)
+
+    gsm = GatewayStateManager(client=client)
+    with pytest.raises(AccountingPersistenceError) as excinfo:
+        await gsm.save_ledger_entry(_ledger_entry())
+    assert excinfo.value.write_kind == "ledger"
+    assert excinfo.value.strategy_id == "s1"
+    assert "db down" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_gateway_state_manager_ledger_rpc_exception_wraps() -> None:
+    """Transport-level errors (e.g. gRPC failures) wrap as AccountingPersistenceError."""
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    client = MagicMock()
+    client.state.SaveLedgerEntry = MagicMock(side_effect=RuntimeError("rpc boom"))
+
+    gsm = GatewayStateManager(client=client)
+    with pytest.raises(AccountingPersistenceError) as excinfo:
+        await gsm.save_ledger_entry(_ledger_entry())
+    assert excinfo.value.write_kind == "ledger"
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_write_ledger_entry_gateway_rpc_failure_halts_live() -> None:
+    """Live mode + gateway RPC failure = AccountingPersistenceError, no escape hatch.
+
+    Post-VIB-3201: the runner no longer swallows NotImplementedError for
+    the gateway backend. A failed SaveLedgerEntry raises
+    AccountingPersistenceError and the runner propagates it so
+    run_iteration halts with ACCOUNTING_FAILED.
+    """
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    response = MagicMock()
+    response.success = False
+    response.error = "db down"
+    client = MagicMock()
+    client.state.SaveLedgerEntry = MagicMock(return_value=response)
+
+    gsm = GatewayStateManager(client=client)
     cfg = RunnerConfig(dry_run=False)
-    runner = _Runner(state_manager=state_mgr, config=cfg)
+    runner = _Runner(state_manager=gsm, config=cfg)
+
+    with pytest.raises(AccountingPersistenceError):
+        await runner._write_ledger_entry(strategy=_Strategy(), intent=_swap_intent(), result=None, success=True)
+
+
+@pytest.mark.asyncio
+async def test_write_ledger_entry_unknown_backend_notimplemented_escalates() -> None:
+    """Any backend raising NotImplementedError must escalate -- no backend-specific escape hatch.
+
+    VIB-3201 removed the runner's gateway-only NotImplementedError swallow.
+    ``StateManager.save_ledger_entry`` wraps any non-AccountingPersistenceError
+    backend exception into AccountingPersistenceError, so runners see a
+    typed error and halt in live mode.
+    """
+    from almanak.framework.state.state_manager import StateManager, StateManagerConfig
+
+    mgr = StateManager(StateManagerConfig(load_state_on_startup=False))
+    mgr._initialized = True
+    warm = MagicMock()
+    warm.save_ledger_entry = AsyncMock(side_effect=NotImplementedError("custom backend bug"))
+    mgr._warm = warm
+
+    cfg = RunnerConfig(dry_run=False)
+    runner = _Runner(state_manager=mgr, config=cfg)
 
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await runner._write_ledger_entry(strategy=_Strategy(), intent=_swap_intent(), result=None, success=True)
-    assert "outside the known gateway gap" in str(excinfo.value)
+    assert excinfo.value.write_kind == "ledger"
+    assert isinstance(excinfo.value.__cause__, NotImplementedError)
 
 
 # =============================================================================
