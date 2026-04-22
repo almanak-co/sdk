@@ -6,6 +6,34 @@ PositionEvent with raw observables (amounts, prices, fees).
 
 Fungible positions (lending supply/borrow, staking) are tracked via
 enriched snapshot deltas (Phase 1d), not lifecycle events.
+
+Phase 5i — helper extraction layout
+-----------------------------------
+``build_position_event_from_intent`` is composed from small phase helpers.
+The phase ordering is LOAD-BEARING and must not change:
+
+    α  _seed_event          : intent-type dispatch + seed (position_id,
+                              tx details, protocol, chain, ledger link)
+    γ  _apply_lp_open       : lp_open_data enrichment (pair tokens,
+                              liquidity, ticks, deposit amounts)
+    δ  _apply_lp_close      : lp_close_data enrichment (received amounts,
+                              fee coalescing)
+    ε  _apply_swap_fallback : swap_amounts fills ONLY empty token/amount
+                              slots — MUST run AFTER γ so an LP_OPEN with
+                              a co-occurring swap leg keeps its real pair
+                              identities (token0/token1) instead of being
+                              clobbered by the swap's token_in/token_out.
+    ζ  _apply_perp          : perp_data enrichment. Currently overrides
+                              ``position_id`` when ``perp.position_id`` is
+                              truthy; see latent bug #1709 — preserved
+                              byte-for-byte in this refactor.
+    η  _apply_protocol_fees : VIB-3205 protocol fee USD capture. Empty
+                              string ("unknown") is DISTINCT from "0"
+                              ("measured zero") — preserve that invariant.
+    θ                         final guard: no position_id → drop the event.
+
+Constraint (critical): γ → δ → ε → ζ → η ordering. Re-ordering ε before
+γ silently regresses the invariant called out above.
 """
 
 import uuid
@@ -151,19 +179,31 @@ class PositionEvent:
         return d
 
 
-def build_position_event_from_intent(
-    *,
-    deployment_id: str,
-    intent: Any,
-    result: Any,
-    ledger_entry_id: str = "",
-    chain: str = "",
-) -> PositionEvent | None:
-    """Build a PositionEvent from an intent and execution result.
+@dataclass(frozen=True)
+class IntentEventContext:
+    """Immutable bag of inputs shared across phase helpers (Phase 5i).
 
-    Returns None if the intent type doesn't produce position events
-    (e.g., SWAP, SUPPLY, BORROW).
+    Bundles the raw intent/result, pre-fetched ``extracted_data`` dict, and
+    the static wiring fields (deployment_id, chain, ledger_entry_id) so each
+    ``_apply_*`` helper has one parameter instead of six.
     """
+
+    intent: Any
+    result: Any
+    extracted: dict[str, Any]
+    deployment_id: str
+    chain: str
+    ledger_entry_id: str
+
+
+def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
+    """Phase α + β — intent-type dispatch and seed the PositionEvent.
+
+    Returns ``None`` when the intent type is not a position-producing
+    lifecycle intent (SWAP / SUPPLY / BORROW / ...), matching the original
+    early-exit on line 174 of the pre-refactor implementation.
+    """
+    intent = ctx.intent
     intent_type = ""
     if hasattr(intent, "intent_type"):
         it = intent.intent_type
@@ -176,14 +216,15 @@ def build_position_event_from_intent(
     position_type = INTENT_TO_POSITION_TYPE.get(intent_type, PositionType.LP)
     protocol = getattr(intent, "protocol", "") or ""
 
-    # Extract position_id from result
+    # Position id: result.position_id takes precedence over intent.position_id.
     position_id = ""
+    result = ctx.result
     if result and hasattr(result, "position_id") and result.position_id:
         position_id = str(result.position_id)
     elif hasattr(intent, "position_id") and intent.position_id:
         position_id = str(intent.position_id)
 
-    # Extract tx details
+    # Tx details from the result envelope (first transaction only).
     tx_hash = ""
     gas_usd = ""
     if result:
@@ -193,108 +234,189 @@ def build_position_event_from_intent(
         if gas_cost is not None:
             gas_usd = str(gas_cost)
 
-    event = PositionEvent(
-        deployment_id=deployment_id,
+    return PositionEvent(
+        deployment_id=ctx.deployment_id,
         position_id=position_id,
         position_type=position_type.value,
         event_type=event_type.value,
         protocol=protocol,
-        chain=chain,
+        chain=ctx.chain,
         tx_hash=tx_hash,
         gas_usd=gas_usd,
+        ledger_entry_id=ctx.ledger_entry_id,
+    )
+
+
+def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase γ — enrich with lp_open_data.
+
+    Populates position_id (override), liquidity, ticks, deposit amounts, and
+    the LP pair tokens. Tokens prefer intent.token0/token1, falling back to
+    intent.from_token/to_token when the LP intent carries the pair as the
+    two swap sides.
+    """
+    lp_open = ctx.extracted.get("lp_open_data")
+    if not (lp_open and hasattr(lp_open, "position_id")):
+        return
+
+    event.position_id = str(lp_open.position_id)
+    event.liquidity = str(getattr(lp_open, "liquidity", "") or "")
+    event.tick_lower = getattr(lp_open, "tick_lower", None)
+    event.tick_upper = getattr(lp_open, "tick_upper", None)
+    # VIB-3205 audit fix (Codex P1, pr-auditor Blocker #1): populate
+    # amount0/amount1 + token0/token1 from the extracted LP open data.
+    # Without these, `compute_impermanent_loss` short-circuits to None
+    # because the entry-state builder reads amount0/amount1 off the
+    # PositionEvent. Previously this block only copied position_id /
+    # liquidity / ticks, leaving the IL pipeline as dead code in
+    # production.
+    amount0 = getattr(lp_open, "amount0", None)
+    amount1 = getattr(lp_open, "amount1", None)
+    if amount0 is not None:
+        event.amount0 = str(amount0)
+    if amount1 is not None:
+        event.amount1 = str(amount1)
+    # Token addresses: LPOpenData doesn't carry them directly, so fall
+    # back to the intent's from_token / to_token (LP intents expose these
+    # as the two sides of the pair) before the swap-based fallback below.
+    intent = ctx.intent
+    t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
+    t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
+    if t0:
+        event.token0 = str(t0)
+    if t1:
+        event.token1 = str(t1)
+
+
+def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase δ — enrich with lp_close_data.
+
+    Reads received amounts and coalesces the parser-variant fee attribute
+    names (fees_token0 preferred, fee0 fallback) for both token sides.
+    """
+    lp_close = ctx.extracted.get("lp_close_data")
+    if not lp_close:
+        return
+
+    event.amount0 = str(getattr(lp_close, "amount0_received", "") or "")
+    event.amount1 = str(getattr(lp_close, "amount1_received", "") or "")
+    for fee_attr in ("fees_token0", "fee0"):
+        fee = getattr(lp_close, fee_attr, None)
+        if fee is not None:
+            event.fees_token0 = str(fee)
+            break
+    for fee_attr in ("fees_token1", "fee1"):
+        fee = getattr(lp_close, fee_attr, None)
+        if fee is not None:
+            event.fees_token1 = str(fee)
+            break
+
+
+def _apply_swap_fallback(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase ε — fill EMPTY token/amount slots from swap_amounts.
+
+    CRITICAL invariant: this helper reads the current event.token0/token1/
+    amount0/amount1 values and only writes to slots that are still empty.
+    That's what prevents a SWAP leg that co-occurs with an LP_OPEN (e.g.
+    single-asset provisioning that swaps half into the other side) from
+    clobbering the real LP pair identities with (token_in, token_out).
+
+    This is the reason the phase ordering γ → ε is load-bearing: ε needs
+    γ's populated slots to know what to skip.
+    """
+    swap = ctx.extracted.get("swap_amounts")
+    if not swap:
+        return
+
+    if not event.token0:
+        event.token0 = getattr(swap, "token_in", "") or ""
+    if not event.token1:
+        event.token1 = getattr(swap, "token_out", "") or ""
+    if not event.amount0:
+        event.amount0 = str(getattr(swap, "amount_in_decimal", "") or "")
+    if not event.amount1:
+        event.amount1 = str(getattr(swap, "amount_out_decimal", "") or "")
+
+
+def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase ζ — enrich with perp_data.
+
+    Copies leverage, entry/mark price, unrealized PnL and direction. When
+    ``perp.position_id`` is truthy, it currently overrides the seeded
+    position_id — preserved byte-for-byte per latent bug #1709 (fixed out
+    of scope for this refactor).
+    """
+    perp = ctx.extracted.get("perp_data")
+    if not perp:
+        return
+
+    event.leverage = str(getattr(perp, "leverage", "") or "")
+    event.entry_price = str(getattr(perp, "entry_price", "") or "")
+    event.mark_price = str(getattr(perp, "mark_price", "") or "")
+    event.unrealized_pnl = str(getattr(perp, "unrealized_pnl", "") or "")
+    event.is_long = getattr(perp, "is_long", None)
+    if hasattr(perp, "position_id") and perp.position_id:
+        event.position_id = str(perp.position_id)
+
+
+def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase η — VIB-3205 protocol fee capture.
+
+    Preserves the empty-vs-zero distinction: a parser that does not emit
+    ``protocol_fees`` leaves the field as "" (unknown); a parser that
+    measures and reports a zero fee sets it to "0" (measured zero). The
+    two are semantically different to downstream PnL attribution.
+    """
+    protocol_fees = ctx.extracted.get("protocol_fees")
+    if protocol_fees is None or not hasattr(protocol_fees, "total_usd"):
+        return
+    total_usd = getattr(protocol_fees, "total_usd", None)
+    if total_usd is not None:
+        event.protocol_fees_usd = str(total_usd)
+
+
+def build_position_event_from_intent(
+    *,
+    deployment_id: str,
+    intent: Any,
+    result: Any,
+    ledger_entry_id: str = "",
+    chain: str = "",
+) -> PositionEvent | None:
+    """Build a PositionEvent from an intent and execution result.
+
+    Returns None if the intent type doesn't produce position events
+    (e.g., SWAP, SUPPLY, BORROW).
+
+    Sequences the phase helpers α → γ → δ → ε → ζ → η → θ. Ordering is
+    load-bearing (see module docstring).
+    """
+    extracted = getattr(result, "extracted_data", {}) if result else {}
+    ctx = IntentEventContext(
+        intent=intent,
+        result=result,
+        extracted=extracted or {},
+        deployment_id=deployment_id,
+        chain=chain,
         ledger_entry_id=ledger_entry_id,
     )
 
-    # Populate from extracted_data
-    extracted = getattr(result, "extracted_data", {}) if result else {}
+    # α + β — dispatch + seed.
+    event = _seed_event(ctx)
+    if event is None:
+        return None
+
+    # Short-circuit: without extracted_data we can't enrich. Only emit the
+    # bare event if it already has a joinable position_id.
     if not extracted:
-        # Don't emit lifecycle events without a position_id — they can't be
-        # joined reliably downstream.
         return event if event.position_id else None
 
-    # LP data
-    lp_open = extracted.get("lp_open_data")
-    lp_close = extracted.get("lp_close_data")
+    # γ → δ → ε → ζ → η (ordering load-bearing).
+    _apply_lp_open(event, ctx)
+    _apply_lp_close(event, ctx)
+    _apply_swap_fallback(event, ctx)
+    _apply_perp(event, ctx)
+    _apply_protocol_fees(event, ctx)
 
-    if lp_open and hasattr(lp_open, "position_id"):
-        event.position_id = str(lp_open.position_id)
-        event.liquidity = str(getattr(lp_open, "liquidity", "") or "")
-        event.tick_lower = getattr(lp_open, "tick_lower", None)
-        event.tick_upper = getattr(lp_open, "tick_upper", None)
-        # VIB-3205 audit fix (Codex P1, pr-auditor Blocker #1): populate
-        # amount0/amount1 + token0/token1 from the extracted LP open data.
-        # Without these, `compute_impermanent_loss` short-circuits to None
-        # because the entry-state builder reads amount0/amount1 off the
-        # PositionEvent. Previously this block only copied position_id /
-        # liquidity / ticks, leaving the IL pipeline as dead code in
-        # production.
-        amount0 = getattr(lp_open, "amount0", None)
-        amount1 = getattr(lp_open, "amount1", None)
-        if amount0 is not None:
-            event.amount0 = str(amount0)
-        if amount1 is not None:
-            event.amount1 = str(amount1)
-        # Token addresses: LPOpenData doesn't carry them directly, so fall
-        # back to the intent's from_token / to_token (LP intents expose these
-        # as the two sides of the pair) before the swap-based fallback below.
-        t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
-        t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
-        if t0:
-            event.token0 = str(t0)
-        if t1:
-            event.token1 = str(t1)
-
-    if lp_close:
-        event.amount0 = str(getattr(lp_close, "amount0_received", "") or "")
-        event.amount1 = str(getattr(lp_close, "amount1_received", "") or "")
-        for fee_attr in ("fees_token0", "fee0"):
-            fee = getattr(lp_close, fee_attr, None)
-            if fee is not None:
-                event.fees_token0 = str(fee)
-                break
-        for fee_attr in ("fees_token1", "fee1"):
-            fee = getattr(lp_close, fee_attr, None)
-            if fee is not None:
-                event.fees_token1 = str(fee)
-                break
-
-    # Swap amounts (for value estimation).
-    # Guard token0/token1 so we don't clobber the LP pair tokens the lp_open
-    # branch already populated from intent.token0/token1 — a SWAP leg that
-    # co-occurs with an LP_OPEN (e.g. single-asset provisioning that swaps
-    # half into the other side) would otherwise overwrite the real pair
-    # identities with (token_in, token_out), breaking IL math downstream.
-    swap = extracted.get("swap_amounts")
-    if swap:
-        if not event.token0:
-            event.token0 = getattr(swap, "token_in", "") or ""
-        if not event.token1:
-            event.token1 = getattr(swap, "token_out", "") or ""
-        if not event.amount0:
-            event.amount0 = str(getattr(swap, "amount_in_decimal", "") or "")
-        if not event.amount1:
-            event.amount1 = str(getattr(swap, "amount_out_decimal", "") or "")
-
-    # Perp data
-    perp = extracted.get("perp_data")
-    if perp:
-        event.leverage = str(getattr(perp, "leverage", "") or "")
-        event.entry_price = str(getattr(perp, "entry_price", "") or "")
-        event.mark_price = str(getattr(perp, "mark_price", "") or "")
-        event.unrealized_pnl = str(getattr(perp, "unrealized_pnl", "") or "")
-        event.is_long = getattr(perp, "is_long", None)
-        if hasattr(perp, "position_id") and perp.position_id:
-            event.position_id = str(perp.position_id)
-
-    # Protocol fees (VIB-3205): capture ProtocolFees.total_usd so PnL
-    # attribution can reference the real protocol fee paid on this tx.
-    # Leave empty string when the parser did not emit protocol_fees —
-    # attribution distinguishes empty ("unknown") from "0" ("measured zero").
-    protocol_fees = extracted.get("protocol_fees")
-    if protocol_fees is not None and hasattr(protocol_fees, "total_usd"):
-        total_usd = getattr(protocol_fees, "total_usd", None)
-        if total_usd is not None:
-            event.protocol_fees_usd = str(total_usd)
-
-    # Final guard: don't emit lifecycle events without a position_id
+    # θ — final guard: drop events that never acquired a position_id.
     return event if event.position_id else None
