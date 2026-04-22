@@ -955,3 +955,751 @@ class TestInlineTeardownAmountResolution:
         # Verify the resolved intent (not original) was executed
         called_kwargs = runner._execute_single_chain.call_args.kwargs
         assert called_kwargs["intent"] is resolved_intent
+
+
+# ---------------------------------------------------------------------------
+# Characterization tests for execute_teardown_via_manager (Phase 6A.4 gate)
+# ---------------------------------------------------------------------------
+#
+# These tests pin the current behavior of the full happy path + error branches
+# of `_execute_teardown_via_manager` (CC 40 @ runner_teardown.py:499) so Phase
+# 6A.4 can extract phase helpers without regressing safety-critical teardown.
+#
+# Existing teardown tests cover:
+#   - Routing (_execute_teardown_via_manager is called vs _execute_single_chain).
+#   - Compiler-fail + positions-fail early-fallback branches.
+#   - Exception-path side effects (`_request_teardown_failure_shutdown`).
+#
+# These tests extend that to cover:
+#   - Full TeardownManager happy path (persist -> cancel_window -> execute ->
+#     verify -> success mapping to IterationStatus.TEARDOWN).
+#   - Cancel-window-cancelled branch (returns TEARDOWN but does NOT shut down).
+#   - Safety-validation-failed branch (blocked_reason propagates to error).
+#   - Verify-fail branch (positions_closed=False after success flips to fail).
+#   - Verify-exception branch (verify raised -> treated as verify-fail).
+#   - Execute-exception branch (exception inside the outer try + state update).
+#   - TeardownManager-returns-failure branch (success=False mapping).
+#   - Compiler-fail WITHOUT unsafe-fallback branch (raises STRATEGY_ERROR).
+#   - Positions-fail WITHOUT unsafe-fallback branch (raises STRATEGY_ERROR).
+#   - Auto-mode derivation wired into approval_callback (manual only).
+#   - `request=None` skips `state_manager.mark_*` calls.
+
+
+def _make_teardown_manager_class_mock(
+    *,
+    teardown_result,
+    positions_closed: bool = True,
+    verify_raises: Exception | None = None,
+    cancel_was_cancelled: bool = False,
+    safety_passed: bool = True,
+    safety_reason: str | None = None,
+    execute_raises: Exception | None = None,
+):
+    """Build a class-level mock for TeardownManager.
+
+    When the runner imports `from ..teardown.teardown_manager import
+    TeardownManager` inside `execute_teardown_via_manager`, patching the
+    symbol at `almanak.framework.runner.runner_teardown` won't work because
+    the import is lazy. So we patch the source module instead.
+    """
+    from almanak.framework.teardown.cancel_window import CancelWindowResult
+    from almanak.framework.teardown.safety_guard import SafetyValidation
+    from almanak.framework.teardown.models import TeardownState, TeardownStatus
+
+    mgr = MagicMock()
+    mgr.orchestrator = MagicMock()
+    mgr.compiler = MagicMock()
+    mgr.alert_manager = MagicMock()
+    mgr.alert_manager.send_teardown_complete = AsyncMock()
+    # safety_guard.validate_teardown_request is sync
+    validation = SafetyValidation(
+        all_passed=safety_passed,
+        checks=[],
+        blocked_reason=safety_reason,
+    )
+    mgr.safety_guard.validate_teardown_request = MagicMock(return_value=validation)
+    # cancel_window.run_cancel_window is async
+    cw_result = CancelWindowResult(was_cancelled=cancel_was_cancelled)
+    mgr.cancel_window.run_cancel_window = AsyncMock(return_value=cw_result)
+    # state_manager.save_teardown_state / delete are async
+    mgr.state_manager = MagicMock()
+    mgr.state_manager.save_teardown_state = AsyncMock()
+    mgr.state_manager.delete_teardown_state = AsyncMock()
+    # _persist_state returns a TeardownState
+    from datetime import UTC, datetime as _dt
+    state = TeardownState(
+        teardown_id="td_test",
+        strategy_id="test_strat",
+        mode=TeardownMode.SOFT,
+        status=TeardownStatus.PENDING,
+        total_intents=1,
+        completed_intents=0,
+        current_intent_index=0,
+        started_at=_dt.now(UTC),
+        updated_at=_dt.now(UTC),
+    )
+    mgr._persist_state = AsyncMock(return_value=state)
+    # _execute_intents async -> TeardownResult (or raises)
+    if execute_raises is not None:
+        mgr._execute_intents = AsyncMock(side_effect=execute_raises)
+    else:
+        mgr._execute_intents = AsyncMock(return_value=teardown_result)
+    # _verify_closure async -> bool (or raises)
+    if verify_raises is not None:
+        mgr._verify_closure = AsyncMock(side_effect=verify_raises)
+    else:
+        mgr._verify_closure = AsyncMock(return_value=positions_closed)
+    return mgr
+
+
+def _make_successful_teardown_result():
+    from decimal import Decimal
+    from almanak.framework.teardown.models import TeardownResult
+
+    return TeardownResult(
+        success=True,
+        strategy_id="test_strat",
+        mode="graceful",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        duration_seconds=5.0,
+        intents_total=1,
+        intents_succeeded=1,
+        intents_failed=0,
+        starting_value_usd=Decimal("1000"),
+        final_value_usd=Decimal("990"),
+        total_costs_usd=Decimal("10"),
+        final_balances={},
+    )
+
+
+def _make_failed_teardown_result(error_msg: str = "Slippage too high"):
+    from decimal import Decimal
+    from almanak.framework.teardown.models import TeardownResult
+
+    return TeardownResult(
+        success=False,
+        strategy_id="test_strat",
+        mode="graceful",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        duration_seconds=5.0,
+        intents_total=1,
+        intents_succeeded=0,
+        intents_failed=1,
+        starting_value_usd=Decimal("1000"),
+        final_value_usd=Decimal("1000"),
+        total_costs_usd=Decimal("0"),
+        final_balances={},
+        error=error_msg,
+    )
+
+
+def _make_strategy_for_manager(**overrides):
+    """Build a strategy suitable for the full TeardownManager path."""
+    from decimal import Decimal
+    from almanak.framework.teardown.models import (
+        PositionInfo,
+        PositionType,
+        TeardownPositionSummary,
+    )
+
+    strategy = _make_strategy(**overrides)
+    strategy.name = "Test Strategy"
+    strategy.uses_safe_wallet = False
+    strategy.pause = AsyncMock()
+    strategy.get_open_positions.return_value = TeardownPositionSummary(
+        strategy_id="test_strat",
+        timestamp=datetime.now(UTC),
+        positions=[
+            PositionInfo(
+                position_type=PositionType.TOKEN,
+                position_id="test_pos",
+                chain="arbitrum",
+                protocol="uniswap_v3",
+                value_usd=Decimal("1000"),
+                details={"asset": "ETH"},
+            )
+        ],
+    )
+    strategy.acknowledge_teardown_request = MagicMock()
+    return strategy
+
+
+class TestExecuteTeardownViaManagerCharacterization:
+    """Characterization tests pinning execute_teardown_via_manager behavior.
+
+    These tests MUST continue to pass byte-for-byte after Phase 6A.4 phase-
+    helper extraction. They cover the full state machine: safety validation,
+    cancel window, intent execution, post-execution verification, and the
+    three success/failure/cancel terminal mappings.
+    """
+
+    @pytest.fixture()
+    def _patch_manager(self):
+        """Provide a context-manager factory that patches TeardownManager.
+
+        Returns a context that patches both the source module and the
+        TeardownStateAdapter so that real SQLite/Postgres is never touched.
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _do(**mgr_kwargs):
+            with patch(
+                "almanak.framework.teardown.teardown_manager.TeardownManager"
+            ) as mgr_cls, patch(
+                "almanak.framework.teardown.state_manager.TeardownStateAdapter"
+            ) as adapter_cls:
+                mock_mgr = _make_teardown_manager_class_mock(**mgr_kwargs)
+                mgr_cls.return_value = mock_mgr
+                mock_adapter = MagicMock()
+                mock_adapter.save_teardown_state = AsyncMock()
+                adapter_cls.return_value = mock_adapter
+                yield mock_mgr, mock_adapter
+
+        return _do
+
+    @pytest.mark.asyncio
+    async def test_happy_path_single_chain_success(self, _patch_manager):
+        """Full happy path: safety -> persist -> cancel window -> execute ->
+        verify -> success returns IterationStatus.TEARDOWN, calls
+        request_shutdown, writes TERMINATED lifecycle state."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+        runner.request_shutdown = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        state_mgr.db_path = "/tmp/test_state.db"
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        with _patch_manager(teardown_result=_make_successful_teardown_result()):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        runner.request_shutdown.assert_called_once()
+        runner._lifecycle_write_state.assert_any_call("test_strat", "TERMINATED")
+        state_mgr.mark_completed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_window_aborts_returns_teardown_without_shutdown(self, _patch_manager):
+        """Cancel-window-cancelled returns TEARDOWN status and records success
+        but does NOT request shutdown — the operator explicitly aborted."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._record_success = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        with _patch_manager(
+            teardown_result=_make_successful_teardown_result(),
+            cancel_was_cancelled=True,
+        ):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        # Cancelled path: no shutdown, no failure handler
+        runner.request_shutdown.assert_not_called()
+        runner._request_teardown_failure_shutdown.assert_not_called()
+        runner._record_success.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_safety_validation_fail_returns_error(self, _patch_manager):
+        """Safety validation failure bypasses execution, returns STRATEGY_ERROR
+        and requests teardown failure shutdown (ERROR terminal state)."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        with _patch_manager(
+            teardown_result=_make_successful_teardown_result(),
+            safety_passed=False,
+            safety_reason="Loss cap exceeded: 5% > 3%",
+        ):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "Loss cap exceeded" in result.error
+        state_mgr.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_verify_fail_flips_success_to_failure(self, _patch_manager):
+        """Post-execution verify returns False -> flip successful TeardownResult
+        to failure, persist FAILED status, return STRATEGY_ERROR."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        with _patch_manager(
+            teardown_result=_make_successful_teardown_result(),
+            positions_closed=False,
+        ):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "positions still open" in result.error
+        # verify-fail branch calls mark_failed once inside _verify_closure
+        # handling and once again in the final failure-mapping block. Both
+        # calls ship the same error message — this ordering is the existing
+        # behavior pinned by this characterization test.
+        assert state_mgr.mark_failed.call_count == 2
+        all_errors = [c.kwargs["error"] for c in state_mgr.mark_failed.call_args_list]
+        assert all("positions still open" in e for e in all_errors)
+        runner._request_teardown_failure_shutdown.assert_called_once()
+        runner.request_shutdown.assert_not_called()  # failure path, not success
+
+    @pytest.mark.asyncio
+    async def test_verify_exception_treated_as_verify_fail(self, _patch_manager):
+        """Verify raising an exception is treated as verify-fail (don't discard
+        successful execution stats). Flips to failure with error message."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        state_mgr.db_path = None
+
+        with _patch_manager(
+            teardown_result=_make_successful_teardown_result(),
+            verify_raises=RuntimeError("RPC exploded"),
+        ):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=None,  # test request=None branch
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "Post-teardown verification error" in result.error
+        # request=None: mark_failed should NOT be called
+        state_mgr.mark_failed.assert_not_called()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_exception_outer_try(self, _patch_manager):
+        """Exception inside the outer try (from _execute_intents) is caught;
+        returns STRATEGY_ERROR and flips teardown_state to FAILED if present."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        with _patch_manager(
+            teardown_result=_make_successful_teardown_result(),
+            execute_raises=RuntimeError("compiler went boom"),
+        ):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "compiler went boom" in result.error
+        state_mgr.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_teardown_result_failure_mapped(self, _patch_manager):
+        """TeardownResult(success=False) maps to STRATEGY_ERROR with
+        error field preserved."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        failed_result = _make_failed_teardown_result("Slippage exceeded")
+        with _patch_manager(teardown_result=failed_result):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert result.error == "Slippage exceeded"
+        state_mgr.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_compiler_fail_without_fallback_returns_error(self):
+        """Compiler fails AND allow_unsafe_teardown_fallback=False ->
+        STRATEGY_ERROR; does NOT fall back to inline."""
+        runner = _make_runner()
+        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=False)
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner._build_teardown_compiler = MagicMock(return_value=None)
+        runner._execute_teardown_inline = AsyncMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        result = await runner._execute_teardown_via_manager(
+            strategy=strategy,
+            teardown_intents=[intent],
+            teardown_mode=TeardownMode.SOFT,
+            teardown_market=None,
+            start_time=datetime.now(UTC),
+            request=request,
+            state_manager=state_mgr,
+        )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "compiler" in result.error.lower()
+        runner._execute_teardown_inline.assert_not_called()
+        state_mgr.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_positions_fail_without_fallback_returns_error(self):
+        """get_open_positions fails AND allow_unsafe_teardown_fallback=False ->
+        STRATEGY_ERROR; does NOT fall back to inline."""
+        runner = _make_runner()
+        runner.config = RunnerConfig(allow_unsafe_teardown_fallback=False)
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+        runner._execute_teardown_inline = AsyncMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        strategy.get_open_positions.side_effect = RuntimeError("RPC timeout")
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        with patch("almanak.framework.teardown.teardown_manager.TeardownManager"), patch(
+            "almanak.framework.teardown.state_manager.TeardownStateAdapter"
+        ):
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "RPC timeout" in result.error or "positions" in result.error.lower()
+        runner._execute_teardown_inline.assert_not_called()
+        state_mgr.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_skips_approval_callback_manual_wires_it(self, _patch_manager):
+        """Auto mode (request=None) -> approval_callback=None.
+        Manual mode (request.requested_by='cli') -> approval_callback wired."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        # Manual mode
+        with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
+            request = MagicMock()
+            request.requested_by = "cli"
+            await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=MagicMock(),
+            )
+            call_kwargs = mgr._execute_intents.call_args.kwargs
+            assert call_kwargs["on_approval_needed"] is not None
+            assert call_kwargs["is_auto_mode"] is False
+
+        # Auto mode: request=None
+        with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
+            await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+            call_kwargs = mgr._execute_intents.call_args.kwargs
+            assert call_kwargs["on_approval_needed"] is None
+            assert call_kwargs["is_auto_mode"] is True
+
+    @pytest.mark.asyncio
+    async def test_hard_mode_maps_to_emergency_string(self, _patch_manager):
+        """TeardownMode.HARD maps to mode='emergency' in logging and
+        mark_completed payload."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        with _patch_manager(teardown_result=_make_successful_teardown_result()):
+            await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.HARD,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        # mark_completed kwargs: mode should be "emergency"
+        mark_kwargs = state_mgr.mark_completed.call_args.kwargs
+        assert mark_kwargs["result"]["mode"] == "emergency"
+
+    @pytest.mark.asyncio
+    async def test_price_oracle_uses_market_fetch_when_present(self, _patch_manager):
+        """teardown_market with populated get_price_oracle_dict -> price_oracle
+        threaded through to _execute_intents. Empty dict is preserved (not
+        collapsed to None / fallback)."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        # Market returns a populated dict
+        market = MagicMock()
+        market.get_price_oracle_dict.return_value = {"ETH": Decimal("3000"), "USDC": Decimal("1")}
+
+        with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
+            await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=market,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+            call_kwargs = mgr._execute_intents.call_args.kwargs
+            oracle = call_kwargs["price_oracle"]
+            assert oracle["ETH"] == Decimal("3000")
+
+    @pytest.mark.asyncio
+    async def test_price_oracle_falls_back_when_market_returns_empty(self, _patch_manager):
+        """When market.get_price_oracle_dict returns {}, fall back to
+        get_fallback_teardown_prices (stablecoins)."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        market = MagicMock()
+        market.get_price_oracle_dict.return_value = {}  # empty -> fall back
+
+        with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
+            await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=market,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+            call_kwargs = mgr._execute_intents.call_args.kwargs
+            oracle = call_kwargs["price_oracle"]
+            # Fallback always includes at least one stablecoin
+            assert oracle is not None
+            assert len(oracle) > 0
+
+    @pytest.mark.asyncio
+    async def test_alert_failure_does_not_prevent_success_mapping(self, _patch_manager):
+        """alert_manager.send_teardown_complete raises -> swallowed; still
+        returns IterationStatus.TEARDOWN."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
+            mgr.alert_manager.send_teardown_complete.side_effect = RuntimeError("smtp down")
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        runner.request_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_does_not_prevent_success_mapping(self, _patch_manager):
+        """state_manager.delete_teardown_state raises -> swallowed; still
+        returns IterationStatus.TEARDOWN."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(
+            should_teardown=True, teardown_intents=[intent]
+        )
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
+            mgr.state_manager.delete_teardown_state.side_effect = RuntimeError("disk full")
+            result = await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        runner.request_shutdown.assert_called_once()

@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -528,11 +527,8 @@ async def execute_teardown_via_manager(
         request: Active teardown request from state manager
         state_manager: Teardown state manager for lifecycle tracking
     """
-    import uuid
-
     from ..teardown import TeardownMode
-    from ..teardown.teardown_manager import TeardownManager
-    from .runner_models import IterationResult, IterationStatus
+    from . import _teardown_helpers as _h
 
     strategy_id = strategy.strategy_id
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
@@ -542,282 +538,88 @@ async def execute_teardown_via_manager(
     # exposed there so tests exercise the real logic.
     is_auto_mode = derive_teardown_auto_mode(request)
 
-    # Build compiler for TeardownManager
-    # Call through runner method so instance-level mock patching in tests works.
-    compiler = runner._build_teardown_compiler(strategy, teardown_market)
-    if compiler is None:
-        if not runner.config.allow_unsafe_teardown_fallback:
-            error_msg = (
-                f"Cannot build TeardownManager compiler for {strategy_id}. "
-                f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False). "
-                f"Fix compiler dependencies or enable fallback for local testing."
-            )
-            logger.error(error_msg)
-            if request:
-                _safe_mark(state_manager, "mark_failed", strategy_id, error=error_msg)
-            runner._request_teardown_failure_shutdown(error_msg)
-            return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
-        logger.warning(
-            f"Cannot build compiler for TeardownManager — falling back to inline teardown "
-            f"for {strategy_id} (unsafe fallback enabled)"
-        )
-        return await runner._execute_teardown_inline(
-            strategy, teardown_intents, teardown_market, start_time, request, state_manager
-        )
-
-    # Create TeardownManager with safety features, including state persistence (VIB-2924).
-    # Prefer an explicit DB path from the StateManager when it's a real filesystem
-    # path; otherwise fall through to the adapter's default resolution (which
-    # honours ``ALMANAK_STATE_DB``). This keeps tests with mock StateManagers
-    # working while production still converges on the shared DB file.
-    from pathlib import Path as _Path
-
-    from ..teardown.state_manager import TeardownStateAdapter
-
-    _raw_db_path = getattr(state_manager, "db_path", None)
-    _adapter_db_path = _raw_db_path if isinstance(_raw_db_path, str | _Path) else None
-    teardown_state_adapter = TeardownStateAdapter(db_path=_adapter_db_path)
-    teardown_mgr = TeardownManager(
-        orchestrator=runner.execution_orchestrator,
-        compiler=compiler,
-        alert_manager=runner.alert_manager,
-        state_manager=teardown_state_adapter,
+    # Phase 1: build compiler (or return early/fallback).
+    compiler, early = await _h.resolve_compiler_or_fallback(
+        runner, strategy, teardown_intents, teardown_market, start_time, request, state_manager
     )
+    if compiler is None:
+        return early  # type: ignore[return-value]
 
-    # Execute with TeardownManager safety: loss caps, escalating slippage,
-    # cancel window, post-execution verification
+    # Phase 2: construct TeardownManager + state adapter.
+    teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(runner, compiler, state_manager)
+
     logger.info(
         f"🛑 Routing {strategy_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"
     )
 
+    # Outer try preserves the original exception contract: any failure in
+    # the execution/verify phases (including helpers) is caught here so we
+    # can reflect FAILED into both `state_manager` (teardown_requests) and
+    # the adapter row (teardown_execution_state). The helper handles both.
+    teardown_state = None
     try:
-        # Get positions for safety validation (loss caps).
-        # If positions can't be fetched, fall back to inline execution —
-        # we must NOT pass an empty portfolio through safety validation
-        # as it would trivially pass loss cap checks (3% of $0 = $0).
-        try:
-            positions = strategy.get_open_positions()
-        except Exception as pos_err:
-            if not runner.config.allow_unsafe_teardown_fallback:
-                error_msg = (
-                    f"Cannot fetch positions for safety validation for {strategy_id}: {pos_err}. "
-                    f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False)."
-                )
-                logger.error(error_msg)
-                if request:
-                    _safe_mark(state_manager, "mark_failed", strategy_id, error=error_msg)
-                runner._request_teardown_failure_shutdown(error_msg)
-                return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time)
-            logger.warning(
-                f"Cannot fetch positions for safety validation — "
-                f"falling back to inline teardown for {strategy_id} (unsafe fallback enabled): {pos_err}"
-            )
-            return await runner._execute_teardown_inline(
-                strategy, teardown_intents, teardown_market, start_time, request, state_manager
-            )
+        # Phase 3: fetch positions (or return early/fallback).
+        positions, early = await _h.fetch_positions_or_fallback(
+            runner, strategy, teardown_intents, teardown_market, start_time, request, state_manager
+        )
+        if positions is None:
+            return early  # type: ignore[return-value]
 
-        # Safety validation: check loss caps before execution
-        validation = teardown_mgr.safety_guard.validate_teardown_request(positions, teardown_mode)
-        if not validation.all_passed:
-            logger.error(f"🛑 Teardown safety validation failed: {validation.blocked_reason}")
-            if request:
-                _safe_mark(
-                    state_manager,
-                    "mark_failed",
-                    strategy_id,
-                    error=f"Safety validation failed: {validation.blocked_reason}",
-                )
-            runner._request_teardown_failure_shutdown(f"Teardown safety validation failed: {validation.blocked_reason}")
-            return runner._create_error_result(
-                strategy_id,
-                IterationStatus.STRATEGY_ERROR,
-                f"Teardown safety validation failed: {validation.blocked_reason}",
-                start_time,
-            )
+        # Phase 4: safety validation (loss caps).
+        safety_error = _h.validate_safety_or_error(
+            runner, teardown_mgr, strategy, positions, teardown_mode, start_time, request, state_manager
+        )
+        if safety_error is not None:
+            return safety_error
 
-        # Persist state for resumability
-        teardown_id = f"td_{uuid.uuid4().hex[:12]}"
-        teardown_state = await teardown_mgr._persist_state(
-            teardown_id=teardown_id,
-            strategy=strategy,  # type: ignore[arg-type]
-            mode=teardown_mode,
-            intents=teardown_intents,
+        # Phase 5: persist state + cancel window (may short-circuit cancel).
+        teardown_state, cancel_short_circuit = await _h.run_cancel_window_and_persist(
+            runner, teardown_mgr, strategy, teardown_intents, teardown_mode, is_auto_mode, start_time
+        )
+        if cancel_short_circuit is not None:
+            return cancel_short_circuit
+        # Contract: when cancel_short_circuit is None, run_cancel_window_and_persist
+        # returns a concrete TeardownState. The assertion narrows the type for
+        # mypy so downstream helpers can treat it as non-optional.
+        assert teardown_state is not None
+
+        # Phase 6: price oracle resolution (pure helper).
+        price_oracle = _h.resolve_price_oracle(teardown_market)
+
+        # Phase 7: execute intents + post-execution verify.
+        teardown_result = await _h.execute_and_verify(
+            runner,
+            teardown_mgr,
+            teardown_state_adapter,
+            teardown_state,
+            strategy,
+            teardown_intents,
+            positions,
+            teardown_mode,
+            teardown_market,
+            is_auto_mode,
+            price_oracle,
+            request,
+            state_manager,
         )
 
-        # Run cancel window — gives operator time to abort
-        cancel_result = await teardown_mgr.cancel_window.run_cancel_window(
-            teardown_id=teardown_id,
-            is_auto_mode=is_auto_mode,
-        )
-        if cancel_result.was_cancelled:
-            logger.info(f"🛑 Teardown {teardown_id} cancelled during window")
-            runner._record_success()
-            return IterationResult(
-                status=IterationStatus.TEARDOWN,
-                intent=None,
-                strategy_id=strategy_id,
-                duration_ms=runner._calculate_duration_ms(start_time),
-            )
-
-        # Update state to EXECUTING after cancel window
-        from ..teardown.models import TeardownStatus
-
-        teardown_state.status = TeardownStatus.EXECUTING
-        if teardown_mgr.state_manager:
-            await teardown_mgr.state_manager.save_teardown_state(teardown_state)
-
-        # Extract price oracle for accurate compilation during execution.
-        # Do NOT use `or None` — an empty dict {} should stay as-is,
-        # not collapse to None (which triggers placeholder prices).
-        price_oracle = None
-        if teardown_market is not None and hasattr(teardown_market, "get_price_oracle_dict"):
-            fetched = teardown_market.get_price_oracle_dict()
-            price_oracle = fetched if fetched is not None else None
-        if not price_oracle:
-            price_oracle = get_fallback_teardown_prices(teardown_market)
-
-        # Build approval callback for slippage escalation (VIB-2927).
-        # Only wire for manual mode — auto mode uses hard slippage limits.
-        approval_callback = None
-        if not is_auto_mode:
-            approval_callback = _make_approval_callback(runner, teardown_state_adapter)
-
-        # Execute intents with escalating slippage
-        teardown_result = await teardown_mgr._execute_intents(
-            teardown_id=teardown_state.teardown_id,
-            strategy=strategy,  # type: ignore[arg-type]
-            intents=teardown_intents,
-            positions=positions,
-            mode=teardown_mode,
-            teardown_state=teardown_state,
-            on_approval_needed=approval_callback,
-            is_auto_mode=is_auto_mode,
-            price_oracle=price_oracle,
-            market=teardown_market,
-        )
-
-        # Post-execution verification: check positions are actually closed.
-        # Fail-closed (VIB-2925): if execution succeeded but positions remain,
-        # mark as failed. Skip verification when execution already failed — the
-        # original error is more actionable than "positions still open".
-        # Catch verification exceptions locally so we don't discard the
-        # successful on-chain execution stats in the teardown_result.
-        if teardown_result.success:
-            verify_error_msg: str | None = None
-            try:
-                positions_closed = await teardown_mgr._verify_closure(strategy)  # type: ignore[arg-type]
-            except Exception as verify_err:
-                logger.exception(
-                    "Post-teardown verification raised for %s — treating as verify-fail",
-                    strategy_id,
-                )
-                positions_closed = False
-                verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
-
-            if not positions_closed:
-                if verify_error_msg is None:
-                    verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
-                logger.warning(f"Post-teardown verification: {strategy_id} incomplete. Marking as failed.")
-                teardown_result = replace(
-                    teardown_result,
-                    success=False,
-                    error=verify_error_msg,
-                    recovery_options=["Verify positions on-chain", "Re-run teardown"],
-                )
-                # Persist the failure so the SQLite row reflects reality —
-                # `_execute_intents` already set status=COMPLETED; flip it
-                # to FAILED so a postmortem reader doesn't see a row
-                # claiming success while the teardown actually failed.
-                teardown_state.status = TeardownStatus.FAILED
-                teardown_state.updated_at = datetime.now(UTC)
-                try:
-                    await teardown_state_adapter.save_teardown_state(teardown_state)
-                except Exception:
-                    logger.warning(
-                        "Failed to persist FAILED status for teardown %s after verify-fail",
-                        teardown_state.teardown_id,
-                        exc_info=True,
-                    )
-                if request:
-                    _safe_mark(state_manager, "mark_failed", strategy_id, error=verify_error_msg)
-
-        # Send completion alert
-        if teardown_mgr.alert_manager and teardown_result.success:
-            try:
-                await teardown_mgr.alert_manager.send_teardown_complete(teardown_result)
-            except Exception as alert_err:
-                logger.warning(f"Failed to send teardown completion alert: {alert_err}")
-
-        # Clean up persisted state on success
-        if teardown_mgr.state_manager and teardown_result.success:
-            try:
-                await teardown_mgr.state_manager.delete_teardown_state(teardown_id)
-            except Exception as cleanup_err:
-                logger.warning(f"Failed to clean up teardown state: {cleanup_err}")
+        # Phase 8: alert + cleanup (best effort, swallow exceptions).
+        await _h.send_alert_and_cleanup(teardown_mgr, teardown_result, teardown_state.teardown_id)
 
     except Exception as e:
-        logger.error(f"🛑 TeardownManager execution failed for {strategy_id}: {e}")
-        if request:
-            _safe_mark(state_manager, "mark_failed", strategy_id, error=str(e))
-        # Also reflect the failure in the TeardownStateAdapter row so that
-        # postmortem readers don't see an EXECUTING teardown_execution_state
-        # row paired with a FAILED teardown_requests row. Best-effort: the
-        # exception may have fired before the state row or adapter was even
-        # initialised, in which case we silently skip.
-        try:
-            if "teardown_state" in locals() and "teardown_state_adapter" in locals():
-                from ..teardown.models import TeardownStatus as _TS
+        return await _h.handle_executor_exception(
+            runner,
+            strategy,
+            start_time,
+            request,
+            state_manager,
+            teardown_state,
+            teardown_state_adapter,
+            e,
+        )
 
-                teardown_state.status = _TS.FAILED
-                teardown_state.updated_at = datetime.now(UTC)
-                await teardown_state_adapter.save_teardown_state(teardown_state)
-        except Exception:
-            logger.warning(
-                "Failed to persist FAILED teardown_execution_state for %s after exception",
-                strategy_id,
-                exc_info=True,
-            )
-        runner._request_teardown_failure_shutdown(str(e))
-        return runner._create_error_result(strategy_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
-
-    # Map TeardownResult -> IterationResult
-    if teardown_result.success:
-        logger.info(
-            f"🛑 {strategy_id} teardown complete via TeardownManager "
-            f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} intents, "
-            f"{teardown_result.duration_seconds:.1f}s)"
-        )
-        runner.request_shutdown()
-        runner._lifecycle_write_state(strategy_id, "TERMINATED")
-        if request:
-            _safe_mark(
-                state_manager,
-                "mark_completed",
-                strategy_id,
-                result={
-                    "intents": teardown_result.intents_succeeded,
-                    "mode": mode_str,
-                    "duration_s": teardown_result.duration_seconds,
-                },
-            )
-        runner._record_success()
-        return IterationResult(
-            status=IterationStatus.TEARDOWN,
-            intent=None,
-            strategy_id=strategy_id,
-            duration_ms=runner._calculate_duration_ms(start_time),
-        )
-    else:
-        logger.warning(f"🛑 {strategy_id} teardown incomplete via TeardownManager: {teardown_result.error}")
-        if request:
-            _safe_mark(state_manager, "mark_failed", strategy_id, error=teardown_result.error or "teardown failed")
-        runner._request_teardown_failure_shutdown(teardown_result.error or "teardown failed")
-        return IterationResult(
-            status=IterationStatus.STRATEGY_ERROR,
-            error=teardown_result.error,
-            strategy_id=strategy_id,
-            duration_ms=runner._calculate_duration_ms(start_time),
-        )
+    # Phase 9: map TeardownResult -> IterationResult + terminal side effects.
+    return _h.map_teardown_result(runner, strategy, start_time, teardown_result, teardown_mode, request, state_manager)
 
 
 # -------------------------------------------------------------------------
