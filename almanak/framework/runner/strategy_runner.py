@@ -1459,8 +1459,35 @@ class StrategyRunner:
                 # below is unreachable.
                 was_in_error_streak = self._consecutive_errors >= self.config.max_consecutive_errors
 
+                # Anchor wall-clock for the full iteration + snapshot phase. Used
+                # by ``capture_snapshot_with_accounting`` to report a complete
+                # ``duration_ms`` on ACCOUNTING_FAILED results (issue #1782
+                # follow-up to #1770 -- #1770 preserved iteration-body duration,
+                # but the snapshot phase that actually failed still wasn't
+                # included in the reported duration).
+                iteration_start_monotonic = time.monotonic()
+
                 # Phase 4: run one iteration.
                 result = await self.run_iteration(strategy)
+
+                # Capture portfolio snapshot (possibly rebuilding `result` into
+                # ACCOUNTING_FAILED in live mode on AccountingPersistenceError).
+                #
+                # The iteration_summary emission and state-persistence calls
+                # below are intentionally sequenced AFTER the snapshot phase
+                # so they observe the FINAL result (including the
+                # ACCOUNTING_FAILED rebuild + full iteration+snapshot
+                # duration_ms). Emitting before the snapshot would leak a
+                # misleading SUCCESS row into operator dashboards whenever
+                # the live-mode snapshot persistence fails (issue #1782,
+                # Gemini review of PR #1786).
+                result = await _run_loop_helpers.capture_snapshot_with_accounting(
+                    self,
+                    strategy,
+                    strategy_id,
+                    result,
+                    iteration_start_monotonic=iteration_start_monotonic,
+                )
 
                 # Emit structured iteration summary for JSONL log analysis
                 self._emit_iteration_summary(result, chain=getattr(strategy, "chain", None))
@@ -1475,10 +1502,6 @@ class StrategyRunner:
                         await self._persist_copy_trading_state(strategy_id, activity_provider)
                     except Exception as e:
                         logger.warning(f"Failed to persist copy trading state: {e}")
-
-                # Capture portfolio snapshot (possibly rebuilding `result` into
-                # ACCOUNTING_FAILED in live mode on AccountingPersistenceError).
-                result = await _run_loop_helpers.capture_snapshot_with_accounting(self, strategy, strategy_id, result)
 
                 # Call callback if provided
                 if iteration_callback:

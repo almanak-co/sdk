@@ -40,8 +40,11 @@ can preserve them):
   IS rebuilt inline -- the helper ``_create_error_result`` is NOT used
   (double-count avoidance for ``_total_iterations``; post fix #1771
   ``_create_error_result`` no longer mutates ``_consecutive_errors``).
-  The rebuilt result preserves ``result.duration_ms`` so iteration
-  summaries reflect the full iteration cost (issue #1770, fixed).
+  The rebuilt result's ``duration_ms`` is measured from the
+  iteration-start ``time.monotonic()`` anchor (captured in ``run_loop``)
+  through to the failure site, so iteration summaries reflect the full
+  iteration cost AND the snapshot-phase wall-clock that actually
+  failed (issue #1770 + #1782, fixed).
 - Max iterations: counter increments AFTER the iteration completes, so
   ``max_iterations=1`` runs exactly one iteration even if shutdown is
   requested mid-iteration.
@@ -50,6 +53,7 @@ can preserve them):
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -968,16 +972,11 @@ class TestAccountingFailedSnapshot:
     async def test_live_mode_snapshot_failure_escalates_to_accounting_failed(self):
         runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
 
-        # Use a distinctive duration so we can assert the rebuilt result
-        # preserves the full iteration duration (issue #1770) rather than
-        # measuring only the snapshot phase.
-        iteration_duration_ms = 1234.5
-
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
                 strategy_id="test-strategy",
-                duration_ms=iteration_duration_ms,
+                duration_ms=1234.5,
             )
 
         runner.run_iteration = mock_iter
@@ -998,33 +997,59 @@ class TestAccountingFailedSnapshot:
         assert "Accounting persistence failed" in (captured[0].error or "")
         # And the alert hook was invoked.
         assert runner._alert_accounting_failure.await_count == 1
-        # Regression: duration_ms on the rebuilt result MUST equal the full
-        # iteration duration carried on the original ``result``, not the
-        # snapshot-phase duration. See issue #1770.
-        assert captured[0].duration_ms == iteration_duration_ms
+        # Regression (#1782): duration_ms on the rebuilt result is measured
+        # from the iteration-start anchor to the failure site, so it is
+        # bounded below by zero and reported as a finite float. The exact
+        # value depends on wall-clock time taken by the mocked iteration;
+        # tighter assertions live in the dedicated #1782 regression test
+        # below where we control the wall-clock shape.
+        assert captured[0].duration_ms >= 0.0
+        assert math.isfinite(captured[0].duration_ms)
 
     @pytest.mark.asyncio
-    async def test_accounting_failed_duration_covers_full_iteration(self):
-        """Regression for #1770: rebuilt ACCOUNTING_FAILED result reports the
-        full iteration duration, not just the snapshot phase.
+    async def test_accounting_failed_duration_covers_full_iteration_and_snapshot(self):
+        """Regression for #1782 (follow-up to #1770): the rebuilt
+        ACCOUNTING_FAILED result's ``duration_ms`` covers BOTH the
+        iteration body AND the snapshot phase that failed, measured as
+        a single wall-clock window from the iteration-start anchor.
 
-        Before the fix, ``capture_snapshot_with_accounting`` measured
-        ``duration_ms`` from a fresh ``snapshot_start`` timestamp captured
-        inside the helper, so a 30-second iteration that only failed during
-        post-iteration snapshot persistence would be reported as a sub-
-        millisecond event in iteration summaries. We now require the
-        rebuilt result to preserve ``result.duration_ms``.
+        #1770 fixed the obvious under-report (snapshot-only duration)
+        by preserving ``result.duration_ms`` (the iteration-body
+        duration) on the rebuilt result. But the snapshot phase itself
+        -- which is literally the phase that failed -- was still
+        excluded from the reported ``duration_ms``. #1782 fixes this
+        by anchoring on ``time.monotonic()`` at the top of the
+        iteration body in ``run_loop`` and measuring through to the
+        failure site inside ``capture_snapshot_with_accounting``.
         """
         runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
 
-        # Simulate a long iteration: 30 seconds of iteration work.
-        full_iteration_ms = 30_000.0
+        # Force a measurable snapshot-phase duration by making the
+        # mocked ``_capture_portfolio_snapshot`` sleep before raising.
+        # This simulates the realistic case where the persistence
+        # layer spends real wall-clock time before erroring (disk I/O,
+        # RPC, connection timeouts, etc.).
+        snapshot_phase_seconds = 0.05
+        real_error = AccountingPersistenceError(
+            AccountingWriteKind.SNAPSHOT,
+            strategy_id="test-strategy",
+            cause=RuntimeError("disk full"),
+        )
+
+        async def slow_snapshot(strategy=None, iteration_number=None):
+            await asyncio.sleep(snapshot_phase_seconds)
+            raise real_error
+
+        runner._capture_portfolio_snapshot = AsyncMock(side_effect=slow_snapshot)
 
         async def mock_iter(s):
             return IterationResult(
                 status=IterationStatus.SUCCESS,
                 strategy_id="test-strategy",
-                duration_ms=full_iteration_ms,
+                # Stale/uninformative duration on the pre-snapshot
+                # result -- we should NOT be using this as the
+                # rebuilt duration any more (post-#1782).
+                duration_ms=0.0,
             )
 
         runner.run_iteration = mock_iter
@@ -1042,8 +1067,18 @@ class TestAccountingFailedSnapshot:
         assert len(captured) == 1
         rebuilt = captured[0]
         assert rebuilt.status == IterationStatus.ACCOUNTING_FAILED
-        # The full iteration duration must be carried into the rebuilt result.
-        assert rebuilt.duration_ms == full_iteration_ms
+        # The snapshot phase slept for ~50ms; the rebuilt duration must
+        # reflect at LEAST that wall-clock, even though the pre-snapshot
+        # ``result.duration_ms`` was 0.0. This is the #1782 guarantee:
+        # snapshot-phase time is included.
+        assert rebuilt.duration_ms >= snapshot_phase_seconds * 1000.0, (
+            f"rebuilt duration_ms ({rebuilt.duration_ms}ms) must include "
+            f"the >= {snapshot_phase_seconds * 1000.0}ms snapshot phase"
+        )
+        # And not wildly more than the real wall-clock (sanity bound --
+        # test infrastructure overhead should not inflate this beyond
+        # a few seconds on any reasonable CI box).
+        assert rebuilt.duration_ms < 5_000.0
 
     @pytest.mark.asyncio
     async def test_accounting_failed_preserves_forensic_metadata(self):
@@ -1092,6 +1127,135 @@ class TestAccountingFailedSnapshot:
         assert rebuilt.intent is sentinel_intent
         assert rebuilt.execution_result is sentinel_execution_result
         assert rebuilt.balance_reconciliation is sentinel_balance_reconciliation
+
+    @pytest.mark.asyncio
+    async def test_accounting_failed_duration_excludes_alert_latency(self):
+        """Regression (Gemini / Codex review of PR #1786): the rebuilt
+        ACCOUNTING_FAILED ``duration_ms`` must NOT include the wall-clock
+        spent inside ``_alert_accounting_failure``. The alert hook
+        performs network I/O (Slack / PagerDuty) and its latency is a
+        property of the alert system, not of the iteration + snapshot
+        phase that actually failed. Including it would inflate
+        operator dashboards during alert-system slowness and misrepresent
+        the cost of the iteration work.
+        """
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+
+        # Make the snapshot phase instant, but the alert phase slow.
+        # Anything the snapshot phase measures is fine; what we're
+        # locking in is that the alert-phase latency does NOT bleed
+        # into the reported duration_ms.
+        alert_latency_seconds = 0.1
+
+        async def slow_alert(s, acc_err):
+            await asyncio.sleep(alert_latency_seconds)
+
+        runner._alert_accounting_failure = AsyncMock(side_effect=slow_alert)
+
+        async def mock_iter(s):
+            return IterationResult(
+                status=IterationStatus.SUCCESS,
+                strategy_id="test-strategy",
+                duration_ms=0.0,
+            )
+
+        runner.run_iteration = mock_iter
+
+        await asyncio.wait_for(
+            runner.run_loop(
+                strategy,
+                interval_seconds=0,
+                iteration_callback=captured.append,
+                max_iterations=1,
+            ),
+            timeout=5,
+        )
+
+        assert len(captured) == 1
+        rebuilt = captured[0]
+        assert rebuilt.status == IterationStatus.ACCOUNTING_FAILED
+        # The key guarantee: duration_ms was snapshotted BEFORE the
+        # alert hook ran, so the 100ms sleep inside ``slow_alert``
+        # must not be reflected in the reported duration. We give a
+        # generous margin (half the alert latency) to absorb
+        # scheduler jitter on busy CI boxes.
+        assert rebuilt.duration_ms < alert_latency_seconds * 1000.0 / 2, (
+            f"rebuilt duration_ms ({rebuilt.duration_ms}ms) must exclude "
+            f"the {alert_latency_seconds * 1000.0}ms alert-phase wall-clock; "
+            f"alert side-effect latency leaked into the reported duration."
+        )
+        # And the alert was actually invoked -- guards against the
+        # trivial pass where alerting was silently skipped.
+        assert runner._alert_accounting_failure.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_accounting_failed_iteration_summary_reflects_rebuilt_result(self):
+        """Regression (Gemini review of PR #1786): the iteration_summary
+        JSONL record and the persisted state must reflect the FINAL
+        (rebuilt) result, not the pre-snapshot SUCCESS result.
+
+        Before this fix, ``_emit_iteration_summary`` and ``_update_state``
+        ran BEFORE ``capture_snapshot_with_accounting``, so a
+        live-mode snapshot failure would:
+          - log ``status=SUCCESS`` with the pre-snapshot duration_ms in
+            the iteration_summary JSONL feed
+          - persist ``last_iteration.status=SUCCESS`` in the strategy
+            state row
+        while the iteration_callback separately received the
+        ACCOUNTING_FAILED rebuilt result. Dashboards and post-mortem
+        tooling that read from the JSONL feed / state row would
+        misreport the iteration as a success.
+        """
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+
+        # Spy on summary emission + state update so we can verify
+        # they saw the rebuilt result.
+        summary_calls: list[IterationResult] = []
+        state_calls: list[IterationResult] = []
+
+        def record_summary(result, chain=None):
+            summary_calls.append(result)
+
+        async def record_state(strategy_id, result, strategy=None):
+            state_calls.append(result)
+
+        runner._emit_iteration_summary = MagicMock(side_effect=record_summary)
+        runner._update_state = AsyncMock(side_effect=record_state)
+
+        async def mock_iter(s):
+            return IterationResult(
+                status=IterationStatus.SUCCESS,
+                strategy_id="test-strategy",
+                duration_ms=42.0,
+            )
+
+        runner.run_iteration = mock_iter
+
+        await asyncio.wait_for(
+            runner.run_loop(
+                strategy,
+                interval_seconds=0,
+                iteration_callback=captured.append,
+                max_iterations=1,
+            ),
+            timeout=5,
+        )
+
+        assert len(captured) == 1
+        assert captured[0].status == IterationStatus.ACCOUNTING_FAILED
+
+        # iteration_summary must see the rebuilt ACCOUNTING_FAILED
+        # result -- not the pre-snapshot SUCCESS result.
+        assert len(summary_calls) == 1
+        assert summary_calls[0].status == IterationStatus.ACCOUNTING_FAILED
+        assert summary_calls[0] is captured[0]
+
+        # State persistence must also see the rebuilt result so the
+        # last_iteration row in the state store does not lie about
+        # the terminal status of this iteration.
+        assert len(state_calls) == 1
+        assert state_calls[0].status == IterationStatus.ACCOUNTING_FAILED
+        assert state_calls[0] is captured[0]
 
     @pytest.mark.asyncio
     async def test_non_live_mode_snapshot_failure_is_logged_only(self):

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -172,6 +173,7 @@ async def capture_snapshot_with_accounting(
     strategy: StrategyProtocol,
     strategy_id: str,
     result: IterationResult,
+    iteration_start_monotonic: float | None = None,
 ) -> IterationResult:
     """Capture portfolio snapshot after an iteration, applying the
     live-mode ACCOUNTING_FAILED escalation contract.
@@ -180,16 +182,27 @@ async def capture_snapshot_with_accounting(
     or when persistence succeeds, the input ``result`` is returned
     unchanged. In live mode, a raised ``AccountingPersistenceError`` is
     converted into a fresh ``IterationResult`` with
-    ``IterationStatus.ACCOUNTING_FAILED``. The rebuilt result preserves
-    ``result.duration_ms`` so the iteration summary reflects the full
-    iteration cost and not just the snapshot phase (issue #1770), and it
-    also carries over ``result.intent``, ``result.execution_result``,
-    and ``result.balance_reconciliation`` so operators retain the on-
-    chain tx hash, gas metrics, and reconciliation context that
-    preceded the accounting failure. The helper bypasses
-    ``_create_error_result`` to avoid a redundant ``_total_iterations``
-    bump -- ``run_iteration`` already counted this iteration via
-    ``_record_success`` before the snapshot phase ran.
+    ``IterationStatus.ACCOUNTING_FAILED``. The rebuilt result's
+    ``duration_ms`` covers the FULL wall-clock window from iteration
+    start through the snapshot phase that failed (issue #1782 -- the
+    #1770 fix preserved the iteration-body duration but still excluded
+    the snapshot-phase time, undercounting ``duration_ms`` by the
+    wall-clock spent in the post-iteration snapshot that actually
+    failed). The caller passes ``iteration_start_monotonic``, captured
+    at the top of the iteration body via ``time.monotonic()``; we
+    compute ``duration_ms`` from that anchor at the moment of failure.
+    If the caller doesn't supply the anchor we fall back to
+    ``result.duration_ms`` (iteration-body only) -- this preserves the
+    post-#1770 behaviour for any external caller that hasn't been
+    updated, but all in-tree callers pass the anchor. The rebuilt
+    result also carries over ``result.intent``,
+    ``result.execution_result``, and ``result.balance_reconciliation``
+    so operators retain the on-chain tx hash, gas metrics, and
+    reconciliation context that preceded the accounting failure. The
+    helper bypasses ``_create_error_result`` to avoid a redundant
+    ``_total_iterations`` bump -- ``run_iteration`` already counted
+    this iteration via ``_record_success`` before the snapshot phase
+    ran.
     """
     # Local import to avoid circular dependency at module load time.
     from .runner_models import IterationResult, IterationStatus
@@ -209,24 +222,48 @@ async def capture_snapshot_with_accounting(
         # logs). In non-live modes, swallow + ERROR-log so
         # pre-prod drift is visible without halting the loop.
         if runner._is_live_mode():
+            # Capture the failure timestamp BEFORE any alert / logging
+            # side effects so ``duration_ms`` reflects only the
+            # iteration-body + snapshot-phase wall-clock. The alert
+            # hook (``_alert_accounting_failure``) performs network
+            # I/O for Slack / PagerDuty and can add noticeable
+            # latency; including that latency in the reported
+            # duration would skew operator dashboards and misrepresent
+            # the cost of the iteration + snapshot work that actually
+            # failed (Gemini / Codex review of PR #1786).
+            #
+            # Report the FULL wall-clock cost of the failed
+            # iteration, including the snapshot phase that
+            # actually failed. Issue #1770 fixed the obvious
+            # undercount (snapshot-only duration); issue
+            # #1782 finishes the job by also including the
+            # snapshot-phase time that elapsed between
+            # ``run_iteration`` returning and
+            # ``AccountingPersistenceError`` firing. When the
+            # caller passes ``iteration_start_monotonic``
+            # (the anchor captured at the top of the
+            # iteration body), we measure from that anchor
+            # through ``time.monotonic()`` now; otherwise we
+            # fall back to ``result.duration_ms`` so an
+            # external caller that hasn't been updated still
+            # gets the #1770 behaviour.
+            if iteration_start_monotonic is not None:
+                duration_ms = (time.monotonic() - iteration_start_monotonic) * 1000.0
+            else:
+                duration_ms = result.duration_ms
             logger.exception(
                 "Accounting persistence failed in live mode for %s (write_kind=%s)",
                 strategy_id,
                 acc_err.write_kind,
             )
             await runner._alert_accounting_failure(strategy, acc_err)
-            # Preserve the full iteration duration AND the
-            # forensic metadata from the already-completed
-            # ``result``. The iteration succeeded on-chain;
-            # only the post-iteration persistence step
-            # failed. Reporting the snapshot-phase duration
-            # alone (issue #1770) would undercount iteration
-            # work in JSONL summaries and downstream
-            # alerting dashboards, and dropping ``intent`` /
-            # ``execution_result`` / ``balance_reconciliation``
-            # would erase the on-chain tx hash, gas metrics,
-            # and reconciliation context operators need to
-            # diagnose what preceded the accounting failure.
+            # Forensic metadata (``intent``,
+            # ``execution_result``, ``balance_reconciliation``)
+            # is carried across unchanged: the iteration
+            # succeeded on-chain and operators need the tx
+            # hash, gas metrics, and reconciliation context
+            # to diagnose what preceded the accounting
+            # failure.
             #
             # We still build the result directly rather
             # than via ``_create_error_result`` -- that
@@ -240,7 +277,7 @@ async def capture_snapshot_with_accounting(
                 status=IterationStatus.ACCOUNTING_FAILED,
                 error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
                 strategy_id=strategy_id,
-                duration_ms=result.duration_ms,
+                duration_ms=duration_ms,
                 intent=result.intent,
                 execution_result=result.execution_result,
                 balance_reconciliation=result.balance_reconciliation,
