@@ -924,3 +924,887 @@ class TestDeployedModeAgentIdResolution:
         assert response.strategy_id == "platform-uuid-1234"
         assert response.strategy_name == "uniswap_rsi"
         assert json.loads(response.config_json) == config_data
+
+
+# ---------------------------------------------------------------------------
+# Phase 5a-chars: characterization tests for ListStrategies + GetStrategyDetails
+#
+# These tests pin down current behavior of the 3-way source lookup (registry,
+# filesystem, paper sessions), the status filter matrix, chain filtering, and
+# the state-enrichment branches. They deliberately document existing behavior
+# (including the #1706 last-branch-wins quirk) so that the Phase 5b helper
+# extraction can refactor without regressing observable behavior.
+# ---------------------------------------------------------------------------
+
+
+class TestListStrategiesSourceMatrix:
+    """Characterization: 3-way source lookup (registry / filesystem / paper)."""
+
+    @pytest.mark.asyncio
+    async def test_registry_only_source(self, dashboard_service, mock_context):
+        """REGISTRY filter: only registry instances, no paper, no filesystem."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("only_in_registry:xyz", chain="base", status="RUNNING"),
+        ]
+
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]),
+        ):
+            request = gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        assert response.total_count == 1
+        assert response.strategies[0].strategy_id == "only_in_registry:xyz"
+        assert response.strategies[0].chain == "base"
+
+    @pytest.mark.asyncio
+    async def test_filesystem_only_source(
+        self, dashboard_service, mock_context, temp_strategies_dir
+    ):
+        """AVAILABLE filter with empty registry: strategy found only on disk."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = []
+
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]),
+        ):
+            request = gateway_pb2.ListStrategiesRequest(status_filter="AVAILABLE")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        assert response.total_count == 1
+        assert response.strategies[0].strategy_id == "test_strategy"
+        # Filesystem templates default to PAUSED status
+        assert response.strategies[0].status == "PAUSED"
+
+    @pytest.mark.asyncio
+    async def test_paper_session_only_source(self, dashboard_service, mock_context):
+        """Paper session appears in REGISTRY mode when not in registry or filesystem."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = []
+
+        paper_session = {
+            "strategy_id": "paper:my_strat",
+            "name": "My Strat (Paper)",
+            "status": "PAPER_TRADING",
+            "chain": "arbitrum",
+            "protocol": "Uniswap V3",
+            "total_value_usd": "100",
+            "pnl_24h_usd": "0",
+            "last_action_at": 0,
+            "attention_required": False,
+            "attention_reason": "",
+            "is_multi_chain": False,
+            "chains": ["arbitrum"],
+            "execution_mode": "paper",
+            "paper_metrics_json": "{}",
+        }
+
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
+        ):
+            request = gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        assert response.total_count == 1
+        assert response.strategies[0].strategy_id == "paper:my_strat"
+        assert response.strategies[0].status == "PAPER_TRADING"
+        assert response.strategies[0].execution_mode == "paper"
+
+    @pytest.mark.asyncio
+    async def test_mixed_sources_registry_plus_paper(
+        self, dashboard_service, mock_context, temp_strategies_dir
+    ):
+        """ALL filter combines registry + filesystem + paper sessions."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("live_strat:abc", chain="base", status="RUNNING"),
+        ]
+
+        paper_session = {
+            "strategy_id": "paper:sim_strat",
+            "name": "Sim (Paper)",
+            "status": "PAPER_TRADING",
+            "chain": "arbitrum",
+            "protocol": "Unknown",
+            "total_value_usd": "50",
+            "pnl_24h_usd": "0",
+            "last_action_at": 0,
+            "attention_required": False,
+            "attention_reason": "",
+            "is_multi_chain": False,
+            "chains": ["arbitrum"],
+            "execution_mode": "paper",
+            "paper_metrics_json": "{}",
+        }
+
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
+        ):
+            request = gateway_pb2.ListStrategiesRequest(status_filter="ALL")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        ids = {s.strategy_id for s in response.strategies}
+        # Registry (live_strat:abc) + filesystem (test_strategy) + paper (paper:sim_strat)
+        assert ids == {"live_strat:abc", "test_strategy", "paper:sim_strat"}
+
+    @pytest.mark.asyncio
+    async def test_paper_excluded_from_available_source(
+        self, dashboard_service, mock_context, temp_strategies_dir
+    ):
+        """AVAILABLE mode is library-only: paper sessions must not leak through."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = []
+
+        paper_session = {
+            "strategy_id": "paper:sim_strat",
+            "name": "Sim (Paper)",
+            "status": "PAPER_TRADING",
+            "chain": "arbitrum",
+            "protocol": "Unknown",
+            "total_value_usd": "0",
+            "pnl_24h_usd": "0",
+            "last_action_at": 0,
+            "attention_required": False,
+            "attention_reason": "",
+            "is_multi_chain": False,
+            "chains": ["arbitrum"],
+            "execution_mode": "paper",
+            "paper_metrics_json": "{}",
+        }
+
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
+        ):
+            request = gateway_pb2.ListStrategiesRequest(status_filter="AVAILABLE")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        ids = {s.strategy_id for s in response.strategies}
+        assert "paper:sim_strat" not in ids
+        assert "test_strategy" in ids
+
+
+class TestListStrategiesStatusFilters:
+    """Characterization: every status filter value matches its registry status."""
+
+    @pytest.fixture(autouse=True)
+    def _no_paper_sessions(self, dashboard_service):
+        with patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]):
+            yield
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["RUNNING", "PAUSED", "ERROR", "STUCK", "INACTIVE"])
+    async def test_each_status_filter_matches_registry_status(
+        self, dashboard_service, mock_context, status
+    ):
+        """RUNNING / PAUSED / ERROR / STUCK / INACTIVE each pick only their own."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("strat_running:01", status="RUNNING"),
+            _make_instance("strat_paused:02", status="PAUSED"),
+            _make_instance("strat_error:03", status="ERROR"),
+            _make_instance("strat_stuck:04", status="STUCK"),
+            _make_instance("strat_inactive:05", status="INACTIVE"),
+        ]
+
+        with patch(
+            "almanak.gateway.services.dashboard_service.get_instance_registry",
+            return_value=mock_registry,
+        ):
+            request = gateway_pb2.ListStrategiesRequest(status_filter=status)
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        assert response.total_count == 1
+        assert response.strategies[0].status == status
+
+    @pytest.mark.asyncio
+    async def test_chain_filter_arbitrum_selects_only_matching(
+        self, dashboard_service, mock_context
+    ):
+        """chain_filter='arbitrum' picks out only arbitrum instances."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("strat_arb:01", chain="arbitrum", status="RUNNING"),
+            _make_instance("strat_base:02", chain="base", status="RUNNING"),
+            _make_instance("strat_avax:03", chain="avalanche", status="RUNNING"),
+        ]
+
+        with patch(
+            "almanak.gateway.services.dashboard_service.get_instance_registry",
+            return_value=mock_registry,
+        ):
+            request = gateway_pb2.ListStrategiesRequest(chain_filter="arbitrum")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        assert response.total_count == 1
+        assert response.strategies[0].chain == "arbitrum"
+
+    @pytest.mark.asyncio
+    async def test_chain_filter_substring_matches_multichain(
+        self, dashboard_service, mock_context
+    ):
+        """chain_filter does a substring match against the chain column."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("multi:01", chain="arbitrum,base", status="RUNNING"),
+            _make_instance("single:02", chain="avalanche", status="RUNNING"),
+        ]
+
+        with patch(
+            "almanak.gateway.services.dashboard_service.get_instance_registry",
+            return_value=mock_registry,
+        ):
+            request = gateway_pb2.ListStrategiesRequest(chain_filter="base")
+            response = await dashboard_service.ListStrategies(request, mock_context)
+
+        # Substring match: "arbitrum,base" contains "base" → included
+        assert response.total_count == 1
+        assert response.strategies[0].strategy_id == "multi:01"
+        assert response.strategies[0].is_multi_chain is True
+
+
+class TestListStrategiesRegistryEnrichment:
+    """Characterization: registry-instance enrichment (chain_wallets, wallet_address, state)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_paper_sessions(self, dashboard_service):
+        with patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_chain_wallets_json_parse_success(self, dashboard_service, mock_context):
+        """Valid chain_wallets JSON is parsed and exposed on the summary proto."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        inst = _make_instance("multi:01", chain="arbitrum,base", status="RUNNING")
+        inst.chain_wallets = json.dumps({"arbitrum": "0xAAA", "base": "0xBBB"})
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [inst]
+
+        with patch(
+            "almanak.gateway.services.dashboard_service.get_instance_registry",
+            return_value=mock_registry,
+        ):
+            response = await dashboard_service.ListStrategies(
+                gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY"), mock_context
+            )
+
+        assert response.total_count == 1
+        s = response.strategies[0]
+        assert dict(s.chain_wallets) == {"arbitrum": "0xAAA", "base": "0xBBB"}
+
+    @pytest.mark.asyncio
+    async def test_chain_wallets_json_parse_failure_is_silent(
+        self, dashboard_service, mock_context
+    ):
+        """Malformed chain_wallets JSON is swallowed; map ends up empty."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        inst = _make_instance("broken:01", status="RUNNING")
+        inst.chain_wallets = "{not valid json"
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [inst]
+
+        with patch(
+            "almanak.gateway.services.dashboard_service.get_instance_registry",
+            return_value=mock_registry,
+        ):
+            response = await dashboard_service.ListStrategies(
+                gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY"), mock_context
+            )
+
+        assert response.total_count == 1
+        # Parse failure leaves chain_wallets empty and does NOT crash listing
+        assert dict(response.strategies[0].chain_wallets) == {}
+
+    @pytest.mark.asyncio
+    async def test_wallet_address_is_propagated_to_summary(
+        self, dashboard_service, mock_context
+    ):
+        """wallet_address from the registry is forwarded on the summary proto."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        inst = _make_instance("strat:01", status="RUNNING")
+        inst.wallet_address = "0xDEADBEEF"
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [inst]
+
+        with patch(
+            "almanak.gateway.services.dashboard_service.get_instance_registry",
+            return_value=mock_registry,
+        ):
+            response = await dashboard_service.ListStrategies(
+                gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY"), mock_context
+            )
+
+        assert response.strategies[0].wallet_address == "0xDEADBEEF"
+
+    @pytest.mark.asyncio
+    async def test_state_enrichment_consecutive_errors_parsed(
+        self, dashboard_service, mock_context
+    ):
+        """Valid consecutive_errors in state is reflected on the summary."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("strat:01", status="RUNNING"),
+        ]
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"consecutive_errors": 3}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            response = await dashboard_service.ListStrategies(
+                gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY"), mock_context
+            )
+
+        assert response.strategies[0].consecutive_errors == 3
+
+    @pytest.mark.asyncio
+    async def test_state_enrichment_consecutive_errors_parse_failure_defaults_to_zero(
+        self, dashboard_service, mock_context
+    ):
+        """Unparseable consecutive_errors (non-numeric) falls back to 0 without crashing."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("strat:01", status="RUNNING"),
+        ]
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"consecutive_errors": "not-a-number"}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            response = await dashboard_service.ListStrategies(
+                gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY"), mock_context
+            )
+
+        assert response.strategies[0].consecutive_errors == 0
+
+    @pytest.mark.asyncio
+    async def test_state_enrichment_last_iteration_at_parse_failure_defaults_to_zero(
+        self, dashboard_service, mock_context
+    ):
+        """Malformed last_iteration.timestamp → graceful 0, no crash."""
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.list_all.return_value = [
+            _make_instance("strat:01", status="RUNNING"),
+        ]
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"last_iteration": {"timestamp": "not-an-iso-date"}}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            response = await dashboard_service.ListStrategies(
+                gateway_pb2.ListStrategiesRequest(status_filter="REGISTRY"), mock_context
+            )
+
+        assert response.strategies[0].last_iteration_at == 0
+
+
+class TestGetStrategyDetailsStateEnrichment:
+    """Characterization: GetStrategyDetails state-enrichment precedence rules.
+
+    Covers the branch cascade in `dashboard_service.py:944-960`:
+      1. registry PAUSED wins over state-derived status
+      2. EXECUTION_FAILED / STRATEGY_ERROR → ERROR
+      3. is_running → RUNNING
+      4. is_paused → PAUSED  (last branch wins; #1706)
+    """
+
+    @pytest.mark.asyncio
+    async def test_iteration_status_execution_failed_overrides_registry_running(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """EXECUTION_FAILED in state overrides RUNNING from registry → status=ERROR."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("strat:01", status="RUNNING")
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"last_iteration": {"status": "EXECUTION_FAILED"}}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.status == "ERROR"
+        assert response.summary.attention_required is True
+        assert "EXECUTION_FAILED" in response.summary.attention_reason
+
+    @pytest.mark.asyncio
+    async def test_registry_paused_wins_over_iteration_error(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """Registry PAUSED preserved even when state reports EXECUTION_FAILED."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("strat:01", status="PAUSED")
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {
+                "last_iteration": {"status": "EXECUTION_FAILED"},
+                "is_running": True,  # would also say RUNNING, but registry PAUSED wins
+            }
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.status == "PAUSED"
+
+    @pytest.mark.asyncio
+    async def test_is_running_in_state_promotes_to_running(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """is_running=True in state promotes registry status to RUNNING."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        # Registry says INACTIVE but state says is_running
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("strat:01", status="INACTIVE")
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"is_running": True}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.status == "RUNNING"
+
+    @pytest.mark.asyncio
+    async def test_issue_1706_is_running_wins_over_is_paused(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """Characterize #1706: when state sets BOTH is_running=True and is_paused=True.
+
+        Current (buggy) behavior: the cascade uses `elif`, so `is_running` (evaluated first)
+        wins and RUNNING is reported. The issue argues this is fragile — producers that
+        flip both keys silently pick whichever branch is checked first.
+
+        This test pins down the current behavior. When #1706 is fixed (explicit precedence
+        or a single lifecycle enum), this assertion will need to flip.
+        """
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("strat:01", status="INACTIVE")
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"is_running": True, "is_paused": True}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        # TODO(#1706): is_running currently wins due to elif ordering. When #1706
+        # is fixed with explicit precedence or a lifecycle enum, update this.
+        assert response.summary.status == "RUNNING"
+
+    @pytest.mark.asyncio
+    async def test_is_paused_in_state_promotes_to_paused(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """is_paused=True in state promotes to PAUSED when is_running is absent."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("strat:01", status="INACTIVE")
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"is_paused": True}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.status == "PAUSED"
+
+    @pytest.mark.asyncio
+    async def test_last_iteration_at_parse_failure_defaults_to_zero(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """Malformed last_iteration.timestamp in state → last_iteration_at=0."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = _make_instance("strat:01", status="RUNNING")
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {"last_iteration": {"timestamp": "garbage"}}
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="strat:01")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.last_iteration_at == 0
+
+
+class TestGetStrategyDetailsFallbacksAndOptIns:
+    """Characterization: filesystem / paper fallbacks, position balances, opt-in flags."""
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_paper_session_when_not_in_registry_or_filesystem(
+        self, dashboard_service, mock_context, monkeypatch
+    ):
+        """Paper session ID (paper:xxx) resolves via _discover_paper_sessions fallback."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = None
+
+        paper_session = {
+            "strategy_id": "paper:my_sim",
+            "name": "My Sim (Paper)",
+            "status": "PAPER_TRADING",
+            "chain": "arbitrum",
+            "protocol": "Unknown",
+            "total_value_usd": "200",
+            "pnl_24h_usd": "0",
+            "last_action_at": 0,
+            "attention_required": False,
+            "attention_reason": "",
+            "is_multi_chain": False,
+            "chains": ["arbitrum"],
+            "execution_mode": "paper",
+            "paper_metrics_json": '{"tick_count": 10}',
+        }
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[paper_session]),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="paper:my_sim")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        assert response.summary.strategy_id == "paper:my_sim"
+        assert response.summary.execution_mode == "paper"
+        assert response.summary.status == "PAPER_TRADING"
+        assert response.summary.paper_metrics_json == '{"tick_count": 10}'
+
+    @pytest.mark.asyncio
+    async def test_position_prefers_snapshot_wallet_balances_over_state_dict(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """PositionInfo.token_balances come from PortfolioSnapshot when available,
+        NOT from state["balances"] (snapshot wins over state dict fallback)."""
+        from almanak.framework.portfolio.models import TokenBalance
+
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        snapshot = PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            strategy_id="test_strategy",
+            total_value_usd=Decimal("500"),
+            available_cash_usd=Decimal("500"),
+            value_confidence=ValueConfidence.HIGH,
+            wallet_balances=[
+                TokenBalance(symbol="USDC", balance=Decimal("500"), value_usd=Decimal("500")),
+            ],
+        )
+
+        async def fake_snapshot(strategy_id):
+            return snapshot
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            # State also has balances — must NOT win
+            return {"balances": {"WETH": {"balance": "99", "value_usd": "99"}}}
+
+        with (
+            patch.object(dashboard_service, "_get_latest_snapshot", side_effect=fake_snapshot),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="test_strategy")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        symbols = [tb.symbol for tb in response.position.token_balances]
+        assert symbols == ["USDC"]
+        assert response.position.token_balances[0].balance == "500"
+
+    @pytest.mark.asyncio
+    async def test_position_falls_back_to_state_balances_when_snapshot_empty(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """With no snapshot balances, PositionInfo is populated from state["balances"]."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        async def fake_snapshot(strategy_id):
+            return None  # No snapshot available
+
+        async def fake_state(strategy_id, fallback_strategy_id=None):
+            return {
+                "balances": {
+                    "USDC": {"balance": "100", "value_usd": "100"},
+                    "WETH": {"balance": "0.5", "value_usd": "1500"},
+                },
+                "health_factor": "1.85",
+                "leverage": "2.0",
+            }
+
+        with (
+            patch.object(dashboard_service, "_get_latest_snapshot", side_effect=fake_snapshot),
+            patch.object(dashboard_service, "_get_strategy_state_data", side_effect=fake_state),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="test_strategy")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        symbols = {tb.symbol for tb in response.position.token_balances}
+        assert symbols == {"USDC", "WETH"}
+        assert response.position.health_factor == "1.85"
+        assert response.position.leverage == "2.0"
+
+    @pytest.mark.asyncio
+    async def test_timeline_opt_in_true_invokes_inner_get_timeline(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """include_timeline=True calls self.GetTimeline with the requested limit."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        fake_event = gateway_pb2.TimelineEventInfo(
+            timestamp=1_700_000_000,
+            event_type="TRADE",
+            description="fake",
+        )
+        timeline_response = gateway_pb2.GetTimelineResponse(events=[fake_event])
+
+        with patch.object(
+            dashboard_service,
+            "GetTimeline",
+            new=AsyncMock(return_value=timeline_response),
+        ) as mock_get_timeline:
+            request = gateway_pb2.GetStrategyDetailsRequest(
+                strategy_id="test_strategy",
+                include_timeline=True,
+                timeline_limit=7,
+            )
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        mock_get_timeline.assert_awaited_once()
+        inner_req = mock_get_timeline.await_args[0][0]
+        assert inner_req.strategy_id == "test_strategy"
+        assert inner_req.limit == 7
+        assert len(response.timeline) == 1
+        assert response.timeline[0].event_type == "TRADE"
+
+    @pytest.mark.asyncio
+    async def test_timeline_opt_in_false_does_not_call_inner(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """include_timeline=False (default) must NOT invoke self.GetTimeline."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        with patch.object(
+            dashboard_service,
+            "GetTimeline",
+            new=AsyncMock(return_value=gateway_pb2.GetTimelineResponse()),
+        ) as mock_get_timeline:
+            request = gateway_pb2.GetStrategyDetailsRequest(
+                strategy_id="test_strategy",
+                include_timeline=False,
+            )
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        mock_get_timeline.assert_not_called()
+        assert len(response.timeline) == 0
+
+    @pytest.mark.asyncio
+    async def test_pnl_history_opt_in_true_invokes_build_pnl_history(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """include_pnl_history=True calls _build_pnl_history and attaches points."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        fake_points = [
+            gateway_pb2.PnLDataPoint(timestamp=1_700_000_000, value_usd="100", pnl_usd="5"),
+            gateway_pb2.PnLDataPoint(timestamp=1_700_003_600, value_usd="101", pnl_usd="6"),
+        ]
+
+        with patch.object(
+            dashboard_service,
+            "_build_pnl_history",
+            new=AsyncMock(return_value=fake_points),
+        ) as mock_build:
+            request = gateway_pb2.GetStrategyDetailsRequest(
+                strategy_id="test_strategy",
+                include_pnl_history=True,
+            )
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        mock_build.assert_awaited_once()
+        assert len(response.pnl_history) == 2
+        assert response.pnl_history[0].value_usd == "100"
+
+    @pytest.mark.asyncio
+    async def test_pnl_history_opt_in_false_does_not_build(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """include_pnl_history=False (default) must NOT call _build_pnl_history."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        with patch.object(
+            dashboard_service,
+            "_build_pnl_history",
+            new=AsyncMock(return_value=[]),
+        ) as mock_build:
+            request = gateway_pb2.GetStrategyDetailsRequest(
+                strategy_id="test_strategy",
+                include_pnl_history=False,
+            )
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        mock_build.assert_not_called()
+        assert len(response.pnl_history) == 0
+
+    @pytest.mark.asyncio
+    async def test_wallet_address_absent_from_filesystem_source(
+        self, dashboard_service, mock_context, monkeypatch, temp_strategies_dir
+    ):
+        """Filesystem-sourced strategies don't set wallet_address (proto default=empty)."""
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = temp_strategies_dir
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = None
+
+        with (
+            patch(
+                "almanak.gateway.services.dashboard_service.get_instance_registry",
+                return_value=mock_registry,
+            ),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(strategy_id="test_strategy")
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        # Filesystem path does not carry wallet_address — proto default is empty string
+        assert response.summary.wallet_address == ""
+        assert response.summary.strategy_id == "test_strategy"
