@@ -27,9 +27,12 @@ from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain,
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
 from almanak.gateway.services._dashboard_helpers import (
+    build_chain_health,
+    build_position_proto,
     build_registry_strategy_info,
     build_strategy_summary_kwargs,
     enrich_strategy_info,
+    lookup_strategy_source,
 )
 from almanak.gateway.timeline.store import get_timeline_store
 from almanak.gateway.validation import ValidationError, resolve_agent_id, validate_strategy_id
@@ -785,32 +788,15 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         original_strategy_id = strategy_id
         strategy_id = resolve_agent_id(strategy_id)
 
-        # Check registry first, then fall back to filesystem
-        strategy_info = None
-        try:
-            registry = get_instance_registry()
-            inst = registry.get(strategy_id)
-            if inst is not None:
-                effective_status = self._compute_effective_status(inst)
-                strategy_info = build_registry_strategy_info(inst, effective_status)
-        except Exception as e:
-            logger.debug(f"Failed to check registry for {strategy_id}: {e}")
-
-        # Fallback to filesystem discovery
-        if strategy_info is None:
-            strategies = self._discover_strategies_from_filesystem()
-            for s in strategies:
-                if s["strategy_id"] == strategy_id:
-                    strategy_info = s
-                    break
-
-        # Fallback to paper session discovery (match against original ID
-        # because resolve_agent_id may have rewritten paper:xxx IDs)
-        if strategy_info is None:
-            for s in self._discover_paper_sessions():
-                if s["strategy_id"] == original_strategy_id or s["strategy_id"] == strategy_id:
-                    strategy_info = s
-                    break
+        # Resolve strategy source via registry → filesystem → paper cascade
+        strategy_info = lookup_strategy_source(
+            strategy_id=strategy_id,
+            original_strategy_id=original_strategy_id,
+            registry_getter=get_instance_registry,
+            compute_effective_status=self._compute_effective_status,
+            discover_filesystem=self._discover_strategies_from_filesystem,
+            discover_paper_sessions=self._discover_paper_sessions,
+        )
 
         if strategy_info is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
@@ -833,50 +819,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Build summary
         summary = gateway_pb2.StrategySummary(**build_strategy_summary_kwargs(strategy_info))
 
-        # Build position info — prefer framework snapshot over state dict
-        position = gateway_pb2.PositionInfo()
-
-        # Primary: wallet balances from persisted portfolio snapshot (Phase 1c)
-        snapshot_balances_populated = False
+        # Build position info — snapshot wins over state dict fallback
         try:
             latest_snap = await self._get_latest_snapshot(strategy_id)
-            if latest_snap and latest_snap.wallet_balances:
-                for wb in latest_snap.wallet_balances:
-                    position.token_balances.append(
-                        gateway_pb2.TokenBalanceInfo(
-                            symbol=wb.symbol,
-                            balance=str(wb.balance),
-                            value_usd=str(wb.value_usd),
-                        )
-                    )
-                snapshot_balances_populated = True
         except Exception:
             logger.debug("Failed to get snapshot balances for %s", strategy_id, exc_info=True)
-
-        if state:
-            # Fallback: extract token balances from state dict if snapshot didn't have them
-            if not snapshot_balances_populated:
-                balances = state.get("balances", {})
-                for symbol, balance_data in balances.items():
-                    if isinstance(balance_data, dict):
-                        position.token_balances.append(
-                            gateway_pb2.TokenBalanceInfo(
-                                symbol=symbol,
-                                balance=str(balance_data.get("balance", "0")),
-                                value_usd=str(balance_data.get("value_usd", "0")),
-                            )
-                        )
-
-            # Extract health factor and leverage if present
-            if "health_factor" in state:
-                position.health_factor = str(state["health_factor"])
-            if "leverage" in state:
-                position.leverage = str(state["leverage"])
-
-        # Include cached strategy positions from heartbeat
-        cached = self._cached_positions.get(strategy_id)
-        if cached:
-            position.strategy_positions.extend(cached)
+            latest_snap = None
+        position = build_position_proto(
+            state=state,
+            cached_positions=self._cached_positions.get(strategy_id),
+            snapshot=latest_snap,
+        )
 
         # Get timeline events if requested
         timeline = []
@@ -893,17 +846,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if request.include_pnl_history:
             pnl_history = await self._build_pnl_history(strategy_id)
 
-        # Derive chain health from strategy chains.
-        # Stub: reports UNKNOWN until real health probing (RPC latency, block number, gas price) is wired.
-        chain_health = {}
+        # Derive chain health from strategy chains (stub — UNKNOWN until real probing wired)
         raw_chains = strategy_info.get("chains")
         chains: list[str] = raw_chains if isinstance(raw_chains, list) else []
-        for chain_name in chains:
-            chain_health[chain_name] = gateway_pb2.ChainHealthInfo(
-                chain=chain_name,
-                status="UNKNOWN",
-                last_updated=int(datetime.now(UTC).timestamp()),
-            )
+        chain_health = build_chain_health(chains)
 
         return gateway_pb2.StrategyDetails(
             summary=summary,
