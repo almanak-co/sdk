@@ -34,6 +34,11 @@ from .helpers import (
     load_strategy_config,
     parse_date,
 )
+from .run_helpers import (
+    build_pnl_config,
+    parse_token_list,
+    resolve_strategy_class_or_mock,
+)
 
 # =============================================================================
 # Sweep Helpers
@@ -695,6 +700,385 @@ def print_optimization_results(
 
 
 # =============================================================================
+# Phase helpers (Phase 5B.3 extractions)
+# =============================================================================
+
+
+def _parse_sweep_params(params: tuple[str, ...]) -> list[SweepParameter]:
+    """Phase S1: parse the repeated `--param NAME:v1,v2,...` CLI flags.
+
+    Validates that at least one `--param` was supplied and surfaces any
+    per-flag parse error as a `click.UsageError` with the original message.
+    """
+    from .helpers import parse_param_string as _parse_param_string
+
+    if not params:
+        raise click.UsageError("At least one --param is required. Use format: --param 'name:val1,val2,val3'")
+
+    sweep_params: list[SweepParameter] = []
+    for param_str in params:
+        try:
+            sweep_params.append(_parse_param_string(param_str))
+        except click.BadParameter as e:
+            raise click.UsageError(str(e)) from e
+    return sweep_params
+
+
+def _resolve_backtest_periods(
+    periods: str | None,
+    start: datetime | None,
+    end: datetime | None,
+) -> tuple[bool, list[Any]]:
+    """Phase S2: resolve `--periods` vs `--start/--end` into a period list.
+
+    Returns:
+        Tuple of ``(multi_period_mode, backtest_periods)``. ``multi_period_mode``
+        is True when ``--periods`` was supplied.
+
+    Raises:
+        click.UsageError: on mutual-exclusion violation or missing required args.
+    """
+    from ...backtesting.pnl.periods import BacktestPeriod, resolve_periods
+
+    if periods is not None:
+        if start is not None or end is not None:
+            raise click.UsageError("Cannot use --periods together with --start/--end. Use one or the other.")
+        try:
+            return True, resolve_periods(periods)
+        except (ValueError, json.JSONDecodeError) as e:
+            raise click.UsageError(str(e)) from e
+
+    if start is None or end is None:
+        raise click.UsageError("Either --start and --end, or --periods is required.")
+    return False, [BacktestPeriod(name="single", start=start, end=end)]
+
+
+@dataclass
+class _SweepRunContext:
+    """Bundle of validated config passed to sweep phase helpers.
+
+    Mirrors ``SweepBacktestContext`` in spirit but is sweep-local so that
+    phase helpers stay side-effect-compatible with the original inline
+    implementation without forcing premature consolidation. Kept private so
+    that callers still invoke the public CLI entry point.
+    """
+
+    strategy: str
+    chain: str
+    token_list: list[str]
+    interval: int
+    initial_capital: float
+    output_path: Path | None
+    multi_period_mode: bool
+    backtest_periods: list[Any]
+    sweep_params: list[SweepParameter]
+    combinations: list[dict[str, str]]
+    periods_spec: str | None  # raw --periods arg, used only for banner echo
+
+
+def _print_sweep_configuration(
+    ctx: _SweepRunContext,
+    *,
+    parallel: bool,
+    effective_workers: int,
+) -> None:
+    """Phase S5: emit the PARAMETER SWEEP CONFIGURATION banner.
+
+    Preserves the original stdout ordering, spacing, and byte-for-byte
+    formatting — tests grep-assert several of these lines verbatim.
+    """
+    total_combinations = len(ctx.combinations)
+    total_runs = total_combinations * len(ctx.backtest_periods)
+
+    click.echo("=" * 60)
+    click.echo("PARAMETER SWEEP CONFIGURATION")
+    click.echo("=" * 60)
+    click.echo(f"Strategy: {ctx.strategy}")
+    click.echo(f"Chain: {ctx.chain}")
+    if ctx.multi_period_mode:
+        click.echo(f"Periods: {ctx.periods_spec} ({len(ctx.backtest_periods)} windows)")
+        for bp in ctx.backtest_periods:
+            click.echo(f"  - {bp.name}: {bp.start.date()} -> {bp.end.date()}")
+    else:
+        click.echo(f"Period: {ctx.backtest_periods[0].start.date()} -> {ctx.backtest_periods[0].end.date()}")
+    click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
+    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
+    click.echo(f"Tokens: {', '.join(ctx.token_list)}")
+    click.echo()
+    click.echo("Parameters to sweep:")
+    for p in ctx.sweep_params:
+        click.echo(f"  {p.name}: {', '.join(p.values)}")
+    click.echo()
+    click.echo(f"Total combinations: {total_combinations}")
+    if ctx.multi_period_mode:
+        click.echo(
+            f"Total runs: {total_runs} ({total_combinations} combinations x {len(ctx.backtest_periods)} periods)"
+        )
+
+    if parallel:
+        click.echo("Execution mode: Parallel (multiprocessing)")
+        click.echo(f"Workers: {effective_workers}")
+    else:
+        click.echo("Execution mode: Async (concurrent)")
+        click.echo(f"Concurrency: {effective_workers}")
+
+    if ctx.output_path:
+        click.echo(f"Output: {ctx.output_path}")
+
+    click.echo("=" * 60)
+
+
+def _compute_worker_count(parallel: bool, workers: int | None, total_runs: int) -> int:
+    """Phase S5 tail: derive the effective worker/concurrency count.
+
+    In parallel mode defaults to ``max(1, cpu_count - 1)`` and is capped at
+    ``total_runs`` (no benefit to more workers than runs). In async mode the
+    default is 4 (historical value; kept to preserve behaviour).
+    """
+    if parallel:
+        import os
+
+        effective = workers if workers is not None else max(1, (os.cpu_count() or 1) - 1)
+        return min(effective, total_runs) if total_runs > 0 else effective
+    return workers if workers is not None else 4
+
+
+def _handle_sweep_dry_run(ctx: _SweepRunContext) -> bool:
+    """Phase S6: emit the dry-run combinations block and signal early exit.
+
+    Returns True if the caller received ``--dry-run`` and should ``return``
+    without executing backtests. The caller is responsible for checking the
+    ``--dry-run`` flag and only invoking this helper when it is set.
+    """
+    total_runs = len(ctx.combinations) * len(ctx.backtest_periods)
+    click.echo()
+    if ctx.multi_period_mode:
+        click.echo(f"Parameter combinations x periods (dry run, {total_runs} total):")
+    else:
+        click.echo("Parameter combinations (dry run):")
+    click.echo("-" * 40)
+    for i, combo in enumerate(ctx.combinations, 1):
+        params_str = ", ".join(f"{k}={v}" for k, v in combo.items())
+        if ctx.multi_period_mode:
+            for bp in ctx.backtest_periods:
+                click.echo(f"  {params_str}  |  {bp.name}")
+        else:
+            click.echo(f"  {i}. {params_str}")
+    click.echo("-" * 40)
+    click.echo()
+    click.echo("Dry run - no backtests executed.")
+    return True
+
+
+def _run_sweep_over_periods(
+    ctx: _SweepRunContext,
+    *,
+    strategy_class: Any,
+    base_config: dict[str, Any],
+    data_provider: CoinGeckoDataProvider,
+    parallel: bool,
+    effective_workers: int,
+) -> list[SweepResult]:
+    """Phase S9: loop over periods, running sweeps in parallel or async mode.
+
+    Preserves the original "one event loop per period" shape — `asyncio.run`
+    is called once per period when in async mode, matching the behaviour that
+    per-period fixtures/cleanup relies on. Also preserves the
+    `preflight_validation=total_combinations <= 1` heuristic and the error
+    message ``"Error during sweep: {e}"`` with `sys.exit(1)`.
+    """
+    total_combinations = len(ctx.combinations)
+    all_results: list[SweepResult] = []
+
+    try:
+        for bp in ctx.backtest_periods:
+            pnl_config = build_pnl_config(
+                start_time=bp.start,
+                end_time=bp.end,
+                interval_seconds=ctx.interval,
+                initial_capital=ctx.initial_capital,
+                chain=ctx.chain,
+                tokens=ctx.token_list,
+                gas_price_gwei=30.0,
+                include_gas_costs=True,
+                allow_degraded_data=True,
+                preflight_validation=total_combinations <= 1,
+                fail_on_preflight_error=False,
+            )
+
+            if ctx.multi_period_mode:
+                click.echo(f"--- Period: {bp.name} ({bp.start.date()} -> {bp.end.date()}) ---")
+
+            if parallel:
+                period_results = _run_parallel_sweep(
+                    strategy_class=strategy_class,
+                    base_config=base_config,
+                    pnl_config=pnl_config,
+                    combinations=ctx.combinations,
+                    workers=effective_workers,
+                    sweep_params=ctx.sweep_params,
+                )
+            else:
+                period_results = asyncio.run(
+                    run_parallel_sweeps(
+                        strategy_class=strategy_class,
+                        base_config=base_config,
+                        pnl_config=pnl_config,
+                        data_provider=data_provider,
+                        combinations=ctx.combinations,
+                        parallel=effective_workers,
+                    )
+                )
+
+            for r in period_results:
+                r.period_name = bp.name
+            all_results.extend(period_results)
+
+    except Exception as e:
+        click.echo(f"Error during sweep: {e}", err=True)
+        sys.exit(1)
+
+    return all_results
+
+
+def _display_sweep_results(
+    ctx: _SweepRunContext,
+    all_results: list[SweepResult],
+) -> None:
+    """Phase S10: render the results table(s).
+
+    For multi-period runs with more than one period the aggregated +
+    per-period tables are emitted; otherwise the single-period results table.
+    """
+    if ctx.multi_period_mode and len(ctx.backtest_periods) > 1:
+        aggregated = _aggregate_multi_period_results(all_results, ctx.combinations)
+        _print_multi_period_results(all_results, aggregated, ctx.sweep_params)
+    else:
+        print_sweep_results_table(all_results, ctx.sweep_params)
+
+
+def _write_sweep_json(
+    ctx: _SweepRunContext,
+    all_results: list[SweepResult],
+) -> None:
+    """Phase S11: write full JSON results to ``ctx.output_path``.
+
+    Preserves the exact schema — external tooling reads this file. Keys
+    include ``sweep_config``, ``results``, ``_meta``, and (for multi-period
+    runs with >1 periods) ``aggregated``. ``best_params`` is appended when
+    results are non-empty. No-op when ``ctx.output_path`` is None.
+    """
+    if ctx.output_path is None:
+        return
+
+    total_combinations = len(ctx.combinations)
+    output_data: dict[str, Any] = {
+        "sweep_config": {
+            "strategy": ctx.strategy,
+            "periods": [
+                {"name": bp.name, "start": bp.start.isoformat(), "end": bp.end.isoformat()}
+                for bp in ctx.backtest_periods
+            ],
+            "interval_seconds": ctx.interval,
+            "initial_capital_usd": str(ctx.initial_capital),
+            "chain": ctx.chain,
+            "tokens": ctx.token_list,
+            "parameters": [{"name": p.name, "values": p.values} for p in ctx.sweep_params],
+            "total_combinations": total_combinations,
+            "multi_period": ctx.multi_period_mode,
+        },
+        "results": [
+            {
+                "params": r.params,
+                "period": r.period_name,
+                "sharpe_ratio": str(r.sharpe_ratio),
+                "total_return_pct": str(r.total_return_pct),
+                "max_drawdown_pct": str(r.max_drawdown_pct),
+                "win_rate": str(r.win_rate),
+                "total_trades": r.total_trades,
+            }
+            for r in all_results
+        ],
+        "_meta": {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "generator": "almanak backtest sweep",
+            "engine": "pnl",
+        },
+    }
+
+    if all_results:
+        if ctx.multi_period_mode and len(ctx.backtest_periods) > 1:
+            agg = _aggregate_multi_period_results(all_results, ctx.combinations)
+            if agg:
+                best_agg = sorted(agg, key=lambda x: (x.avg_sharpe, sorted(x.params.items())), reverse=True)[0]
+                output_data["best_params"] = best_agg.params
+        else:
+            best_single = max(all_results, key=lambda x: (x.sharpe_ratio, sorted(x.params.items())))
+            output_data["best_params"] = best_single.params
+
+    if ctx.multi_period_mode and len(ctx.backtest_periods) > 1:
+        aggregated = _aggregate_multi_period_results(all_results, ctx.combinations)
+        output_data["aggregated"] = [
+            {
+                "params": a.params,
+                "avg_sharpe": a.avg_sharpe,
+                "avg_return_pct": a.avg_return_pct,
+                "avg_max_dd_pct": a.avg_max_dd_pct,
+                "avg_trades": a.avg_trades,
+                "cumulative_pnl": a.cumulative_pnl,
+                "sharpe_std": a.sharpe_std,
+            }
+            for a in sorted(aggregated, key=lambda x: x.avg_sharpe, reverse=True)
+        ]
+
+    with open(ctx.output_path, "w") as f:
+        json.dump(output_data, f, indent=2)
+
+    click.echo(f"Results written to: {ctx.output_path}")
+
+
+def _generate_sweep_report(
+    ctx: _SweepRunContext,
+    all_results: list[SweepResult],
+) -> None:
+    """Phase S12: generate an HTML report for the best parameter combination.
+
+    No-op when ``all_results`` is empty. Matches the original winner
+    selection: for multi-period sweeps, pick the aggregated winner, then the
+    best Sharpe across that winner's per-period results.
+    """
+    if not all_results:
+        return
+
+    from ...backtesting.report_generator import generate_report
+
+    click.echo()
+    click.echo("Generating HTML report for best parameter combination...")
+
+    if ctx.multi_period_mode and len(ctx.backtest_periods) > 1:
+        aggregated = _aggregate_multi_period_results(all_results, ctx.combinations)
+        winner_params = aggregated[0].params if aggregated else all_results[0].params
+        candidate_results = [r for r in all_results if r.params == winner_params]
+        best_result = max(candidate_results, key=lambda x: x.sharpe_ratio)
+    else:
+        best_result = max(all_results, key=lambda x: x.sharpe_ratio)
+
+    if ctx.output_path:
+        report_path = ctx.output_path.with_suffix(".html")
+    else:
+        safe_strategy_name = ctx.strategy.replace("/", "_").replace("\\", "_")
+        report_path = Path(f"backtest_report_{safe_strategy_name}_sweep.html")
+
+    report_result = generate_report(best_result.result, output_path=report_path)
+
+    if report_result.success:
+        click.echo(f"Report saved to: {report_result.file_path}")
+        click.echo(f"  Best params: {best_result.params}")
+    else:
+        click.echo(f"Warning: Failed to generate report: {report_result.error}", err=True)
+
+
+# =============================================================================
 # Sweep Command
 # =============================================================================
 
@@ -867,306 +1251,83 @@ def sweep_backtest(
             --periods "2024-monthly" \\
             --param "threshold:0.01,0.02,0.03"
     """
-    from ...backtesting.pnl.periods import BacktestPeriod, resolve_periods
-    from .helpers import parse_param_string as _parse_param_string
+    # Phase S1: parse --param flags
+    sweep_params = _parse_sweep_params(params)
 
-    # Parse parameters
-    if not params:
-        raise click.UsageError("At least one --param is required. Use format: --param 'name:val1,val2,val3'")
+    # Phase S2: resolve --periods vs --start/--end
+    multi_period_mode, backtest_periods = _resolve_backtest_periods(periods, start, end)
 
-    sweep_params: list[SweepParameter] = []
-    for param_str in params:
-        try:
-            sweep_params.append(_parse_param_string(param_str))
-        except click.BadParameter as e:
-            raise click.UsageError(str(e)) from e
-
-    # Validate --start/--end vs --periods
-    multi_period_mode = False
-    backtest_periods: list[BacktestPeriod] = []
-
-    if periods is not None:
-        if start is not None or end is not None:
-            raise click.UsageError("Cannot use --periods together with --start/--end. Use one or the other.")
-        try:
-            backtest_periods = resolve_periods(periods)
-        except (ValueError, json.JSONDecodeError) as e:
-            raise click.UsageError(str(e)) from e
-        multi_period_mode = True
-    else:
-        if start is None or end is None:
-            raise click.UsageError("Either --start and --end, or --periods is required.")
-        backtest_periods = [BacktestPeriod(name="single", start=start, end=end)]
-
-    # Validate strategy exists
+    # Phase S3: validate strategy is registered (sweep-flavoured: empty registry
+    # falls through to the MockSweepStrategy path below).
     available_strategies = list_strategies_fn()
     if strategy not in available_strategies and available_strategies:
         click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
         click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
         raise click.Abort()
 
-    # Generate all combinations
+    # Phase S4: build combinations + token list
     combinations = generate_combinations(sweep_params)
-    total_combinations = len(combinations)
+    token_list = parse_token_list(tokens)
 
-    # Parse tokens list
-    token_list = [t.strip().upper() for t in tokens.split(",")]
+    ctx = _SweepRunContext(
+        strategy=strategy,
+        chain=chain,
+        token_list=token_list,
+        interval=interval,
+        initial_capital=initial_capital,
+        output_path=Path(output) if output else None,
+        multi_period_mode=multi_period_mode,
+        backtest_periods=backtest_periods,
+        sweep_params=sweep_params,
+        combinations=combinations,
+        periods_spec=periods,
+    )
 
-    # Display configuration
-    click.echo("=" * 60)
-    click.echo("PARAMETER SWEEP CONFIGURATION")
-    click.echo("=" * 60)
-    click.echo(f"Strategy: {strategy}")
-    click.echo(f"Chain: {chain}")
-    if multi_period_mode:
-        click.echo(f"Periods: {periods} ({len(backtest_periods)} windows)")
-        for bp in backtest_periods:
-            click.echo(f"  - {bp.name}: {bp.start.date()} -> {bp.end.date()}")
-    else:
-        click.echo(f"Period: {backtest_periods[0].start.date()} -> {backtest_periods[0].end.date()}")
-    click.echo(f"Interval: {interval}s ({interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${initial_capital:,.2f}")
-    click.echo(f"Tokens: {', '.join(token_list)}")
-    click.echo()
-    click.echo("Parameters to sweep:")
-    for p in sweep_params:
-        click.echo(f"  {p.name}: {', '.join(p.values)}")
-    click.echo()
-    total_runs = total_combinations * len(backtest_periods)
-    click.echo(f"Total combinations: {total_combinations}")
-    if multi_period_mode:
-        click.echo(f"Total runs: {total_runs} ({total_combinations} combinations x {len(backtest_periods)} periods)")
+    # Phase S5: compute worker count + print configuration banner
+    total_runs = len(combinations) * len(backtest_periods)
+    effective_workers = _compute_worker_count(parallel, workers, total_runs)
+    _print_sweep_configuration(ctx, parallel=parallel, effective_workers=effective_workers)
 
-    # Determine execution mode and worker count
-    if parallel:
-        import os
-
-        effective_workers = workers if workers is not None else max(1, (os.cpu_count() or 1) - 1)
-        effective_workers = min(effective_workers, total_runs)
-        click.echo("Execution mode: Parallel (multiprocessing)")
-        click.echo(f"Workers: {effective_workers}")
-    else:
-        effective_workers = workers if workers is not None else 4
-        click.echo("Execution mode: Async (concurrent)")
-        click.echo(f"Concurrency: {effective_workers}")
-
-    if output:
-        click.echo(f"Output: {output}")
-
-    click.echo("=" * 60)
-
-    # Handle dry run
+    # Phase S6: --dry-run early exit
     if dry_run:
-        click.echo()
-        if multi_period_mode:
-            click.echo(f"Parameter combinations x periods (dry run, {total_runs} total):")
-        else:
-            click.echo("Parameter combinations (dry run):")
-        click.echo("-" * 40)
-        for i, combo in enumerate(combinations, 1):
-            params_str = ", ".join(f"{k}={v}" for k, v in combo.items())
-            if multi_period_mode:
-                for bp in backtest_periods:
-                    click.echo(f"  {params_str}  |  {bp.name}")
-            else:
-                click.echo(f"  {i}. {params_str}")
-        click.echo("-" * 40)
-        click.echo()
-        click.echo("Dry run - no backtests executed.")
+        _handle_sweep_dry_run(ctx)
         return
 
-    # Load strategy
-    try:
-        strategy_class = get_strategy(strategy)
-    except ValueError:
-        click.echo()
-        click.echo("Warning: No strategies registered in factory.", err=True)
-        click.echo("Running with mock strategy for demonstration.", err=True)
-        click.echo()
+    # Phase S7: resolve strategy class (mock fallback preserved)
+    strategy_class = resolve_strategy_class_or_mock(strategy, allow_mock=True)
 
-        from ...strategies import MarketSnapshot
-
-        class MockSweepStrategy:
-            """Mock strategy for sweep demonstration."""
-
-            strategy_id: str = "mock-sweep"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                return None
-
-        strategy_class = MockSweepStrategy
-
-    # Load base strategy config
+    # Phase S8: load base strategy config + data provider
     base_config = load_strategy_config(strategy, chain)
 
-    # Create data provider
     click.echo()
     click.echo("Initializing CoinGecko data provider...")
     data_provider = CoinGeckoDataProvider()
 
-    # Run sweep (single-period or multi-period)
-    all_results: list[SweepResult] = []
-
     if multi_period_mode:
         click.echo(f"Starting multi-period sweep ({total_runs} total runs)...")
     else:
-        click.echo(f"Starting parameter sweep ({total_combinations} combinations)...")
+        click.echo(f"Starting parameter sweep ({len(combinations)} combinations)...")
     click.echo()
 
-    try:
-        for bp in backtest_periods:
-            pnl_config = PnLBacktestConfig(
-                start_time=bp.start,
-                end_time=bp.end,
-                interval_seconds=interval,
-                initial_capital_usd=Decimal(str(initial_capital)),
-                chain=chain,
-                tokens=token_list,
-                gas_price_gwei=Decimal("30"),
-                include_gas_costs=True,
-                allow_degraded_data=True,
-                preflight_validation=total_combinations <= 1,
-                fail_on_preflight_error=False,
-            )
+    # Phase S9: run sweep across all periods
+    all_results = _run_sweep_over_periods(
+        ctx,
+        strategy_class=strategy_class,
+        base_config=base_config,
+        data_provider=data_provider,
+        parallel=parallel,
+        effective_workers=effective_workers,
+    )
 
-            if multi_period_mode:
-                click.echo(f"--- Period: {bp.name} ({bp.start.date()} -> {bp.end.date()}) ---")
+    # Phase S10: display results
+    _display_sweep_results(ctx, all_results)
 
-            if parallel:
-                period_results = _run_parallel_sweep(
-                    strategy_class=strategy_class,
-                    base_config=base_config,
-                    pnl_config=pnl_config,
-                    combinations=combinations,
-                    workers=effective_workers,
-                    sweep_params=sweep_params,
-                )
-            else:
-                period_results = asyncio.run(
-                    run_parallel_sweeps(
-                        strategy_class=strategy_class,
-                        base_config=base_config,
-                        pnl_config=pnl_config,
-                        data_provider=data_provider,
-                        combinations=combinations,
-                        parallel=effective_workers,
-                    )
-                )
+    # Phase S11: optional JSON output
+    _write_sweep_json(ctx, all_results)
 
-            # Tag results with period name
-            for r in period_results:
-                r.period_name = bp.name
-            all_results.extend(period_results)
-
-    except Exception as e:
-        click.echo(f"Error during sweep: {e}", err=True)
-        sys.exit(1)
-
-    # Display results
-    if multi_period_mode and len(backtest_periods) > 1:
-        aggregated = _aggregate_multi_period_results(all_results, combinations)
-        _print_multi_period_results(all_results, aggregated, sweep_params)
-    else:
-        print_sweep_results_table(all_results, sweep_params)
-
-    # Write JSON output if requested
-    if output:
-        output_path = Path(output)
-        output_data: dict[str, Any] = {
-            "sweep_config": {
-                "strategy": strategy,
-                "periods": [
-                    {"name": bp.name, "start": bp.start.isoformat(), "end": bp.end.isoformat()}
-                    for bp in backtest_periods
-                ],
-                "interval_seconds": interval,
-                "initial_capital_usd": str(initial_capital),
-                "chain": chain,
-                "tokens": token_list,
-                "parameters": [{"name": p.name, "values": p.values} for p in sweep_params],
-                "total_combinations": total_combinations,
-                "multi_period": multi_period_mode,
-            },
-            "results": [
-                {
-                    "params": r.params,
-                    "period": r.period_name,
-                    "sharpe_ratio": str(r.sharpe_ratio),
-                    "total_return_pct": str(r.total_return_pct),
-                    "max_drawdown_pct": str(r.max_drawdown_pct),
-                    "win_rate": str(r.win_rate),
-                    "total_trades": r.total_trades,
-                }
-                for r in all_results
-            ],
-            "_meta": {
-                "generated_at": datetime.now(UTC).isoformat(),
-                "generator": "almanak backtest sweep",
-                "engine": "pnl",
-            },
-        }
-
-        if all_results:
-            if multi_period_mode and len(backtest_periods) > 1:
-                agg = _aggregate_multi_period_results(all_results, combinations)
-                if agg:
-                    best_agg = sorted(agg, key=lambda x: (x.avg_sharpe, sorted(x.params.items())), reverse=True)[0]
-                    output_data["best_params"] = best_agg.params
-            else:
-                best_single = max(all_results, key=lambda x: (x.sharpe_ratio, sorted(x.params.items())))
-                output_data["best_params"] = best_single.params
-
-        if multi_period_mode and len(backtest_periods) > 1:
-            aggregated = _aggregate_multi_period_results(all_results, combinations)
-            output_data["aggregated"] = [
-                {
-                    "params": a.params,
-                    "avg_sharpe": a.avg_sharpe,
-                    "avg_return_pct": a.avg_return_pct,
-                    "avg_max_dd_pct": a.avg_max_dd_pct,
-                    "avg_trades": a.avg_trades,
-                    "cumulative_pnl": a.cumulative_pnl,
-                    "sharpe_std": a.sharpe_std,
-                }
-                for a in sorted(aggregated, key=lambda x: x.avg_sharpe, reverse=True)
-            ]
-
-        with open(output_path, "w") as f:
-            json.dump(output_data, f, indent=2)
-
-        click.echo(f"Results written to: {output_path}")
-
-    # Generate HTML report for best result if requested
-    if report and all_results:
-        from ...backtesting.report_generator import generate_report
-
-        click.echo()
-        click.echo("Generating HTML report for best parameter combination...")
-
-        if multi_period_mode and len(backtest_periods) > 1:
-            aggregated = _aggregate_multi_period_results(all_results, combinations)
-            winner_params = aggregated[0].params if aggregated else all_results[0].params
-            candidate_results = [r for r in all_results if r.params == winner_params]
-            best_result = max(candidate_results, key=lambda x: x.sharpe_ratio)
-        else:
-            best_result = max(all_results, key=lambda x: x.sharpe_ratio)
-
-        if output:
-            report_path = Path(output).with_suffix(".html")
-        else:
-            safe_strategy_name = strategy.replace("/", "_").replace("\\", "_")
-            report_path = Path(f"backtest_report_{safe_strategy_name}_sweep.html")
-
-        report_result = generate_report(best_result.result, output_path=report_path)
-
-        if report_result.success:
-            click.echo(f"Report saved to: {report_result.file_path}")
-            click.echo(f"  Best params: {best_result.params}")
-        else:
-            click.echo(f"Warning: Failed to generate report: {report_result.error}", err=True)
+    # Phase S12: optional HTML report
+    if report:
+        _generate_sweep_report(ctx, all_results)
 
 
 # =============================================================================

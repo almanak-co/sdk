@@ -10,10 +10,13 @@ implementations so that extracting them does not change observable behaviour:
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import click
 
+from ...backtesting import PnLBacktestConfig
 from ...strategies import get_strategy
 from .helpers import list_strategies_fn
 
@@ -133,3 +136,52 @@ def resolve_strategy_class_or_mock(strategy: str, *, allow_mock: bool) -> Any:
                 return None
 
         return MockSweepStrategy
+
+
+def build_pnl_config(
+    *,
+    start_time: datetime,
+    end_time: datetime,
+    interval_seconds: int,
+    initial_capital: float,
+    chain: str,
+    tokens: list[str],
+    gas_price_gwei: float = 30.0,
+    include_gas_costs: bool = True,
+    allow_degraded_data: bool | None = None,
+    preflight_validation: bool | None = None,
+    fail_on_preflight_error: bool | None = None,
+) -> PnLBacktestConfig:
+    """Construct a `PnLBacktestConfig` from CLI-shaped scalar arguments.
+
+    Centralises the `Decimal(str(initial_capital))` / `Decimal(str(gas_price))`
+    coercion repeated inline in `pnl_backtest` and `sweep_backtest`.
+
+    The sweep-only robustness kwargs (`allow_degraded_data`,
+    `preflight_validation`, `fail_on_preflight_error`) default to ``None`` so
+    that pnl callers can omit them entirely — when None, we fall through to the
+    `PnLBacktestConfig` dataclass defaults (``True``/``True``/``True``). The
+    sweep command overrides these three with values that match the original
+    sweep inline construction (``True``/``<first-period-only>``/``False``).
+
+    Note: existing float-coercion behaviour is preserved. Issue #1702 tracks
+    moving these to `Decimal` in a dedicated follow-up — 5B.3 is a pure
+    refactor and must not change behaviour.
+    """
+    kwargs: dict[str, Any] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "interval_seconds": interval_seconds,
+        "initial_capital_usd": Decimal(str(initial_capital)),
+        "chain": chain,
+        "tokens": tokens,
+        "gas_price_gwei": Decimal(str(gas_price_gwei)),
+        "include_gas_costs": include_gas_costs,
+    }
+    if allow_degraded_data is not None:
+        kwargs["allow_degraded_data"] = allow_degraded_data
+    if preflight_validation is not None:
+        kwargs["preflight_validation"] = preflight_validation
+    if fail_on_preflight_error is not None:
+        kwargs["fail_on_preflight_error"] = fail_on_preflight_error
+    return PnLBacktestConfig(**kwargs)
