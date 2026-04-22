@@ -489,6 +489,252 @@ class _CheckConfig:
 # =============================================================================
 
 
+_STRATEGY_BASE_NAMES: tuple[str, ...] = (
+    "IntentStrategy",
+    "StatelessStrategy",
+    "Strategy",
+    "StrategyBase",
+)
+
+
+def _default_ast_facts() -> dict[str, Any]:
+    """Return the fact dict populated when the AST walk can't run.
+
+    Kept as a helper so read-failure / syntax-error paths share one source of
+    truth with the ``_StrategyASTVisitor`` initial state.
+    """
+    return {
+        "imports_position_info": False,
+        "overrides_get_open_positions": False,
+        "overrides_generate_teardown_intents": False,
+        "teardown_body_empty": False,
+        "has_on_intent_executed": False,
+        "class_name": None,
+    }
+
+
+class _StrategyASTVisitor(ast.NodeVisitor):
+    """Single-pass AST visitor folding every Layer-2 heuristic into one walk.
+
+    We keep the heuristics that run against the full module in ``visit_*``
+    methods (``visit_Constant`` for placeholders, ``visit_Import`` /
+    ``visit_ImportFrom`` for ``PositionInfo`` tracking, ``visit_ClassDef`` for
+    strategy-class resolution) so each concern reads like a small, testable
+    method instead of a branch in a ~200-line procedure.
+
+    Ordering note: ``ast.NodeVisitor.generic_visit`` is depth-first, whereas
+    the previous implementation used ``ast.walk`` (breadth-first). For the
+    findings we emit this is equivalent — placeholder nodes are always at
+    the same depth as their enclosing statement, so ``lineno`` order is
+    preserved. The characterization tests pin that ordering explicitly.
+
+    Nesting note: because DFS visits a nested ``ClassDef`` before any later
+    top-level sibling, fallback-class resolution explicitly restricts itself
+    to top-level classes (``_class_depth == 0``). A nested strategy class
+    inside an unrelated wrapper would otherwise outrank the real top-level
+    class and corrupt downstream ``missing_*`` findings — the pre-refactor
+    BFS walk was implicitly safe from this.
+    """
+
+    def __init__(self, strategy_file: Path, report: CheckReport, target_class_name: str | None) -> None:
+        self.strategy_file = strategy_file
+        self.report = report
+        self.target_class_name = target_class_name
+        self.facts: dict[str, Any] = _default_ast_facts()
+        self.strategy_class_node: ast.ClassDef | None = None
+        self.fallback_class_node: ast.ClassDef | None = None
+        # Depth of currently-open ``ClassDef`` nodes. Fallback resolution only
+        # fires when this is 0 (i.e. the class being visited is top-level).
+        self._class_depth = 0
+
+    # -- Public entry point ------------------------------------------------
+
+    def run(self, tree: ast.Module) -> dict[str, Any]:
+        """Walk ``tree`` and apply class-level heuristics, returning ``facts``."""
+        self.visit(tree)
+        if self.strategy_class_node is None:
+            self.strategy_class_node = self.fallback_class_node
+        if self.strategy_class_node is not None:
+            self._analyze_strategy_class(self.strategy_class_node)
+        return self.facts
+
+    # -- Node visitors -----------------------------------------------------
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        """Flag placeholder string literals wherever they appear."""
+        if isinstance(node.value, str):
+            hit = _is_placeholder_value(node.value)
+            if hit:
+                self.report.add(
+                    Finding(
+                        severity=Severity.ERROR,
+                        layer=Layer.AST,
+                        code="placeholder_address",
+                        message=(
+                            f"Placeholder address literal {node.value!r} found in source "
+                            f"(matched on: {hit}). Replace with the real value before running."
+                        ),
+                        file=str(self.strategy_file),
+                        line=node.lineno,
+                    )
+                )
+        # Constant nodes have no meaningful children for our purposes, but
+        # we still call ``generic_visit`` to stay consistent with the API.
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """``from x import PositionInfo`` -> mark fact."""
+        for alias in node.names:
+            if alias.name == "PositionInfo":
+                self.facts["imports_position_info"] = True
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        """Dotted ``import ...PositionInfo`` also counts."""
+        for alias in node.names:
+            if alias.name.endswith("PositionInfo"):
+                self.facts["imports_position_info"] = True
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Resolve the concrete strategy class by name or by base.
+
+        Target-name matches win regardless of nesting (the loader may pick a
+        nested class via ``__qualname__``). Fallback resolution is restricted
+        to top-level classes to match the pre-refactor BFS behaviour.
+        """
+        if (
+            self.target_class_name is not None
+            and self.strategy_class_node is None
+            and node.name == self.target_class_name
+        ):
+            self.strategy_class_node = node
+        elif self._class_depth == 0 and self.fallback_class_node is None and self._has_strategy_base(node):
+            self.fallback_class_node = node
+        self._class_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            self._class_depth -= 1
+
+    # -- Class resolution helpers -----------------------------------------
+
+    @staticmethod
+    def _base_name(base: ast.expr) -> str | None:
+        """Return the identifier used as a class-base, if any.
+
+        Handles plain ``Name`` bases, ``pkg.Base`` attribute bases, and
+        ``Generic[T]``-style subscripted bases whose value is a ``Name``.
+        """
+        if isinstance(base, ast.Name):
+            return base.id
+        if isinstance(base, ast.Attribute):
+            return base.attr
+        if isinstance(base, ast.Subscript) and isinstance(base.value, ast.Name):
+            return base.value.id
+        return None
+
+    def _has_strategy_base(self, node: ast.ClassDef) -> bool:
+        """True if any of the class's bases names a known strategy base."""
+        return any(self._base_name(b) in _STRATEGY_BASE_NAMES for b in node.bases)
+
+    # -- Strategy-class analysis (runs once the target class is resolved) --
+
+    def _analyze_strategy_class(self, class_node: ast.ClassDef) -> None:
+        """Populate method-override facts and emit missing/empty findings."""
+        self.facts["class_name"] = class_node.name
+        inherits_stateless = self._inherits_stateless(class_node)
+        self.facts["inherits_stateless"] = inherits_stateless
+
+        method_defs = self._collect_methods(class_node)
+        self._check_teardown(method_defs, inherits_stateless)
+        self._check_get_open_positions(method_defs, inherits_stateless)
+        self.facts["has_on_intent_executed"] = "on_intent_executed" in method_defs
+
+    @staticmethod
+    def _inherits_stateless(class_node: ast.ClassDef) -> bool:
+        """``class X(StatelessStrategy)`` or ``class X(pkg.StatelessStrategy)``."""
+        for base in class_node.bases:
+            if isinstance(base, ast.Name) and base.id == "StatelessStrategy":
+                return True
+            if isinstance(base, ast.Attribute) and base.attr == "StatelessStrategy":
+                return True
+        return False
+
+    @staticmethod
+    def _collect_methods(
+        class_node: ast.ClassDef,
+    ) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+        """Return ``{name: FunctionDef}`` for direct methods on the class."""
+        return {item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)}
+
+    def _check_teardown(
+        self,
+        method_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+        inherits_stateless: bool,
+    ) -> None:
+        """Teardown override: absent -> warning; trivial body -> empty warning."""
+        if "generate_teardown_intents" in method_defs:
+            self.facts["overrides_generate_teardown_intents"] = True
+            method = method_defs["generate_teardown_intents"]
+            if _is_trivial_teardown_body(method):
+                self.facts["teardown_body_empty"] = True
+                self.report.add(
+                    Finding(
+                        severity=Severity.WARNING,
+                        layer=Layer.AST,
+                        code="empty_teardown_intents",
+                        message=(
+                            "generate_teardown_intents() returns an empty list or only 'pass'. "
+                            "Operator close-requests will silently no-op."
+                        ),
+                        file=str(self.strategy_file),
+                        line=method.lineno,
+                    )
+                )
+        elif not inherits_stateless:
+            # StatelessStrategy subclasses inherit a valid default implementation.
+            self.report.add(
+                Finding(
+                    severity=Severity.WARNING,
+                    layer=Layer.AST,
+                    code="missing_teardown_intents",
+                    message=(
+                        "generate_teardown_intents() is not overridden. Operators cannot "
+                        "safely close positions for this strategy."
+                    ),
+                    file=str(self.strategy_file),
+                )
+            )
+
+    def _check_get_open_positions(
+        self,
+        method_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+        inherits_stateless: bool,
+    ) -> None:
+        """``get_open_positions`` missing while ``PositionInfo`` is imported."""
+        if "get_open_positions" in method_defs:
+            self.facts["overrides_get_open_positions"] = True
+            return
+        if self.facts["imports_position_info"] and not inherits_stateless:
+            # StatelessStrategy provides a valid empty get_open_positions();
+            # don't nag even if the subclass happens to import PositionInfo
+            # for typing.
+            self.report.add(
+                Finding(
+                    severity=Severity.WARNING,
+                    layer=Layer.AST,
+                    code="missing_get_open_positions",
+                    message=(
+                        "Strategy imports PositionInfo but does not override "
+                        "get_open_positions(). Teardown preview will return an "
+                        "empty position list."
+                    ),
+                    file=str(self.strategy_file),
+                )
+            )
+
+
 def _ast_scan_strategy_file(
     strategy_file: Path,
     report: CheckReport,
@@ -502,16 +748,12 @@ def _ast_scan_strategy_file(
     If ``target_class_name`` is provided (e.g. because the loader already
     picked a concrete class) we lock onto that exact class in the tree so
     the two passes can't disagree about which class is the "strategy".
-    """
-    facts: dict[str, Any] = {
-        "imports_position_info": False,
-        "overrides_get_open_positions": False,
-        "overrides_generate_teardown_intents": False,
-        "teardown_body_empty": False,
-        "has_on_intent_executed": False,
-        "class_name": None,
-    }
 
+    Implementation: this function is intentionally thin — it only handles
+    the error paths (unreadable / unparseable files) and delegates the
+    actual walk to :class:`_StrategyASTVisitor`. Keep the body short so the
+    cyclomatic complexity budget stays well within the Phase-7 CC ≤ 12 bar.
+    """
     try:
         # Force UTF-8 so we don't get locale-dependent decoding surprises
         # on Windows or non-UTF-8 CI runners.
@@ -526,7 +768,7 @@ def _ast_scan_strategy_file(
                 file=str(strategy_file),
             )
         )
-        return None, facts
+        return None, _default_ast_facts()
 
     try:
         tree = ast.parse(source, filename=str(strategy_file))
@@ -541,152 +783,10 @@ def _ast_scan_strategy_file(
                 line=exc.lineno,
             )
         )
-        return None, facts
+        return None, _default_ast_facts()
 
-    # --- single-pass AST walk -------------------------------------------------
-    # We fold three concerns into one tree walk to avoid re-traversing the
-    # module three times:
-    #   1. Placeholder string literals (``0x_SET_...`` etc.) — full-tree scan.
-    #   2. PositionInfo import tracking — full-tree scan.
-    #   3. Concrete strategy ClassDef node — either by exact name (when the
-    #      loader already picked the class) or by falling back to the first
-    #      class whose bases reference a known strategy base.
-    # Nothing breaks early; every placeholder must still be flagged even after
-    # the target class is found.
-    strategy_class_node: ast.ClassDef | None = None
-    fallback_class_node: ast.ClassDef | None = None
-    _STRATEGY_BASE_NAMES = ("IntentStrategy", "StatelessStrategy", "Strategy", "StrategyBase")
-
-    for node in ast.walk(tree):
-        # --- 1. placeholder addresses in string literals ---------------------
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            hit = _is_placeholder_value(node.value)
-            if hit:
-                report.add(
-                    Finding(
-                        severity=Severity.ERROR,
-                        layer=Layer.AST,
-                        code="placeholder_address",
-                        message=(
-                            f"Placeholder address literal {node.value!r} found in source "
-                            f"(matched on: {hit}). Replace with the real value before running."
-                        ),
-                        file=str(strategy_file),
-                        line=node.lineno,
-                    )
-                )
-
-        # --- 2. import tracking (for PositionInfo heuristic) -----------------
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if alias.name == "PositionInfo":
-                    facts["imports_position_info"] = True
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.endswith("PositionInfo"):
-                    facts["imports_position_info"] = True
-
-        # --- 3. concrete strategy class resolution ---------------------------
-        # Prefer an exact name match when the loader supplied one; otherwise
-        # remember the first class whose bases mention a known strategy base
-        # so we can fall through to it at the end of the walk.
-        elif isinstance(node, ast.ClassDef):
-            if target_class_name is not None and strategy_class_node is None and node.name == target_class_name:
-                strategy_class_node = node
-            elif fallback_class_node is None:
-                base_names: list[str] = []
-                for base in node.bases:
-                    if isinstance(base, ast.Name):
-                        base_names.append(base.id)
-                    elif isinstance(base, ast.Attribute):
-                        base_names.append(base.attr)
-                    elif isinstance(base, ast.Subscript) and isinstance(base.value, ast.Name):
-                        base_names.append(base.value.id)
-                if any(name in _STRATEGY_BASE_NAMES for name in base_names):
-                    fallback_class_node = node
-
-    if strategy_class_node is None:
-        strategy_class_node = fallback_class_node
-
-    if strategy_class_node is None:
-        # No finding here — the loader already emitted one if there's no class.
-        return tree, facts
-
-    facts["class_name"] = strategy_class_node.name
-
-    # StatelessStrategy provides valid default no-op implementations of both
-    # get_open_positions() and generate_teardown_intents() (stateless
-    # strategies have no positions to track). Detect that inheritance so we
-    # don't surface false-positive "missing override" warnings for valid
-    # signal-only / alert-only strategies.
-    inherits_stateless = False
-    for base in strategy_class_node.bases:
-        if isinstance(base, ast.Name) and base.id == "StatelessStrategy":
-            inherits_stateless = True
-            break
-        if isinstance(base, ast.Attribute) and base.attr == "StatelessStrategy":
-            inherits_stateless = True
-            break
-    facts["inherits_stateless"] = inherits_stateless
-
-    method_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-    for item in strategy_class_node.body:
-        if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
-            method_defs[item.name] = item
-
-    if "generate_teardown_intents" in method_defs:
-        facts["overrides_generate_teardown_intents"] = True
-        if _is_trivial_teardown_body(method_defs["generate_teardown_intents"]):
-            facts["teardown_body_empty"] = True
-            report.add(
-                Finding(
-                    severity=Severity.WARNING,
-                    layer=Layer.AST,
-                    code="empty_teardown_intents",
-                    message=(
-                        "generate_teardown_intents() returns an empty list or only 'pass'. "
-                        "Operator close-requests will silently no-op."
-                    ),
-                    file=str(strategy_file),
-                    line=method_defs["generate_teardown_intents"].lineno,
-                )
-            )
-    elif not inherits_stateless:
-        # StatelessStrategy subclasses inherit a valid default implementation.
-        report.add(
-            Finding(
-                severity=Severity.WARNING,
-                layer=Layer.AST,
-                code="missing_teardown_intents",
-                message=(
-                    "generate_teardown_intents() is not overridden. Operators cannot "
-                    "safely close positions for this strategy."
-                ),
-                file=str(strategy_file),
-            )
-        )
-
-    if "get_open_positions" in method_defs:
-        facts["overrides_get_open_positions"] = True
-    elif facts["imports_position_info"] and not inherits_stateless:
-        # StatelessStrategy provides a valid empty get_open_positions(); don't
-        # nag even if the subclass happens to import PositionInfo for typing.
-        report.add(
-            Finding(
-                severity=Severity.WARNING,
-                layer=Layer.AST,
-                code="missing_get_open_positions",
-                message=(
-                    "Strategy imports PositionInfo but does not override "
-                    "get_open_positions(). Teardown preview will return an "
-                    "empty position list."
-                ),
-                file=str(strategy_file),
-            )
-        )
-
-    facts["has_on_intent_executed"] = "on_intent_executed" in method_defs
-
+    visitor = _StrategyASTVisitor(strategy_file, report, target_class_name)
+    facts = visitor.run(tree)
     return tree, facts
 
 
