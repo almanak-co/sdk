@@ -2077,177 +2077,33 @@ class PnLBacktester:
     ) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
         """Calculate the token inflows and outflows for an intent.
 
+        Dispatches to per-intent-type helpers in
+        :mod:`almanak.framework.backtesting.pnl._engine_helpers` (Phase 6C.3).
+        Unmatched intent types (HOLD, PERP, ...) return empty flow dicts --
+        their balances are tracked via collateral rather than explicit token
+        flows.
+
         Args:
             intent: Intent object
             intent_type: Type of intent
             amount_usd: USD amount of the trade
-            executed_price: Executed price
-            fee_usd: Fee in USD
-            slippage_usd: Slippage cost in USD
+            executed_price: Executed price (unused; kept for API stability)
+            fee_usd: Fee in USD (only consumed by SWAP)
+            slippage_usd: Slippage cost in USD (only consumed by SWAP)
             market_state: Market state for prices
 
         Returns:
             Tuple of (tokens_in, tokens_out) dicts
         """
-        tokens_in: dict[str, Decimal] = {}
-        tokens_out: dict[str, Decimal] = {}
-
-        if intent_type == IntentType.SWAP:
-            # For swaps, we send one token and receive another
-            from_token = getattr(intent, "from_token", "USDC")
-            to_token = getattr(intent, "to_token", "WETH")
-
-            if isinstance(from_token, str):
-                from_token = from_token.upper()
-            if isinstance(to_token, str):
-                to_token = to_token.upper()
-
-            # Amount out is the trade amount
-            amount_out = amount_usd
-            try:
-                from_price = market_state.get_price(from_token)
-                if from_price > 0:
-                    tokens_out[from_token] = amount_out / from_price
-            except KeyError:
-                tokens_out[from_token] = amount_out  # Assume $1 price
-
-            # Amount in is after fees and slippage
-            amount_in_usd = amount_usd - fee_usd - slippage_usd
-            try:
-                to_price = market_state.get_price(to_token)
-                if to_price > 0:
-                    tokens_in[to_token] = amount_in_usd / to_price
-            except KeyError:
-                tokens_in[to_token] = amount_in_usd  # Assume $1 price
-
-        elif intent_type == IntentType.SUPPLY:
-            # Supply: we send tokens to the protocol
-            token = getattr(intent, "token", getattr(intent, "asset", "WETH"))
-            if isinstance(token, str):
-                token = token.upper()
-
-            try:
-                price = market_state.get_price(token)
-                if price > 0:
-                    tokens_out[token] = amount_usd / price
-            except KeyError:
-                tokens_out[token] = amount_usd
-
-        elif intent_type == IntentType.WITHDRAW:
-            # Withdraw: we receive tokens from the protocol
-            token = getattr(intent, "token", getattr(intent, "asset", "WETH"))
-            if isinstance(token, str):
-                token = token.upper()
-
-            try:
-                price = market_state.get_price(token)
-                if price > 0:
-                    tokens_in[token] = amount_usd / price
-            except KeyError:
-                tokens_in[token] = amount_usd
-
-        elif intent_type == IntentType.BORROW:
-            # Borrow: we receive borrowed tokens
-            token = getattr(intent, "token", getattr(intent, "asset", "USDC"))
-            if isinstance(token, str):
-                token = token.upper()
-
-            try:
-                price = market_state.get_price(token)
-                if price > 0:
-                    tokens_in[token] = amount_usd / price
-            except KeyError:
-                tokens_in[token] = amount_usd
-
-        elif intent_type == IntentType.REPAY:
-            # Repay: we send tokens to pay back debt
-            token = getattr(intent, "token", getattr(intent, "asset", "USDC"))
-            if isinstance(token, str):
-                token = token.upper()
-
-            try:
-                price = market_state.get_price(token)
-                if price > 0:
-                    tokens_out[token] = amount_usd / price
-            except KeyError:
-                tokens_out[token] = amount_usd
-
-        elif intent_type == IntentType.LP_OPEN:
-            # LP Open: we send both tokens to the pool
-            token0 = getattr(intent, "token0", getattr(intent, "token_a", "WETH"))
-            token1 = getattr(intent, "token1", getattr(intent, "token_b", "USDC"))
-
-            if isinstance(token0, str):
-                token0 = token0.upper()
-            if isinstance(token1, str):
-                token1 = token1.upper()
-
-            # Split the USD amount roughly 50/50
-            half_amount = amount_usd / Decimal("2")
-
-            try:
-                price0 = market_state.get_price(token0)
-                tokens_out[token0] = half_amount / price0
-            except KeyError:
-                tokens_out[token0] = half_amount
-
-            try:
-                price1 = market_state.get_price(token1)
-                tokens_out[token1] = half_amount / price1
-            except KeyError:
-                tokens_out[token1] = half_amount
-
-        elif intent_type == IntentType.LP_CLOSE:
-            # LP Close: we receive tokens back from the pool
-            token0 = getattr(intent, "token0", getattr(intent, "token_a", "WETH"))
-            token1 = getattr(intent, "token1", getattr(intent, "token_b", "USDC"))
-
-            if isinstance(token0, str):
-                token0 = token0.upper()
-            if isinstance(token1, str):
-                token1 = token1.upper()
-
-            # Approximate tokens received (actual depends on IL)
-            half_amount = amount_usd / Decimal("2")
-
-            try:
-                price0 = market_state.get_price(token0)
-                tokens_in[token0] = half_amount / price0
-            except KeyError:
-                tokens_in[token0] = half_amount
-
-            try:
-                price1 = market_state.get_price(token1)
-                tokens_in[token1] = half_amount / price1
-            except KeyError:
-                tokens_in[token1] = half_amount
-
-        elif intent_type in {IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM}:
-            # Vault deposit/redeem: underlying asset flows to/from vault
-            token = getattr(intent, "deposit_token", None)
-            if not token:
-                token = "USDC"
-                logger.warning(
-                    "Vault intent missing deposit_token, defaulting to USDC"
-                    " — set deposit_token for accurate backtesting"
-                )
-            if isinstance(token, str):
-                token = token.upper()
-
-            try:
-                price = market_state.get_price(token)
-                amount = amount_usd / price if price > 0 else amount_usd
-            except KeyError:
-                amount = amount_usd
-
-            if intent_type == IntentType.VAULT_DEPOSIT:
-                tokens_out[token] = amount
-            else:
-                tokens_in[token] = amount
-
-        # For PERP and other types, token flows are handled via collateral
-
-        return tokens_in, tokens_out
+        del executed_price  # kept for backwards-compatible signature
+        return _engine_helpers.calculate_token_flows(
+            intent=intent,
+            intent_type=intent_type,
+            amount_usd=amount_usd,
+            fee_usd=fee_usd,
+            slippage_usd=slippage_usd,
+            market_state=market_state,
+        )
 
     def _create_position_delta(
         self,

@@ -1,10 +1,18 @@
-"""Phase helpers for :meth:`PnLBacktester._run_backtest` (Phase 6C.2).
+"""Phase helpers for :class:`PnLBacktester` (Phases 6C.2 + 6C.3).
 
 This module contains phase-level helpers extracted from the main body of
-``PnLBacktester._run_backtest`` to reduce cyclomatic complexity and isolate
-responsibilities. Every helper preserves the EXACT original behavior captured
-by the characterization tests in
+``PnLBacktester`` to reduce cyclomatic complexity and isolate responsibilities.
+Every helper preserves the EXACT original behavior captured by the
+characterization tests in
 ``tests/unit/backtesting/pnl/test_engine_characterization.py``.
+
+Extracted surfaces
+------------------
+* ``_run_backtest`` — preflight, initialization, iteration loop, error path,
+  and finalization (Phase 6C.2).
+* ``_calculate_token_flows`` — per-intent-type token-inflow / token-outflow
+  helpers plus a :func:`calculate_token_flows` dispatch sequencer (Phase
+  6C.3).
 
 Design notes
 ------------
@@ -28,14 +36,17 @@ Design notes
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
     BacktestResult,
+    IntentType,
     ParameterSourceTracker,
     PreflightReport,
 )
@@ -60,6 +71,9 @@ if TYPE_CHECKING:
     )
     from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
     from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -746,3 +760,345 @@ def finalize_backtest_result(
         parameter_sources=state.parameter_sources,
         data_coverage_metrics=state.portfolio.calculate_data_coverage_metrics(),
     )
+
+
+# =============================================================================
+# Token-flow helpers (Phase 6C.3)
+# =============================================================================
+#
+# Each helper below owns a single ``IntentType`` branch previously inlined in
+# ``PnLBacktester._calculate_token_flows``. They share a consistent shape:
+#
+#     * Accept the intent + scalar USD numbers + market state.
+#     * Return a ``(tokens_in, tokens_out)`` tuple of
+#       ``dict[str, Decimal]`` — empty dict for the side that does not flow.
+#     * Preserve uppercase token normalization (via :func:`_normalize_token`),
+#       ``price > 0`` guards, and the ``KeyError`` fallback that substitutes
+#       the raw USD amount for tokens whose price is missing from
+#       ``market_state`` — byte-for-byte identical to the pre-extraction body
+#       (see characterization tests in
+#       ``tests/unit/backtesting/pnl/test_engine_characterization.py``).
+#
+# LP helpers split the USD amount 50/50 and do NOT gate on ``price > 0``
+# (matching the original behavior; a zero price would raise
+# ``ZeroDivisionError`` exactly as it did before).
+#
+# Dispatch is performed by :func:`calculate_token_flows` through the
+# :data:`_SIMPLE_FLOW_HANDLERS` mapping (plus an explicit SWAP branch, which
+# is the only handler that consumes ``fee_usd`` / ``slippage_usd``).
+
+
+def _normalize_token(token: Any) -> Any:
+    """Uppercase a token symbol if it is a string; otherwise return as-is.
+
+    Centralizes the ``if isinstance(token, str): token = token.upper()``
+    idiom used by every flow branch. Non-string inputs pass through
+    unchanged, matching the pre-extraction behavior (e.g. an object used
+    as a token key by a custom intent would survive untouched).
+    """
+    if isinstance(token, str):
+        return token.upper()
+    return token
+
+
+def _calculate_swap_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    fee_usd: Decimal,
+    slippage_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """SWAP: one token leaves (``from_token``), another arrives (``to_token``).
+
+    Outflow uses ``amount_usd`` at ``from_token`` price. Inflow uses
+    ``amount_usd - fee_usd - slippage_usd`` at ``to_token`` price. Unknown
+    prices fall back to the raw USD amount as a unit count.
+    """
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    from_token = _normalize_token(getattr(intent, "from_token", "USDC"))
+    to_token = _normalize_token(getattr(intent, "to_token", "WETH"))
+
+    # Amount out is the trade amount
+    amount_out = amount_usd
+    try:
+        from_price = market_state.get_price(from_token)
+        if from_price > 0:
+            tokens_out[from_token] = amount_out / from_price
+    except KeyError:
+        tokens_out[from_token] = amount_out  # Assume $1 price
+
+    # Amount in is after fees and slippage
+    amount_in_usd = amount_usd - fee_usd - slippage_usd
+    try:
+        to_price = market_state.get_price(to_token)
+        if to_price > 0:
+            tokens_in[to_token] = amount_in_usd / to_price
+    except KeyError:
+        tokens_in[to_token] = amount_in_usd  # Assume $1 price
+
+    return tokens_in, tokens_out
+
+
+def _resolve_single_token(intent: Any, default: str) -> Any:
+    """Look up ``intent.token`` or ``intent.asset`` (first wins), normalized.
+
+    Mirrors ``getattr(intent, "token", getattr(intent, "asset", default))``
+    with uppercase normalization via :func:`_normalize_token` for string
+    symbols.
+    """
+    return _normalize_token(getattr(intent, "token", getattr(intent, "asset", default)))
+
+
+def _calculate_supply_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """SUPPLY: token leaves the wallet into the protocol."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    token = _resolve_single_token(intent, "WETH")
+
+    try:
+        price = market_state.get_price(token)
+        if price > 0:
+            tokens_out[token] = amount_usd / price
+    except KeyError:
+        tokens_out[token] = amount_usd
+
+    return tokens_in, tokens_out
+
+
+def _calculate_withdraw_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """WITHDRAW: token arrives back from the protocol."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    token = _resolve_single_token(intent, "WETH")
+
+    try:
+        price = market_state.get_price(token)
+        if price > 0:
+            tokens_in[token] = amount_usd / price
+    except KeyError:
+        tokens_in[token] = amount_usd
+
+    return tokens_in, tokens_out
+
+
+def _calculate_borrow_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """BORROW: borrowed token arrives in the wallet."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    token = _resolve_single_token(intent, "USDC")
+
+    try:
+        price = market_state.get_price(token)
+        if price > 0:
+            tokens_in[token] = amount_usd / price
+    except KeyError:
+        tokens_in[token] = amount_usd
+
+    return tokens_in, tokens_out
+
+
+def _calculate_repay_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """REPAY: token leaves the wallet to pay down debt."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    token = _resolve_single_token(intent, "USDC")
+
+    try:
+        price = market_state.get_price(token)
+        if price > 0:
+            tokens_out[token] = amount_usd / price
+    except KeyError:
+        tokens_out[token] = amount_usd
+
+    return tokens_in, tokens_out
+
+
+def _resolve_lp_tokens(intent: Any) -> tuple[Any, Any]:
+    """Resolve ``(token0, token1)`` for LP intents, uppercased if strings."""
+    token0 = _normalize_token(getattr(intent, "token0", getattr(intent, "token_a", "WETH")))
+    token1 = _normalize_token(getattr(intent, "token1", getattr(intent, "token_b", "USDC")))
+    return token0, token1
+
+
+def _calculate_lp_open_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """LP_OPEN: both tokens leave the wallet, USD split 50/50."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    token0, token1 = _resolve_lp_tokens(intent)
+
+    # Split the USD amount roughly 50/50
+    half_amount = amount_usd / Decimal("2")
+
+    try:
+        price0 = market_state.get_price(token0)
+        tokens_out[token0] = half_amount / price0
+    except KeyError:
+        tokens_out[token0] = half_amount
+
+    try:
+        price1 = market_state.get_price(token1)
+        tokens_out[token1] = half_amount / price1
+    except KeyError:
+        tokens_out[token1] = half_amount
+
+    return tokens_in, tokens_out
+
+
+def _calculate_lp_close_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """LP_CLOSE: both tokens return to the wallet, USD split 50/50.
+
+    Approximate tokens received (actual depends on impermanent loss).
+    """
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+
+    token0, token1 = _resolve_lp_tokens(intent)
+
+    # Approximate tokens received (actual depends on IL)
+    half_amount = amount_usd / Decimal("2")
+
+    try:
+        price0 = market_state.get_price(token0)
+        tokens_in[token0] = half_amount / price0
+    except KeyError:
+        tokens_in[token0] = half_amount
+
+    try:
+        price1 = market_state.get_price(token1)
+        tokens_in[token1] = half_amount / price1
+    except KeyError:
+        tokens_in[token1] = half_amount
+
+    return tokens_in, tokens_out
+
+
+def _resolve_vault_token(intent: Any) -> Any:
+    """Resolve ``intent.deposit_token`` for vault intents, warning on fallback."""
+    token = getattr(intent, "deposit_token", None)
+    if not token:
+        token = "USDC"
+        logger.warning(
+            "Vault intent missing deposit_token, defaulting to USDC — set deposit_token for accurate backtesting"
+        )
+    return _normalize_token(token)
+
+
+def _calculate_vault_token_amount(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[Any, Decimal]:
+    """Resolve vault token and convert ``amount_usd`` to token units.
+
+    Mirrors the shared preamble of ``_calculate_vault_deposit_flows`` and
+    ``_calculate_vault_redeem_flows``: the only per-branch difference is
+    whether the resulting amount lands in ``tokens_in`` or ``tokens_out``.
+    """
+    token = _resolve_vault_token(intent)
+
+    try:
+        price = market_state.get_price(token)
+        amount = amount_usd / price if price > 0 else amount_usd
+    except KeyError:
+        amount = amount_usd
+
+    return token, amount
+
+
+def _calculate_vault_deposit_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """VAULT_DEPOSIT: deposit token flows out of the wallet into the vault."""
+    token, amount = _calculate_vault_token_amount(intent, amount_usd, market_state)
+    return {}, {token: amount}
+
+
+def _calculate_vault_redeem_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """VAULT_REDEEM: deposit token flows back from the vault into the wallet."""
+    token, amount = _calculate_vault_token_amount(intent, amount_usd, market_state)
+    return {token: amount}, {}
+
+
+# Dispatch table used by :func:`calculate_token_flows`. The SWAP handler has
+# a distinct signature (it consumes fee/slippage); every other handler takes
+# the same ``(intent, amount_usd, market_state)`` shape and is invoked
+# through :data:`_SIMPLE_FLOW_HANDLERS`.
+#
+# Using a module-level mapping (rather than an ``if/elif`` chain) makes the
+# sequencer constant-time in the number of intent types and makes it
+# mechanically clear which intent types are covered by a dedicated helper
+# versus falling through to the collateral-based no-flow default.
+_SIMPLE_FLOW_HANDLERS: dict[IntentType, object] = {
+    IntentType.SUPPLY: _calculate_supply_flows,
+    IntentType.WITHDRAW: _calculate_withdraw_flows,
+    IntentType.BORROW: _calculate_borrow_flows,
+    IntentType.REPAY: _calculate_repay_flows,
+    IntentType.LP_OPEN: _calculate_lp_open_flows,
+    IntentType.LP_CLOSE: _calculate_lp_close_flows,
+    IntentType.VAULT_DEPOSIT: _calculate_vault_deposit_flows,
+    IntentType.VAULT_REDEEM: _calculate_vault_redeem_flows,
+}
+
+
+def calculate_token_flows(
+    intent: Any,
+    intent_type: IntentType,
+    amount_usd: Decimal,
+    fee_usd: Decimal,
+    slippage_usd: Decimal,
+    market_state: MarketState,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Dispatch ``intent_type`` to the matching per-intent-type flow helper.
+
+    Returns ``({}, {})`` for any intent type not covered by a dedicated
+    helper (HOLD, PERP, and any future types handled via collateral rather
+    than explicit token flows) — matching the pre-extraction fall-through
+    semantics.
+    """
+    # SWAP is the only branch that consumes fee / slippage.
+    if intent_type == IntentType.SWAP:
+        return _calculate_swap_flows(intent, amount_usd, fee_usd, slippage_usd, market_state)
+
+    handler = _SIMPLE_FLOW_HANDLERS.get(intent_type)
+    if handler is not None:
+        return handler(intent, amount_usd, market_state)  # type: ignore[operator]
+
+    # For PERP, HOLD, and other types, token flows are handled via collateral
+    return {}, {}
