@@ -711,3 +711,425 @@ class TestExtractPositionId:
 
         receipt = {"logs": [unknown_mint]}
         assert parser.extract_position_id(receipt) is None
+
+
+# =============================================================================
+# Characterization tests for _build_swap_result
+#
+# These lock down the CURRENT behavior of the internal `_build_swap_result`
+# method before the CC-51 refactor. The goal is an exhaustive safety net:
+# every branch that influences `ParsedSwapResult` field semantics, sign
+# conventions, token identification fallbacks, and decimal conversion is
+# exercised here so that a subsequent phase-extraction refactor cannot
+# silently alter receipt parsing.
+# =============================================================================
+
+
+class _StubResolvedToken:
+    """Minimal stand-in for ResolvedToken used by token_resolver.resolve()."""
+
+    def __init__(self, decimals: int) -> None:
+        self.decimals = decimals
+
+
+class _StubTokenResolver:
+    """In-memory resolver that maps lowercased address -> decimals.
+
+    Raises for unknown addresses (mirrors the real resolver behavior which
+    raises when a token cannot be resolved on a chain).
+    """
+
+    def __init__(self, decimals_by_addr: dict[str, int]) -> None:
+        self._decimals = {addr.lower(): d for addr, d in decimals_by_addr.items()}
+
+    def resolve(self, token: str, chain: str, **kwargs):  # noqa: ARG002
+        key = token.lower()
+        if key not in self._decimals:
+            raise LookupError(f"unknown token {token}")
+        return _StubResolvedToken(self._decimals[key])
+
+
+# Deterministic addresses used across characterization tests.
+_POOL_MGR_ARB = "0x000000000004444c5dc75cb358380d2e3de08a90"
+_USDC_ARB = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+_WETH_ARB = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+_USDT_ARB = "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
+_USER = "0x1111111111111111111111111111111111111111"
+_ROUTER = "0x66a9893cc07d91d95644aedd05d03f95e1dba8af"
+
+
+class TestBuildSwapResultCharacterization:
+    """Characterization suite for ``_build_swap_result``.
+
+    These tests capture the behavior that must survive the refactor:
+    sign convention, Swap event selection, token identification paths,
+    decimal handling, and effective_price computation.
+    """
+
+    # -- Happy path: exact-input ---------------------------------------------
+
+    def test_exact_input_direction_token1_in_token0_out(self):
+        """amount0 positive -> swapper received token0, paid token1.
+
+        Locks the canonical exact-input convention: amount_in = |amount1|,
+        amount_out = amount0.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap_log = _build_swap_log(
+            amount0=1000 * 10**6,
+            amount1=-(5 * 10**17),
+            tick=123,
+            sqrt_price_x96=79228162514264337593543950336,
+        )
+        result = parser.parse_receipt({"logs": [swap_log]})
+
+        assert result.swap_result is not None
+        sr = result.swap_result
+        assert sr.amount_in == 5 * 10**17
+        assert sr.amount_out == 1000 * 10**6
+        # tick_after / sqrt_price_x96_after must be carried from the Swap event
+        assert sr.tick_after == 123
+        assert sr.sqrt_price_x96_after == 79228162514264337593543950336
+
+    # -- Exact-output direction (from pool's POV) ----------------------------
+
+    def test_exact_output_direction_token0_in_token1_out(self):
+        """amount0 negative -> swapper paid token0, received token1.
+
+        V4 emits the final settlement amounts, so both exact-in and
+        exact-out produce the same sign interpretation. This locks the
+        reverse direction branch.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap_log = _build_swap_log(
+            amount0=-(1000 * 10**6),
+            amount1=5 * 10**17,
+        )
+        result = parser.parse_receipt({"logs": [swap_log]})
+
+        assert result.swap_result is not None
+        assert result.swap_result.amount_in == 1000 * 10**6
+        assert result.swap_result.amount_out == 5 * 10**17
+
+    # -- Multi-hop / multiple Swap events ------------------------------------
+
+    def test_multi_hop_uses_first_swap_event(self):
+        """With multiple Swap events, the FIRST one determines the result.
+
+        This is intentional for multi-hop: the first hop's input is the
+        user's input; the last hop's output is the user's output, but the
+        current implementation only reads the first event. Locking that
+        behavior so a future refactor cannot silently change it.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        first_hop = _build_swap_log(
+            amount0=-(1000 * 10**6),  # paid 1000 USDC
+            amount1=5 * 10**17,  # received intermediate
+            tick=100,
+        )
+        second_hop = _build_swap_log(
+            amount0=2 * 10**18,
+            amount1=-(5 * 10**17),
+            tick=200,
+        )
+        result = parser.parse_receipt({"logs": [first_hop, second_hop]})
+
+        assert len(result.swap_events) == 2
+        assert result.swap_result is not None
+        # Values from FIRST event
+        assert result.swap_result.amount_in == 1000 * 10**6
+        assert result.swap_result.amount_out == 5 * 10**17
+        assert result.swap_result.tick_after == 100
+
+    # -- Reverted / missing Swap --------------------------------------------
+
+    def test_reverted_tx_no_logs_no_swap_result(self):
+        """A reverted tx emits no PoolManager logs -> swap_result stays None.
+
+        The parser does NOT inspect receipt.status; it simply finds no
+        Swap events and returns a ParseResult with swap_result=None.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        receipt = {"status": 0, "logs": []}
+        result = parser.parse_receipt(receipt)
+
+        assert result.swap_result is None
+        assert result.swap_events == []
+
+    def test_missing_swap_event_unrelated_logs(self):
+        """Receipt with unrelated logs (only Transfers) produces no swap_result."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        transfer = _build_transfer_log(
+            token=_USDC_ARB,
+            from_addr=_USER,
+            to_addr=_ROUTER,
+            amount=1000 * 10**6,
+        )
+        result = parser.parse_receipt({"logs": [transfer]})
+
+        assert result.swap_result is None
+        assert len(result.transfer_events) == 1
+
+    # -- Token identification paths -----------------------------------------
+
+    def test_token_identification_pool_manager_direct(self):
+        """Primary path: Transfer events that go directly to/from PoolManager."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        t_in = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_POOL_MGR_ARB, amount=5 * 10**17
+        )
+        t_out = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_POOL_MGR_ARB, to_addr=_USER, amount=1000 * 10**6
+        )
+        result = parser.parse_receipt({"logs": [swap, t_in, t_out]})
+
+        assert result.swap_result is not None
+        assert result.swap_result.token_in == _WETH_ARB
+        assert result.swap_result.token_out == _USDC_ARB
+
+    def test_token_identification_amount_fallback(self):
+        """Secondary path: Transfers via a router identified by amount match."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        t_in = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_ROUTER, amount=5 * 10**17
+        )
+        t_out = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_ROUTER, to_addr=_USER, amount=1000 * 10**6
+        )
+        result = parser.parse_receipt({"logs": [swap, t_in, t_out]})
+
+        assert result.swap_result is not None
+        assert result.swap_result.token_in == _WETH_ARB
+        assert result.swap_result.token_out == _USDC_ARB
+
+    def test_token_identification_infra_direction_fallback(self):
+        """Tertiary path: amounts differ due to wrap/unwrap; fallback by
+        transfer direction relative to pool manager."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        # Swap amounts differ from actual ERC-20 flows (WETH wrap/unwrap scenario)
+        swap = _build_swap_log(amount0=900 * 10**6, amount1=-(4 * 10**17))
+        # FROM PoolManager -> output side
+        t_out = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_POOL_MGR_ARB, to_addr=_USER, amount=123456
+        )
+        # TO PoolManager -> input side
+        t_in = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_POOL_MGR_ARB, amount=654321
+        )
+        result = parser.parse_receipt({"logs": [swap, t_out, t_in]})
+
+        assert result.swap_result is not None
+        # Direct pool_manager match still identifies both
+        assert result.swap_result.token_in == _WETH_ARB
+        assert result.swap_result.token_out == _USDC_ARB
+
+    def test_token_identification_last_resort_elimination(self):
+        """Last-resort path: neither PoolManager match nor amount match nor
+        infra-direction match hits; remaining unseen tokens get assigned by
+        elimination (output first, then input).
+
+        WARNING: this is the log-order-dependent path flagged as a latent
+        bug in https://github.com/almanak-co/almanak-sdk-private/issues/1767.
+        The test pins the CURRENT behavior so a future deterministic fix can
+        update the assertion intentionally; the refactor preserved this
+        behavior byte-for-byte and did NOT introduce it.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        # Neither endpoint is PoolManager; amounts don't match amount_in/out.
+        # Both transfers flow between two unknown EOAs.
+        t1 = _build_transfer_log(
+            token=_USDC_ARB,
+            from_addr="0x2222222222222222222222222222222222222222",
+            to_addr="0x3333333333333333333333333333333333333333",
+            amount=42,
+        )
+        t2 = _build_transfer_log(
+            token=_WETH_ARB,
+            from_addr="0x2222222222222222222222222222222222222222",
+            to_addr="0x3333333333333333333333333333333333333333",
+            amount=99,
+        )
+        result = parser.parse_receipt({"logs": [swap, t1, t2]})
+
+        assert result.swap_result is not None
+        # Last-resort elimination: first unseen token -> output, second -> input.
+        assert result.swap_result.token_out == _USDC_ARB
+        assert result.swap_result.token_in == _WETH_ARB
+
+    def test_latent_bug_router_only_direction_fallback_flips_sides(self):
+        """Latent bug characterization — ISSUE #1767.
+
+        When ERC-20 Transfer amounts diverge from Swap event amounts (the
+        exact scenario _identify_tokens_by_direction was designed for — e.g.
+        WRAP_ETH / UNWRAP_WETH paths via UniversalRouter), the current
+        ``infra`` set contains only ``self.pool_manager``. Router-routed
+        transfers never touch PoolManager, so the directional pass finds no
+        signal and the fallback degenerates to log-order-based elimination.
+
+        With the INPUT-side transfer logged first, ``token_out`` gets the
+        input address and ``token_in`` gets the output address — the two
+        fields are silently FLIPPED. This test pins that flipped behavior
+        so a deterministic fix (broaden infra, fail-closed, or stable
+        tiebreaker — see #1767) has to explicitly update it.
+        """
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        # amount0=+1000 USDC (received), amount1=-0.5 WETH (paid) per V4 Swap.
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        # Wrapped-ETH path: user's WETH transfer amount differs from the V4
+        # Swap amount (0.6 WETH wrapped, only 0.5 consumed); USDC payout also
+        # differs (router returns dust). Neither amount matches the Swap
+        # event's amount_in / amount_out, and neither endpoint is the
+        # PoolManager — so the amount fallback and pool-manager pass both
+        # miss, and the direction fallback hits only log-order elimination.
+        input_side = _build_transfer_log(
+            token=_WETH_ARB,
+            from_addr=_USER,
+            to_addr=_ROUTER,
+            amount=6 * 10**17,  # 0.6 WETH — ≠ amount_in (5e17)
+        )
+        output_side = _build_transfer_log(
+            token=_USDC_ARB,
+            from_addr=_ROUTER,
+            to_addr=_USER,
+            amount=999 * 10**6,  # ≠ amount_out (1000e6)
+        )
+        receipt = {"logs": [swap, input_side, output_side]}
+        result = parser.parse_receipt(receipt)
+
+        assert result.swap_result is not None
+        sr = result.swap_result
+        # BUG: input transfer logged first -> elimination makes it token_out.
+        # The correct values would be token_in=WETH, token_out=USDC.
+        assert sr.token_out == _WETH_ARB, "pinned buggy behavior — see issue #1767"
+        assert sr.token_in == _USDC_ARB, "pinned buggy behavior — see issue #1767"
+
+    # -- Decimal / precision handling ---------------------------------------
+
+    def test_decimal_conversion_with_resolver(self):
+        """When token_resolver resolves BOTH tokens, amount_in_decimal,
+        amount_out_decimal, and effective_price are all computed."""
+        resolver = _StubTokenResolver({_USDC_ARB: 6, _WETH_ARB: 18})
+        parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        t_in = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_POOL_MGR_ARB, amount=5 * 10**17
+        )
+        t_out = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_POOL_MGR_ARB, to_addr=_USER, amount=1000 * 10**6
+        )
+        result = parser.parse_receipt({"logs": [swap, t_in, t_out]})
+
+        assert result.swap_result is not None
+        sr = result.swap_result
+        assert sr.amount_in_decimal == Decimal("0.5")  # 0.5 WETH
+        assert sr.amount_out_decimal == Decimal("1000")  # 1000 USDC
+        assert sr.effective_price == Decimal("2000")  # 1000 USDC / 0.5 WETH
+
+    def test_decimal_conversion_unresolved_falls_back_to_zero(self):
+        """When decimals cannot be resolved, decimal fields fall back to
+        Decimal(0) (guard against raw-integer leak into "human-readable" fields)."""
+        # Resolver raises on both addresses
+        resolver = _StubTokenResolver({})
+        parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        t_in = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_POOL_MGR_ARB, amount=5 * 10**17
+        )
+        t_out = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_POOL_MGR_ARB, to_addr=_USER, amount=1000 * 10**6
+        )
+        result = parser.parse_receipt({"logs": [swap, t_in, t_out]})
+
+        assert result.swap_result is not None
+        sr = result.swap_result
+        # Raw integers preserved
+        assert sr.amount_in == 5 * 10**17
+        assert sr.amount_out == 1000 * 10**6
+        # Human-readable fields guard: fall back to Decimal(0)
+        assert sr.amount_in_decimal == Decimal(0)
+        assert sr.amount_out_decimal == Decimal(0)
+        # effective_price must be None when decimals are missing
+        assert sr.effective_price is None
+
+    def test_decimal_conversion_partial_resolution_skips_price(self):
+        """If only one side's decimals resolve, effective_price must be None
+        to avoid mixing raw integers with decimal amounts (off by orders
+        of magnitude for cross-decimal pairs)."""
+        resolver = _StubTokenResolver({_USDC_ARB: 6})  # WETH missing
+        parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        t_in = _build_transfer_log(
+            token=_WETH_ARB, from_addr=_USER, to_addr=_POOL_MGR_ARB, amount=5 * 10**17
+        )
+        t_out = _build_transfer_log(
+            token=_USDC_ARB, from_addr=_POOL_MGR_ARB, to_addr=_USER, amount=1000 * 10**6
+        )
+        result = parser.parse_receipt({"logs": [swap, t_in, t_out]})
+
+        assert result.swap_result is not None
+        sr = result.swap_result
+        # USDC side resolved -> decimal populated
+        assert sr.amount_out_decimal == Decimal("1000")
+        # WETH side NOT resolved -> fallback zero
+        assert sr.amount_in_decimal == Decimal(0)
+        # effective_price requires BOTH resolved
+        assert sr.effective_price is None
+
+    # -- Slippage -----------------------------------------------------------
+
+    def test_slippage_bps_positive(self):
+        """Slippage = (quoted - actual) / quoted; positive when we got less."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        result = parser.parse_receipt(
+            {"logs": [swap]}, quoted_amount_out=1100 * 10**6
+        )
+
+        assert result.swap_result is not None
+        # (1100 - 1000) / 1100 = 0.0909... * 10000 -> 909
+        assert result.swap_result.slippage_bps == 909
+
+    def test_slippage_bps_none_without_quote(self):
+        """Without quoted_amount_out, slippage_bps stays None."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
+        result = parser.parse_receipt({"logs": [swap]})
+
+        assert result.swap_result is not None
+        assert result.swap_result.slippage_bps is None
+
+    # -- Preserved dataclass contract ---------------------------------------
+
+    def test_parsed_swap_result_fields_preserved(self):
+        """Lock the ParsedSwapResult field surface that downstream relies on."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        swap = _build_swap_log(
+            amount0=1000 * 10**6,
+            amount1=-(5 * 10**17),
+            tick=17,
+            sqrt_price_x96=42,
+        )
+        result = parser.parse_receipt({"logs": [swap]})
+
+        assert result.swap_result is not None
+        sr = result.swap_result
+        # Every field documented on ParsedSwapResult must be set (even if None).
+        for attr in (
+            "amount_in",
+            "amount_out",
+            "amount_in_decimal",
+            "amount_out_decimal",
+            "token_in",
+            "token_out",
+            "effective_price",
+            "price_impact_bps",
+            "slippage_bps",
+            "tick_after",
+            "sqrt_price_x96_after",
+        ):
+            assert hasattr(sr, attr), f"ParsedSwapResult missing {attr}"
+        assert sr.tick_after == 17
+        assert sr.sqrt_price_x96_after == 42

@@ -568,20 +568,23 @@ class UniswapV4ReceiptParser:
             logger.warning("Failed to decode Transfer event: %s", e)
             return None
 
-    def _build_swap_result(
-        self,
-        swap_events: list[SwapEventData],
-        transfer_events: list[TransferEventData],
-        quoted_amount_out: int | None,
-    ) -> ParsedSwapResult:
-        """Build a high-level swap result from decoded events."""
-        # Use the first swap event (single-hop)
-        swap = swap_events[0]
+    # -- _build_swap_result phase helpers -------------------------------------
+    #
+    # _build_swap_result orchestrates five independent phases. Each phase is
+    # extracted into a small, independently testable helper so the public
+    # contract (ParsedSwapResult field semantics, sign conventions, and
+    # parse_receipt API) is preserved byte-for-byte while CC drops well below
+    # the refactor target.
 
-        # V4 Swap event sign convention (from swapper's perspective):
-        #   positive = tokens RECEIVED by the swapper from the pool
-        #   negative = tokens PAID by the swapper to the pool
-        # Verified against real mainnet transactions (2026-03-29).
+    @staticmethod
+    def _compute_swap_amounts(swap: SwapEventData) -> tuple[int, int]:
+        """Derive (amount_in, amount_out) from a V4 Swap event.
+
+        V4 sign convention (swapper's perspective):
+            positive = tokens RECEIVED by the swapper from the pool
+            negative = tokens PAID by the swapper to the pool
+        Verified against real mainnet transactions (2026-03-29).
+        """
         if swap.amount0 > 0:
             # Swapper received token0, paid token1
             amount_in = abs(swap.amount1)
@@ -592,79 +595,137 @@ class UniswapV4ReceiptParser:
             amount_out = swap.amount1
 
         if amount_out <= 0 or amount_in <= 0:
-            logger.warning("V4 Swap event has unexpected signs: amount0=%s, amount1=%s", swap.amount0, swap.amount1)
+            logger.warning(
+                "V4 Swap event has unexpected signs: amount0=%s, amount1=%s",
+                swap.amount0,
+                swap.amount1,
+            )
+        return amount_in, amount_out
 
-        # Calculate slippage vs quote
-        slippage_bps = None
+    @staticmethod
+    def _calculate_slippage_bps(amount_out: int, quoted_amount_out: int | None) -> int | None:
+        """Return realized slippage in bps vs the pre-trade quote, or None."""
         if quoted_amount_out and quoted_amount_out > 0 and amount_out > 0:
             slippage = (quoted_amount_out - amount_out) / quoted_amount_out
-            slippage_bps = int(slippage * 10000)
+            return int(slippage * 10000)
+        return None
 
-        # Resolve token decimals from Transfer events for proper decimal conversion
-        token_in_addr = None
-        token_out_addr = None
-        token_in_decimals = None
-        token_out_decimals = None
-
-        # Identify token addresses from Transfer events
-        # In a swap: one Transfer goes TO the pool (token_in), one comes FROM the pool (token_out)
+    def _identify_tokens_by_pool_manager(
+        self, transfer_events: list[TransferEventData]
+    ) -> tuple[str | None, str | None]:
+        """Primary path: Transfers directly to/from PoolManager identify in/out."""
+        token_in_addr: str | None = None
+        token_out_addr: str | None = None
         pool_manager = self.pool_manager
         for transfer in transfer_events:
             if transfer.to_address.lower() == pool_manager:
                 token_in_addr = transfer.token
             elif transfer.from_address.lower() == pool_manager:
                 token_out_addr = transfer.token
+        return token_in_addr, token_out_addr
 
-        # Fallback: V4 flash accounting routes tokens through UniversalRouter/Permit2,
-        # so Transfers may not be directly to/from PoolManager. Match by amount instead.
-        # Skip transfers for tokens already identified to avoid mismatches when
-        # amount_in == amount_out (e.g. stablecoin-to-stablecoin swaps).
-        if (token_in_addr is None or token_out_addr is None) and transfer_events:
-            for transfer in transfer_events:
-                # Skip transfers for tokens already assigned to the other side
-                if token_in_addr is None and transfer.amount == amount_in and transfer.token != token_out_addr:
-                    token_in_addr = transfer.token
-                elif token_out_addr is None and transfer.amount == amount_out and transfer.token != token_in_addr:
-                    token_out_addr = transfer.token
+    @staticmethod
+    def _identify_tokens_by_amount(
+        transfer_events: list[TransferEventData],
+        amount_in: int,
+        amount_out: int,
+        token_in_addr: str | None,
+        token_out_addr: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Fallback 1: V4 flash accounting via UniversalRouter/Permit2 may
+        route Transfers away from PoolManager. Match by amount instead.
+        Skip transfers for tokens already assigned to the other side to
+        handle stablecoin-to-stablecoin swaps where amount_in == amount_out.
+        """
+        for transfer in transfer_events:
+            if token_in_addr is None and transfer.amount == amount_in and transfer.token != token_out_addr:
+                token_in_addr = transfer.token
+            elif token_out_addr is None and transfer.amount == amount_out and transfer.token != token_in_addr:
+                token_out_addr = transfer.token
+        return token_in_addr, token_out_addr
 
-        # Fallback 2: For WETH-routed swaps, amounts may differ due to WRAP_ETH/UNWRAP_WETH.
-        # Identify tokens by transfer direction relative to known infrastructure addresses.
-        if (token_in_addr is None or token_out_addr is None) and transfer_events:
-            # Known addresses: PoolManager and common router patterns
-            infra = {pool_manager}
-            seen_tokens = set()
-            if token_in_addr:
-                seen_tokens.add(token_in_addr.lower())
-            if token_out_addr:
-                seen_tokens.add(token_out_addr.lower())
+    def _identify_tokens_by_direction(
+        self,
+        transfer_events: list[TransferEventData],
+        token_in_addr: str | None,
+        token_out_addr: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Fallback 2: For WETH-routed swaps, ERC-20 amounts may diverge from
+        Swap event amounts due to WRAP_ETH/UNWRAP_WETH. Identify tokens by
+        transfer direction relative to PoolManager, then by elimination.
+        """
+        infra = {self.pool_manager}
+        seen_tokens: set[str] = set()
+        if token_in_addr:
+            seen_tokens.add(token_in_addr.lower())
+        if token_out_addr:
+            seen_tokens.add(token_out_addr.lower())
+
+        for transfer in transfer_events:
+            token_lower = transfer.token.lower()
+            if token_lower in seen_tokens:
+                continue
+            from_lower = transfer.from_address.lower()
+            to_lower = transfer.to_address.lower()
+            # Token sent FROM infrastructure TO non-infra = output (user receives)
+            if token_out_addr is None and from_lower in infra:
+                token_out_addr = transfer.token
+                seen_tokens.add(token_lower)
+            # Token sent TO infrastructure FROM non-infra = input (user pays)
+            elif token_in_addr is None and to_lower in infra:
+                token_in_addr = transfer.token
+                seen_tokens.add(token_lower)
+
+        # Last resort: assign remaining unseen tokens by elimination (output first).
+        if token_in_addr is None or token_out_addr is None:
             for transfer in transfer_events:
                 token_lower = transfer.token.lower()
                 if token_lower in seen_tokens:
                     continue
-                from_lower = transfer.from_address.lower()
-                to_lower = transfer.to_address.lower()
-                # Token sent FROM infrastructure TO non-infra = output (user receives)
-                if token_out_addr is None and from_lower in infra:
+                if token_out_addr is None:
                     token_out_addr = transfer.token
                     seen_tokens.add(token_lower)
-                # Token sent TO infrastructure FROM non-infra = input (user pays)
-                elif token_in_addr is None and to_lower in infra:
+                elif token_in_addr is None:
                     token_in_addr = transfer.token
                     seen_tokens.add(token_lower)
-            # Last resort: assign remaining unseen tokens by elimination
-            if token_in_addr is None or token_out_addr is None:
-                for transfer in transfer_events:
-                    token_lower = transfer.token.lower()
-                    if token_lower in seen_tokens:
-                        continue
-                    if token_out_addr is None:
-                        token_out_addr = transfer.token
-                        seen_tokens.add(token_lower)
-                    elif token_in_addr is None:
-                        token_in_addr = transfer.token
-                        seen_tokens.add(token_lower)
+        return token_in_addr, token_out_addr
 
-        # Resolve decimals via token_resolver (lazy-load if not injected)
+    def _identify_swap_tokens(
+        self,
+        transfer_events: list[TransferEventData],
+        amount_in: int,
+        amount_out: int,
+    ) -> tuple[str | None, str | None]:
+        """Orchestrate the three token-identification passes.
+
+        Returns (token_in_addr, token_out_addr). Either may be None if the
+        receipt does not contain enough Transfer evidence.
+        """
+        token_in_addr, token_out_addr = self._identify_tokens_by_pool_manager(transfer_events)
+        if not transfer_events:
+            return token_in_addr, token_out_addr
+
+        if token_in_addr is None or token_out_addr is None:
+            token_in_addr, token_out_addr = self._identify_tokens_by_amount(
+                transfer_events, amount_in, amount_out, token_in_addr, token_out_addr
+            )
+        if token_in_addr is None or token_out_addr is None:
+            token_in_addr, token_out_addr = self._identify_tokens_by_direction(
+                transfer_events, token_in_addr, token_out_addr
+            )
+        return token_in_addr, token_out_addr
+
+    def _resolve_token_decimals(
+        self,
+        token_in_addr: str | None,
+        token_out_addr: str | None,
+    ) -> tuple[int | None, int | None]:
+        """Resolve decimals for token_in and token_out via the token_resolver.
+
+        Lazy-loads the global resolver if one wasn't injected at construction.
+        Returns (None, None) on any failure; callers must handle missing
+        decimals by falling back to Decimal(0) for human-readable fields.
+        """
         resolver = self._token_resolver
         if resolver is None:
             try:
@@ -674,28 +735,44 @@ class UniswapV4ReceiptParser:
             except Exception:
                 logger.debug("Could not load token_resolver for decimal conversion")
 
+        token_in_decimals: int | None = None
+        token_out_decimals: int | None = None
         if resolver and token_in_addr:
             try:
-                resolved = resolver.resolve(token_in_addr, self.chain)
-                token_in_decimals = resolved.decimals
+                token_in_decimals = resolver.resolve(token_in_addr, self.chain).decimals
             except Exception:
                 logger.warning(
-                    "Could not resolve decimals for token_in %s — decimal amounts will be zero", token_in_addr
+                    "Could not resolve decimals for token_in %s — decimal amounts will be zero",
+                    token_in_addr,
                 )
         if resolver and token_out_addr:
             try:
-                resolved = resolver.resolve(token_out_addr, self.chain)
-                token_out_decimals = resolved.decimals
+                token_out_decimals = resolver.resolve(token_out_addr, self.chain).decimals
             except Exception:
                 logger.warning(
-                    "Could not resolve decimals for token_out %s — decimal amounts will be zero", token_out_addr
+                    "Could not resolve decimals for token_out %s — decimal amounts will be zero",
+                    token_out_addr,
                 )
+        return token_in_decimals, token_out_decimals
 
-        # Compute human-readable decimal amounts
-        # When decimals are not resolved, fall back to Decimal(0) rather than raw integer
-        # amounts — a raw integer (e.g. 2000000000 for 2000 USDC) in a field documented as
-        # "human-readable" would silently corrupt downstream financial logic.
-        both_decimals_resolved = token_in_decimals is not None and token_out_decimals is not None
+    @staticmethod
+    def _compute_decimal_amounts(
+        amount_in: int,
+        amount_out: int,
+        token_in_decimals: int | None,
+        token_out_decimals: int | None,
+    ) -> tuple[Decimal, Decimal, Decimal | None]:
+        """Compute (amount_in_decimal, amount_out_decimal, effective_price).
+
+        When decimals are not resolved, human-readable amounts fall back to
+        Decimal(0) rather than leaking raw integer amounts into a field
+        documented as "human-readable" (would silently corrupt downstream
+        financial logic).
+
+        effective_price is computed ONLY when BOTH decimals are resolved to
+        avoid mixing raw integers with Decimals for cross-decimal pairs
+        (e.g. USDC/WETH), which would be off by orders of magnitude.
+        """
         if token_in_decimals is not None:
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
         else:
@@ -705,12 +782,37 @@ class UniswapV4ReceiptParser:
         else:
             amount_out_decimal = Decimal(0)
 
-        # Effective price: only compute when BOTH decimals are resolved to avoid
-        # mixing raw integer amounts with human-readable decimals (would produce
-        # prices off by orders of magnitude for cross-decimal pairs like USDC/WETH).
-        effective_price = None
-        if both_decimals_resolved and amount_in_decimal > 0 and amount_out_decimal > 0:
+        both_resolved = token_in_decimals is not None and token_out_decimals is not None
+        effective_price: Decimal | None = None
+        if both_resolved and amount_in_decimal > 0 and amount_out_decimal > 0:
             effective_price = amount_out_decimal / amount_in_decimal
+        return amount_in_decimal, amount_out_decimal, effective_price
+
+    def _build_swap_result(
+        self,
+        swap_events: list[SwapEventData],
+        transfer_events: list[TransferEventData],
+        quoted_amount_out: int | None,
+    ) -> ParsedSwapResult:
+        """Build a high-level swap result from decoded events.
+
+        Orchestrates five pure phase helpers:
+          1. _compute_swap_amounts       — sign convention
+          2. _calculate_slippage_bps     — realized slippage vs quote
+          3. _identify_swap_tokens       — pool_mgr / amount / direction passes
+          4. _resolve_token_decimals     — lazy resolver lookup
+          5. _compute_decimal_amounts    — human-readable amounts + price
+        """
+        # Use the first swap event (single-hop; multi-hop receipts may emit
+        # several Swap events but the first carries the user's input side).
+        swap = swap_events[0]
+        amount_in, amount_out = self._compute_swap_amounts(swap)
+        slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
+        token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
+        token_in_decimals, token_out_decimals = self._resolve_token_decimals(token_in_addr, token_out_addr)
+        amount_in_decimal, amount_out_decimal, effective_price = self._compute_decimal_amounts(
+            amount_in, amount_out, token_in_decimals, token_out_decimals
+        )
 
         return ParsedSwapResult(
             amount_in=amount_in,
