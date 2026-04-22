@@ -180,9 +180,16 @@ async def capture_snapshot_with_accounting(
     or when persistence succeeds, the input ``result`` is returned
     unchanged. In live mode, a raised ``AccountingPersistenceError`` is
     converted into a fresh ``IterationResult`` with
-    ``IterationStatus.ACCOUNTING_FAILED`` (NOT via
-    ``_create_error_result`` -- that helper would double-count the
-    snapshot error against ``_consecutive_errors``).
+    ``IterationStatus.ACCOUNTING_FAILED``. The rebuilt result preserves
+    ``result.duration_ms`` so the iteration summary reflects the full
+    iteration cost and not just the snapshot phase (issue #1770), and it
+    also carries over ``result.intent``, ``result.execution_result``,
+    and ``result.balance_reconciliation`` so operators retain the on-
+    chain tx hash, gas metrics, and reconciliation context that
+    preceded the accounting failure. The helper bypasses
+    ``_create_error_result`` to avoid a redundant ``_total_iterations``
+    bump -- ``run_iteration`` already counted this iteration via
+    ``_record_success`` before the snapshot phase ran.
     """
     # Local import to avoid circular dependency at module load time.
     from .runner_models import IterationResult, IterationStatus
@@ -190,7 +197,6 @@ async def capture_snapshot_with_accounting(
     if not runner.config.enable_state_persistence:
         return result
 
-    snapshot_start = datetime.now(UTC)
     try:
         await runner._capture_portfolio_snapshot(
             strategy=strategy,
@@ -209,17 +215,35 @@ async def capture_snapshot_with_accounting(
                 acc_err.write_kind,
             )
             await runner._alert_accounting_failure(strategy, acc_err)
-            # Build IterationResult directly instead of via
-            # _create_error_result, which mutates
-            # _consecutive_errors. The outer run_loop failure
-            # handler (~line 1150) increments that counter
-            # for any non-success result; using the helper
-            # here would double-count the snapshot error.
+            # Preserve the full iteration duration AND the
+            # forensic metadata from the already-completed
+            # ``result``. The iteration succeeded on-chain;
+            # only the post-iteration persistence step
+            # failed. Reporting the snapshot-phase duration
+            # alone (issue #1770) would undercount iteration
+            # work in JSONL summaries and downstream
+            # alerting dashboards, and dropping ``intent`` /
+            # ``execution_result`` / ``balance_reconciliation``
+            # would erase the on-chain tx hash, gas metrics,
+            # and reconciliation context operators need to
+            # diagnose what preceded the accounting failure.
+            #
+            # We still build the result directly rather
+            # than via ``_create_error_result`` -- that
+            # helper, post fix #1771, no longer mutates
+            # ``_consecutive_errors``, but it DOES still
+            # bump ``_total_iterations`` which would
+            # double-count this iteration (``run_iteration``
+            # already counted it via ``_record_success``
+            # before the snapshot phase ran).
             return IterationResult(
                 status=IterationStatus.ACCOUNTING_FAILED,
                 error=f"Accounting persistence failed ({acc_err.write_kind}): {acc_err}",
                 strategy_id=strategy_id,
-                duration_ms=runner._calculate_duration_ms(snapshot_start),
+                duration_ms=result.duration_ms,
+                intent=result.intent,
+                execution_result=result.execution_result,
+                balance_reconciliation=result.balance_reconciliation,
             )
         logger.error(
             "Snapshot accounting persistence failed in non-live mode for %s "
@@ -245,6 +269,15 @@ async def handle_iteration_failure(
     triggers emergency stop if the breaker just tripped OPEN, and emits
     the max-consecutive-errors alert + ERROR lifecycle write when the
     streak threshold is reached.
+
+    Ownership of ``_consecutive_errors`` (fix for issue #1771): this
+    helper is the SOLE owner of the consecutive-error streak counter for
+    iteration results. ``StrategyRunner._create_error_result`` does NOT
+    increment it. The one remaining increment outside this helper lives
+    in ``run_loop``'s outer ``except Exception`` clause, which handles
+    raised (as opposed to returned-as-result) errors -- a separate flow
+    that never reaches ``run_iteration``'s result path and therefore
+    never touches this helper.
     """
     from .runner_models import IterationStatus
 

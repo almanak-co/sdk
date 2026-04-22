@@ -740,28 +740,45 @@ class TestRunIteration:
         self,
         runner: StrategyRunner,
     ) -> None:
-        """Test that consecutive errors are tracked."""
+        """Consecutive errors are tracked across failing iterations.
+
+        Post fix #1771, ``_consecutive_errors`` is owned by
+        ``handle_iteration_failure`` (invoked from ``run_loop``), not by
+        ``_create_error_result`` inside ``run_iteration``. Calling
+        ``run_iteration`` in isolation therefore does NOT bump the
+        streak counter -- the counter only ticks when the iteration
+        result flows back through ``run_loop``. Drive the loop here so
+        the test exercises the real ownership boundary.
+        """
         strategy = MockStrategy(decide_raises=ValueError("Error"))
 
-        # Run multiple failing iterations
-        await runner.run_iteration(strategy)
-        await runner.run_iteration(strategy)
-        await runner.run_iteration(strategy)
+        # Run exactly three failing iterations through run_loop so the
+        # post-iteration failure handler owns the increments.
+        await runner.run_loop(strategy, interval_seconds=0, max_iterations=3)
 
         metrics = runner.get_metrics()
         assert metrics["consecutive_errors"] == 3
+        # Each failed iteration also ticks _total_iterations exactly once
+        # (via _create_error_result, which now keeps that responsibility).
+        assert metrics["total_iterations"] == 3
 
     @pytest.mark.asyncio
     async def test_consecutive_errors_reset_on_success(
         self,
         runner: StrategyRunner,
     ) -> None:
-        """Test that consecutive errors reset after success."""
-        failing_strategy = MockStrategy(decide_raises=ValueError("Error"))
+        """Consecutive errors reset after a successful iteration.
+
+        See note on ``test_consecutive_errors_tracked``: post fix #1771,
+        ``run_iteration`` in isolation no longer increments
+        ``_consecutive_errors``. Seed the streak directly and then run
+        one successful iteration through ``run_iteration`` to observe
+        the success-reset contract owned by ``_record_success``.
+        """
         successful_strategy = MockStrategy(decide_returns=Intent.hold())
 
-        await runner.run_iteration(failing_strategy)
-        await runner.run_iteration(failing_strategy)
+        # Seed a streak that the next successful iteration should clear.
+        runner._consecutive_errors = 2
         assert runner.get_metrics()["consecutive_errors"] == 2
 
         await runner.run_iteration(successful_strategy)

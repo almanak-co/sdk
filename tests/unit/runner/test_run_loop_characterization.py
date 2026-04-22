@@ -38,7 +38,10 @@ can preserve them):
   rebuilds ``result`` into ``IterationStatus.ACCOUNTING_FAILED``. Non-
   live modes log and keep the original result. The iteration result
   IS rebuilt inline -- the helper ``_create_error_result`` is NOT used
-  (double-count avoidance, see comment at line ~1544).
+  (double-count avoidance for ``_total_iterations``; post fix #1771
+  ``_create_error_result`` no longer mutates ``_consecutive_errors``).
+  The rebuilt result preserves ``result.duration_ms`` so iteration
+  summaries reflect the full iteration cost (issue #1770, fixed).
 - Max iterations: counter increments AFTER the iteration completes, so
   ``max_iterations=1`` runs exactly one iteration even if shutdown is
   requested mid-iteration.
@@ -928,30 +931,56 @@ class TestLifecycleCommands:
 # =============================================================================
 
 
+def _setup_accounting_failure_runner(
+    *,
+    live_mode: bool = True,
+    write_kind: AccountingWriteKind = AccountingWriteKind.SNAPSHOT,
+    cause: Exception | None = None,
+) -> tuple[StrategyRunner, MagicMock, list[IterationResult]]:
+    """Build a runner pre-wired for the ACCOUNTING_FAILED branch.
+
+    Returns the configured ``runner``, mock ``strategy``, and the
+    ``captured`` list that the tests should pass as the iteration
+    callback. Callers still need to assign ``runner.run_iteration`` and
+    invoke ``run_loop`` themselves -- this helper only covers the common
+    mock wiring (addresses CodeRabbit nit on duplicated setup in PR #1777).
+    """
+    runner = _make_runner(enable_state_persistence=True, max_consecutive_errors=10)
+    strategy = _make_strategy()
+    runner._is_live_mode = MagicMock(return_value=live_mode)
+    runner._update_state = AsyncMock()
+    runner._capture_portfolio_snapshot = AsyncMock(
+        side_effect=AccountingPersistenceError(
+            write_kind,
+            strategy_id="test-strategy",
+            cause=cause or RuntimeError("disk full"),
+        )
+    )
+    runner._alert_accounting_failure = AsyncMock()
+    captured: list[IterationResult] = []
+    return runner, strategy, captured
+
+
 class TestAccountingFailedSnapshot:
     """Pin that live-mode snapshot AccountingPersistenceError rebuilds the result."""
 
     @pytest.mark.asyncio
     async def test_live_mode_snapshot_failure_escalates_to_accounting_failed(self):
-        runner = _make_runner(enable_state_persistence=True, max_consecutive_errors=10)
-        strategy = _make_strategy()
-        runner._is_live_mode = MagicMock(return_value=True)
-        runner._update_state = AsyncMock()
-        runner._capture_portfolio_snapshot = AsyncMock(
-            side_effect=AccountingPersistenceError(
-                AccountingWriteKind.SNAPSHOT,
-                strategy_id="test-strategy",
-                cause=RuntimeError("disk full"),
-            )
-        )
-        runner._alert_accounting_failure = AsyncMock()
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+
+        # Use a distinctive duration so we can assert the rebuilt result
+        # preserves the full iteration duration (issue #1770) rather than
+        # measuring only the snapshot phase.
+        iteration_duration_ms = 1234.5
 
         async def mock_iter(s):
-            return _make_result(IterationStatus.SUCCESS)
+            return IterationResult(
+                status=IterationStatus.SUCCESS,
+                strategy_id="test-strategy",
+                duration_ms=iteration_duration_ms,
+            )
 
         runner.run_iteration = mock_iter
-
-        captured: list[IterationResult] = []
 
         await asyncio.wait_for(
             runner.run_loop(
@@ -969,28 +998,109 @@ class TestAccountingFailedSnapshot:
         assert "Accounting persistence failed" in (captured[0].error or "")
         # And the alert hook was invoked.
         assert runner._alert_accounting_failure.await_count == 1
+        # Regression: duration_ms on the rebuilt result MUST equal the full
+        # iteration duration carried on the original ``result``, not the
+        # snapshot-phase duration. See issue #1770.
+        assert captured[0].duration_ms == iteration_duration_ms
+
+    @pytest.mark.asyncio
+    async def test_accounting_failed_duration_covers_full_iteration(self):
+        """Regression for #1770: rebuilt ACCOUNTING_FAILED result reports the
+        full iteration duration, not just the snapshot phase.
+
+        Before the fix, ``capture_snapshot_with_accounting`` measured
+        ``duration_ms`` from a fresh ``snapshot_start`` timestamp captured
+        inside the helper, so a 30-second iteration that only failed during
+        post-iteration snapshot persistence would be reported as a sub-
+        millisecond event in iteration summaries. We now require the
+        rebuilt result to preserve ``result.duration_ms``.
+        """
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+
+        # Simulate a long iteration: 30 seconds of iteration work.
+        full_iteration_ms = 30_000.0
+
+        async def mock_iter(s):
+            return IterationResult(
+                status=IterationStatus.SUCCESS,
+                strategy_id="test-strategy",
+                duration_ms=full_iteration_ms,
+            )
+
+        runner.run_iteration = mock_iter
+
+        await asyncio.wait_for(
+            runner.run_loop(
+                strategy,
+                interval_seconds=0,
+                iteration_callback=captured.append,
+                max_iterations=1,
+            ),
+            timeout=5,
+        )
+
+        assert len(captured) == 1
+        rebuilt = captured[0]
+        assert rebuilt.status == IterationStatus.ACCOUNTING_FAILED
+        # The full iteration duration must be carried into the rebuilt result.
+        assert rebuilt.duration_ms == full_iteration_ms
+
+    @pytest.mark.asyncio
+    async def test_accounting_failed_preserves_forensic_metadata(self):
+        """Regression guard (CodeRabbit / Gemini review of PR #1777): the
+        rebuilt ACCOUNTING_FAILED result must preserve ``intent``,
+        ``execution_result``, and ``balance_reconciliation`` from the
+        successful pre-snapshot result. Operators rely on this metadata
+        (tx hashes, gas used, reconciliation deltas) to diagnose what
+        on-chain actions preceded the accounting failure; dropping any
+        of it leaves them guessing at the book-drift source.
+        """
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+
+        # Stand-in values for each forensic field -- we only care that
+        # the rebuilt result carries the SAME object reference across.
+        sentinel_intent = MagicMock(name="sentinel-intent")
+        sentinel_execution_result = MagicMock(name="sentinel-execution-result")
+        sentinel_balance_reconciliation = {"mismatches": [{"token": "USDC", "actual": 1}]}
+
+        async def mock_iter(s):
+            return IterationResult(
+                status=IterationStatus.SUCCESS,
+                strategy_id="test-strategy",
+                duration_ms=100.0,
+                intent=sentinel_intent,
+                execution_result=sentinel_execution_result,
+                balance_reconciliation=sentinel_balance_reconciliation,
+            )
+
+        runner.run_iteration = mock_iter
+
+        await asyncio.wait_for(
+            runner.run_loop(
+                strategy,
+                interval_seconds=0,
+                iteration_callback=captured.append,
+                max_iterations=1,
+            ),
+            timeout=5,
+        )
+
+        assert len(captured) == 1
+        rebuilt = captured[0]
+        assert rebuilt.status == IterationStatus.ACCOUNTING_FAILED
+        # Forensic fields MUST be carried across -- identity, not just equality.
+        assert rebuilt.intent is sentinel_intent
+        assert rebuilt.execution_result is sentinel_execution_result
+        assert rebuilt.balance_reconciliation is sentinel_balance_reconciliation
 
     @pytest.mark.asyncio
     async def test_non_live_mode_snapshot_failure_is_logged_only(self):
-        runner = _make_runner(enable_state_persistence=True, max_consecutive_errors=10)
-        strategy = _make_strategy()
-        runner._is_live_mode = MagicMock(return_value=False)
-        runner._update_state = AsyncMock()
-        runner._capture_portfolio_snapshot = AsyncMock(
-            side_effect=AccountingPersistenceError(
-                AccountingWriteKind.SNAPSHOT,
-                strategy_id="test-strategy",
-                cause=RuntimeError("disk full"),
-            )
-        )
-        runner._alert_accounting_failure = AsyncMock()
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=False)
 
         async def mock_iter(s):
             return _make_result(IterationStatus.SUCCESS)
 
         runner.run_iteration = mock_iter
-
-        captured: list[IterationResult] = []
 
         await asyncio.wait_for(
             runner.run_loop(
@@ -1121,3 +1231,134 @@ class TestLoopTeardown:
         assert last_call.args[1] == "ERROR"
         # error_message kwarg preserved
         assert last_call.kwargs.get("error_message") == "breaker tripped"
+
+
+# =============================================================================
+# Consecutive-errors counter single-ownership (issue #1771)
+# =============================================================================
+
+
+class TestConsecutiveErrorsSingleIncrement:
+    """Regression guard for #1771: ``_consecutive_errors`` is incremented by
+    ``handle_iteration_failure`` only. ``_create_error_result`` bumps only
+    ``_total_iterations``. Previously both sites incremented, so any
+    failure class returned via ``_create_error_result`` from ``run_iteration``
+    double-counted and pushed the ``max_consecutive_errors`` threshold by one
+    iteration.
+    """
+
+    def test_create_error_result_does_not_increment_consecutive_errors(self):
+        """Direct unit check of ownership contract: calling
+        ``_create_error_result`` must NOT mutate ``_consecutive_errors``.
+        It MUST still increment ``_total_iterations`` (accounting for the
+        failed iteration).
+
+        Seed ``_consecutive_errors`` with a non-zero value so the assertion
+        proves the counter is left fully untouched -- not merely that it
+        did not go from ``0`` to ``1``. A regression that resets the streak
+        to ``0`` would otherwise slip past a zero-seeded check.
+        """
+        runner = _make_runner()
+        runner._consecutive_errors = 7
+        runner._total_iterations = 0
+
+        result = runner._create_error_result(
+            strategy_id="test-strategy",
+            status=IterationStatus.STRATEGY_ERROR,
+            error="boom",
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        # _consecutive_errors stays untouched -- run_loop's handler owns it.
+        # Seeding with 7 proves neither an increment nor a reset occurred.
+        assert runner._consecutive_errors == 7
+        # _total_iterations still ticks up to keep lifetime counts honest.
+        assert runner._total_iterations == 1
+
+    @pytest.mark.asyncio
+    async def test_error_result_flows_increment_consecutive_errors_exactly_once(self):
+        """End-to-end: a result that came from ``_create_error_result`` and
+        flows back into ``run_loop`` bumps ``_consecutive_errors`` exactly
+        once per iteration.
+
+        We simulate this by bypassing ``run_iteration`` and returning a
+        pre-built error result (as ``_create_error_result`` would, minus
+        the counter mutation that used to happen inside it). If the loop
+        body also double-incremented, we would see 2 instead of 1.
+        """
+        runner = _make_runner(max_consecutive_errors=10)
+        strategy = _make_strategy()
+        runner._maybe_trigger_emergency = AsyncMock()
+
+        # Mimic what _create_error_result now does AFTER the fix: bump
+        # _total_iterations but NOT _consecutive_errors, then return the
+        # error result. run_loop's failure handler should be the sole
+        # incrementer.
+        async def mock_iter(s):
+            runner._total_iterations += 1
+            return _make_result(
+                status=IterationStatus.STRATEGY_ERROR,
+                error="decide() blew up",
+            )
+
+        runner.run_iteration = mock_iter
+
+        await asyncio.wait_for(
+            runner.run_loop(strategy, interval_seconds=0, max_iterations=1),
+            timeout=5,
+        )
+
+        # Exactly one increment per iteration -- no double-count.
+        assert runner._consecutive_errors == 1
+
+    @pytest.mark.asyncio
+    async def test_max_consecutive_errors_threshold_reached_at_n_iterations(self):
+        """Regression guard: with max_consecutive_errors=3, the ERROR
+        lifecycle write must first fire at iteration 3 (not iteration 2
+        as would happen under the old double-counting behavior).
+        """
+        runner = _make_runner(max_consecutive_errors=3)
+        strategy = _make_strategy()
+        runner._alert_consecutive_errors = AsyncMock()
+        runner._maybe_trigger_emergency = AsyncMock()
+
+        # Track ERROR lifecycle writes in the order they arrive alongside
+        # the iteration count at the moment each write fires.
+        iteration_at_error_write: list[int] = []
+        completed_iterations = {"n": 0}
+
+        async def mock_iter(s):
+            completed_iterations["n"] += 1
+            # Simulate _create_error_result post-fix: bump _total_iterations,
+            # leave _consecutive_errors alone.
+            runner._total_iterations += 1
+            return _make_result(
+                status=IterationStatus.STRATEGY_ERROR,
+                error=f"iter {completed_iterations['n']}",
+            )
+
+        runner.run_iteration = mock_iter
+
+        original_write = runner._lifecycle_write_state
+
+        def spy(*args, **kwargs):
+            state = args[1] if len(args) >= 2 else None
+            if state == "ERROR":
+                iteration_at_error_write.append(completed_iterations["n"])
+            return original_write(*args, **kwargs)
+
+        runner._lifecycle_write_state = spy
+
+        await asyncio.wait_for(
+            runner.run_loop(strategy, interval_seconds=0, max_iterations=5),
+            timeout=5,
+        )
+
+        # The first ERROR write must land on iteration 3 (counter hits
+        # threshold 3 exactly then). Under the buggy double-count, the
+        # counter would reach 4 after iteration 2, so the first ERROR
+        # write would land on iteration 2.
+        assert iteration_at_error_write, "ERROR lifecycle write never fired"
+        assert iteration_at_error_write[0] == 3
+

@@ -4097,8 +4097,36 @@ class StrategyRunner:
         start_time: datetime,
         intent: AnyIntent | None = None,
     ) -> IterationResult:
-        """Create an error IterationResult and update metrics."""
-        self._consecutive_errors += 1
+        """Create an error ``IterationResult`` and bump the total-iteration
+        counter.
+
+        Ownership contract (fix for issue #1771):
+
+        * ``_total_iterations`` is incremented here. This is ONE of three
+          sites that tick the lifetime counter on a failure path; the
+          others are:
+
+          - ``_run_single_chain_intents`` (multi-intent sequence failure,
+            see note at ``strategy_runner.py:~1196``) which counts the
+            iteration once for the whole sequence.
+          - Some single-intent failure paths that return an
+            ``IterationResult`` directly (e.g. inline results built in
+            ``_execute_single_chain`` / ``_execute_multi_chain``) do NOT
+            currently increment the counter -- consolidating those is
+            tracked as a follow-up; do not widen the contract here
+            unannounced.
+
+          The success path ticks ``_total_iterations`` via
+          ``_record_success`` / ``runner_state.record_success``.
+        * ``_consecutive_errors`` is NOT incremented here. Every result
+          this helper builds flows back to ``run_loop`` which calls
+          ``_run_loop_helpers.handle_iteration_failure`` for any result
+          with ``not result.success``. That helper is the single owner
+          of the consecutive-error streak counter. Incrementing in both
+          places (the pre-refactor behavior) double-counted every
+          failure that went through both sites and pushed the
+          ``max_consecutive_errors`` alarm threshold by one iteration.
+        """
         self._total_iterations += 1
 
         return IterationResult(
