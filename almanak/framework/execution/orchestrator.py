@@ -745,6 +745,218 @@ def _generate_intent_description(action_bundle: "ActionBundle") -> str:
 
 
 # =============================================================================
+# Pre-flight balance-check helpers
+# =============================================================================
+
+
+# Lending protocols whose metadata encodes amounts already in wei.  Every other
+# protocol (morpho, morpho_blue, compound_v3, ...) ships human-readable amounts
+# that must be multiplied by 10**decimals before comparing against on-chain
+# ``balanceOf``.
+_WEI_LENDING_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "spark", "radiant_v2"})
+
+# ``balanceOf(address)`` function selector (first 4 bytes of keccak256).
+_ERC20_BALANCE_OF_SELECTOR: bytes = bytes.fromhex("70a08231")
+
+# Per-call RPC budget for the pre-flight check.  Individual timeouts fail-open
+# (the check is a best-effort optimisation, not a hard gate).
+_PREFLIGHT_RPC_TIMEOUT_S: float = 5.0
+
+# Requirement tuple emitted by ``_preflight_collect_requirements``:
+# ``(symbol, address, amount_wei, decimals, is_native)``.
+_Requirement = tuple[str, str, int, int | None, bool]
+
+
+def _preflight_parse_amount_wei(raw_amount: str, token_info: dict, is_wei: bool = True) -> int | None:
+    """Parse a metadata amount string to wei. Returns ``None`` if unparseable.
+
+    Args:
+        raw_amount: The raw amount string from metadata.
+        token_info: Token dict with optional ``decimals`` key.
+        is_wei: If True the value is already wei-coded (SWAP / LP / aave-family
+            lending).  If False it is human-readable and needs a decimals-based
+            multiply (Morpho / Compound lending).
+
+    Returns:
+        Integer wei amount, or ``None`` if the value is zero, negative, non-
+        numeric, or fractional on a wei-coded path.
+    """
+    try:
+        val = Decimal(raw_amount)
+    except Exception:
+        return None
+    if val <= 0:
+        return None
+
+    token_decimals = token_info.get("decimals")
+    if is_wei:
+        if val != int(val):
+            # Fractional values are invalid on wei-coded paths. Return None to
+            # fail open rather than guess the format.
+            return None
+        return int(val)
+
+    # Human-readable -> convert to wei.
+    if token_decimals is not None and token_decimals >= 0:
+        return int(val * Decimal(10**token_decimals))
+    return None  # Can't convert without decimals
+
+
+def _preflight_requirement_from(
+    token_info: dict,
+    raw_amount: str | None,
+    *,
+    is_wei: bool = True,
+) -> _Requirement | None:
+    """Build a single requirement tuple, or ``None`` when inputs are missing."""
+    if not token_info or not raw_amount:
+        return None
+    amount_wei = _preflight_parse_amount_wei(raw_amount, token_info, is_wei=is_wei)
+    if amount_wei is None or amount_wei <= 0:
+        return None
+    return (
+        token_info.get("symbol", "?"),
+        token_info.get("address", ""),
+        amount_wei,
+        token_info.get("decimals"),
+        bool(token_info.get("is_native")),
+    )
+
+
+def _preflight_swap_requirements(metadata: dict, _protocol: str) -> list[_Requirement]:
+    """Collect SWAP intent requirements.
+
+    For multi-step bundles (e.g. Pendle pre-swap routing) the
+    ``from_token``/``amount_in`` fields describe the intermediate token that
+    won't exist in the wallet until the pre-swap tx has run.  When present,
+    ``original_from_token``/``original_amount_in`` pin the token the wallet
+    actually holds today and must win (VIB-2533).
+    """
+    swap_token = metadata.get("original_from_token") or metadata.get("from_token", {})
+    swap_amount = metadata.get("original_amount_in") or metadata.get("amount_in")
+    req = _preflight_requirement_from(swap_token, swap_amount)
+    return [req] if req is not None else []
+
+
+def _preflight_lp_open_requirements(metadata: dict, _protocol: str) -> list[_Requirement]:
+    """Collect LP_OPEN intent requirements (both legs of the pair)."""
+    token0 = metadata.get("token0") or metadata.get("token_x") or {}
+    token1 = metadata.get("token1") or metadata.get("token_y") or {}
+    amount0 = metadata.get("amount0_desired") or metadata.get("amount_x")
+    amount1 = metadata.get("amount1_desired") or metadata.get("amount_y")
+    reqs: list[_Requirement] = []
+    for token, amount in ((token0, amount0), (token1, amount1)):
+        req = _preflight_requirement_from(token, amount)
+        if req is not None:
+            reqs.append(req)
+    return reqs
+
+
+def _preflight_supply_requirements(metadata: dict, protocol: str) -> list[_Requirement]:
+    """Collect SUPPLY intent requirements."""
+    is_wei = protocol in _WEI_LENDING_PROTOCOLS
+    req = _preflight_requirement_from(
+        metadata.get("supply_token", {}),
+        metadata.get("supply_amount"),
+        is_wei=is_wei,
+    )
+    return [req] if req is not None else []
+
+
+def _preflight_repay_requirements(metadata: dict, protocol: str) -> list[_Requirement]:
+    """Collect REPAY intent requirements.
+
+    Skips the full-repay sentinel (``repay_full=True`` encodes MAX_UINT256 --
+    no wallet can hold 2**256 tokens, so the check would spuriously reject).
+    """
+    if metadata.get("repay_full"):
+        return []
+    is_wei = protocol in _WEI_LENDING_PROTOCOLS
+    req = _preflight_requirement_from(
+        metadata.get("repay_token", {}),
+        metadata.get("repay_amount"),
+        is_wei=is_wei,
+    )
+    return [req] if req is not None else []
+
+
+def _preflight_borrow_requirements(metadata: dict, protocol: str) -> list[_Requirement]:
+    """Collect BORROW intent requirements (collateral token balance)."""
+    is_wei = protocol in _WEI_LENDING_PROTOCOLS
+    req = _preflight_requirement_from(
+        metadata.get("collateral_token", {}),
+        metadata.get("collateral_amount"),
+        is_wei=is_wei,
+    )
+    return [req] if req is not None else []
+
+
+# Dispatch table: intent type -> requirement collector.  Adding a new balance-
+# checked intent type is a single entry here.
+_PREFLIGHT_COLLECTORS: dict[str, Callable[[dict, str], list[_Requirement]]] = {
+    "SWAP": _preflight_swap_requirements,
+    "LP_OPEN": _preflight_lp_open_requirements,
+    "SUPPLY": _preflight_supply_requirements,
+    "REPAY": _preflight_repay_requirements,
+    "BORROW": _preflight_borrow_requirements,
+}
+
+
+def _preflight_collect_requirements(action_bundle: ActionBundle) -> list[_Requirement]:
+    """Extract the list of (token, amount) pairs that need an on-chain check.
+
+    Parsing errors (ValueError, TypeError from malformed metadata) are
+    swallowed and translated into an empty list -- we never block a submission
+    because metadata failed to parse.  Intent types with no collector
+    registered (HOLD, LP_CLOSE, etc.) also return an empty list.
+    """
+    metadata = action_bundle.metadata or {}
+    intent_type = (action_bundle.intent_type or "").upper()
+    protocol = (metadata.get("protocol") or "").lower()
+
+    collector = _PREFLIGHT_COLLECTORS.get(intent_type)
+    if collector is None:
+        return []
+
+    try:
+        return collector(metadata, protocol)
+    except (ValueError, TypeError) as e:
+        logger.debug(f"Pre-flight balance check: could not parse metadata: {e}")
+        return []
+
+
+async def _preflight_fetch_balance(web3: AsyncWeb3, wallet: str, address: str, is_native: bool) -> int:
+    """Fetch a native or ERC20 balance with a 5s per-call timeout.
+
+    Raises:
+        TimeoutError: If the RPC exceeds ``_PREFLIGHT_RPC_TIMEOUT_S`` seconds.
+        Any exception from the underlying web3 client.
+    """
+    if is_native:
+        balance = await asyncio.wait_for(
+            web3.eth.get_balance(web3.to_checksum_address(wallet)),
+            timeout=_PREFLIGHT_RPC_TIMEOUT_S,
+        )
+        return int(balance)
+
+    data = _ERC20_BALANCE_OF_SELECTOR + bytes.fromhex(wallet[2:].lower().zfill(64))
+    raw = await asyncio.wait_for(
+        web3.eth.call({"to": web3.to_checksum_address(address), "data": data}),
+        timeout=_PREFLIGHT_RPC_TIMEOUT_S,
+    )
+    return int(raw.hex(), 16)
+
+
+def _preflight_format_shortfall(symbol: str, balance_wei: int, required_wei: int, decimals: int | None) -> str:
+    """Format a single ``Insufficient <SYMBOL>`` line for the user-facing error."""
+    if decimals is not None:
+        required_human = Decimal(required_wei) / Decimal(10**decimals)
+        actual_human = Decimal(balance_wei) / Decimal(10**decimals)
+        return f"Insufficient {symbol}: have {actual_human:.6f}, need {required_human:.6f}"
+    return f"Insufficient {symbol}: have {balance_wei} wei, need {required_wei} wei"
+
+
+# =============================================================================
 # Execution Orchestrator
 # =============================================================================
 
@@ -2214,6 +2426,18 @@ class ExecutionOrchestrator:
         and actual submission (MEV, concurrent strategies, etc.). It is NOT a
         substitute for on-chain revert protection.
 
+        The body is split into three phases so each stage is individually
+        testable and keeps the top-level control flow linear:
+
+        1. ``_preflight_collect_requirements`` -- read ActionBundle metadata and
+           build the list of (symbol, address, amount_wei, decimals, is_native)
+           tuples that actually need to be checked on-chain.
+        2. ``_preflight_check_balances`` -- for each requirement, fetch balance
+           (native or ERC20) via ``_get_web3``, compare against the required
+           amount, and collect shortfall strings.
+        3. Format the final message and return, or return ``None`` when all
+           requirements are satisfied.
+
         Args:
             action_bundle: The bundle with metadata containing token amounts.
             context: Execution context with wallet address.
@@ -2224,162 +2448,69 @@ class ExecutionOrchestrator:
         if not self.rpc_url:
             return None  # Can't check without RPC
 
-        metadata = action_bundle.metadata or {}
-        intent_type = (action_bundle.intent_type or "").upper()
-        protocol = (metadata.get("protocol") or "").lower()
-        wallet = context.wallet_address or self.signer.address
-
-        # Protocols that store lending amounts as wei in metadata.
-        # All others (morpho, morpho_blue, compound_v3) use human-readable.
-        _WEI_LENDING_PROTOCOLS = {"aave_v3", "spark", "radiant_v2"}
-
-        # Extract required tokens and amounts from metadata based on intent type
-        # Each requirement: (symbol, address, amount_wei, decimals or None, is_native)
-        requirements: list[tuple[str, str, int, int | None, bool]] = []
-
-        def _parse_amount_wei(raw_amount: str, token_info: dict, is_wei: bool = True) -> int | None:
-            """Parse a metadata amount string to wei. Returns None if unparseable.
-
-            Args:
-                raw_amount: The raw amount string from metadata.
-                token_info: Token dict with optional 'decimals' key.
-                is_wei: If True, the value is already in wei (SWAP/LP and Aave/Spark lending).
-                    If False, the value is human-readable and needs conversion (Morpho/Compound).
-            """
-            try:
-                val = Decimal(raw_amount)
-                if val <= 0:
-                    return None
-                token_decimals = token_info.get("decimals")
-                if is_wei:
-                    if val != int(val):
-                        # Fractional values are invalid on wei-coded paths.
-                        # Return None to fail open rather than guess the format.
-                        return None
-                    return int(val)
-                else:
-                    # Human-readable -> convert to wei
-                    if token_decimals is not None and token_decimals >= 0:
-                        return int(val * Decimal(10**token_decimals))
-                    return None  # Can't convert without decimals
-            except Exception:
-                return None
-
-        def _add_requirement(token_info: dict, raw_amount: str | None, is_wei: bool = True) -> None:
-            if not token_info or not raw_amount:
-                return
-            amount_wei = _parse_amount_wei(raw_amount, token_info, is_wei=is_wei)
-            if amount_wei is not None and amount_wei > 0:
-                requirements.append(
-                    (
-                        token_info.get("symbol", "?"),
-                        token_info.get("address", ""),
-                        amount_wei,
-                        token_info.get("decimals"),
-                        bool(token_info.get("is_native")),
-                    )
-                )
-
-        try:
-            if intent_type == "SWAP":
-                # For multi-step bundles (e.g., Pendle pre-swap routing), the metadata
-                # from_token/amount_in reflect the intermediate token (e.g., sUSDe) which
-                # won't exist in the wallet until the pre-swap TX runs.  Check the
-                # original input token instead when present (VIB-2533).
-                swap_token = metadata.get("original_from_token") or metadata.get("from_token", {})
-                swap_amount = metadata.get("original_amount_in") or metadata.get("amount_in")
-                _add_requirement(swap_token, swap_amount)
-
-            elif intent_type == "LP_OPEN":
-                token0 = metadata.get("token0") or metadata.get("token_x") or {}
-                token1 = metadata.get("token1") or metadata.get("token_y") or {}
-                amount0 = metadata.get("amount0_desired") or metadata.get("amount_x")
-                amount1 = metadata.get("amount1_desired") or metadata.get("amount_y")
-                _add_requirement(token0, amount0)
-                _add_requirement(token1, amount1)
-
-            elif intent_type == "SUPPLY":
-                is_wei = protocol in _WEI_LENDING_PROTOCOLS
-                _add_requirement(metadata.get("supply_token", {}), metadata.get("supply_amount"), is_wei=is_wei)
-
-            elif intent_type == "REPAY":
-                # Skip full-repay (MAX_UINT256 sentinel) -- wallet can't hold 2^256 tokens
-                if not metadata.get("repay_full"):
-                    is_wei = protocol in _WEI_LENDING_PROTOCOLS
-                    _add_requirement(metadata.get("repay_token", {}), metadata.get("repay_amount"), is_wei=is_wei)
-
-            elif intent_type == "BORROW":
-                # Check collateral token balance for borrow intents
-                is_wei = protocol in _WEI_LENDING_PROTOCOLS
-                _add_requirement(metadata.get("collateral_token", {}), metadata.get("collateral_amount"), is_wei=is_wei)
-
-        except (ValueError, TypeError) as e:
-            logger.debug(f"Pre-flight balance check: could not parse metadata: {e}")
-            return None  # Don't block on parse errors
-
+        requirements = _preflight_collect_requirements(action_bundle)
         if not requirements:
-            return None  # Nothing to check (HOLD, LP_CLOSE, etc.)
+            return None  # Nothing to check (HOLD, LP_CLOSE, parse error, etc.)
 
-        # Check on-chain balances
-        # balanceOf(address) selector = 0x70a08231
-        erc20_balance_of = bytes.fromhex("70a08231")
-
+        wallet = context.wallet_address or self.signer.address
         try:
             web3 = await self._get_web3()
-
-            shortfalls: list[str] = []
-            check_failures = 0
-            for symbol, address, required_wei, decimals, is_native in requirements:
-                if not address and not is_native:
-                    continue
-                try:
-                    if is_native:
-                        balance_wei = int(
-                            await asyncio.wait_for(
-                                web3.eth.get_balance(web3.to_checksum_address(wallet)),
-                                timeout=5.0,
-                            )
-                        )
-                    else:
-                        data = erc20_balance_of + bytes.fromhex(wallet[2:].lower().zfill(64))
-                        raw = await asyncio.wait_for(
-                            web3.eth.call({"to": web3.to_checksum_address(address), "data": data}),
-                            timeout=5.0,
-                        )
-                        balance_wei = int(raw.hex(), 16)
-
-                    if balance_wei < required_wei:
-                        if decimals is not None:
-                            required_human = Decimal(required_wei) / Decimal(10**decimals)
-                            actual_human = Decimal(balance_wei) / Decimal(10**decimals)
-                            shortfalls.append(
-                                f"Insufficient {symbol}: have {actual_human:.6f}, need {required_human:.6f}"
-                            )
-                        else:
-                            shortfalls.append(f"Insufficient {symbol}: have {balance_wei} wei, need {required_wei} wei")
-                except Exception as e:
-                    check_failures += 1
-                    logger.debug(f"Pre-flight: could not check {symbol} balance: {e}")
-                    # Don't block on individual check failures
-
-            if check_failures > 0:
-                logger.warning(
-                    f"Pre-flight balance check: could not verify {check_failures} of "
-                    f"{len(requirements)} token balance(s)"
-                )
-
-            if shortfalls:
-                msg = (
-                    f"Pre-flight balance check failed: {'; '.join(shortfalls)}. "
-                    f"No transactions submitted (saved gas on approvals)."
-                )
-                logger.warning(msg)
-                return msg
-
+            shortfalls = await self._preflight_check_balances(web3, wallet, requirements)
         except Exception as e:
             logger.debug(f"Pre-flight balance check skipped: {e}")
+            return None
 
-        return None
+        if not shortfalls:
+            return None
+
+        msg = (
+            f"Pre-flight balance check failed: {'; '.join(shortfalls)}. "
+            f"No transactions submitted (saved gas on approvals)."
+        )
+        logger.warning(msg)
+        return msg
+
+    async def _preflight_check_balances(
+        self,
+        web3: AsyncWeb3,
+        wallet: str,
+        requirements: list[tuple[str, str, int, int | None, bool]],
+    ) -> list[str]:
+        """Compare on-chain balances against required amounts.
+
+        Iterates every requirement, fetches the matching balance (native or
+        ERC20), and returns the list of human-formatted shortfall strings.
+        Individual RPC failures are logged at DEBUG but never raised -- a
+        balance we couldn't read cannot block submission (fail-open, VIB-1449).
+
+        Args:
+            web3: Connected AsyncWeb3 instance from ``_get_web3``.
+            wallet: Wallet address (0x-prefixed) whose balance is checked.
+            requirements: Output of ``_preflight_collect_requirements``.
+
+        Returns:
+            List of formatted shortfall strings (empty if all satisfied).
+        """
+        shortfalls: list[str] = []
+        check_failures = 0
+        for symbol, address, required_wei, decimals, is_native in requirements:
+            if not address and not is_native:
+                continue
+            try:
+                balance_wei = await _preflight_fetch_balance(web3, wallet, address, is_native)
+            except Exception as e:
+                check_failures += 1
+                logger.debug(f"Pre-flight: could not check {symbol} balance: {e}")
+                continue
+
+            if balance_wei < required_wei:
+                shortfalls.append(_preflight_format_shortfall(symbol, balance_wei, required_wei, decimals))
+
+        if check_failures > 0:
+            logger.warning(
+                f"Pre-flight balance check: could not verify {check_failures} of {len(requirements)} token balance(s)"
+            )
+        return shortfalls
 
     async def _sign_safe_batch(
         self,
