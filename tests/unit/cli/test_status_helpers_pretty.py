@@ -606,3 +606,543 @@ def test_render_details_pretty_position_none_safe() -> None:
     # Should not raise
     out = _invoke(runner, status_helpers._render_details_pretty, details, True)
     assert "Strategy: Demo Strategy" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _format_strategy_position_pnl_line branches
+# ---------------------------------------------------------------------------
+
+
+def test_format_pnl_line_current_only_no_color() -> None:
+    """Current-only input skips the PnL color logic entirely."""
+    sp = _make_strategy_position(current_price="1200")
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert out == "Current: $1200"
+    # No PnL part -> no ANSI color codes
+    assert "\x1b[" not in out
+
+
+def test_format_pnl_line_entry_and_current_only() -> None:
+    """Entry + current (no PnL) joins with ' | ' and no coloring."""
+    sp = _make_strategy_position(entry_price="1000", current_price="1100")
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert out == "Entry: $1000 | Current: $1100"
+    assert "PnL:" not in out
+
+
+def test_format_pnl_line_negative_float_string() -> None:
+    """Negative-float string triggers the `pnl_num < 0` branch (red, no prefix)."""
+    sp = _make_strategy_position(unrealized_pnl_usd="-0.01")
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert "\x1b[31m" in out  # red
+    assert "$-0.01" in out
+    assert "+$" not in out
+
+
+def test_format_pnl_line_positive_float_string_with_pct() -> None:
+    """Positive float + pct renders the full `+$val (pct%)` block in green."""
+    sp = _make_strategy_position(
+        unrealized_pnl_usd="2.5",
+        unrealized_pnl_pct="0.25",
+    )
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert "\x1b[32m" in out  # green
+    assert "+$2.5 (0.25%)" in out
+
+
+def test_format_pnl_line_zero_float_string_with_pct_no_prefix() -> None:
+    """Zero PnL with pct still emits the pct suffix but no '+' prefix."""
+    sp = _make_strategy_position(
+        unrealized_pnl_usd="0.0",
+        unrealized_pnl_pct="0.0",
+    )
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert "\x1b[37m" in out  # white
+    assert "$0.0 (0.0%)" in out
+    assert "+$" not in out
+
+
+def test_format_pnl_line_none_value_invalid_fallback() -> None:
+    """`None` for `unrealized_pnl_usd` exercises the TypeError branch.
+
+    Note: the guard at line 406 treats `None != ""` as True, so this DOES
+    take the PnL path with TypeError fallback to 0.0 -- preserving the
+    silent-0.0 semantic (#1697).
+    """
+    sp = _make_strategy_position(unrealized_pnl_usd=None)
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    # TypeError -> pnl_num=0.0 -> white, no prefix
+    assert "\x1b[37m" in out
+    # The raw `None` value is formatted into the output literal
+    assert "$None" in out
+
+
+def test_format_pnl_line_value_error_branch() -> None:
+    """Explicitly exercise the ValueError branch of the try/except."""
+    sp = _make_strategy_position(unrealized_pnl_usd="abc-not-a-num")
+    out = status_helpers._format_strategy_position_pnl_line(sp)
+    assert "\x1b[37m" in out  # 0.0 fallback -> white
+    assert "$abc-not-a-num" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _format_strategy_position_size_line branches
+# ---------------------------------------------------------------------------
+
+
+def test_format_size_line_only_collateral() -> None:
+    """Only collateral present -> single-segment line."""
+    sp = _make_strategy_position(value_usd="", collateral_usd="50")
+    out = status_helpers._format_strategy_position_size_line(sp)
+    assert out == "Collateral: $50"
+
+
+def test_format_size_line_only_leverage() -> None:
+    """Only leverage present -> single-segment line."""
+    sp = _make_strategy_position(value_usd="", leverage="10")
+    out = status_helpers._format_strategy_position_size_line(sp)
+    assert out == "Leverage: 10x"
+
+
+def test_format_size_line_only_health_factor() -> None:
+    """Only health_factor present -> single-segment line."""
+    sp = _make_strategy_position(value_usd="", health_factor="2.0")
+    out = status_helpers._format_strategy_position_size_line(sp)
+    assert out == "HF: 2.0"
+
+
+def test_format_size_line_size_plus_hf() -> None:
+    """Size + HF (skipping collateral/leverage) joins with ' | '."""
+    sp = _make_strategy_position(size_usd="1000", health_factor="1.5")
+    out = status_helpers._format_strategy_position_size_line(sp)
+    assert out == "Size: $1000 | HF: 1.5"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _print_strategy_positions (line 450, 445->448)
+# ---------------------------------------------------------------------------
+
+
+def test_print_strategy_positions_pnl_line_emitted_when_populated() -> None:
+    """`pnl_line` is non-empty => inner echo on line 450 fires."""
+    runner = CliRunner()
+    sp = _make_strategy_position(
+        entry_price="1000",
+        current_price="1100",
+        unrealized_pnl_usd="100",
+        unrealized_pnl_pct="10.0",
+    )
+    out = _invoke(runner, status_helpers._print_strategy_positions, [sp])
+    # Pretty layout: indented 6 spaces then the joined PnL line
+    assert "Entry: $1000" in out
+    assert "Current: $1100" in out
+    assert "+$100 (10.0%)" in out
+
+
+def test_print_strategy_positions_size_line_emitted_when_populated() -> None:
+    """`size_line` non-empty => indented size summary is emitted."""
+    runner = CliRunner()
+    sp = _make_strategy_position(size_usd="500", leverage="3", value_usd="")
+    out = _invoke(runner, status_helpers._print_strategy_positions, [sp])
+    assert "      Size: $500 | Leverage: 3x" in out
+
+
+def test_print_strategy_positions_size_empty_pnl_populated() -> None:
+    """Exercise branch 445->448 (size empty, pnl populated)."""
+    runner = CliRunner()
+    # Clear all the size-line fields so size_line is "" -> falsy
+    # but provide pnl fields to drive line 450.
+    sp = _make_strategy_position(
+        value_usd="",
+        size_usd="",
+        collateral_usd="",
+        leverage="",
+        health_factor="",
+        entry_price="2000",
+        unrealized_pnl_usd="5",
+    )
+    out = _invoke(runner, status_helpers._print_strategy_positions, [sp])
+    # No Size/Value line
+    assert "Size:" not in out
+    assert "Value:" not in out
+    # PnL-line present
+    assert "Entry: $2000" in out
+    assert "+$5" in out
+
+
+def test_print_strategy_positions_multiple_entries_each_rendered() -> None:
+    """Each item in the iterable gets its own header + body block."""
+    runner = CliRunner()
+    sp1 = _make_strategy_position(position_id="ETH-PERP", direction="LONG")
+    sp2 = _make_strategy_position(position_id="BTC-PERP", direction="SHORT")
+    out = _invoke(runner, status_helpers._print_strategy_positions, [sp1, sp2])
+    assert "ETH-PERP" in out
+    assert "BTC-PERP" in out
+    assert "LONG" in out
+    assert "SHORT" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _print_summary_header
+# ---------------------------------------------------------------------------
+
+
+def test_print_summary_header_protocol_empty_shows_dash() -> None:
+    """Empty-string `protocol` renders as `-`."""
+    runner = CliRunner()
+    s = _make_summary(protocol="")
+    out = _invoke(runner, status_helpers._print_summary_header, s)
+    assert "Protocol:    -" in out
+
+
+def test_print_summary_header_pnl_since_deploy_populated() -> None:
+    """Non-empty `pnl_since_deploy_usd` drops the `-` placeholder."""
+    runner = CliRunner()
+    s = _make_summary(pnl_since_deploy_usd="100.00")
+    out = _invoke(runner, status_helpers._print_summary_header, s)
+    assert "PnL (total): $100.00" in out
+    assert "PnL (total): -" not in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _print_operator_card severity color map
+# ---------------------------------------------------------------------------
+
+
+def _spy_click_style(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Install a `click.style` spy in `status_helpers` and return a call log.
+
+    Each recorded entry captures `text`, `fg`, `bold`, and any additional
+    kwargs passed through to the original style. Used to make color-mapping
+    assertions deterministic even when the Runner strips ANSI with
+    `color=False`.
+    """
+    calls: list[dict[str, Any]] = []
+    original = status_helpers.click.style
+
+    def _spy(text: str, fg: str | None = None, bold: bool = False, **kw: Any) -> str:
+        calls.append({"text": text, "fg": fg, "bold": bold, **kw})
+        return original(text, fg=fg, bold=bold, **kw)
+
+    monkeypatch.setattr(status_helpers.click, "style", _spy)
+    return calls
+
+
+def test_print_operator_card_severity_low_uses_white_fg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LOW severity maps to `fg="white"` (not bold) via severity_colors."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    oc = _make_operator_card(severity="LOW", reason="FYI")
+    out = _invoke(runner, status_helpers._print_operator_card, oc)
+    assert "Operator Alert [LOW]: FYI" in out
+    # The alert header style call must record fg=white and bold=False for LOW
+    header_calls = [c for c in calls if "Operator Alert [LOW]" in c["text"]]
+    assert header_calls, "expected alert header to be styled via click.style"
+    assert header_calls[0]["fg"] == "white"
+    assert header_calls[0]["bold"] is False
+
+
+def test_print_operator_card_severity_medium_uses_yellow_fg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MEDIUM maps to yellow (not bold)."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    oc = _make_operator_card(severity="MEDIUM", reason="Watch")
+    _invoke(runner, status_helpers._print_operator_card, oc)
+    header_calls = [c for c in calls if "Operator Alert [MEDIUM]" in c["text"]]
+    assert header_calls[0]["fg"] == "yellow"
+    assert header_calls[0]["bold"] is False
+
+
+def test_print_operator_card_severity_high_is_bold_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HIGH maps to bold red."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    oc = _make_operator_card(severity="HIGH", reason="Urgent")
+    _invoke(runner, status_helpers._print_operator_card, oc)
+    header_calls = [c for c in calls if "Operator Alert [HIGH]" in c["text"]]
+    assert header_calls[0]["fg"] == "red"
+    assert header_calls[0]["bold"] is True
+
+
+def test_print_operator_card_severity_critical_is_bold_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CRITICAL maps to bold red."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    oc = _make_operator_card(severity="CRITICAL", reason="STOP")
+    _invoke(runner, status_helpers._print_operator_card, oc)
+    header_calls = [c for c in calls if "Operator Alert [CRITICAL]" in c["text"]]
+    assert header_calls[0]["fg"] == "red"
+    assert header_calls[0]["bold"] is True
+
+
+def test_print_operator_card_severity_unknown_falls_back_to_white(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown severity falls back to `fg="white"` via `.get(sev, "white")`."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    oc = _make_operator_card(severity="BOGUS", reason="mystery")
+    out = _invoke(runner, status_helpers._print_operator_card, oc)
+    assert "Operator Alert [BOGUS]: mystery" in out
+    header_calls = [c for c in calls if "Operator Alert [BOGUS]" in c["text"]]
+    # Unknown severity -> falls back to the default "white" AND bold=False
+    # (because "BOGUS" is not in the `{HIGH, CRITICAL}` bold set).
+    assert header_calls[0]["fg"] == "white"
+    assert header_calls[0]["bold"] is False
+
+
+def test_print_operator_card_risk_only() -> None:
+    """Populated `risk_description` but no actions => only Risk line."""
+    runner = CliRunner()
+    oc = _make_operator_card(risk_description="Immediate loss risk")
+    out = _invoke(runner, status_helpers._print_operator_card, oc)
+    assert "Risk: Immediate loss risk" in out
+    assert "Suggested:" not in out
+
+
+def test_print_operator_card_suggested_only() -> None:
+    """Populated `suggested_actions` without `risk_description` => only Suggested block."""
+    runner = CliRunner()
+    oc = _make_operator_card(
+        risk_description="",
+        suggested_actions=["resume manually"],
+    )
+    out = _invoke(runner, status_helpers._print_operator_card, oc)
+    assert "Risk:" not in out
+    assert "Suggested:" in out
+    assert "- resume manually" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _print_legacy_position
+# ---------------------------------------------------------------------------
+
+
+def test_print_legacy_position_only_health_factor() -> None:
+    """Only `health_factor` set -> block emitted with just HF line."""
+    runner = CliRunner()
+    pos = _make_position(health_factor="2.0")
+    out = _invoke(runner, status_helpers._print_legacy_position, pos)
+    assert "Position:" in out
+    assert "Health Factor: 2.0" in out
+
+
+def test_print_legacy_position_health_factor_zero_included() -> None:
+    """`health_factor=0` triggers emission (only None suppresses)."""
+    runner = CliRunner()
+    pos = _make_position(health_factor=0)
+    out = _invoke(runner, status_helpers._print_legacy_position, pos)
+    assert "Health Factor: 0" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _print_chain_health status color map
+# ---------------------------------------------------------------------------
+
+
+def test_print_chain_health_healthy_status_is_green(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HEALTHY status maps to `fg="green"`."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    health = {
+        "arbitrum": SimpleNamespace(
+            status="HEALTHY", rpc_latency_ms=10, gas_price_gwei="0.1"
+        )
+    }
+    _invoke(runner, status_helpers._print_chain_health, health)
+    status_calls = [c for c in calls if c["text"] == "HEALTHY"]
+    assert status_calls, "expected status token to be styled"
+    assert status_calls[0]["fg"] == "green"
+
+
+def test_print_chain_health_degraded_status_is_yellow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEGRADED status maps to `fg="yellow"`."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    health = {
+        "base": SimpleNamespace(status="DEGRADED", rpc_latency_ms=500, gas_price_gwei="1")
+    }
+    _invoke(runner, status_helpers._print_chain_health, health)
+    status_calls = [c for c in calls if c["text"] == "DEGRADED"]
+    assert status_calls[0]["fg"] == "yellow"
+
+
+def test_print_chain_health_unavailable_status_is_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UNAVAILABLE status maps to `fg="red"`."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    health = {
+        "arbitrum": SimpleNamespace(
+            status="UNAVAILABLE", rpc_latency_ms=0, gas_price_gwei="0"
+        )
+    }
+    out = _invoke(runner, status_helpers._print_chain_health, health)
+    assert "UNAVAILABLE" in out
+    status_calls = [c for c in calls if c["text"] == "UNAVAILABLE"]
+    assert status_calls[0]["fg"] == "red"
+
+
+def test_print_chain_health_unknown_status_falls_back_to_white(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown status falls back to white via `.get(status, "white")`."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    health = {
+        "weird-chain": SimpleNamespace(
+            status="MAINTENANCE", rpc_latency_ms=1, gas_price_gwei="1"
+        )
+    }
+    out = _invoke(runner, status_helpers._print_chain_health, health)
+    assert "MAINTENANCE" in out
+    status_calls = [c for c in calls if c["text"] == "MAINTENANCE"]
+    assert status_calls[0]["fg"] == "white"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _print_timeline color map
+# ---------------------------------------------------------------------------
+
+
+def test_print_timeline_event_type_colors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each known event type maps to its declared color; unknown falls back to white."""
+    calls = _spy_click_style(monkeypatch)
+    runner = CliRunner()
+    events = [
+        SimpleNamespace(
+            timestamp=1, event_type="TRADE", description="t", tx_hash="", chain="arb"
+        ),
+        SimpleNamespace(
+            timestamp=2, event_type="REBALANCE", description="r", tx_hash="", chain="arb"
+        ),
+        SimpleNamespace(
+            timestamp=3, event_type="ERROR", description="e", tx_hash="", chain="arb"
+        ),
+        SimpleNamespace(
+            timestamp=4,
+            event_type="STATE_CHANGE",
+            description="s",
+            tx_hash="",
+            chain="arb",
+        ),
+        SimpleNamespace(
+            timestamp=5, event_type="UNKNOWN", description="u", tx_hash="", chain="arb"
+        ),
+    ]
+    _invoke(runner, status_helpers._print_timeline, events)
+
+    expected = {
+        "TRADE": "green",
+        "REBALANCE": "cyan",
+        "ERROR": "red",
+        "STATE_CHANGE": "yellow",
+        "UNKNOWN": "white",  # falls back via .get(etype, "white")
+    }
+    for etype, fg in expected.items():
+        etype_calls = [c for c in calls if c["text"] == etype]
+        assert etype_calls, f"expected event_type token '{etype}' to be styled"
+        assert etype_calls[0]["fg"] == fg, (
+            f"{etype} should map to fg={fg!r}, got {etype_calls[0]['fg']!r}"
+        )
+
+
+def test_print_timeline_no_tx_hash_omits_tx_suffix() -> None:
+    """Empty `tx_hash` means no `tx:...` appendage on the event line."""
+    runner = CliRunner()
+    events = [
+        SimpleNamespace(
+            timestamp=1_700_000_000,
+            event_type="TRADE",
+            description="Buy",
+            tx_hash="",
+            chain="arbitrum",
+        )
+    ]
+    out = _invoke(runner, status_helpers._print_timeline, events)
+    assert "tx:" not in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_details_pretty empty-section guards
+# ---------------------------------------------------------------------------
+
+
+def test_render_details_pretty_empty_operator_card_skipped() -> None:
+    """`operator_card` with empty `strategy_id` -> no Operator Alert block."""
+    runner = CliRunner()
+    oc = _make_operator_card(strategy_id="")
+    details = _make_details(operator_card=oc)
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Operator Alert" not in out
+
+
+def test_render_details_pretty_legacy_pos_populated_only() -> None:
+    """Legacy position with token_balances populated -> `Position:` block."""
+    runner = CliRunner()
+    pos = _make_position(
+        token_balances=[SimpleNamespace(symbol="USDC", balance="10", value_usd="10")]
+    )
+    details = _make_details(position=pos)
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Position:" in out
+    assert "USDC: 10 ($10)" in out
+    # Empty strategy_positions -> NOT present
+    assert "Positions:" not in out
+
+
+def test_render_details_pretty_only_strategy_positions() -> None:
+    """Only `strategy_positions` populated => `Positions:` present, no legacy block.
+
+    Regression guard: if someone reintroduces the legacy `Position:` block on a
+    position that only has `strategy_positions`, this test must fail. The
+    legacy block starts with the literal line `  Position:` (2-space indent,
+    newline-terminated), while the new-style block uses `  Positions:` (note
+    the plural `s`). A plain substring check disambiguates -- NO `or` guard.
+    """
+    runner = CliRunner()
+    pos = _make_position(strategy_positions=[_make_strategy_position()])
+    details = _make_details(position=pos)
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    # Legacy `Position:` line would be `  Position:\n` (singular + newline).
+    # The plural `  Positions:\n` must NOT match this literal.
+    assert "  Position:\n" not in out
+    # But the strategy_positions block (plural) IS present
+    assert "  Positions:\n" in out
+
+
+def test_render_details_pretty_chain_health_only() -> None:
+    """Chain_health populated alone -> only that block present (plus summary)."""
+    runner = CliRunner()
+    health = {
+        "arbitrum": SimpleNamespace(
+            status="HEALTHY", rpc_latency_ms=10, gas_price_gwei="0.1"
+        )
+    }
+    details = _make_details(chain_health=health)
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Chain Health:" in out
+    assert "Position:" not in out
+    assert "Positions:" not in out
+    assert "Recent Events:" not in out
+
+
+def test_render_details_pretty_timeline_enabled_but_empty() -> None:
+    """`timeline_enabled=True` with empty events -> no `Recent Events:` block."""
+    runner = CliRunner()
+    details = _make_details(timeline=[])
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert "Recent Events:" not in out
+
+
+def test_render_details_pretty_trailing_blank_line() -> None:
+    """Output ends with an actual blank line (the final `click.echo()` call).
+
+    The orchestrator's last line is a bare `click.echo()` — that emits a
+    single `"\n"` AFTER the previous line's own `"\n"`, producing `"\n\n"`
+    at the tail. This asserts that invariant directly (not just "ends with
+    a newline", which would pass even if the final blank line were removed).
+    """
+    runner = CliRunner()
+    details = _make_details()
+    out = _invoke(runner, status_helpers._render_details_pretty, details, True)
+    assert out.endswith("\n\n")

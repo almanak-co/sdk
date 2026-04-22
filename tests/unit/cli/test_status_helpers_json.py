@@ -677,3 +677,248 @@ def test_render_details_as_json_kitchen_sink() -> None:
     assert data["position"]["health_factor"] == 2.5
     assert data["position"]["strategy_positions"][0]["direction"] == "LONG"
     assert data["operator_card"]["severity"] == "CRITICAL"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: transport edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_strategy_details_disconnect_runs_on_rpc_error() -> None:
+    """finally-clause disconnect fires exactly once even when RPC raises."""
+    client = _FakeClient(raise_exc=RuntimeError("rpc dropped"))
+    with pytest.raises(SystemExit):
+        status_helpers._fetch_strategy_details(
+            client,  # type: ignore[arg-type]
+            "demo",
+            include_timeline=True,
+            timeline_limit=1,
+        )
+    # `finally` ran exactly once despite the error
+    assert client.disconnect_called == 1
+
+
+def test_fetch_strategy_details_request_fields_include_timeline_false() -> None:
+    """`include_timeline=False` propagates verbatim to the proto request."""
+    fake_response = _make_details()
+    client = _FakeClient(response=fake_response)
+    status_helpers._fetch_strategy_details(
+        client,  # type: ignore[arg-type]
+        "demo",
+        include_timeline=False,
+        timeline_limit=25,
+    )
+    req = client.dashboard.last_request
+    assert req.include_timeline is False
+    # Plan target: include_pnl_history is always False (wired by helper, not arg)
+    assert req.include_pnl_history is False
+    assert req.timeline_limit == 25
+
+
+def test_fetch_strategy_details_grpc_like_error_string(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A gRPC-style error class stringifies verbatim into the error message."""
+
+    class _FakeGrpcError(Exception):
+        def __str__(self) -> str:
+            return "StatusCode.UNAVAILABLE: channel closed"
+
+    client = _FakeClient(raise_exc=_FakeGrpcError())
+    with pytest.raises(SystemExit) as excinfo:
+        status_helpers._fetch_strategy_details(
+            client,  # type: ignore[arg-type]
+            "demo",
+            include_timeline=True,
+            timeline_limit=10,
+        )
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    # Whole error string grep — smoke test anchor
+    assert "Failed to get strategy details: StatusCode.UNAVAILABLE: channel closed" in err
+    assert client.disconnect_called == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_json_position edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_render_json_position_strategy_positions_partial_fields() -> None:
+    """Only some optional fields populated -> only those emitted (proto3 sentinel)."""
+    sp = _make_strategy_position(
+        direction="SHORT",
+        size_usd="250",
+        # entry_price, current_price, etc. remain "" -> stripped
+    )
+    pos = _make_position(strategy_positions=[sp])
+    out = status_helpers._render_json_position(pos)
+    entry = out["strategy_positions"][0]
+    # Required always emitted
+    assert "position_type" in entry
+    # Explicitly set optionals present
+    assert entry["direction"] == "SHORT"
+    assert entry["size_usd"] == "250"
+    # Empty-string optionals NOT present
+    assert "entry_price" not in entry
+    assert "current_price" not in entry
+    assert "unrealized_pnl_usd" not in entry
+    assert "unrealized_pnl_pct" not in entry
+    assert "collateral_usd" not in entry
+    assert "leverage" not in entry
+    assert "health_factor" not in entry
+
+
+def test_render_json_position_strategy_positions_details_map_preserved() -> None:
+    """Non-empty `details` map is dict-cloned (proto map semantics preserved)."""
+    sp = _make_strategy_position(details={"risk_band": "amber", "trace": "xyz"})
+    pos = _make_position(strategy_positions=[sp])
+    out = status_helpers._render_json_position(pos)
+    assert out["strategy_positions"][0]["details"] == {
+        "risk_band": "amber",
+        "trace": "xyz",
+    }
+    # Ensure it's a dict, not the proto object
+    assert isinstance(out["strategy_positions"][0]["details"], dict)
+
+
+def test_render_json_position_multiple_strategy_positions() -> None:
+    """More than one position entry flows through the serializer."""
+    sp1 = _make_strategy_position(position_id="ETH-PERP", direction="LONG")
+    sp2 = _make_strategy_position(position_id="BTC-PERP", direction="SHORT")
+    pos = _make_position(strategy_positions=[sp1, sp2])
+    out = status_helpers._render_json_position(pos)
+    assert len(out["strategy_positions"]) == 2
+    assert out["strategy_positions"][0]["position_id"] == "ETH-PERP"
+    assert out["strategy_positions"][1]["position_id"] == "BTC-PERP"
+
+
+def test_render_json_position_health_factor_zero_included() -> None:
+    """`health_factor=0` is NOT None, so it's emitted (coerced to float)."""
+    pos = _make_position(health_factor=0)
+    out = status_helpers._render_json_position(pos)
+    assert out["health_factor"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_json_summary
+# ---------------------------------------------------------------------------
+
+
+def test_render_json_summary_pnl_since_deploy_proto3_empty_string_to_none() -> None:
+    """proto3 empty-string for `pnl_since_deploy_usd` becomes JSON `None`.
+
+    This preserves the documented behavior: proto3 string fields never have
+    `is set` semantics -- an empty string IS the sentinel for unset. The
+    refactor keeps this behavior byte-for-byte.
+    """
+    s = _make_summary(pnl_since_deploy_usd="")
+    out = status_helpers._render_json_summary(s)
+    assert out["pnl_since_deploy_usd"] is None
+
+
+def test_render_json_summary_zero_pnl_since_deploy_is_not_none() -> None:
+    """A non-empty `"0"` string is kept verbatim (distinguished from empty)."""
+    s = _make_summary(pnl_since_deploy_usd="0")
+    out = status_helpers._render_json_summary(s)
+    # `"0"` is truthy as a non-empty string -> passes the `or None` guard
+    assert out["pnl_since_deploy_usd"] == "0"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_json_timeline
+# ---------------------------------------------------------------------------
+
+
+def test_render_json_timeline_empty_returns_empty_list() -> None:
+    """Empty timeline serializer returns `[]`, not None."""
+    assert status_helpers._render_json_timeline([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_json_chain_health
+# ---------------------------------------------------------------------------
+
+
+def test_render_json_chain_health_empty_returns_empty_dict() -> None:
+    """Empty chain_health map serializer returns `{}`."""
+    assert status_helpers._render_json_chain_health({}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_json_operator_card
+# ---------------------------------------------------------------------------
+
+
+def test_render_json_operator_card_suggested_actions_empty_list() -> None:
+    """Empty `suggested_actions` list stays as an empty list in the JSON."""
+    oc = SimpleNamespace(
+        strategy_id="demo",
+        severity="LOW",
+        reason="FYI",
+        risk_description="",
+        suggested_actions=[],
+    )
+    out = status_helpers._render_json_operator_card(oc)
+    assert out["suggested_actions"] == []
+    # risk_description passes through even when empty (no guard in helper)
+    assert out["risk_description"] == ""
+
+
+def test_render_json_operator_card_suggested_actions_list_coerced() -> None:
+    """RepeatedScalarContainer-like inputs are coerced to plain list."""
+    oc = SimpleNamespace(
+        strategy_id="demo",
+        severity="MEDIUM",
+        reason="Watch",
+        risk_description="",
+        suggested_actions=("a", "b", "c"),  # tuple -> list
+    )
+    out = status_helpers._render_json_operator_card(oc)
+    assert out["suggested_actions"] == ["a", "b", "c"]
+    assert isinstance(out["suggested_actions"], list)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A.3 — extended coverage: _render_details_as_json orchestration guards
+# ---------------------------------------------------------------------------
+
+
+def test_render_details_as_json_position_falsy_skips_render() -> None:
+    """`details.position` being truthy-empty container is skipped by outer guard."""
+    # An empty SimpleNamespace stands in for a proto message where bool(...) is
+    # True but all sub-fields are empty -- the inner `if pos_data` short-circuits.
+    details = _make_details(position=_make_position())
+    data = json.loads(status_helpers._render_details_as_json(details))
+    assert "position" not in data
+
+
+def test_render_details_as_json_operator_card_truthy_no_strategy_id() -> None:
+    """`operator_card` truthy but `strategy_id` empty -> NOT included."""
+    oc = SimpleNamespace(
+        strategy_id="",
+        severity="HIGH",
+        reason="present-but-unset",
+        risk_description="",
+        suggested_actions=[],
+    )
+    details = _make_details(operator_card=oc)
+    data = json.loads(status_helpers._render_details_as_json(details))
+    assert "operator_card" not in data
+
+
+def test_render_details_as_json_chain_health_empty_dict_omitted() -> None:
+    """Empty chain_health dict -> the top-level key is omitted."""
+    details = _make_details(chain_health={})
+    data = json.loads(status_helpers._render_details_as_json(details))
+    assert "chain_health" not in data
+
+
+def test_render_details_as_json_is_valid_json() -> None:
+    """Top-level output is a JSON string that round-trips via json.loads."""
+    details = _make_details()
+    out_str = status_helpers._render_details_as_json(details)
+    assert isinstance(out_str, str)
+    # Round-trip parse -- no exception = valid JSON
+    data = json.loads(out_str)
+    assert data["strategy_id"] == "demo"
