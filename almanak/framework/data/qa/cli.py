@@ -23,6 +23,7 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 from dotenv import load_dotenv
@@ -30,8 +31,10 @@ from dotenv import load_dotenv
 from .cli_helpers import (
     apply_cli_overrides,
     configure_logging,
+    echo_category_failures,
     load_qa_config_or_exit,
     print_startup_banner,
+    summarize_category,
 )
 from .config import QAConfig
 from .runner import QAReport, QARunner
@@ -267,36 +270,17 @@ def qa_data(
     click.echo("QA TEST SUMMARY")
     click.echo("=" * 60)
 
-    # Show test category summaries
-    if report.cex_spot_results:
-        passed = sum(1 for r in report.cex_spot_results if r.passed)
-        total = len(report.cex_spot_results)
-        status = "PASS" if passed == total else "FAIL"
-        click.echo(f"CEX Spot Prices:    {passed}/{total} [{status}]")
-
-    if report.dex_spot_results:
-        passed = sum(1 for r in report.dex_spot_results if r.passed)
-        total = len(report.dex_spot_results)
-        status = "PASS" if passed == total else "FAIL"
-        click.echo(f"DEX Spot Prices:    {passed}/{total} [{status}]")
-
-    if report.cex_historical_results:
-        passed = sum(1 for r in report.cex_historical_results if r.passed)
-        total = len(report.cex_historical_results)
-        status = "PASS" if passed == total else "FAIL"
-        click.echo(f"CEX Historical:     {passed}/{total} [{status}]")
-
-    if report.dex_historical_results:
-        passed = sum(1 for r in report.dex_historical_results if r.passed)
-        total = len(report.dex_historical_results)
-        status = "PASS" if passed == total else "FAIL"
-        click.echo(f"DEX Historical:     {passed}/{total} [{status}]")
-
-    if report.rsi_results:
-        passed = sum(1 for r in report.rsi_results if r.passed)
-        total = len(report.rsi_results)
-        status = "PASS" if passed == total else "FAIL"
-        click.echo(f"RSI Indicators:     {passed}/{total} [{status}]")
+    # Show test category summaries.
+    # (summary_label, results) — order is operator-facing and must be preserved.
+    summary_categories: list[tuple[str, list[Any]]] = [
+        ("CEX Spot Prices:    ", report.cex_spot_results),
+        ("DEX Spot Prices:    ", report.dex_spot_results),
+        ("CEX Historical:     ", report.cex_historical_results),
+        ("DEX Historical:     ", report.dex_historical_results),
+        ("RSI Indicators:     ", report.rsi_results),
+    ]
+    for summary_label, results in summary_categories:
+        summarize_category(results, summary_label)
 
     click.echo("-" * 60)
     click.echo(f"Total:              {report.passed_tests}/{report.total_tests}")
@@ -310,24 +294,22 @@ def qa_data(
         sys.exit(0)
     else:
         click.echo("OVERALL: FAILED")
-        # Show failure details
+        # Show failure details.
+        # (failure_label, results) — order is operator-facing and must be
+        # preserved. Labels differ from the summary labels above: no column
+        # padding, "Historical" instead of "Prices", "RSI" instead of
+        # "RSI Indicators".
         click.echo()
         click.echo("Failed tests:")
-        for cex_spot_r in report.cex_spot_results:
-            if not cex_spot_r.passed:
-                click.echo(f"  - CEX Spot {cex_spot_r.token}: {cex_spot_r.error or 'validation failed'}")
-        for dex_spot_r in report.dex_spot_results:
-            if not dex_spot_r.passed:
-                click.echo(f"  - DEX Spot {dex_spot_r.token}: {dex_spot_r.error or 'validation failed'}")
-        for cex_hist_r in report.cex_historical_results:
-            if not cex_hist_r.passed:
-                click.echo(f"  - CEX Historical {cex_hist_r.token}: {cex_hist_r.error or 'validation failed'}")
-        for dex_hist_r in report.dex_historical_results:
-            if not dex_hist_r.passed:
-                click.echo(f"  - DEX Historical {dex_hist_r.token}: {dex_hist_r.error or 'validation failed'}")
-        for rsi_r in report.rsi_results:
-            if not rsi_r.passed:
-                click.echo(f"  - RSI {rsi_r.token}: {rsi_r.error or 'validation failed'}")
+        failure_categories: list[tuple[str, list[Any]]] = [
+            ("CEX Spot", report.cex_spot_results),
+            ("DEX Spot", report.dex_spot_results),
+            ("CEX Historical", report.cex_historical_results),
+            ("DEX Historical", report.dex_historical_results),
+            ("RSI", report.rsi_results),
+        ]
+        for failure_label, results in failure_categories:
+            echo_category_failures(results, failure_label)
         sys.exit(1)
 
 

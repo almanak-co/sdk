@@ -27,10 +27,27 @@ from click.testing import CliRunner
 from almanak.framework.data.qa.cli_helpers import (
     apply_cli_overrides,
     configure_logging,
+    echo_category_failures,
     load_qa_config_or_exit,
     print_startup_banner,
+    summarize_category,
 )
 from almanak.framework.data.qa.config import QAConfig, QAThresholds
+
+
+class _FakeResult:
+    """Lightweight stand-in for a category result used by the summary/failure helpers.
+
+    Matches the ``.passed`` / ``.token`` / ``.error`` surface that the inline
+    ``qa_data`` blocks read. We deliberately avoid constructing real
+    ``CEXSpotResult`` / ``DEXSpotResult`` etc. instances so the helper tests
+    stay decoupled from the runner's result dataclasses.
+    """
+
+    def __init__(self, passed: bool, token: str = "T", error: str | None = None) -> None:
+        self.passed = passed
+        self.token = token
+        self.error = error
 
 
 def _make_config(**overrides: object) -> QAConfig:
@@ -290,3 +307,158 @@ def test_load_qa_config_or_exit_echo_strings_verbatim(
         result = runner.invoke(_cmd)
 
     assert expected in result.output
+
+
+# =============================================================================
+# summarize_category (Phase 6.2)
+# =============================================================================
+
+
+def _invoke_summary(results: list[_FakeResult], label: str) -> str:
+    """Invoke ``summarize_category`` via a throwaway Click command for capture."""
+    runner = CliRunner()
+
+    @click.command()
+    def _cmd() -> None:
+        summarize_category(results, label)
+
+    result = runner.invoke(_cmd)
+    assert result.exit_code == 0
+    return result.output
+
+
+class TestSummarizeCategory:
+    def test_empty_results_is_noop(self) -> None:
+        """Guarded ``if report.<category>_results:`` original => no output."""
+        out = _invoke_summary([], "CEX Spot Prices:    ")
+        assert out == ""
+
+    def test_all_pass_emits_pass_status(self) -> None:
+        results = [_FakeResult(passed=True), _FakeResult(passed=True)]
+        out = _invoke_summary(results, "CEX Spot Prices:    ")
+        assert out == "CEX Spot Prices:    2/2 [PASS]\n"
+
+    def test_all_fail_emits_fail_status(self) -> None:
+        results = [_FakeResult(passed=False), _FakeResult(passed=False)]
+        out = _invoke_summary(results, "DEX Historical:     ")
+        assert out == "DEX Historical:     0/2 [FAIL]\n"
+
+    def test_mixed_pass_fail_emits_fail_status(self) -> None:
+        """Any failing result flips the status to FAIL, not PARTIAL."""
+        results = [
+            _FakeResult(passed=True),
+            _FakeResult(passed=False),
+            _FakeResult(passed=True),
+        ]
+        out = _invoke_summary(results, "RSI Indicators:     ")
+        assert out == "RSI Indicators:     2/3 [FAIL]\n"
+
+    def test_single_passing_result(self) -> None:
+        out = _invoke_summary([_FakeResult(passed=True)], "CEX Historical:     ")
+        assert out == "CEX Historical:     1/1 [PASS]\n"
+
+    def test_label_is_written_verbatim(self) -> None:
+        """Alignment / padding is caller-owned -- we don't trim or re-pad."""
+        out = _invoke_summary([_FakeResult(passed=True)], "X")
+        assert out == "X1/1 [PASS]\n"
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "CEX Spot Prices:    ",
+            "DEX Spot Prices:    ",
+            "CEX Historical:     ",
+            "DEX Historical:     ",
+            "RSI Indicators:     ",
+        ],
+    )
+    def test_canonical_labels_are_20_chars_wide(self, label: str) -> None:
+        """All five caller-supplied labels must share the 20-char column width
+        so the summary block in ``qa_data`` renders as a clean aligned table."""
+        assert len(label) == 20
+
+
+# =============================================================================
+# echo_category_failures (Phase 6.3)
+# =============================================================================
+
+
+def _invoke_failures(results: list[_FakeResult], label: str) -> str:
+    """Invoke ``echo_category_failures`` via a throwaway Click command."""
+    runner = CliRunner()
+
+    @click.command()
+    def _cmd() -> None:
+        echo_category_failures(results, label)
+
+    result = runner.invoke(_cmd)
+    assert result.exit_code == 0
+    return result.output
+
+
+class TestEchoCategoryFailures:
+    def test_empty_results_is_noop(self) -> None:
+        assert _invoke_failures([], "CEX Spot") == ""
+
+    def test_all_pass_is_noop(self) -> None:
+        """If every result passed, the Phase G loop has nothing to echo."""
+        results = [
+            _FakeResult(passed=True, token="ETH"),
+            _FakeResult(passed=True, token="WBTC"),
+        ]
+        assert _invoke_failures(results, "CEX Spot") == ""
+
+    def test_single_failure_uses_error_message(self) -> None:
+        results = [_FakeResult(passed=False, token="ETH", error="price mismatch")]
+        out = _invoke_failures(results, "CEX Spot")
+        assert out == "  - CEX Spot ETH: price mismatch\n"
+
+    def test_failure_without_error_falls_back_to_validation_failed(self) -> None:
+        """``None`` / empty error => ``'validation failed'`` sentinel."""
+        results = [_FakeResult(passed=False, token="WBTC", error=None)]
+        out = _invoke_failures(results, "DEX Spot")
+        assert out == "  - DEX Spot WBTC: validation failed\n"
+
+    def test_empty_string_error_falls_back_to_validation_failed(self) -> None:
+        """``""`` is falsy in the original inline expression; mirror that."""
+        results = [_FakeResult(passed=False, token="LINK", error="")]
+        out = _invoke_failures(results, "RSI")
+        assert out == "  - RSI LINK: validation failed\n"
+
+    def test_mixed_results_only_failures_are_echoed(self) -> None:
+        """Passing rows are silently skipped; failures preserve input order."""
+        results = [
+            _FakeResult(passed=True, token="ETH"),
+            _FakeResult(passed=False, token="WBTC", error="boom"),
+            _FakeResult(passed=True, token="LINK"),
+            _FakeResult(passed=False, token="UNI", error=None),
+        ]
+        out = _invoke_failures(results, "CEX Historical")
+        assert out == (
+            "  - CEX Historical WBTC: boom\n"
+            "  - CEX Historical UNI: validation failed\n"
+        )
+
+    def test_multiple_failures_preserve_iteration_order(self) -> None:
+        """Operator log readability depends on stable category iteration order."""
+        results = [
+            _FakeResult(passed=False, token="A", error="e1"),
+            _FakeResult(passed=False, token="B", error="e2"),
+            _FakeResult(passed=False, token="C", error="e3"),
+        ]
+        out = _invoke_failures(results, "DEX Historical")
+        assert out == (
+            "  - DEX Historical A: e1\n"
+            "  - DEX Historical B: e2\n"
+            "  - DEX Historical C: e3\n"
+        )
+
+    @pytest.mark.parametrize(
+        "label",
+        ["CEX Spot", "DEX Spot", "CEX Historical", "DEX Historical", "RSI"],
+    )
+    def test_all_canonical_labels_round_trip(self, label: str) -> None:
+        """Each of the 5 category labels must render in the fixed line format."""
+        results = [_FakeResult(passed=False, token="X", error="why")]
+        out = _invoke_failures(results, label)
+        assert out == f"  - {label} X: why\n"

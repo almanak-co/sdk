@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -170,9 +172,73 @@ def print_startup_banner(
     click.echo()
 
 
+def summarize_category(
+    results: Sequence[Any],
+    label: str,
+) -> None:
+    """Echo a single Phase F per-category summary line.
+
+    Replaces the 5x near-identical inline blocks in ``qa_data`` that each
+    computed ``passed / total`` and echoed a status line for one result
+    category (CEX Spot, DEX Spot, CEX Historical, DEX Historical, RSI).
+
+    Empty result lists are a no-op: the original inline block was guarded
+    by ``if report.<category>_results:``, so nothing is echoed when the
+    category ran zero tests. Preserving that skip is part of the
+    byte-identical operator-output contract.
+
+    ``label`` is written verbatim -- the caller is responsible for its
+    column alignment (the original inline strings used a fixed 20-char
+    wide label ending in ``:`` plus padding). Passing the label fully
+    formatted keeps this helper trivially testable and identity-preserving.
+
+    Args:
+        results: Category result list from ``QAReport`` (items must have a
+            ``.passed`` attribute; list may be empty).
+        label: Pre-aligned label string, e.g. ``"CEX Spot Prices:    "``.
+            Written verbatim; no trimming or padding is applied.
+    """
+    if not results:
+        return
+    passed = sum(1 for r in results if r.passed)
+    total = len(results)
+    status = "PASS" if passed == total else "FAIL"
+    click.echo(f"{label}{passed}/{total} [{status}]")
+
+
+def echo_category_failures(
+    results: Sequence[Any],
+    label: str,
+) -> None:
+    """Echo the Phase G failure detail lines for one category.
+
+    Replaces the 5x near-identical inline ``for`` loops in ``qa_data`` that
+    each iterated ``<category>_results`` and echoed one line per failing
+    entry. Iteration order is preserved so operator output stays stable.
+
+    The failure line format is locked to the original inline block:
+
+        ``  - <label> <token>: <error or 'validation failed'>``
+
+    An empty result list is a no-op -- the original code looped over empty
+    lists implicitly. A category with zero failing entries is also a no-op.
+
+    Args:
+        results: Category result list from ``QAReport``. Items must expose
+            ``.passed`` (bool), ``.token`` (str), and ``.error`` (str | None).
+        label: Failure-line category prefix, e.g. ``"CEX Spot"`` or ``"RSI"``.
+            Note this differs from the summary label (no trailing padding).
+    """
+    for r in results:
+        if not r.passed:
+            click.echo(f"  - {label} {r.token}: {r.error or 'validation failed'}")
+
+
 __all__ = [
     "apply_cli_overrides",
     "configure_logging",
+    "echo_category_failures",
     "load_qa_config_or_exit",
     "print_startup_banner",
+    "summarize_category",
 ]
