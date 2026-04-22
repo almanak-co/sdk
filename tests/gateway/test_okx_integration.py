@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from almanak.gateway.integrations.base import IntegrationError
+from almanak.gateway.integrations.models import WalletPosition
 from almanak.gateway.integrations.okx import (
     OkxDefiContext,
     OkxIntegration,
+    _dedupe_reward_rows,
     _extract_data_entries,
     _extract_position_rows,
     _extract_reward_rows_from_network,
@@ -483,26 +485,60 @@ class TestOkxIntegration:
         """get_wallet_positions merges token balances with DeFi positions."""
         token_payload = {
             "code": "0",
-            "data": [{"tokenAssets": [
-                {"chainIndex": "1", "tokenContractAddress": "", "symbol": "ETH",
-                 "balance": "1.0", "tokenPrice": "2000", "isRiskToken": False},
-            ]}],
+            "data": [
+                {
+                    "tokenAssets": [
+                        {
+                            "chainIndex": "1",
+                            "tokenContractAddress": "",
+                            "symbol": "ETH",
+                            "balance": "1.0",
+                            "tokenPrice": "2000",
+                            "isRiskToken": False,
+                        },
+                    ]
+                }
+            ],
         }
         defi_platform_payload = {
             "code": "0",
-            "data": [{"walletIdPlatformList": [{"platformList": [
-                {"analysisPlatformId": "44", "platformName": "Aave V3"},
-            ]}]}],
+            "data": [
+                {
+                    "walletIdPlatformList": [
+                        {
+                            "platformList": [
+                                {"analysisPlatformId": "44", "platformName": "Aave V3"},
+                            ]
+                        }
+                    ]
+                }
+            ],
         }
         defi_detail_payload = {
             "code": "0",
-            "data": [{"walletIdPlatformDetailList": [{
-                "analysisPlatformId": "44",
-                "networkHoldVoList": [{"chainIndex": "1", "investTokenBalanceVoList": [
-                    {"investmentName": "USDC Lend", "investmentId": "x", "investType": 1,
-                     "totalValue": "500", "tokenList": [{"tokenSymbol": "USDC"}]},
-                ]}],
-            }]}],
+            "data": [
+                {
+                    "walletIdPlatformDetailList": [
+                        {
+                            "analysisPlatformId": "44",
+                            "networkHoldVoList": [
+                                {
+                                    "chainIndex": "1",
+                                    "investTokenBalanceVoList": [
+                                        {
+                                            "investmentName": "USDC Lend",
+                                            "investmentId": "x",
+                                            "investType": 1,
+                                            "totalValue": "500",
+                                            "tokenList": [{"tokenSymbol": "USDC"}],
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ],
         }
 
         with patch.object(okx, "_fetch", side_effect=[token_payload, defi_platform_payload, defi_detail_payload]):
@@ -537,8 +573,10 @@ class TestOkxIntegration:
         mock_session = AsyncMock()
         mock_session.request = fake_request
 
-        with patch.object(okx, "_get_session", AsyncMock(return_value=mock_session)), \
-             patch.object(okx._rate_limiter, "acquire", AsyncMock(return_value=0)):
+        with (
+            patch.object(okx, "_get_session", AsyncMock(return_value=mock_session)),
+            patch.object(okx._rate_limiter, "acquire", AsyncMock(return_value=0)),
+        ):
             with pytest.raises(IntegrationError, match="Invalid OKX response"):
                 await okx._fetch("/api/v6/dex/balance/total-value-by-address")
 
@@ -615,7 +653,12 @@ class TestNormalizeDefiDetails:
         assert aave_reward.protocol == "Aave"
         assert aave_reward.value_usd == "22.50"
         assert aave_reward.token_symbols == ["AAVE"]
-        assert aave_reward.details == {"reward_amount": "0.25", "chain_index": "42161"}
+        # Reward rows now carry platform_id in details (#1708 dedup key component).
+        assert aave_reward.details == {
+            "reward_amount": "0.25",
+            "chain_index": "42161",
+            "platform_id": "44",
+        }
 
         # Network-level reward (availableRewards)
         arb_reward = positions[2]
@@ -670,10 +713,10 @@ class TestNormalizeDefiDetails:
             "not a dict",
             [],
             42,
-            {"code": "0"},                   # no 'data' key
-            {"code": "0", "data": "nope"},   # data is neither dict nor list
+            {"code": "0"},  # no 'data' key
+            {"code": "0", "data": "nope"},  # data is neither dict nor list
             {"code": "0", "data": None},
-            {"code": "0", "data": {}},       # dict without walletIdPlatformDetailList
+            {"code": "0", "data": {}},  # dict without walletIdPlatformDetailList
             {"code": "0", "data": []},
         ],
     )
@@ -1033,13 +1076,13 @@ class TestNormalizeDefiDetails:
         assert reward_symbols == ["REW1", "REW2"]
 
     def test_duplicate_rewards_at_network_and_position_level_issue_1708(self, platforms):
-        """Issue #1708: same reward present at both levels produces two rows.
+        """Issue #1708 (fixed): duplicate rewards dedupe to the innermost row.
 
-        Current (buggy) behavior: a reward token that appears in both
+        When a reward token appears in BOTH
         ``positionList[].unclaimFeesDefiTokenInfo`` AND
-        ``networkHoldVoList[].availableRewards`` is emitted twice with
-        different position_ids. When #1708 is fixed, this test must flip to
-        assert a single row.
+        ``networkHoldVoList[].availableRewards``, the normalizer now emits a
+        single row, preferring the position-level (innermost) source for more
+        specific ``investLogo``-derived protocol attribution.
         """
         payload = {
             "code": "0",
@@ -1056,6 +1099,9 @@ class TestNormalizeDefiDetails:
                                         "investmentId": "inv-dup",
                                         "investType": 1,
                                         "totalValue": "100",
+                                        "investLogo": {
+                                            "bottomRightLogoList": [{"tokenName": "Aave"}],
+                                        },
                                         "positionList": [
                                             {
                                                 "unclaimFeesDefiTokenInfo": [
@@ -1088,13 +1134,143 @@ class TestNormalizeDefiDetails:
         }
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         rewards = [p for p in positions if p.position_type == "reward"]
-        # Duplicate-by-design today: position-level + network-level rows coexist.
+        # Deduped: position-level (innermost) wins.
+        assert len(rewards) == 1
+        surviving = rewards[0]
+        assert surviving.position_id == "okx:reward:44:inv-dup:ARB"
+        # Inherits the investLogo-derived protocol attribution, not platform_names fallback.
+        assert surviving.protocol == "Aave"
+        # The internal source marker must not leak to downstream consumers.
+        assert "_reward_source" not in surviving.details
+
+    def test_distinct_rewards_not_deduped_issue_1708(self, platforms):
+        """Issue #1708 (fixed): distinct reward symbols across levels are all kept."""
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": [
+                                    {
+                                        "investmentName": "mixed",
+                                        "investmentId": "inv-mixed",
+                                        "investType": 1,
+                                        "totalValue": "100",
+                                        "positionList": [
+                                            {
+                                                "unclaimFeesDefiTokenInfo": [
+                                                    {
+                                                        "baseDefiTokenInfos": [
+                                                            {
+                                                                "tokenSymbol": "AAVE",
+                                                                "coinAmount": "1",
+                                                                "currencyAmount": "5",
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    }
+                                ],
+                                "availableRewards": [
+                                    {
+                                        "tokenSymbol": "OP",
+                                        "tokenAmount": "2",
+                                        "currencyAmount": "6",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        rewards = sorted(
+            (p for p in positions if p.position_type == "reward"),
+            key=lambda p: p.token_symbols[0],
+        )
+        assert [r.token_symbols[0] for r in rewards] == ["AAVE", "OP"]
+
+    def test_two_investments_same_reward_symbol_not_deduped_issue_1708(self, platforms):
+        """Issue #1708 (fixed): two distinct investments accruing the same reward token stay separate.
+
+        Codex P1 regression: the dedup key alone collapses distinct
+        investmentIds that happen to share ``(platform_id, chain_index,
+        symbol)``. Dedup rule only collapses network-level rows that
+        duplicate a position-level row — two position-level rows must never
+        collapse into each other.
+        """
+        payload = {
+            "code": "0",
+            "data": {
+                "walletIdPlatformDetailList": [
+                    {
+                        "analysisPlatformId": "44",
+                        "networkHoldVoList": [
+                            {
+                                "chainIndex": "1",
+                                "investTokenBalanceVoList": [
+                                    {
+                                        "investmentName": "inv-1",
+                                        "investmentId": "inv-1",
+                                        "investType": 1,
+                                        "totalValue": "100",
+                                        "positionList": [
+                                            {
+                                                "unclaimFeesDefiTokenInfo": [
+                                                    {
+                                                        "baseDefiTokenInfos": [
+                                                            {
+                                                                "tokenSymbol": "AAVE",
+                                                                "coinAmount": "1",
+                                                                "currencyAmount": "5",
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "investmentName": "inv-2",
+                                        "investmentId": "inv-2",
+                                        "investType": 1,
+                                        "totalValue": "200",
+                                        "positionList": [
+                                            {
+                                                "unclaimFeesDefiTokenInfo": [
+                                                    {
+                                                        "baseDefiTokenInfos": [
+                                                            {
+                                                                "tokenSymbol": "AAVE",
+                                                                "coinAmount": "2",
+                                                                "currencyAmount": "7",
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        rewards = [p for p in positions if p.position_type == "reward"]
+        # Both position-level AAVE rewards are preserved (distinct investments).
         assert len(rewards) == 2
-        reward_ids = sorted(r.position_id for r in rewards)
-        assert reward_ids == [
-            "okx:reward:44:ARB",            # network-level row
-            "okx:reward:44:inv-dup:ARB",    # position-level row
-        ]
+        ids = sorted(r.position_id for r in rewards)
+        assert ids == ["okx:reward:44:inv-1:AAVE", "okx:reward:44:inv-2:AAVE"]
 
     def test_available_rewards_uses_token_amount_then_coin_amount(self, platforms):
         """availableRewards: ``tokenAmount`` preferred, falls back to ``coinAmount``."""
@@ -1108,8 +1284,12 @@ class TestNormalizeDefiDetails:
                             {
                                 "chainIndex": "1",
                                 "investTokenBalanceVoList": [
-                                    {"investmentName": "anchor", "investmentId": "a",
-                                     "investType": 1, "totalValue": "1"}
+                                    {
+                                        "investmentName": "anchor",
+                                        "investmentId": "a",
+                                        "investType": 1,
+                                        "totalValue": "1",
+                                    }
                                 ],
                                 "availableRewards": [
                                     {"tokenSymbol": "A", "tokenAmount": "1.0", "currencyAmount": "5"},
@@ -1156,13 +1336,13 @@ class TestNormalizeDefiDetails:
         # 10.25 + 5.75 = 16.00
         assert Decimal(positions[0].value_usd) == Decimal("16.00")
 
-    def test_measured_zero_total_value_silently_recomputes_issue_1707(self, platforms):
-        """Issue #1707: ``totalValue == "0"`` triggers _sum_position_values recompute.
+    def test_measured_zero_total_value_preserved_issue_1707(self, platforms, caplog):
+        """Issue #1707 (fixed): measured ``totalValue == "0"`` is preserved.
 
-        Current (buggy) behavior: a measured-zero totalValue is indistinguishable
-        from "field missing" and is silently overwritten by the sum of
-        positionList assets. When #1707 is fixed, totalValue "0" must be
-        preserved verbatim and this assertion must flip.
+        OKX's aggregate is authoritative. When the payload explicitly reports
+        ``totalValue == "0"``, we trust the zero even if ``positionList``
+        contains residual dust. When positionList is non-empty, a warning is
+        emitted so the mismatch is visible in logs.
         """
         payload = self._single_invest_payload(
             platform_id="44",
@@ -1180,10 +1360,56 @@ class TestNormalizeDefiDetails:
                 ],
             },
         )
+        with caplog.at_level("WARNING", logger="almanak.gateway.integrations.okx"):
+            positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        # Fixed: totalValue "0" is preserved; the zero aggregate wins over the dust sum.
+        assert positions[0].value_usd == "0"
+        # Warning surfaces the non-empty positionList mismatch.
+        assert any(
+            "totalValue=0" in rec.message and "positionList is non-empty" in rec.message for rec in caplog.records
+        )
+
+    def test_measured_zero_total_value_empty_position_list_issue_1707(self, platforms, caplog):
+        """Issue #1707 (fixed): measured zero + empty positionList is a clean zero, no warning."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "clean-zero",
+                "investmentId": "z",
+                "investType": 1,
+                "totalValue": "0",
+                "positionList": [],  # empty -> trust the zero, no warning
+            },
+        )
+        with caplog.at_level("WARNING", logger="almanak.gateway.integrations.okx"):
+            positions = OkxIntegration._normalize_defi_details(payload, platforms)
+        assert len(positions) == 1
+        assert positions[0].value_usd == "0"
+        # No warning for the clean-zero case.
+        assert not any("totalValue=0" in rec.message for rec in caplog.records)
+
+    def test_missing_total_value_still_falls_back_to_sum_issue_1707(self, platforms):
+        """Issue #1707 (fixed): field absent entirely still falls back to positionList sum."""
+        payload = self._single_invest_payload(
+            platform_id="44",
+            invest={
+                "investmentName": "no-total-field",
+                "investmentId": "z",
+                "investType": 1,
+                # totalValue absent -> fall back to _sum_position_values
+                "positionList": [
+                    {
+                        "assetsTokenList": [
+                            {"tokenSymbol": "A", "currencyAmount": "42.00"},
+                        ]
+                    }
+                ],
+            },
+        )
         positions = OkxIntegration._normalize_defi_details(payload, platforms)
         assert len(positions) == 1
-        # Current buggy behavior: totalValue "0" silently recomputed from assets.
-        assert positions[0].value_usd == "42.00"
+        assert Decimal(positions[0].value_usd) == Decimal("42.00")
 
     # ------------------------------------------------------------------
     # investType label mapping
@@ -1433,8 +1659,8 @@ class TestNormalizeDefiExtractors:
             "investLogo": {
                 "middleLogoList": [
                     {"tokenName": "A"},
-                    {},                 # skipped
-                    "not-a-dict",       # skipped
+                    {},  # skipped
+                    "not-a-dict",  # skipped
                     {"tokenName": ""},  # skipped (falsy)
                     {"tokenName": "B"},
                 ]
@@ -1528,8 +1754,12 @@ class TestNormalizeDefiExtractors:
         assert row.pool_address == ""
         assert row.token_symbols == []
 
-    def test_extract_position_rows_measured_zero_total_value_recomputes(self, ctx):
-        """Issue #1707 (pinned): measured totalValue=="0" silently recomputes from positionList."""
+    def test_extract_position_rows_measured_zero_total_value_preserved(self, ctx):
+        """Issue #1707 (fixed): measured totalValue=="0" is preserved verbatim.
+
+        Even when positionList has residual dust, the reported aggregate wins.
+        A warning is logged for the mismatch (asserted elsewhere).
+        """
         invest = {
             "investmentName": "z",
             "investmentId": "z",
@@ -1540,7 +1770,7 @@ class TestNormalizeDefiExtractors:
             ],
         }
         rows = _extract_position_rows(invest, ctx)
-        assert rows[0].value_usd == "42.00"
+        assert rows[0].value_usd == "0"
 
     def test_extract_position_rows_multi_invocation_distinct_contexts(self):
         """The same invest dict under two contexts produces distinct position_ids/chain rows."""
@@ -1596,7 +1826,13 @@ class TestNormalizeDefiExtractors:
         assert rows[0].protocol == "Aave"
         assert rows[0].value_usd == "5.00"
         assert rows[0].token_symbols == ["REW1"]
-        assert rows[0].details == {"reward_amount": "1.0", "chain_index": "42161"}
+        # Position-level rows carry platform_id + the internal source marker for dedup (#1708).
+        assert rows[0].details == {
+            "reward_amount": "1.0",
+            "chain_index": "42161",
+            "platform_id": "44",
+            "_reward_source": "position",
+        }
         assert rows[1].position_id == "okx:reward:44:inv-r:REW2"
 
     def test_extract_reward_rows_from_position_zero_value_filtered(self, ctx):
@@ -1630,9 +1866,9 @@ class TestNormalizeDefiExtractors:
         """Missing/non-list unclaimFeesDefiTokenInfo skips the position entry."""
         invest = {
             "positionList": [
-                {},                                     # no unclaim
-                {"unclaimFeesDefiTokenInfo": None},     # non-list
-                {"unclaimFeesDefiTokenInfo": "bad"},    # non-list
+                {},  # no unclaim
+                {"unclaimFeesDefiTokenInfo": None},  # non-list
+                {"unclaimFeesDefiTokenInfo": "bad"},  # non-list
             ],
         }
         assert _extract_reward_rows_from_position(invest, ctx) == []
@@ -1651,11 +1887,11 @@ class TestNormalizeDefiExtractors:
                 "not-a-dict-position",  # skipped: not a dict
                 {
                     "unclaimFeesDefiTokenInfo": [
-                        "not-a-dict-fee-group",        # skipped
+                        "not-a-dict-fee-group",  # skipped
                         {"baseDefiTokenInfos": "oh"},  # non-list baseDefiTokenInfos
                         {
                             "baseDefiTokenInfos": [
-                                "not-a-dict-reward",   # skipped
+                                "not-a-dict-reward",  # skipped
                                 {
                                     "tokenSymbol": "OK",
                                     "coinAmount": "1",
@@ -1697,7 +1933,13 @@ class TestNormalizeDefiExtractors:
         assert row.label == "Aave V3 reward"
         assert row.value_usd == "15.50"
         assert row.token_symbols == ["ARB"]
-        assert row.details == {"reward_amount": "5.0", "chain_index": "42161"}
+        # Network-level rows carry platform_id + the internal source marker for dedup (#1708).
+        assert row.details == {
+            "reward_amount": "5.0",
+            "chain_index": "42161",
+            "platform_id": "44",
+            "_reward_source": "network",
+        }
 
     def test_extract_reward_rows_from_network_token_amount_preferred_over_coin_amount(self, ctx):
         """``tokenAmount`` wins when both tokenAmount and coinAmount are present."""
@@ -1785,10 +2027,12 @@ class TestNormalizeDefiExtractors:
     def test_sum_position_values_multi_position(self):
         """Sums currencyAmount across every asset in every position."""
         positions = [
-            {"assetsTokenList": [
-                {"currencyAmount": "10.25"},
-                {"currencyAmount": "5.75"},
-            ]},
+            {
+                "assetsTokenList": [
+                    {"currencyAmount": "10.25"},
+                    {"currencyAmount": "5.75"},
+                ]
+            },
             {"assetsTokenList": [{"currencyAmount": "4.00"}]},
         ]
         assert _sum_position_values(positions) == "20.00"
@@ -1812,25 +2056,136 @@ class TestNormalizeDefiExtractors:
     def test_sum_position_values_malformed_entries_tolerated(self):
         """Non-dict positions and non-list assetsTokenList entries are skipped."""
         positions = [
-            "not-a-dict",                                 # skipped
-            {"assetsTokenList": None},                    # skipped
-            {"assetsTokenList": "bad"},                   # skipped
-            {},                                           # skipped (no assets)
-            {"assetsTokenList": [
-                "not-a-dict",                             # skipped
-                {"currencyAmount": "1.50"},
-                {"currencyAmount": "invalid"},            # parses to 0
-                {"currencyAmount": "2.50"},
-            ]},
+            "not-a-dict",  # skipped
+            {"assetsTokenList": None},  # skipped
+            {"assetsTokenList": "bad"},  # skipped
+            {},  # skipped (no assets)
+            {
+                "assetsTokenList": [
+                    "not-a-dict",  # skipped
+                    {"currencyAmount": "1.50"},
+                    {"currencyAmount": "invalid"},  # parses to 0
+                    {"currencyAmount": "2.50"},
+                ]
+            },
         ]
         assert _sum_position_values(positions) == "4.00"
 
     def test_sum_position_values_missing_currency_amount_defaults_to_zero(self):
         """Assets missing currencyAmount contribute 0 to the sum."""
         positions = [
-            {"assetsTokenList": [
-                {"tokenSymbol": "A"},  # no currencyAmount
-                {"currencyAmount": "3.50"},
-            ]},
+            {
+                "assetsTokenList": [
+                    {"tokenSymbol": "A"},  # no currencyAmount
+                    {"currencyAmount": "3.50"},
+                ]
+            },
         ]
         assert _sum_position_values(positions) == "3.50"
+
+
+class TestDedupeRewardRows:
+    """Direct unit tests for the ``_dedupe_reward_rows`` helper (issue #1708).
+
+    These complement the end-to-end dedup behavior exercised via
+    ``_normalize_defi_details``: they isolate the contract of the helper
+    so any regression is diagnosable from a single failure.
+    """
+
+    @staticmethod
+    def _reward(
+        *,
+        platform_id: str = "44",
+        chain_index: str = "1",
+        symbol: str = "ARB",
+        source: str = "position",
+        investment_id: str | None = None,
+        protocol: str = "Aave",
+        value_usd: str = "10",
+    ) -> WalletPosition:
+        """Build a synthetic reward row matching the extractors' schema."""
+        pid = (
+            f"okx:reward:{platform_id}:{investment_id}:{symbol}"
+            if investment_id is not None
+            else f"okx:reward:{platform_id}:{symbol}"
+        )
+        return WalletPosition(
+            position_id=pid,
+            protocol=protocol,
+            label=f"{protocol} reward",
+            position_type="reward",
+            value_usd=value_usd,
+            token_symbols=[symbol],
+            details={
+                "reward_amount": "1",
+                "chain_index": chain_index,
+                "platform_id": platform_id,
+                "_reward_source": source,
+            },
+        )
+
+    def test_position_row_wins_over_network_row_same_key(self):
+        """Network-level row is dropped when a matching position-level row exists."""
+        pos = self._reward(source="position", investment_id="inv-1", protocol="Aave")
+        net = self._reward(source="network", protocol="Aave V3")
+        # Order should not matter: network before position.
+        result = _dedupe_reward_rows([net, pos])
+        assert len(result) == 1
+        assert result[0].protocol == "Aave"
+        assert result[0].position_id == "okx:reward:44:inv-1:ARB"
+        # Source marker stripped from the surviving row.
+        assert "_reward_source" not in result[0].details
+
+    def test_two_position_rows_same_symbol_different_investments_both_kept(self):
+        """Two distinct investments on same (platform, chain) accruing same token stay separate."""
+        pos_a = self._reward(source="position", investment_id="inv-a")
+        pos_b = self._reward(source="position", investment_id="inv-b")
+        result = _dedupe_reward_rows([pos_a, pos_b])
+        assert len(result) == 2
+        assert sorted(r.position_id for r in result) == [
+            "okx:reward:44:inv-a:ARB",
+            "okx:reward:44:inv-b:ARB",
+        ]
+
+    def test_network_rows_without_position_match_preserved(self):
+        """Network-level rewards with no matching position-level row are kept."""
+        net = self._reward(source="network", symbol="OP")
+        result = _dedupe_reward_rows([net])
+        assert len(result) == 1
+        assert result[0].position_id == "okx:reward:44:OP"
+        assert "_reward_source" not in result[0].details
+
+    def test_non_reward_rows_pass_through_unchanged(self):
+        """Non-reward positions are not touched by the dedup helper."""
+        investment = WalletPosition(
+            position_id="okx:defi:44:inv",
+            protocol="Aave",
+            label="USDC Supply",
+            position_type="lending",
+            value_usd="100",
+            token_symbols=["USDC"],
+            details={"platform_id": "44", "chain_index": "1"},
+        )
+        net = self._reward(source="network")
+        result = _dedupe_reward_rows([investment, net])
+        assert result[0] is investment  # identity-preserved for non-reward
+        assert result[1].position_type == "reward"
+
+    def test_empty_input_returns_empty_list(self):
+        assert _dedupe_reward_rows([]) == []
+
+    def test_different_chain_index_does_not_dedupe(self):
+        """Same symbol on different chains stays distinct."""
+        pos_eth = self._reward(source="position", investment_id="inv", chain_index="1")
+        net_arb = self._reward(source="network", chain_index="42161")
+        result = _dedupe_reward_rows([pos_eth, net_arb])
+        assert len(result) == 2
+        chains = sorted(r.details["chain_index"] for r in result)
+        assert chains == ["1", "42161"]
+
+    def test_different_platform_does_not_dedupe(self):
+        """Same symbol across platforms stays distinct."""
+        pos_aave = self._reward(source="position", investment_id="inv", platform_id="44")
+        net_uni = self._reward(source="network", platform_id="123")
+        result = _dedupe_reward_rows([pos_aave, net_uni])
+        assert len(result) == 2

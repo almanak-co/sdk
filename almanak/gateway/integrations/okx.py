@@ -164,9 +164,14 @@ def _extract_position_rows(invest: dict[str, Any], ctx: OkxDefiContext) -> list[
     return type is a list so the caller can ``extend`` without special-casing
     empty responses in the future.
 
-    NOTE: Preserves issue #1707 (measured ``totalValue == "0"`` recomputes
-    from positionList). Do not change behavior here — the characterization
-    test pins it.
+    ``totalValue`` handling (issue #1707 fix):
+
+    - Field absent / empty string -> fall back to ``_sum_position_values``.
+    - Field present as ``"0"`` with an empty ``positionList`` -> trust the
+      measured zero.
+    - Field present as ``"0"`` with a non-empty ``positionList`` -> prefer
+      OKX's reported zero (aggregate is authoritative) and emit a warning
+      so the mismatch is visible in logs.
     """
     inv_name = invest.get("investmentName", "")
     inv_id = str(invest.get("investmentId", ""))
@@ -175,11 +180,31 @@ def _extract_position_rows(invest: dict[str, Any], ctx: OkxDefiContext) -> list[
 
     protocol_name, symbols = _resolve_protocol_and_symbols(invest, ctx)
 
+    # Issue #1707: distinguish "field missing" from "measured zero".
+    # ``"totalValue" in invest`` is the cheapest way to separate the two
+    # cases without relying on truthiness of an empty string.
+    position_list = invest.get("positionList")
+    has_total_value_field = "totalValue" in invest
     raw_value = invest.get("totalValue", "")
-    total_value = str(_safe_decimal(raw_value)) if raw_value else ""
-    if not total_value or total_value == "0":
-        # Issue #1707: measured zero collapses to a recompute.
-        total_value = _sum_position_values(invest.get("positionList"))
+
+    if has_total_value_field and raw_value not in (None, ""):
+        # OKX reported a value (possibly zero). Treat the aggregate as authoritative.
+        parsed_total = _safe_decimal(raw_value)
+        total_value = str(parsed_total)
+        # Numeric comparison guards against precision variants like "0.0" / "0.00".
+        if parsed_total == 0 and isinstance(position_list, list) and position_list:
+            logger.warning(
+                "OKX reports totalValue=0 for investment %s on platform %s chain %s, "
+                "but positionList is non-empty; trusting reported zero. "
+                "Sum of positionList would be %s.",
+                inv_id,
+                ctx.platform_id,
+                ctx.chain_index,
+                _sum_position_values(position_list),
+            )
+    else:
+        # Field absent entirely -> fall back to positionList sum.
+        total_value = _sum_position_values(position_list)
 
     pool_addr = invest.get("poolAddress", "") or invest.get("tokenAddress", "")
 
@@ -209,6 +234,10 @@ def _extract_reward_rows_from_position(invest: dict[str, Any], ctx: OkxDefiConte
     One row per non-zero reward. ``protocol`` mirrors the investment-level
     resolution (via :func:`_resolve_protocol_and_symbols`), so rewards inherit
     the protocol attribution rather than falling back to the platform name.
+
+    Each row is tagged with ``details["_reward_source"] = "position"`` so the
+    final dedup step (:func:`_dedupe_reward_rows`) can prefer these innermost
+    rows over network-level duplicates (issue #1708).
     """
     rows: list[WalletPosition] = []
 
@@ -250,6 +279,8 @@ def _extract_reward_rows_from_position(invest: dict[str, Any], ctx: OkxDefiConte
                         details={
                             "reward_amount": r_amount,
                             "chain_index": ctx.chain_index,
+                            "platform_id": ctx.platform_id,
+                            "_reward_source": "position",
                         },
                     )
                 )
@@ -264,9 +295,9 @@ def _extract_reward_rows_from_network(rewards: Any, ctx: OkxDefiContext) -> list
     attribution rather than the per-investment ``investLogo`` override, so
     the label/protocol falls back to the platform name.
 
-    NOTE: Issue #1708 — these may duplicate rewards already emitted at the
-    position level. Do not filter here; the characterization tests pin the
-    duplicate behavior.
+    Callers are responsible for deduplicating against position-level rewards
+    via :func:`_dedupe_reward_rows` — innermost (position-level) wins per
+    issue #1708.
     """
     rows: list[WalletPosition] = []
     if not isinstance(rewards, list):
@@ -293,11 +324,79 @@ def _extract_reward_rows_from_network(rewards: Any, ctx: OkxDefiContext) -> list
                 details={
                     "reward_amount": r_amount,
                     "chain_index": ctx.chain_index,
+                    "platform_id": ctx.platform_id,
+                    "_reward_source": "network",
                 },
             )
         )
 
     return rows
+
+
+def _dedupe_reward_rows(positions: list[WalletPosition]) -> list[WalletPosition]:
+    """Dedupe cross-source reward duplicates (issue #1708).
+
+    OKX can echo the same reward under both
+    ``positionList[].unclaimFeesDefiTokenInfo`` (position-level) and
+    ``networkHoldVoList[].availableRewards`` (network-level). Emitting both
+    double-counts in portfolio aggregation.
+
+    Rule: drop a **network-level** reward row when ANY **position-level**
+    reward row shares the same ``(platform_id, chain_index, symbol,
+    reward_type)`` key. Position-level rows are never collapsed into each
+    other — two distinct investments on the same (platform, chain) accruing
+    the same reward token are legitimately separate rewards.
+
+    Non-reward positions pass through unchanged. Relative order is preserved
+    for surviving rows.
+    """
+    # First pass: enumerate every position-level reward key present in the input.
+    position_level_keys: set[tuple[str, str, str, str]] = set()
+    for row in positions:
+        if row.position_type != "reward":
+            continue
+        details = row.details or {}
+        if details.get("_reward_source") != "position":
+            continue
+        key = _reward_dedup_key(row)
+        position_level_keys.add(key)
+
+    # Second pass: drop network-level rows whose key is already covered.
+    kept: list[WalletPosition] = []
+    for row in positions:
+        if row.position_type != "reward":
+            kept.append(row)
+            continue
+        details = row.details or {}
+        if details.get("_reward_source") == "network" and _reward_dedup_key(row) in position_level_keys:
+            continue  # network-level duplicate of an inner (position-level) reward
+        kept.append(row)
+
+    # Strip the internal source marker so it doesn't leak to downstream consumers.
+    cleaned: list[WalletPosition] = []
+    for row in kept:
+        if row.position_type == "reward" and row.details and "_reward_source" in row.details:
+            new_details = {k: v for k, v in row.details.items() if k != "_reward_source"}
+            cleaned.append(dataclasses.replace(row, details=new_details))
+        else:
+            cleaned.append(row)
+    return cleaned
+
+
+def _reward_dedup_key(row: WalletPosition) -> tuple[str, str, str, str]:
+    """Build the ``(platform_id, chain_index, symbol, reward_type)`` key for a reward row.
+
+    ``platform_id`` and ``chain_index`` are read from ``details`` — both
+    extractors always populate them for reward rows. ``symbol`` is the first
+    element of ``token_symbols``. ``reward_type`` is ``position_type`` (always
+    ``"reward"`` today; included for forward compatibility if OKX adds
+    typed-reward subcategories).
+    """
+    details = row.details or {}
+    platform_id = str(details.get("platform_id", ""))
+    chain_index = str(details.get("chain_index", ""))
+    symbol = row.token_symbols[0] if row.token_symbols else ""
+    return (platform_id, chain_index, symbol, row.position_type)
 
 
 class OkxIntegration(BaseIntegration):
@@ -822,6 +921,11 @@ class OkxIntegration(BaseIntegration):
         (platform, chain) pair. Row construction at level 3 (investments,
         rewards) is delegated to dedicated extractors. See Phase 5f refactor
         plan.
+
+        Rewards emitted at the position level and the network level are
+        deduplicated at the end by
+        ``(platform_id, chain_index, symbol, reward_type)`` — innermost wins
+        (issue #1708).
         """
         platform_names = {p["id"]: p["name"] for p in platforms}
         data_list = _extract_data_entries(payload)
@@ -845,9 +949,9 @@ class OkxIntegration(BaseIntegration):
 
                     invest_list = network_hold.get("investTokenBalanceVoList")
                     if not isinstance(invest_list, list):
-                        # Preserve byte-for-byte: when invest list is absent,
-                        # ``continue`` skips network-level availableRewards too.
-                        # Issue #1708 notes the duplication; don't fix here.
+                        # Byte-for-byte: missing invest list also skips the
+                        # network-level availableRewards (preserved behavior;
+                        # retained under characterization test coverage).
                         continue
 
                     ctx = OkxDefiContext(
@@ -864,7 +968,7 @@ class OkxIntegration(BaseIntegration):
 
                     positions.extend(_extract_reward_rows_from_network(network_hold.get("availableRewards"), ctx))
 
-        return positions
+        return _dedupe_reward_rows(positions)
 
     @staticmethod
     def _sum_position_values(position_list: Any) -> str:
