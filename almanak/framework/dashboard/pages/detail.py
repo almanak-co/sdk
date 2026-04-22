@@ -15,7 +15,7 @@ import streamlit as st
 from almanak.framework.dashboard.components import render_operator_card
 from almanak.framework.dashboard.config import API_BASE_URL, API_TIMEOUT, check_system_health
 from almanak.framework.dashboard.data_source import execute_strategy_action
-from almanak.framework.dashboard.models import Strategy, StrategyStatus
+from almanak.framework.dashboard.models import Strategy
 from almanak.framework.dashboard.plots.lending_plots import plot_health_factor_gauge
 from almanak.framework.dashboard.plots.lp_plots import plot_position_range_status
 from almanak.framework.dashboard.plots.perp_plots import plot_leverage_gauge
@@ -1097,108 +1097,18 @@ def page(strategies: list[Strategy]) -> None:
         render_operator_card(strategy.operator_card, strategy.name)
         st.divider()
 
-    # Action buttons row
-    st.markdown("### Actions")
+    # Action buttons, result feedback, and gas-bump dialog (extracted to
+    # _detail_actions for testability; see Phase 5a plan).
+    from almanak.framework.dashboard.pages._detail_actions import (
+        handle_action_result,
+        render_action_row,
+        render_gas_bump_dialog,
+    )
 
-    # Check system health to determine which buttons should be enabled
     health = check_system_health()
-    can_pause_resume = health.can_execute("pause_resume")
-    can_bump_gas = health.can_execute("bump_gas")
-    health.can_execute("execute_teardown")
-
-    # Show warning if CLI isn't running
-    if not health.cli_running:
-        st.info(
-            "**CLI Not Running** - Some actions are disabled. "
-            "Start the strategy runner CLI to enable Pause/Resume, Bump Gas, and Execute Teardown.",
-            icon="ℹ️",
-        )
-
-    action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
-
-    # Initialize action result state
-    action_result_key = f"action_result_{strategy.id}"
-
-    with action_col1:
-        if strategy.status == StrategyStatus.RUNNING:
-            if st.button("⏸️ Pause", use_container_width=True, disabled=not can_pause_resume):
-                with st.spinner(f"Pausing {strategy.name}..."):
-                    result = call_strategy_action(strategy.id, "pause")
-                st.session_state[action_result_key] = result
-                st.rerun()
-        else:
-            if st.button("▶️ Resume", use_container_width=True, disabled=not can_pause_resume):
-                with st.spinner(f"Resuming {strategy.name}..."):
-                    result = call_strategy_action(strategy.id, "resume")
-                st.session_state[action_result_key] = result
-                st.rerun()
-
-    with action_col2:
-        if st.button("⚙️ Config", use_container_width=True):
-            st.query_params["page"] = "config"
-            st.rerun()
-
-    with action_col3:
-        if st.button("🔄 Refresh", use_container_width=True):
-            st.toast("Refreshing strategy data...")
-            st.rerun()
-
-    with action_col4:
-        if strategy.status == StrategyStatus.STUCK:
-            # Show gas bump dialog
-            if st.button("⛽ Bump Gas", use_container_width=True, disabled=not can_bump_gas):
-                st.session_state[f"show_gas_dialog_{strategy.id}"] = True
-                st.rerun()
-
-    with action_col5:
-        # Close Strategy button - preview always available, execution requires CLI
-        if st.button("🚪 Close Strategy", use_container_width=True, type="secondary"):
-            st.query_params["page"] = "teardown"
-            st.query_params["strategy_id"] = strategy.id
-            st.rerun()
-
-    # Show action result feedback
-    if action_result_key in st.session_state:
-        result = st.session_state[action_result_key]
-        if result.get("success"):
-            st.success(result.get("message", "Action completed successfully"))
-        else:
-            error_msg = result.get("error", "Action failed")
-            if result.get("connection_error"):
-                st.warning(f"API not available: {error_msg}")
-            else:
-                st.error(error_msg)
-        # Clear result after showing
-        del st.session_state[action_result_key]
-
-    # Gas bump dialog
-    gas_dialog_key = f"show_gas_dialog_{strategy.id}"
-    if st.session_state.get(gas_dialog_key):
-        st.markdown("---")
-        st.markdown("#### Bump Gas Price")
-        st.caption("Enter a higher gas price to speed up the pending transaction")
-
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            new_gas_price = st.number_input(
-                "New Gas Price (Gwei)",
-                min_value=0.1,
-                max_value=1000.0,
-                value=1.0,
-                step=0.1,
-                key=f"gas_price_input_{strategy.id}",
-            )
-        with col2:
-            if st.button("Submit", key=f"submit_gas_{strategy.id}"):
-                with st.spinner("Bumping gas price..."):
-                    result = call_strategy_action(strategy.id, "bump-gas", {"gas_price_gwei": new_gas_price})
-                st.session_state[action_result_key] = result
-                st.session_state[gas_dialog_key] = False
-                st.rerun()
-        with col3:
-            if st.button("Cancel", key=f"cancel_gas_{strategy.id}"):
-                st.session_state[gas_dialog_key] = False
-                st.rerun()
+    render_action_row(strategy, health)
+    handle_action_result(strategy.id)
+    render_gas_bump_dialog(strategy.id)
 
     st.divider()
 
