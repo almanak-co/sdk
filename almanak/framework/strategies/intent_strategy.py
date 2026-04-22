@@ -2836,7 +2836,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         # Lazy import to avoid pulling in the full runner package at
         # strategies/ import time (strategies/__init__.py is loaded eagerly
         # by the strategy auto-discovery pipeline).
-        from ..runner.token_extraction import parse_pool_tokens
+        from ..runner.token_extraction import is_fiat_quote_symbol, parse_pool_tokens
 
         config = self.config
         if config is None:
@@ -2896,7 +2896,11 @@ class IntentStrategy(StrategyBase[ConfigT]):
                         tokens.append(symbol)
             elif key in _TOKEN_FIELDS:
                 symbol = value.strip()
-                if symbol and symbol not in seen:
+                # Fiat quote symbols (e.g., quote_token="USD") name an
+                # accounting unit, not an on-chain token — skip them so the
+                # tracked-tokens loop doesn't try balance/price lookups that
+                # always fail (no ERC20, no USD/USD Chainlink feed).
+                if symbol and symbol not in seen and not is_fiat_quote_symbol(symbol):
                     seen.add(symbol)
                     tokens.append(symbol)
 

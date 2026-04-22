@@ -723,3 +723,25 @@ class TestExtractTokenSymbolsFromIntent:
         # WETH appears in both levels but deduped
         assert tokens.count("WETH") == 1
         assert "USDC" in tokens
+
+    def test_pool_field_skips_fiat_quote(self):
+        """Regression: pool 'BTC/USD' must not leak USD into price prefetch.
+
+        Observed on BSC staging (2026-04-22): perp market descriptors like
+        'BTC/USD' caused the gateway price prefetch to query USD/USD, which
+        has no Chainlink feed and no on-chain representation.
+        """
+        intent = MagicMock(spec=[])
+        intent.pool = "BTC/USD"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert tokens == ["BTC"]
+        assert "USD" not in tokens
+
+    def test_token_field_skips_fiat_quote(self):
+        """token_out='USD' must not leak as a fiat quote."""
+        intent = MagicMock(spec=[])
+        intent.token_in = "WETH"
+        intent.token_out = "USD"
+        tokens = ExecutionServiceServicer._extract_token_symbols_from_intent(intent)
+        assert tokens == ["WETH"]
+        assert "USD" not in tokens

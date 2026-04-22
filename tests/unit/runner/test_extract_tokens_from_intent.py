@@ -9,8 +9,11 @@ Fixes VIB-1282: balancer_flash_arb compilation_error on arbitrum.
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.intents import Intent
 from almanak.framework.runner.strategy_runner import _extract_tokens_from_intent
+from almanak.framework.runner.token_extraction import is_fiat_quote_symbol, parse_pool_tokens
 
 
 class TestExtractTokensFromIntent:
@@ -190,3 +193,63 @@ class TestExtractTokensFromIntent:
         assert "WETH" in tokens
         assert "USDC" in tokens
         assert "volatile" not in tokens
+
+
+class TestIsFiatQuoteSymbol:
+    """Unit tests for the is_fiat_quote_symbol() helper.
+
+    Locks in the contract: pure fiat abbreviations (USD/EUR/GBP/JPY) return
+    True regardless of case or surrounding whitespace; real on-chain tokens
+    (USDC, USDT, DAI, etc.) always return False.
+    """
+
+    @pytest.mark.parametrize("symbol", ["USD", "EUR", "GBP", "JPY"])
+    def test_fiat_symbols_return_true(self, symbol):
+        assert is_fiat_quote_symbol(symbol) is True
+
+    @pytest.mark.parametrize("symbol", ["usd", "eur", "gbp", "jpy"])
+    def test_lowercase_fiat_symbols_return_true(self, symbol):
+        assert is_fiat_quote_symbol(symbol) is True
+
+    @pytest.mark.parametrize("symbol", [" USD ", " EUR\t", "\nGBP"])
+    def test_whitespace_padded_fiat_return_true(self, symbol):
+        assert is_fiat_quote_symbol(symbol) is True
+
+    @pytest.mark.parametrize("symbol", ["USDC", "USDT", "DAI", "USDS", "FRAX", "USDE"])
+    def test_stablecoins_return_false(self, symbol):
+        """Dollar-pegged stablecoins are real ERC-20 tokens — must NOT be filtered."""
+        assert is_fiat_quote_symbol(symbol) is False
+
+    @pytest.mark.parametrize("symbol", ["WETH", "BTC", "ETH", "WBTC", "BTCB", "USD.E"])
+    def test_regular_tokens_return_false(self, symbol):
+        assert is_fiat_quote_symbol(symbol) is False
+
+    @pytest.mark.parametrize("value", [None, "", 0, 3.14, [], {}])
+    def test_non_string_inputs_return_false(self, value):
+        assert is_fiat_quote_symbol(value) is False
+
+
+class TestParsePoolTokensFiatFilter:
+    """Verify that fiat quote symbols are stripped from pool descriptors."""
+
+    def test_btc_usd_yields_btc_only(self):
+        """Regression: BSC staging 2026-04-22 — market='BTC/USD' leaked USD."""
+        tokens = parse_pool_tokens("BTC/USD")
+        assert tokens == ["BTC"]
+        assert "USD" not in tokens
+
+    def test_eth_usd_yields_eth_only(self):
+        tokens = parse_pool_tokens("ETH/USD")
+        assert tokens == ["ETH"]
+        assert "USD" not in tokens
+
+    def test_eth_eur_yields_eth_only(self):
+        tokens = parse_pool_tokens("ETH/EUR")
+        assert tokens == ["ETH"]
+
+    def test_real_stable_pair_not_filtered(self):
+        """WETH/USDC must not be affected — USDC is a real token."""
+        tokens = parse_pool_tokens("WETH/USDC/500")
+        assert "WETH" in tokens
+        assert "USDC" in tokens
+        assert len(tokens) == 2

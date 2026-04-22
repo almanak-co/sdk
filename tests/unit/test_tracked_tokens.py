@@ -318,6 +318,50 @@ class TestDeriveTokensFromConfig:
         tokens = strategy._derive_tokens_from_config()
         assert tokens == ["WETH", "USDC"]
 
+    def test_fiat_quote_in_market_descriptor_excluded(self):
+        """Regression: market='BTC/USD' must not leak USD as a tracked token.
+
+        Observed on BSC staging (2026-04-22): strategy with market='BTC/USD'
+        caused the tracked-tokens loop to call balance("USD") and price("USD"),
+        both of which fail — USD is a quote denomination, not an ERC20, and
+        Chainlink has no USD/USD feed.
+        """
+        @dataclass
+        class PerpMarketConfig:
+            market: str = "BTC/USD"
+            strategy_id: str = "test"
+            chain: str = "bsc"
+            def to_dict(self):
+                return {"market": self.market}
+            def update(self, **kwargs):
+                pass
+
+        strategy = _make_strategy(PerpMarketConfig())
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["BTC"]
+        assert "USD" not in tokens
+
+    def test_fiat_quote_token_field_excluded(self):
+        """quote_token='USD' must not leak as a tracked token."""
+        strategy = _make_strategy(SwapConfig(base_token="WETH", quote_token="USD"))
+        tokens = strategy._derive_tokens_from_config()
+        assert tokens == ["WETH"]
+        assert "USD" not in tokens
+
+    def test_stablecoin_quote_token_still_tracked(self):
+        """USDC/USDT/DAI are real tokens and must NOT be filtered as fiat."""
+        strategy = _make_strategy(SwapConfig(base_token="WETH", quote_token="USDC"))
+        tokens = strategy._derive_tokens_from_config()
+        assert "USDC" in tokens
+        assert "WETH" in tokens
+
+    def test_fiat_eur_gbp_jpy_excluded(self):
+        """EUR/GBP/JPY are also pure fiat and have no on-chain representation."""
+        for fiat in ("EUR", "GBP", "JPY"):
+            strategy = _make_strategy(SwapConfig(base_token="WETH", quote_token=fiat))
+            tokens = strategy._derive_tokens_from_config()
+            assert tokens == ["WETH"], f"{fiat} should be filtered"
+
 
 class TestGetTrackedTokens:
     """Test _get_tracked_tokens returns derived tokens or fallback."""

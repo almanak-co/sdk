@@ -37,6 +37,18 @@ _POOL_TYPE_SUFFIXES: frozenset[str] = frozenset(
     }
 )
 
+# Pure fiat quote symbols that appear in market descriptors (e.g., "BTC/USD")
+# but have no on-chain ERC20 representation. Querying balance/price for these
+# always fails (no gateway resolution, no Chainlink `USD/USD` feed). Real
+# dollar-pegged stablecoins (USDC, USDT, DAI, USDS, FRAX, USDE, ...) are NOT in
+# this set — they resolve to actual on-chain tokens.
+FIAT_QUOTE_SYMBOLS: frozenset[str] = frozenset({"USD", "EUR", "GBP", "JPY"})
+
+
+def is_fiat_quote_symbol(symbol: str) -> bool:
+    """Return True if *symbol* is a fiat quote denomination (not a token)."""
+    return isinstance(symbol, str) and symbol.strip().upper() in FIAT_QUOTE_SYMBOLS
+
 
 def _is_symbol(value: Any) -> TypeGuard[str]:
     """Return True if *value* looks like a token symbol (not an address)."""
@@ -62,6 +74,8 @@ def parse_pool_tokens(pool: str) -> list[str]:
     - Trailing pool-type suffixes: volatile, stable, concentrated, cl.
       Filter applies only at the last position — a token that happens to be
       named "VOLATILE" in positions 0/1 is preserved.
+    - Fiat quote symbols (USD/EUR/GBP/JPY): market descriptors like
+      "BTC/USD" name the quote denomination, not an on-chain token.
     - Segments that don't look like token symbols (addresses, empty, overlong).
 
     Preserves first-seen order; does NOT deduplicate (caller's concern).
@@ -89,6 +103,9 @@ def parse_pool_tokens(pool: str) -> list[str]:
         # Skip pool-type suffixes only in trailing position.
         if idx == last_idx and part.lower() in _POOL_TYPE_SUFFIXES:
             continue
+        # Skip fiat quote denominations (e.g., "BTC/USD" -> ["BTC"]).
+        if is_fiat_quote_symbol(part):
+            continue
         if _is_symbol(part):
             tokens.append(part)
 
@@ -114,7 +131,7 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
 
     for field in TOKEN_FIELDS:
         val = _get(field)
-        if _is_symbol(val):
+        if _is_symbol(val) and not is_fiat_quote_symbol(val):
             symbols.append(val.strip())
 
     # Parse pool name (e.g., "WETH/USDC/500") for LP intents
