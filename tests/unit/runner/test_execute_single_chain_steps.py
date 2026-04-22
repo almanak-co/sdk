@@ -437,6 +437,11 @@ class TestSingleChainSlippageGuard:
             max_slippage=Decimal("0.01"),  # 100 bps
         )
         state = _make_state(strategy, intent=intent)
+        # Issue #1780: make the metric gate explicit. The single-intent
+        # flow enters the guard with record_metrics=True; spell it out so
+        # the assertion on _total_iterations below does not depend on a
+        # default that could drift.
+        state.record_metrics = True
         state.last_execution_result = ExecutionResult(
             success=True,
             phase=ExecutionPhase.COMPLETE,
@@ -448,6 +453,7 @@ class TestSingleChainSlippageGuard:
             token_out="ETH",
         )
 
+        pre_total = runner._total_iterations
         result = await runner._single_chain_slippage_guard(state)
         assert result is not None
         assert result.status == IterationStatus.EXECUTION_FAILED
@@ -463,6 +469,48 @@ class TestSingleChainSlippageGuard:
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is False
         # Strategy state must be persisted on slippage breach (on-chain state already changed).
         strategy.save_state.assert_called_once()
+        # Issue #1780: the slippage-breach iteration counts in the
+        # lifetime total when record_metrics=True (single-intent flow),
+        # mirroring the ``_record_success`` tick on the success branch.
+        assert runner._total_iterations == pre_total + 1
+
+    @pytest.mark.asyncio
+    async def test_slippage_breach_multi_intent_defers_metrics(self) -> None:
+        """Issue #1780: when state.record_metrics is False (multi-intent
+        sequence), the slippage guard must NOT bump ``_total_iterations``.
+        The caller (``_run_single_chain_intents``) records once per
+        sequence to avoid double-counting.
+        """
+        runner = _make_runner()
+        runner._write_ledger_entry = AsyncMock()
+        runner._emit_execution_timeline_event = MagicMock()
+
+        strategy = _make_strategy()
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="ETH",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.01"),
+        )
+        state = _make_state(strategy, intent=intent)
+        state.record_metrics = False  # multi-intent sequence
+        state.last_execution_result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            completed_at=datetime.now(UTC),
+        )
+        state.last_execution_result.swap_amounts = SimpleNamespace(
+            slippage_bps=200,
+            token_in="USDC",
+            token_out="ETH",
+        )
+
+        pre_total = runner._total_iterations
+        result = await runner._single_chain_slippage_guard(state)
+        assert result is not None
+        assert result.status == IterationStatus.EXECUTION_FAILED
+        # Multi-intent: the caller will record, so this helper must not.
+        assert runner._total_iterations == pre_total
 
     @pytest.mark.asyncio
     async def test_slippage_breach_sets_error_before_emitting_timeline(self) -> None:

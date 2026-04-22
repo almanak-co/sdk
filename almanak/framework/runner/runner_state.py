@@ -686,6 +686,29 @@ def record_success(runner: Any, *, execution_proved: bool = False) -> None:
         runner._circuit_breaker.record_success()
 
 
+def record_failure(runner: Any) -> None:
+    """Record a failed iteration in lifetime metrics.
+
+    Mirrors :func:`record_success` for the failure path: increments ONLY
+    ``_total_iterations`` so every iteration that produces an
+    ``IterationResult`` — success or failure — is visible in the lifetime
+    count. This is the companion to ``_create_error_result`` for failure
+    sites that build an ``IterationResult`` directly rather than routing
+    through the error-result helper (issue #1780, Gemini finding on PR
+    #1777).
+
+    ``_consecutive_errors`` and the circuit breaker are NOT touched here —
+    those remain owned by ``_run_loop_helpers.handle_iteration_failure``,
+    which runs unconditionally for any ``result.success is False`` in the
+    run loop (fix #1771). Incrementing them here would double-count every
+    failure that flows back through ``run_loop``.
+
+    Args:
+        runner: StrategyRunner instance
+    """
+    runner._total_iterations += 1
+
+
 def calculate_duration_ms(runner: Any, start_time: datetime) -> float:
     """Calculate duration in milliseconds since start_time."""
     elapsed = datetime.now(UTC) - start_time

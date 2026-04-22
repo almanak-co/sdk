@@ -1362,3 +1362,43 @@ class TestConsecutiveErrorsSingleIncrement:
         assert iteration_at_error_write, "ERROR lifecycle write never fired"
         assert iteration_at_error_write[0] == 3
 
+
+# =============================================================================
+# _total_iterations single-ownership contract (issue #1780)
+# =============================================================================
+
+
+class TestRecordFailureIncrements:
+    """Regression guard for #1780: ``_record_failure`` is the companion to
+    ``_record_success`` for the failure path. It must bump ONLY
+    ``_total_iterations`` -- ``_consecutive_errors`` and the circuit
+    breaker remain owned by ``handle_iteration_failure`` in the run loop
+    (fix #1771).
+    """
+
+    def test_record_failure_bumps_only_total_iterations(self) -> None:
+        runner = _make_runner()
+        runner._consecutive_errors = 4
+        runner._total_iterations = 0
+        runner._successful_iterations = 0
+
+        runner._record_failure()
+
+        # Total ticks up by one.
+        assert runner._total_iterations == 1
+        # Success counter untouched -- this is a failure record.
+        assert runner._successful_iterations == 0
+        # Consecutive-errors counter is owned by handle_iteration_failure.
+        assert runner._consecutive_errors == 4
+
+    def test_record_failure_does_not_touch_circuit_breaker(self) -> None:
+        """``_record_failure`` must not call record_failure on the breaker.
+        handle_iteration_failure owns that; calling it here would double-
+        record every failure that flows back through run_loop.
+        """
+        runner = _make_runner()
+        # Install a spy on the circuit breaker if present.
+        runner._circuit_breaker = MagicMock()
+        runner._record_failure()
+        runner._circuit_breaker.record_failure.assert_not_called()
+

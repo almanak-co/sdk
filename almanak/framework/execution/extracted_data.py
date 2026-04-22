@@ -42,6 +42,15 @@ class SwapAmounts:
             a quote.
         token_in: Input token address or symbol
         token_out: Output token address or symbol
+        amount_in_decimal_resolved: ``True`` when ``amount_in_decimal`` was
+            computed from a resolved ``decimals`` value on the token
+            resolver. ``False`` means the parser could not resolve
+            decimals for ``token_in`` and fell back to ``Decimal(0)`` as a
+            sentinel — the value is NOT a measured zero (issue #1778).
+            Defaults to ``True`` so existing parsers that do not populate
+            the flag continue to behave as before.
+        amount_out_decimal_resolved: Analogous flag for
+            ``amount_out_decimal``. See ``amount_in_decimal_resolved``.
 
     Example:
         if result.swap_amounts:
@@ -58,6 +67,8 @@ class SwapAmounts:
     expected_out_decimal: Decimal | None = None
     token_in: str | None = None
     token_out: str | None = None
+    amount_in_decimal_resolved: bool = True
+    amount_out_decimal_resolved: bool = True
 
     # Aliases: amount_in_human / amount_out_human (VIB-295)
     # Strategy authors naturally reach for _human instead of _decimal.
@@ -80,6 +91,8 @@ class SwapAmounts:
             "expected_out_decimal": str(self.expected_out_decimal) if self.expected_out_decimal is not None else None,
             "token_in": self.token_in,
             "token_out": self.token_out,
+            "amount_in_decimal_resolved": self.amount_in_decimal_resolved,
+            "amount_out_decimal_resolved": self.amount_out_decimal_resolved,
         }
 
 

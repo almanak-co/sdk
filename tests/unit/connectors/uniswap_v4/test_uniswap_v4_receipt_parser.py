@@ -1084,7 +1084,8 @@ class TestBuildSwapResultCharacterization:
 
     def test_decimal_conversion_with_resolver(self):
         """When token_resolver resolves BOTH tokens, amount_in_decimal,
-        amount_out_decimal, and effective_price are all computed."""
+        amount_out_decimal, and effective_price are all computed, and the
+        *_decimal_resolved flags are True (issue #1778)."""
         resolver = _StubTokenResolver({_USDC_ARB: 6, _WETH_ARB: 18})
         parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
         swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
@@ -1101,10 +1102,22 @@ class TestBuildSwapResultCharacterization:
         assert sr.amount_in_decimal == Decimal("0.5")  # 0.5 WETH
         assert sr.amount_out_decimal == Decimal("1000")  # 1000 USDC
         assert sr.effective_price == Decimal("2000")  # 1000 USDC / 0.5 WETH
+        # Both sides resolved -> flags are True
+        assert sr.amount_in_decimal_resolved is True
+        assert sr.amount_out_decimal_resolved is True
+
+        # extract_swap_amounts must copy the resolved flags forward so the
+        # ledger sees the same truth (regression guard for #1778).
+        sa = parser.extract_swap_amounts({"logs": [swap, t_in, t_out]})
+        assert sa is not None
+        assert sa.amount_in_decimal_resolved is True
+        assert sa.amount_out_decimal_resolved is True
 
     def test_decimal_conversion_unresolved_falls_back_to_zero(self):
         """When decimals cannot be resolved, decimal fields fall back to
-        Decimal(0) (guard against raw-integer leak into "human-readable" fields)."""
+        Decimal(0) as a backward-compatible sentinel, but the
+        *_decimal_resolved flags are False so downstream consumers can
+        distinguish this from a measured zero (issue #1778)."""
         # Resolver raises on both addresses
         resolver = _StubTokenResolver({})
         parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
@@ -1127,11 +1140,23 @@ class TestBuildSwapResultCharacterization:
         assert sr.amount_out_decimal == Decimal(0)
         # effective_price must be None when decimals are missing
         assert sr.effective_price is None
+        # NEW (#1778): flags must be False so downstream can tell this
+        # apart from a legitimately measured zero.
+        assert sr.amount_in_decimal_resolved is False
+        assert sr.amount_out_decimal_resolved is False
+
+        # extract_swap_amounts must propagate both False flags so the
+        # ledger doesn't mistake sentinel zeros for measured zeros.
+        sa = parser.extract_swap_amounts({"logs": [swap, t_in, t_out]})
+        assert sa is not None
+        assert sa.amount_in_decimal_resolved is False
+        assert sa.amount_out_decimal_resolved is False
 
     def test_decimal_conversion_partial_resolution_skips_price(self):
         """If only one side's decimals resolve, effective_price must be None
         to avoid mixing raw integers with decimal amounts (off by orders
-        of magnitude for cross-decimal pairs)."""
+        of magnitude for cross-decimal pairs). The *_decimal_resolved
+        flags must reflect each side independently (issue #1778)."""
         resolver = _StubTokenResolver({_USDC_ARB: 6})  # WETH missing
         parser = UniswapV4ReceiptParser(chain="arbitrum", token_resolver=resolver)
         swap = _build_swap_log(amount0=1000 * 10**6, amount1=-(5 * 10**17))
@@ -1147,10 +1172,19 @@ class TestBuildSwapResultCharacterization:
         sr = result.swap_result
         # USDC side resolved -> decimal populated
         assert sr.amount_out_decimal == Decimal("1000")
-        # WETH side NOT resolved -> fallback zero
+        assert sr.amount_out_decimal_resolved is True
+        # WETH side NOT resolved -> fallback zero, flag False
         assert sr.amount_in_decimal == Decimal(0)
+        assert sr.amount_in_decimal_resolved is False
         # effective_price requires BOTH resolved
         assert sr.effective_price is None
+
+        # extract_swap_amounts must propagate the partial flags so the
+        # ledger can distinguish unresolved-in from measured-in.
+        sa = parser.extract_swap_amounts({"logs": [swap, t_in, t_out]})
+        assert sa is not None
+        assert sa.amount_out_decimal_resolved is True
+        assert sa.amount_in_decimal_resolved is False
 
     # -- Slippage -----------------------------------------------------------
 

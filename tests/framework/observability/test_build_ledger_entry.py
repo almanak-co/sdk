@@ -462,6 +462,102 @@ class TestSwapAmountsExtraction:
         entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.slippage_bps is None
 
+    def test_swap_amounts_unresolved_decimals_yield_empty_string(self):
+        """Regression for issue #1778.
+
+        When a receipt parser cannot resolve ``decimals`` for a token, it
+        falls back to ``Decimal(0)`` on ``amount_*_decimal`` AND sets
+        ``amount_*_decimal_resolved=False``. The ledger must treat that
+        as "unknown" (→ ``""``) even though the Decimal value is 0 — a
+        measured-zero amount (``Decimal("0")`` with
+        ``amount_*_decimal_resolved=True``) still records as ``"0"``.
+        Without this distinction, PnL attribution and portfolio
+        accounting silently conflate "no resolvable decimals" with
+        "legit zero" (#1778, Codex finding on PR #1774).
+        """
+        swap = _Attrs(
+            token_in="USDC",
+            token_out="ETH",
+            amount_in_decimal=Decimal(0),  # sentinel, not measured
+            amount_out_decimal=Decimal("0.5"),
+            effective_price=None,
+            slippage_bps=None,
+            amount_in_decimal_resolved=False,  # <-- the new signal
+            amount_out_decimal_resolved=True,
+        )
+        result = SimpleNamespace(
+            swap_amounts=swap,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent("SWAP")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        # Unresolved side: suppressed to "" regardless of Decimal value.
+        assert entry.amount_in == ""
+        # Resolved side: measured value preserved.
+        assert entry.amount_out == "0.5"
+
+    def test_swap_amounts_measured_zero_still_records_as_zero(self):
+        """A parser that successfully resolves decimals AND sees a measured
+        zero (e.g. an LP_CLOSE collecting one side) must still record "0"
+        on the ledger — #1768 is still correct. Only the unresolvable
+        case is suppressed (#1778)."""
+        swap = _Attrs(
+            token_in="USDC",
+            token_out="ETH",
+            amount_in_decimal=Decimal(0),  # legitimately measured zero
+            amount_out_decimal=Decimal("0.5"),
+            effective_price=None,
+            slippage_bps=None,
+            amount_in_decimal_resolved=True,  # <-- resolved
+            amount_out_decimal_resolved=True,
+        )
+        result = SimpleNamespace(
+            swap_amounts=swap,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent("SWAP")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.amount_in == "0"
+        assert entry.amount_out == "0.5"
+
+    def test_swap_amounts_legacy_parser_missing_resolved_attrs_treated_as_resolved(self):
+        """Parsers that predate #1778 do not set ``amount_*_decimal_resolved``
+        at all. The ledger's compatibility guard
+        (``getattr(swap_amounts, "amount_*_decimal_resolved", True)`` in
+        ``almanak/framework/observability/ledger.py``) must treat the
+        absence of the flag as "resolved" so those parsers keep recording
+        measured zeros as ``"0"``. Without this test, a future cleanup
+        could silently blank out old connectors again.
+        """
+        swap = _Attrs(
+            token_in="USDC",
+            token_out="ETH",
+            amount_in_decimal=Decimal(0),  # legacy parser: legit measured zero
+            amount_out_decimal=Decimal("0.5"),
+            effective_price=None,
+            slippage_bps=None,
+            # NOTE: amount_in_decimal_resolved / amount_out_decimal_resolved
+            # deliberately OMITTED — simulates a pre-#1778 parser.
+        )
+        result = SimpleNamespace(
+            swap_amounts=swap,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent("SWAP")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        # getattr fallback => both sides treated as resolved.
+        assert entry.amount_in == "0"
+        assert entry.amount_out == "0.5"
+
 
 # ---------------------------------------------------------------------------
 # Phase β' — fallback extraction when swap_amounts is absent (lines 146-164).

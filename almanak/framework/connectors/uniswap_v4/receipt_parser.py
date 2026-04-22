@@ -126,7 +126,22 @@ class TransferEventData:
 
 @dataclass
 class ParsedSwapResult:
-    """High-level parsed swap result."""
+    """High-level parsed swap result.
+
+    ``amount_in_decimal`` / ``amount_out_decimal`` retain the historical
+    ``Decimal(0)`` default so downstream consumers that never checked for
+    None continue to see a safe sentinel (type is intentionally ``Decimal``,
+    NOT ``Decimal | None`` — see issue #1778 guardrail).
+
+    The companion ``amount_in_decimal_resolved`` / ``amount_out_decimal_resolved``
+    flags let callers that DO care about the distinction (e.g. the
+    observability ledger) tell a measured zero apart from an unresolvable-
+    decimals sentinel without having to re-derive that state. ``True``
+    means the human-readable amount was computed from a successfully
+    resolved ``decimals`` value on the token resolver; ``False`` means the
+    parser fell back to ``Decimal(0)`` because decimals were not
+    resolvable for that side (#1778).
+    """
 
     amount_in: int
     amount_out: int
@@ -139,6 +154,8 @@ class ParsedSwapResult:
     slippage_bps: int | None = None
     tick_after: int | None = None
     sqrt_price_x96_after: int | None = None
+    amount_in_decimal_resolved: bool = True
+    amount_out_decimal_resolved: bool = True
 
 
 @dataclass
@@ -314,6 +331,8 @@ class UniswapV4ReceiptParser:
             expected_out_decimal=expected_out,
             token_in=sr.token_in,
             token_out=sr.token_out,
+            amount_in_decimal_resolved=sr.amount_in_decimal_resolved,
+            amount_out_decimal_resolved=sr.amount_out_decimal_resolved,
         )
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
@@ -827,30 +846,39 @@ class UniswapV4ReceiptParser:
         amount_out: int,
         token_in_decimals: int | None,
         token_out_decimals: int | None,
-    ) -> tuple[Decimal, Decimal, Decimal | None]:
+    ) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
         """Compute (amount_in_decimal, amount_out_decimal, effective_price).
 
-        When decimals are not resolved, human-readable amounts fall back to
-        Decimal(0) rather than leaking raw integer amounts into a field
-        documented as "human-readable" (would silently corrupt downstream
-        financial logic).
+        Returns ``None`` for either ``amount_*_decimal`` when decimals could
+        not be resolved for that side. This explicit ``None`` lets callers
+        (``_build_swap_result`` and ``extract_swap_amounts``) tell an
+        unresolvable-decimals case apart from a legitimately measured zero
+        — historically this helper emitted ``Decimal(0)`` as a sentinel,
+        conflating the two (issue #1778, Codex finding on PR #1774).
 
-        effective_price is computed ONLY when BOTH decimals are resolved to
-        avoid mixing raw integers with Decimals for cross-decimal pairs
-        (e.g. USDC/WETH), which would be off by orders of magnitude.
+        ``effective_price`` is computed ONLY when BOTH decimals are
+        resolved AND both amounts are positive, to avoid mixing raw
+        integers with Decimals for cross-decimal pairs (e.g. USDC/WETH),
+        which would be off by orders of magnitude.
         """
+        amount_in_decimal: Decimal | None
+        amount_out_decimal: Decimal | None
         if token_in_decimals is not None:
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
         else:
-            amount_in_decimal = Decimal(0)
+            amount_in_decimal = None
         if token_out_decimals is not None:
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
         else:
-            amount_out_decimal = Decimal(0)
+            amount_out_decimal = None
 
-        both_resolved = token_in_decimals is not None and token_out_decimals is not None
         effective_price: Decimal | None = None
-        if both_resolved and amount_in_decimal > 0 and amount_out_decimal > 0:
+        if (
+            amount_in_decimal is not None
+            and amount_out_decimal is not None
+            and amount_in_decimal > 0
+            and amount_out_decimal > 0
+        ):
             effective_price = amount_out_decimal / amount_in_decimal
         return amount_in_decimal, amount_out_decimal, effective_price
 
@@ -868,6 +896,14 @@ class UniswapV4ReceiptParser:
           3. _identify_swap_tokens       — pool_mgr / amount / direction passes
           4. _resolve_token_decimals     — lazy resolver lookup
           5. _compute_decimal_amounts    — human-readable amounts + price
+
+        ``_compute_decimal_amounts`` now returns ``Decimal | None`` per side
+        to distinguish "decimals unresolvable" from "measured zero"
+        (#1778). ``ParsedSwapResult`` still carries ``Decimal`` fields for
+        backward compatibility — the unresolvable case is coerced back to
+        ``Decimal(0)`` here and flagged via ``*_decimal_resolved=False`` so
+        downstream consumers that care about the distinction (ledger) can
+        see it without a type change to the dataclass.
         """
         # Use the first swap event (single-hop; multi-hop receipts may emit
         # several Swap events but the first carries the user's input side).
@@ -876,9 +912,13 @@ class UniswapV4ReceiptParser:
         slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
         token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
         token_in_decimals, token_out_decimals = self._resolve_token_decimals(token_in_addr, token_out_addr)
-        amount_in_decimal, amount_out_decimal, effective_price = self._compute_decimal_amounts(
+        amount_in_decimal_opt, amount_out_decimal_opt, effective_price = self._compute_decimal_amounts(
             amount_in, amount_out, token_in_decimals, token_out_decimals
         )
+        amount_in_resolved = amount_in_decimal_opt is not None
+        amount_out_resolved = amount_out_decimal_opt is not None
+        amount_in_decimal = amount_in_decimal_opt if amount_in_decimal_opt is not None else Decimal(0)
+        amount_out_decimal = amount_out_decimal_opt if amount_out_decimal_opt is not None else Decimal(0)
 
         return ParsedSwapResult(
             amount_in=amount_in,
@@ -891,6 +931,8 @@ class UniswapV4ReceiptParser:
             slippage_bps=slippage_bps,
             tick_after=swap.tick,
             sqrt_price_x96_after=swap.sqrt_price_x96,
+            amount_in_decimal_resolved=amount_in_resolved,
+            amount_out_decimal_resolved=amount_out_resolved,
         )
 
 

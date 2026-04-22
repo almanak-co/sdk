@@ -320,9 +320,17 @@ async def execute_iteration_loop(
                 portfolio=state.portfolio,
             )
 
+            # Cache available_tokens once per tick: the property returns a
+            # fresh list on every access, and we use it in multiple loops
+            # below. Also build an upper-case set so the membership check
+            # inside the expected_tokens loop is O(1) instead of O(N) per
+            # expected token (see #1781).
+            available_tokens = market_state.available_tokens
+            available_tokens_upper = {t.upper() for t in available_tokens}
+
             # Append prices to indicator engine and populate snapshot
             tick_tokens: set[str] = set()
-            for token in market_state.available_tokens:
+            for token in available_tokens:
                 try:
                     price = market_state.get_price(token)
                     state.indicator_engine.append_price(token, price)
@@ -333,13 +341,12 @@ async def execute_iteration_loop(
 
             # Track data quality: record successful price lookups
             # Count tokens with available prices in this tick
-            available_tokens = market_state.available_tokens
             expected_tokens = config.tokens
             provider_name = getattr(backtester.data_provider, "provider_name", "unknown")
 
             # Record successful lookups for each available token
             for token in expected_tokens:
-                if token.upper() in [t.upper() for t in available_tokens]:
+                if token.upper() in available_tokens_upper:
                     state.data_quality_tracker.record_lookup(
                         success=True,
                         source=provider_name,

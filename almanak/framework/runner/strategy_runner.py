@@ -743,6 +743,12 @@ class StrategyRunner:
                         details=cb_result.to_dict(),
                     )
                 )
+                # Issue #1780: count every iteration that produces an
+                # IterationResult in the lifetime total. The CB-open
+                # short-circuit IS a completed iteration from the runner's
+                # perspective -- run_loop still receives the result, still
+                # emits a summary, still calls handle_iteration_failure.
+                self._record_failure()
                 return IterationResult(
                     status=IterationStatus.CIRCUIT_BREAKER_OPEN,
                     error=cb_result.reason,
@@ -1042,6 +1048,10 @@ class StrategyRunner:
                     },
                 )
             )
+            # Issue #1780: count the CB-blocked iteration in the lifetime
+            # total. The late CB gate produces an IterationResult that
+            # run_loop processes like any other failure result.
+            self._record_failure()
             return IterationResult(
                 status=IterationStatus.CIRCUIT_BREAKER_OPEN,
                 intent=intents[0] if intents else None,
@@ -1118,6 +1128,12 @@ class StrategyRunner:
 
         _chain = getattr(strategy, "chain", "")
         intent_result: IterationResult | None = None
+        # Issue #1780: track whether the final ``intent_result`` came
+        # from the amount='all' resolver short-circuit (no
+        # ``_execute_single_chain`` call). Single-intent iterations that
+        # short-circuit here never reach a helper that records metrics,
+        # so ``_run_single_chain_intents`` must record on their behalf.
+        result_from_early_shortcut = False
         is_multi_intent = len(intents) > 1
         previous_amount_received: Decimal | None = None
         for idx, intent in enumerate(intents):
@@ -1141,6 +1157,7 @@ class StrategyRunner:
             )
             if early_result is not None:
                 intent_result = early_result
+                result_from_early_shortcut = True
                 if should_continue:
                     continue
                 break
@@ -1158,6 +1175,11 @@ class StrategyRunner:
                 market=market,
                 record_metrics=not is_multi_intent,
             )
+            # Once _execute_single_chain ran, it owns metrics for this
+            # step (via record_metrics=True on single-intent). Flip the
+            # flag off so a later iteration's early_result in a
+            # multi-intent sequence doesn't mis-attribute ownership.
+            result_from_early_shortcut = False
 
             # Track amount received for chaining to next step
             if intent_result.status == IterationStatus.SUCCESS and intent_result.execution_result:
@@ -1188,14 +1210,24 @@ class StrategyRunner:
                     )
                 break
 
-        # For multi-intent sequences, record metrics once per iteration
-        if is_multi_intent and intent_result is not None:
+        # Record metrics for paths that do NOT go through a helper that
+        # already records them:
+        #   - multi-intent sequences always record here (the per-step
+        #     ``_execute_single_chain`` calls run with record_metrics=False).
+        #   - single-intent iterations that short-circuited via
+        #     ``_resolve_chained_amount_*`` (e.g. COMPILATION_FAILED when
+        #     wallet balance is 0) never reach ``_execute_single_chain``
+        #     and therefore no helper recorded them -- fix for issue
+        #     #1780, which flagged those as invisible in the lifetime
+        #     total. ``consecutive_errors`` and the circuit breaker are
+        #     still handled by ``handle_iteration_failure`` in the outer
+        #     run loop.
+        needs_record_here = is_multi_intent or result_from_early_shortcut
+        if needs_record_here and intent_result is not None:
             if intent_result.success:
                 self._record_success(execution_proved=intent_result.status == IterationStatus.SUCCESS)
             else:
-                # Only track total_iterations here; consecutive_errors is
-                # already handled by run_loop when result.success is False
-                self._total_iterations += 1
+                self._record_failure()
 
         # Step 6.9: Compute and log balance deltas after execution
         if pre_balances and intent_result is not None and intent_result.success:
@@ -2640,6 +2672,14 @@ class StrategyRunner:
             except Exception as e:
                 logger.warning(f"Error saving strategy state: {e}")
 
+        # Issue #1780: mirror the ``state.record_metrics`` gate used by
+        # ``_single_chain_handle_success`` so a slippage-breach iteration
+        # is counted in the lifetime total when this helper owns metrics
+        # (single-intent). Multi-intent sequences record once at the
+        # caller in ``_run_single_chain_intents`` to avoid double-count.
+        if state.record_metrics:
+            self._record_failure()
+
         return IterationResult(
             status=IterationStatus.EXECUTION_FAILED,
             intent=intent,
@@ -2717,6 +2757,13 @@ class StrategyRunner:
                 await self._handle_execution_error(strategy, last_execution_result)
             except Exception as e:
                 logger.debug("reconciliation alert dispatch failed: %s", e)
+
+        # Issue #1780: same metrics gate as _single_chain_handle_success
+        # and _single_chain_slippage_guard -- single-intent owns the
+        # record_metrics flag here; multi-intent records once at the
+        # caller in ``_run_single_chain_intents``.
+        if state.record_metrics:
+            self._record_failure()
 
         return IterationResult(
             status=IterationStatus.RECONCILIATION_FAILED,
@@ -2810,6 +2857,12 @@ class StrategyRunner:
                 strategy.save_state()
             except Exception as e:
                 logger.warning(f"Error saving strategy state: {e}")
+
+        # Issue #1780: same metrics gate as _single_chain_handle_success.
+        # Single-intent iterations own metrics here; multi-intent routes
+        # to the caller-side record in ``_run_single_chain_intents``.
+        if state.record_metrics:
+            self._record_failure()
 
         return IterationResult(
             status=IterationStatus.EXECUTION_FAILED,
@@ -3096,6 +3149,10 @@ class StrategyRunner:
                 f"{multi_result.failed_count}/{len(intents)} failed: {error_summary}"
             )
 
+            # Issue #1780: mirror the ``_record_success`` call on the
+            # success branch above (line ~3080) so the failed multi-chain
+            # iteration ticks the lifetime counter exactly once.
+            self._record_failure()
             return IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
                 intent=first_intent,
@@ -3974,6 +4031,11 @@ class StrategyRunner:
         # to prevent stale reads on the next decide() cycle.
         self.balance_provider.invalidate_cache()
 
+        # Issue #1780: the bridge-wait failed result is the terminal
+        # outcome of a cross-chain iteration -- record it exactly once
+        # here so the lifetime total matches the success branch that
+        # ``_record_success`` handles at the end of the happy path.
+        self._record_failure()
         return IterationResult(
             status=IterationStatus.EXECUTION_FAILED,
             intent=state.first_intent,
@@ -4176,6 +4238,17 @@ class StrategyRunner:
         from .runner_state import record_success
 
         record_success(self, execution_proved=execution_proved)
+
+    def _record_failure(self) -> None:
+        """Thin proxy to ``runner_state.record_failure`` (issue #1780).
+
+        Use on any failure path that builds an ``IterationResult``
+        directly instead of going through ``_create_error_result``. See
+        ``record_failure`` for the ownership contract.
+        """
+        from .runner_state import record_failure
+
+        record_failure(self)
 
     def _calculate_duration_ms(self, start_time: datetime) -> float:
         from .runner_state import calculate_duration_ms

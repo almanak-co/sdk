@@ -154,13 +154,26 @@ def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmou
     ``is not None`` checks instead of truthiness so measured-zero amounts
     (``Decimal("0")``) are preserved as ``"0"`` rather than silently dropped
     to ``""`` -- issue #1768 (sibling of #1709 / #1710 fixed in #1751).
+
+    The ``amount_*_decimal_resolved`` flags on ``SwapAmounts`` disambiguate
+    a measured ``Decimal(0)`` from an unresolvable-decimals sentinel —
+    historically both were recorded as ``"0"`` on the ledger, silently
+    corrupting PnL attribution and portfolio accounting for tokens whose
+    decimals failed to resolve (issue #1778, Codex finding on PR #1774).
+    An unresolved amount now falls through to the same ``""`` that the
+    truthiness path used to produce before #1768, but without conflating
+    the measured-zero case. Parsers that do not populate the flag default
+    to ``True`` (``SwapAmounts`` default) -- preserves existing behavior
+    byte-for-byte for the many connectors that have not been audited yet.
     """
     token_in = swap_amounts.token_in or getattr(intent, "from_token", "") or ""
     token_out = swap_amounts.token_out or getattr(intent, "to_token", "") or ""
     amt_in = getattr(swap_amounts, "amount_in_decimal", None)
     amt_out = getattr(swap_amounts, "amount_out_decimal", None)
-    amount_in = str(amt_in) if amt_in is not None else ""
-    amount_out = str(amt_out) if amt_out is not None else ""
+    amt_in_resolved = getattr(swap_amounts, "amount_in_decimal_resolved", True)
+    amt_out_resolved = getattr(swap_amounts, "amount_out_decimal_resolved", True)
+    amount_in = str(amt_in) if amt_in is not None and amt_in_resolved else ""
+    amount_out = str(amt_out) if amt_out is not None and amt_out_resolved else ""
     effective_price = str(swap_amounts.effective_price) if swap_amounts.effective_price is not None else ""
     return (
         token_in,
