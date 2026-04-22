@@ -16,6 +16,11 @@ from almanak.framework.dashboard.components import render_operator_card
 from almanak.framework.dashboard.config import API_BASE_URL, API_TIMEOUT, check_system_health
 from almanak.framework.dashboard.data_source import execute_strategy_action
 from almanak.framework.dashboard.models import Strategy
+from almanak.framework.dashboard.pages._detail_render import (
+    group_events_by_intent,
+    status_badge,
+    tx_display_fields,
+)
 from almanak.framework.dashboard.plots.lending_plots import plot_health_factor_gauge
 from almanak.framework.dashboard.plots.lp_plots import plot_position_range_status
 from almanak.framework.dashboard.plots.perp_plots import plot_leverage_gauge
@@ -462,73 +467,32 @@ def render_timeline_events(strategy: Strategy, limit: int = 10) -> None:
 
     st.markdown("### Recent Activity")
 
-    # Group events by correlation_id (intent)
-    intents: dict[str, dict] = {}
-    ungrouped_events = []
-
-    for event in events:
-        correlation_id = event.details.get("correlation_id") if event.details else None
-        if correlation_id:
-            if correlation_id not in intents:
-                intents[correlation_id] = {
-                    "intent_description": event.details.get("intent_description", "Unknown Intent"),
-                    "events": [],
-                    "status": None,
-                    "timestamp": event.timestamp,
-                    "tx_count": event.details.get("tx_count", 0),
-                }
-            intents[correlation_id]["events"].append(event)
-            # Track the final status (EXECUTION_SUCCESS or EXECUTION_FAILED)
-            exec_event = event.details.get("execution_event", "")
-            if exec_event in ("EXECUTION_SUCCESS", "EXECUTION_FAILED"):
-                intents[correlation_id]["status"] = exec_event
-            # Use earliest timestamp for sorting
-            if event.timestamp < intents[correlation_id]["timestamp"]:
-                intents[correlation_id]["timestamp"] = event.timestamp
-        else:
-            ungrouped_events.append(event)
-
-    # Sort intents by most recent first (use the latest event timestamp)
-    sorted_intents = sorted(intents.items(), key=lambda x: max(e.timestamp for e in x[1]["events"]), reverse=True)[
-        :limit
-    ]
+    # Pure grouping + status-derivation logic lives in ``_detail_render`` so
+    # this function only owns the Streamlit HTML emission.
+    intent_groups, ungrouped_events = group_events_by_intent(events)
+    sorted_intents = intent_groups[:limit]
 
     # Render each intent as a collapsible section
-    for _correlation_id, intent_data in sorted_intents:
-        intent_desc = intent_data["intent_description"]
-        status = intent_data["status"]
-        tx_count = intent_data["tx_count"] or len([e for e in intent_data["events"] if e.details.get("tx_hash")])
-        intent_events = sorted(intent_data["events"], key=lambda e: e.timestamp, reverse=True)
+    for group in sorted_intents:
+        intent_desc = group.intent_description
+        badge = status_badge(group.status)
+        tx_count = group.tx_count
+        intent_events = sorted(group.events, key=lambda e: e.timestamp, reverse=True)
         latest_time = intent_events[0].timestamp.strftime("%Y-%m-%d %H:%M:%S")
-
-        # Determine status icon and color
-        if status == "EXECUTION_SUCCESS":
-            status_icon = "✓"
-            status_color = "#00c853"
-            status_text = "Completed"
-        elif status == "EXECUTION_FAILED":
-            status_icon = "✗"
-            status_color = "#f44336"
-            status_text = "Failed"
-        else:
-            # Still in progress
-            status_icon = "⏳"
-            status_color = "#ff9800"
-            status_text = "In Progress"
 
         # Intent header with status
         st.markdown(
             f"""<div style="
                 background-color: #1e1e1e;
                 border: 1px solid #333;
-                border-left: 4px solid {status_color};
+                border-left: 4px solid {badge.color};
                 border-radius: 8px;
                 padding: 0.75rem 1rem;
                 margin-bottom: 0.25rem;
             ">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-weight: 500;">{status_icon} {intent_desc}</span>
-                    <span style="color: {status_color}; font-size: 0.85rem;">{status_text}</span>
+                    <span style="font-weight: 500;">{badge.icon} {intent_desc}</span>
+                    <span style="color: {badge.color}; font-size: 0.85rem;">{badge.text}</span>
                 </div>
                 <div style="color: #888; font-size: 0.8rem; margin-top: 0.25rem;">
                     {latest_time} · {tx_count} transaction(s)
@@ -540,57 +504,36 @@ def render_timeline_events(strategy: Strategy, limit: int = 10) -> None:
         # Expandable TX details
         with st.expander("View transaction details", expanded=False):
             for event in intent_events:
-                exec_event = event.details.get("execution_event", "") if event.details else ""
+                fields = tx_display_fields(event)
+                if fields is None:
+                    continue  # Skip summary events; show only TX-level events.
+
                 tx_hash = event.details.get("tx_hash", "") if event.details else ""
                 time_str = event.timestamp.strftime("%H:%M:%S")
+                tx_short = tx_hash[:10] + "..." if tx_hash else ""
+                # Get chain from event for explorer link
+                chain = getattr(event, "chain", None) or strategy.chain or "arbitrum"
+                explorer_url = get_explorer_url(chain, tx_hash) if tx_hash else ""
 
-                # Skip the summary events, show only TX-level events
-                if exec_event in ("TX_SENT", "TX_CONFIRMED", "TX_FAILED", "TX_REVERTED"):
-                    if exec_event == "TX_CONFIRMED":
-                        icon = "✓"
-                        color = "#00c853"
-                        block = event.details.get("block_number", "")
-                        gas = event.details.get("gas_used", "")
-                        detail = f"Block {block:,}" if block else ""
-                        if gas:
-                            detail += f" · Gas: {gas:,}"
-                    elif exec_event == "TX_SENT":
-                        icon = "→"
-                        color = "#2196f3"
-                        detail = "Submitted to mempool"
-                    elif exec_event in ("TX_FAILED", "TX_REVERTED"):
-                        icon = "✗"
-                        color = "#f44336"
-                        detail = event.details.get("error", "Transaction failed")
-                    else:
-                        icon = "•"
-                        color = "#888"
-                        detail = ""
+                # Make TX hash a clickable link
+                if tx_hash and explorer_url:
+                    tx_display = f'<a href="{explorer_url}" target="_blank" style="background: #2a2a2a; padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.8rem; font-family: monospace; color: #58a6ff; text-decoration: none;">{tx_short}</a>'
+                else:
+                    tx_display = f'<code style="background: #2a2a2a; padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.8rem;">{tx_short}</code>'
 
-                    tx_short = tx_hash[:10] + "..." if tx_hash else ""
-                    # Get chain from event for explorer link
-                    chain = getattr(event, "chain", None) or strategy.chain or "arbitrum"
-                    explorer_url = get_explorer_url(chain, tx_hash) if tx_hash else ""
-
-                    # Make TX hash a clickable link
-                    if tx_hash and explorer_url:
-                        tx_display = f'<a href="{explorer_url}" target="_blank" style="background: #2a2a2a; padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.8rem; font-family: monospace; color: #58a6ff; text-decoration: none;">{tx_short}</a>'
-                    else:
-                        tx_display = f'<code style="background: #2a2a2a; padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.8rem;">{tx_short}</code>'
-
-                    st.markdown(
-                        f"""<div style="
-                            padding: 0.5rem 0;
-                            border-bottom: 1px solid #333;
-                            font-size: 0.9rem;
-                        ">
-                            <span style="color: {color};">{icon}</span>
-                            {tx_display}
-                            <span style="color: #888; margin-left: 0.5rem;">{time_str}</span>
-                            <span style="color: #666; margin-left: 0.5rem;">{detail}</span>
-                        </div>""",
-                        unsafe_allow_html=True,
-                    )
+                st.markdown(
+                    f"""<div style="
+                        padding: 0.5rem 0;
+                        border-bottom: 1px solid #333;
+                        font-size: 0.9rem;
+                    ">
+                        <span style="color: {fields.color};">{fields.icon}</span>
+                        {tx_display}
+                        <span style="color: #888; margin-left: 0.5rem;">{time_str}</span>
+                        <span style="color: #666; margin-left: 0.5rem;">{fields.detail}</span>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
 
     # Show any ungrouped events (legacy or missing correlation_id)
     if ungrouped_events and not sorted_intents:
