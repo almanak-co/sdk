@@ -21,15 +21,13 @@ from almanak.framework.dashboard.plots.lp_plots import plot_position_range_statu
 from almanak.framework.dashboard.plots.perp_plots import plot_leverage_gauge
 from almanak.framework.dashboard.plots.portfolio_plots import plot_portfolio_value_over_time
 from almanak.framework.dashboard.plots.ta_plots import plot_price_with_signals
-from almanak.framework.dashboard.theme import get_chain_color, get_chain_health_color, get_status_color
+from almanak.framework.dashboard.theme import get_chain_color, get_chain_health_color
 from almanak.framework.dashboard.utils import (
     format_bridge_progress,
-    format_chain_badge,
     format_timeline_summary,
     format_usd,
     get_chain_health_icon,
     get_chain_icon,
-    get_status_icon,
     get_timeline_event_icon,
 )
 
@@ -981,64 +979,16 @@ def page(strategies: list[Strategy]) -> None:
         st.error("Strategy object is None - this should not happen")
         return
 
-    # Header with status
-    status_icon = get_status_icon(strategy.status)
-    status_color = get_status_color(strategy.status)
-
-    st.markdown(
-        f"""
-        <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;">
-            <h2 style="margin: 0;">{strategy.name}</h2>
-            <span style="
-                background-color: {status_color}22;
-                color: {status_color};
-                padding: 0.25rem 0.75rem;
-                border-radius: 16px;
-                font-weight: bold;
-            ">{status_icon} {strategy.status.value}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # Header, chain info, and key metrics (extracted to _detail_header for
+    # testability; see Phase 5b plan).
+    from almanak.framework.dashboard.pages._detail_header import (
+        render_chain_info_row,
+        render_key_metrics,
+        render_strategy_header,
     )
 
-    # Strategy info row - show chain badges for multi-chain
-    if strategy.is_multi_chain and strategy.chains:
-        # Multi-chain info display
-        chain_badges_html = ""
-        for chain in strategy.chains:
-            chain_color = get_chain_color(chain)
-            chain_badges_html += format_chain_badge(chain, chain_color)
-
-        st.markdown(
-            f"""
-            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem;">
-                <strong>Chains:</strong> {chain_badges_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Chain health indicators
-        render_chain_health_indicators(strategy)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"**Protocols:** {strategy.protocol}")
-        with col2:
-            if strategy.last_action_at:
-                st.markdown(f"**Last Action:** {strategy.last_action_at.strftime('%Y-%m-%d %H:%M')}")
-    else:
-        # Single-chain info
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            chain_color = get_chain_color(strategy.chain)
-            chain_badge = format_chain_badge(strategy.chain, chain_color)
-            st.markdown(f"**Chain:** {chain_badge}", unsafe_allow_html=True)
-        with col2:
-            st.markdown(f"**Protocol:** {strategy.protocol}")
-        with col3:
-            if strategy.last_action_at:
-                st.markdown(f"**Last Action:** {strategy.last_action_at.strftime('%Y-%m-%d %H:%M')}")
+    render_strategy_header(strategy)
+    render_chain_info_row(strategy)
 
     st.divider()
 
@@ -1048,46 +998,7 @@ def page(strategies: list[Strategy]) -> None:
         return
 
     # Key metrics - include bridge fees for multi-chain
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        # Show value confidence indicator
-        confidence = getattr(strategy, "value_confidence", None)
-        if confidence and confidence != "HIGH":
-            confidence_icons = {
-                "ESTIMATED": "⚠️",
-                "STALE": "⏰",
-                "UNAVAILABLE": "❓",
-            }
-            confidence_icon = confidence_icons.get(confidence, "")
-            st.metric(
-                "Total Value",
-                format_usd(strategy.total_value_usd),
-                help=f"Value confidence: {confidence} {confidence_icon}",
-            )
-        else:
-            st.metric("Total Value", format_usd(strategy.total_value_usd))
-    with col2:
-        # Net PnL includes bridge fees
-        net_pnl = strategy.pnl_24h_usd - strategy.bridge_fees_usd
-        pnl_delta = f"{'+' if net_pnl >= 0 else ''}{net_pnl:,.2f}"
-        st.metric(
-            "24h PnL (Net)",
-            format_usd(abs(net_pnl)),
-            delta=pnl_delta,
-            help=f"Includes ${strategy.bridge_fees_usd:,.2f} in bridge fees" if strategy.bridge_fees_usd > 0 else None,
-        )
-    with col3:
-        if strategy.position and strategy.position.total_lp_value_usd > 0:
-            st.metric("LP Value", format_usd(strategy.position.total_lp_value_usd))
-        elif strategy.position and strategy.position.health_factor:
-            st.metric("Health Factor", f"{strategy.position.health_factor:.2f}")
-        else:
-            st.metric("Positions", "N/A")
-    with col4:
-        if strategy.pnl_history:
-            # Calculate 7d PnL
-            pnl_7d = strategy.pnl_history[-1].pnl_usd
-            st.metric("7d PnL", format_usd(abs(pnl_7d)), delta=f"{'+' if pnl_7d >= 0 else ''}{pnl_7d:,.2f}")
+    render_key_metrics(strategy)
 
     st.divider()
 
