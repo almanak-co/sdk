@@ -10,7 +10,9 @@ Selection Criteria:
 - reliability: Prefer bridges with higher historical reliability
 
 Example:
-    from almanak.framework.connectors.bridges import BridgeSelector, AcrossBridgeAdapter, StargateBridgeAdapter
+    from almanak.framework.intents.bridge_selector import BridgeSelector
+    from almanak.framework.connectors.across import AcrossBridgeAdapter
+    from almanak.framework.connectors.stargate import StargateBridgeAdapter
 
     selector = BridgeSelector([AcrossBridgeAdapter(), StargateBridgeAdapter()])
 
@@ -33,7 +35,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from .base import (
+from ..connectors.bridge_base import (
     BridgeAdapter,
     BridgeError,
     BridgeQuote,

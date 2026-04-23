@@ -46,7 +46,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.bridges.stargate.adapter import STARGATE_ROUTER_ADDRESSES
+from almanak.framework.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
@@ -350,7 +350,7 @@ class TestStargateBridgeIntent:
         )
         # NOTE: a full ETH-balance conservation check was intentionally NOT
         # added here. The StargateBridgeAdapter (see
-        # connectors/bridges/stargate/adapter.py
+        # connectors/stargate/adapter.py
         # `_estimate_layerzero_fee`) applies a **3x safety multiplier** on
         # the base LayerZero messaging fee so a live bridge won't revert on
         # fee underestimation. Combined with the absence of the off-chain

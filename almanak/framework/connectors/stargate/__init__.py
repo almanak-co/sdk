@@ -10,7 +10,7 @@ Stargate Protocol:
 - Native asset transfers (no wrapped tokens)
 
 Example:
-    from almanak.framework.connectors.bridges.stargate import StargateBridgeAdapter
+    from almanak.framework.connectors.stargate import StargateBridgeAdapter
 
     adapter = StargateBridgeAdapter()
     quote = adapter.get_quote(
@@ -33,12 +33,14 @@ from .adapter import (
     StargateStatusError,
     StargateTransactionError,
 )
+from .receipt_parser import StargateReceiptParser
 
 __all__ = [
     "StargateBridgeAdapter",
     "StargateConfig",
     "StargateError",
     "StargateQuoteError",
+    "StargateReceiptParser",
     "StargateTransactionError",
     "StargateStatusError",
     "STARGATE_CHAIN_IDS",

@@ -70,7 +70,7 @@ def test_connector_parser_registered(connector_parts: tuple[str, ...]):
     module. This ensures the ResultEnricher can find the parser at runtime.
 
     Handles both flat layouts (``connectors/aerodrome/receipt_parser.py``) and
-    nested families (``connectors/bridges/across/receipt_parser.py``).
+    nested families (``connectors/<family>/<connector>/receipt_parser.py``).
     """
     connector_id = "/".join(connector_parts)
     suffix = ".".join(connector_parts)
@@ -96,9 +96,8 @@ def test_no_stale_registry_entries():
 
     Catches stale entries left behind when connectors are removed or renamed.
 
-    Accepts two path shapes so nested connector families (e.g., the bridge
-    adapters under ``connectors/bridges/<bridge>/``) can register their
-    receipt parsers:
+    Accepts two path shapes so nested connector families (if any remain) can
+    register their receipt parsers:
 
       1. ``almanak.framework.connectors.<connector>.receipt_parser`` (5 parts)
       2. ``almanak.framework.connectors.<family>.<connector>.receipt_parser``

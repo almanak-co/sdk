@@ -14,7 +14,7 @@ Available Connectors:
 - Morpho Blue: Permissionless lending protocol (Ethereum, Base)
 - Compound V3: Lending protocol with single borrowable assets (Ethereum, Arbitrum)
 - TraderJoe V2: Liquidity Book AMM on Avalanche and Arbitrum
-- Bridges: Cross-chain bridge adapters (Across, Stargate)
+- Across / Stargate: Cross-chain bridge adapters
 - Polymarket: Prediction market trading via hybrid CLOB + on-chain (Polygon)
 """
 
@@ -60,6 +60,18 @@ from .aave_v3 import (
 )
 from .aave_v3 import (
     EVENT_TOPICS as AAVE_EVENT_TOPICS,
+)
+from .across import (
+    ACROSS_CHAIN_IDS,
+    ACROSS_SPOKE_POOL_ADDRESSES,
+    ACROSS_SUPPORTED_TOKENS,
+    AcrossBridgeAdapter,
+    AcrossConfig,
+    AcrossError,
+    AcrossQuoteError,
+    AcrossReceiptParser,
+    AcrossStatusError,
+    AcrossTransactionError,
 )
 from .aerodrome import (
     # Constants
@@ -127,45 +139,16 @@ from .aerodrome import (
 from .aerodrome import (
     TransactionData as AerodromeTransactionData,
 )
-from .bridges import (
-    ACROSS_CHAIN_IDS,
-    ACROSS_SPOKE_POOL_ADDRESSES,
-    ACROSS_SUPPORTED_TOKENS,
-    DEFAULT_RELIABILITY_SCORES,
-    STARGATE_CHAIN_IDS,
-    STARGATE_POOL_IDS,
-    STARGATE_ROUTER_ADDRESSES,
-    STARGATE_SUPPORTED_TOKENS,
-    # Across
-    AcrossBridgeAdapter,
-    AcrossConfig,
-    AcrossError,
-    AcrossQuoteError,
-    AcrossStatusError,
-    AcrossTransactionError,
+from .bridge_base import (
     BridgeAdapter,
     BridgeError,
     BridgeQuote,
     BridgeQuoteError,
     BridgeRoute,
-    BridgeScore,
-    BridgeSelectionResult,
-    # Bridge Selector
-    BridgeSelector,
-    BridgeSelectorError,
     BridgeStatus,
     BridgeStatusEnum,
     BridgeStatusError,
     BridgeTransactionError,
-    NoBridgeAvailableError,
-    SelectionPriority,
-    # Stargate
-    StargateBridgeAdapter,
-    StargateConfig,
-    StargateError,
-    StargateQuoteError,
-    StargateStatusError,
-    StargateTransactionError,
 )
 from .compound_v3 import (
     # Constants
@@ -570,6 +553,19 @@ from .spark import (
 from .spark import (
     WithdrawEventData as SparkWithdrawEventData,
 )
+from .stargate import (
+    STARGATE_CHAIN_IDS,
+    STARGATE_POOL_IDS,
+    STARGATE_ROUTER_ADDRESSES,
+    STARGATE_SUPPORTED_TOKENS,
+    StargateBridgeAdapter,
+    StargateConfig,
+    StargateError,
+    StargateQuoteError,
+    StargateReceiptParser,
+    StargateStatusError,
+    StargateTransactionError,
+)
 from .traderjoe_v2 import (
     BIN_ID_OFFSET,
     BIN_STEPS,
@@ -862,6 +858,7 @@ __all__ = [
     "AcrossConfig",
     "AcrossError",
     "AcrossQuoteError",
+    "AcrossReceiptParser",
     "AcrossTransactionError",
     "AcrossStatusError",
     "ACROSS_CHAIN_IDS",
@@ -872,20 +869,13 @@ __all__ = [
     "StargateConfig",
     "StargateError",
     "StargateQuoteError",
+    "StargateReceiptParser",
     "StargateTransactionError",
     "StargateStatusError",
     "STARGATE_CHAIN_IDS",
     "STARGATE_ROUTER_ADDRESSES",
     "STARGATE_POOL_IDS",
     "STARGATE_SUPPORTED_TOKENS",
-    # Bridge Selector
-    "BridgeSelector",
-    "BridgeScore",
-    "BridgeSelectionResult",
-    "SelectionPriority",
-    "BridgeSelectorError",
-    "NoBridgeAvailableError",
-    "DEFAULT_RELIABILITY_SCORES",
     # TraderJoe V2 Adapter
     "TraderJoeV2Adapter",
     "TraderJoeV2Config",

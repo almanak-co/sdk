@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.connectors.bridges.base import BridgeQuote
-from almanak.framework.connectors.bridges.selector import (
+from almanak.framework.connectors.bridge_base import BridgeQuote
+from almanak.framework.intents.bridge_selector import (
     BridgeSelectionResult,
     NoBridgeAvailableError,
 )

@@ -29,7 +29,8 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Spark](spark.md) | Lending | Ethereum | `spark` |
 | [Pendle](pendle.md) | Yield | Ethereum, Arbitrum | `pendle` |
 | [Kraken](kraken.md) | CEX | N/A | `kraken` |
-| [Bridges](bridges.md) | Bridge | Multi-chain | `bridges` |
+| [Across](across.md) | Bridge | Multi-chain | `across` |
+| [Stargate](stargate.md) | Bridge | Multi-chain | `stargate` |
 | [Flash Loan](flash_loan.md) | Utility | Multi-chain | `flash_loan` |
 | Agni Finance | DEX | Mantle | `agni_finance` |
 | [BenQi](benqi.md) | Lending | Avalanche | `benqi` |

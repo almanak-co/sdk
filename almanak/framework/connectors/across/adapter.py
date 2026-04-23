@@ -43,7 +43,7 @@ from urllib3.util.retry import Retry
 
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
-from ..base import (
+from ..bridge_base import (
     BridgeAdapter,
     BridgeError,
     BridgeQuote,

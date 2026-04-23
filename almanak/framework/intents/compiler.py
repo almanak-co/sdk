@@ -67,11 +67,11 @@ from .vocabulary import (
 if TYPE_CHECKING:
     from web3 import Web3
 
-    from ..connectors.bridges.selector import BridgeSelector
     from ..connectors.polymarket.adapter import PolymarketAdapter
     from ..data.tokens import TokenResolver as TokenResolverType
     from ..gateway_client import GatewayClient
     from .bridge import BridgeIntent
+    from .bridge_selector import BridgeSelector
     from .pool_validation import PoolValidationResult
     from .vocabulary import UnwrapNativeIntent, WrapNativeIntent
 
@@ -756,9 +756,9 @@ class IntentCompiler:
         if self._bridge_selector is not None:
             return self._bridge_selector
 
-        from ..connectors.bridges.across.adapter import AcrossBridgeAdapter
-        from ..connectors.bridges.selector import BridgeSelector
-        from ..connectors.bridges.stargate.adapter import StargateBridgeAdapter
+        from ..connectors.across.adapter import AcrossBridgeAdapter
+        from ..connectors.stargate.adapter import StargateBridgeAdapter
+        from .bridge_selector import BridgeSelector
 
         bridges = [
             AcrossBridgeAdapter(token_resolver=self._token_resolver),

@@ -10,7 +10,7 @@ Features:
 - Available on Ethereum, Arbitrum, Optimism, Base, Polygon, and more
 
 Example:
-    from almanak.framework.connectors.bridges.across import AcrossBridgeAdapter, AcrossConfig
+    from almanak.framework.connectors.across import AcrossBridgeAdapter, AcrossConfig
 
     config = AcrossConfig(timeout_seconds=1800)  # 30 min timeout
     adapter = AcrossBridgeAdapter(config)
@@ -38,12 +38,14 @@ from .adapter import (
     AcrossStatusError,
     AcrossTransactionError,
 )
+from .receipt_parser import AcrossReceiptParser
 
 __all__ = [
     "AcrossBridgeAdapter",
     "AcrossConfig",
     "AcrossError",
     "AcrossQuoteError",
+    "AcrossReceiptParser",
     "AcrossTransactionError",
     "AcrossStatusError",
     "ACROSS_CHAIN_IDS",

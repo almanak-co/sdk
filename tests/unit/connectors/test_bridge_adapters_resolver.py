@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.connectors.bridges.across.adapter import (
+from almanak.framework.connectors.across.adapter import (
     AcrossBridgeAdapter,
     AcrossConfig,
 )
-from almanak.framework.connectors.bridges.stargate.adapter import (
+from almanak.framework.connectors.stargate.adapter import (
     StargateBridgeAdapter,
     StargateConfig,
 )
@@ -138,8 +138,8 @@ class TestDeprecatedDictsRemoved:
 
     def test_deprecated_dicts_removed(self):
         """Verify deprecated token dicts have been removed (US-028)."""
-        import almanak.framework.connectors.bridges.across.adapter as across_module
-        import almanak.framework.connectors.bridges.stargate.adapter as stargate_module
+        import almanak.framework.connectors.across.adapter as across_module
+        import almanak.framework.connectors.stargate.adapter as stargate_module
 
         assert not hasattr(across_module, "ACROSS_TOKEN_ADDRESSES")
         assert not hasattr(stargate_module, "STARGATE_TOKEN_ADDRESSES")

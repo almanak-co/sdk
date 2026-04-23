@@ -264,11 +264,11 @@ class ReceiptParserRegistry:
         ),
         # Cross-Chain Bridges (VIB-3226)
         "across": (
-            "almanak.framework.connectors.bridges.across.receipt_parser",
+            "almanak.framework.connectors.across.receipt_parser",
             "AcrossReceiptParser",
         ),
         "stargate": (
-            "almanak.framework.connectors.bridges.stargate.receipt_parser",
+            "almanak.framework.connectors.stargate.receipt_parser",
             "StargateReceiptParser",
         ),
         # Yield / Structured Products

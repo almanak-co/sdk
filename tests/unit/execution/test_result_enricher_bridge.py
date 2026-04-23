@@ -17,13 +17,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.connectors.bridges.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
-from almanak.framework.connectors.bridges.across.receipt_parser import (
+from almanak.framework.connectors.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
+from almanak.framework.connectors.across.receipt_parser import (
     AcrossReceiptParser,
     V3_FUNDS_DEPOSITED_TOPIC,
 )
-from almanak.framework.connectors.bridges.stargate.adapter import STARGATE_ROUTER_ADDRESSES
-from almanak.framework.connectors.bridges.stargate.receipt_parser import (
+from almanak.framework.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
+from almanak.framework.connectors.stargate.receipt_parser import (
     OFT_SENT_TOPIC,
     StargateReceiptParser,
 )

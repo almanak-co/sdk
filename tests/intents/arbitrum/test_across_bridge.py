@@ -45,7 +45,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.framework.connectors.bridges.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
+from almanak.framework.connectors.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import BridgeIntent
 from almanak.framework.intents.compiler import IntentCompiler
@@ -349,7 +349,7 @@ class TestAcrossBridgeIntent:
         # Exercise the parser the ResultEnricher would invoke for BRIDGE intents
         # on a real on-chain receipt, and assert the typed BridgeData payload
         # matches the deposit's actual amount, token, and route.
-        from almanak.framework.connectors.bridges.across.receipt_parser import (
+        from almanak.framework.connectors.across.receipt_parser import (
             AcrossReceiptParser,
         )
 
