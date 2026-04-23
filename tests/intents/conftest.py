@@ -46,6 +46,17 @@ TEST_SUBMITTER_MAX_RETRIES = int(os.environ.get("ALMANAK_TEST_SUBMITTER_MAX_RETR
 # requests-style (connect, read) timeouts for sync Web3 HTTPProvider
 TEST_WEB3_REQUEST_TIMEOUT = (TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_RPC_READ_TIMEOUT_SECONDS)
 
+# Polygon-specific read timeout: bumped 30s -> 60s (#1804). The polygon Anvil fork
+# consistently hits ReadTimeoutError at the 30s default set by #1738 under CI load
+# (see PR #1798 run 24793717120). Scoped to polygon only; other chains keep 30s.
+TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS = float(
+    os.environ.get("ALMANAK_TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS", "60")
+)
+TEST_POLYGON_WEB3_REQUEST_TIMEOUT = (
+    TEST_RPC_CONNECT_TIMEOUT_SECONDS,
+    TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS,
+)
+
 # Retry config for Anvil RPC calls during wallet funding.
 # Only applies to setup-time RPC calls (anvil_setBalance, anvil_setStorageAt, evm_mine),
 # NOT to test-time execution. Zero overhead on happy path.
@@ -374,6 +385,8 @@ __all__ = [
     "TEST_RPC_READ_TIMEOUT_SECONDS",
     "TEST_WEB3_DEFAULT_HTTP_TIMEOUT_SECONDS",
     "TEST_WEB3_REQUEST_TIMEOUT",
+    "TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS",
+    "TEST_POLYGON_WEB3_REQUEST_TIMEOUT",
     "TEST_CAST_TIMEOUT_SECONDS",
     "TEST_TX_TIMEOUT_SECONDS",
     "TEST_SUBMITTER_MAX_RETRIES",

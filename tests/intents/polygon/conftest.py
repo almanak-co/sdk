@@ -24,11 +24,11 @@ from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.conftest_gateway import AnvilFixture
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    TEST_POLYGON_WEB3_REQUEST_TIMEOUT,
     TEST_PRIVATE_KEY,
     TEST_SUBMITTER_MAX_RETRIES,
     TEST_TX_TIMEOUT_SECONDS,
     TEST_WALLET,
-    TEST_WEB3_REQUEST_TIMEOUT,
     fund_erc20_token,
     fund_native_token,
     get_token_balance,
@@ -58,7 +58,7 @@ def _lower_anvil_base_fee(rpc_url: str) -> None:
 
     Uses in-process Web3 provider RPC instead of subprocess (cast).
     """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_POLYGON_WEB3_REQUEST_TIMEOUT}))
     base_fee_hex = hex(_ANVIL_BASE_FEE_WEI)
     w3.provider.make_request("anvil_setNextBlockBaseFeePerGas", [base_fee_hex])
     # Mine a block so the new base fee takes effect
@@ -135,7 +135,7 @@ def anvil_rpc_url(anvil_polygon: AnvilFixture) -> str:
 @pytest.fixture(scope="module")
 def web3(anvil_rpc_url: str) -> Web3:
     """Connect to gateway's Anvil fork for Polygon."""
-    w3 = Web3(Web3.HTTPProvider(anvil_rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = Web3(Web3.HTTPProvider(anvil_rpc_url, request_kwargs={"timeout": TEST_POLYGON_WEB3_REQUEST_TIMEOUT}))
     assert w3.is_connected(), f"Anvil not responding at {anvil_rpc_url}"
     actual_id = w3.eth.chain_id
     assert actual_id == REQUIRED_CHAIN_ID, f"Expected chain {REQUIRED_CHAIN_ID}, got {actual_id}"
