@@ -3,16 +3,22 @@
 This adapter compiles prediction market intents (PredictionBuyIntent,
 PredictionSellIntent, PredictionRedeemIntent) into executable ActionBundles.
 
-The adapter bridges high-level trading intents to the CLOB API and CTF SDK:
-- Buy/Sell intents -> CLOB orders (signed and submitted off-chain)
+The adapter bridges high-level trading intents to the gateway-backed Polymarket
+client and CTF SDK:
+- Buy/Sell intents -> CLOB orders (submitted through the gateway)
 - Redeem intents -> CTF transactions (on-chain redemption)
 
 Example:
-    from almanak.framework.connectors.polymarket import PolymarketAdapter, PolymarketConfig
+    from almanak.framework.connectors.polymarket import GatewayPolymarketClient, PolymarketAdapter
+    from almanak.framework.gateway_client import GatewayClient
     from almanak.framework.intents import Intent
 
-    config = PolymarketConfig.from_env()
-    adapter = PolymarketAdapter(config)
+    gateway_client = GatewayClient(...)
+    gateway_client.connect()
+    adapter = PolymarketAdapter(
+        GatewayPolymarketClient(gateway_client),
+        wallet_address="0x1234...",
+    )
 
     # Compile a buy intent
     intent = Intent.prediction_buy(
@@ -143,14 +149,13 @@ class PolymarketAdapter:
     4. Return ActionBundle for execution
 
     Attributes:
-        config: Polymarket configuration
-        clob: CLOB API client for order management
+        client: Gateway-backed Polymarket client for order management
+        clob: Compatibility alias for the client
         ctf: CTF SDK for on-chain operations
         web3: Optional Web3 instance for on-chain operations
 
     Example:
-        >>> config = PolymarketConfig.from_env()
-        >>> adapter = PolymarketAdapter(config)
+        >>> adapter = PolymarketAdapter(pm_client, wallet_address="0x1234...")
         >>>
         >>> intent = Intent.prediction_buy(
         ...     market_id="btc-100k",
@@ -169,34 +174,20 @@ class PolymarketAdapter:
         """Initialize the Polymarket adapter.
 
         Args:
-            client: Gateway-backed Polymarket client, or a legacy PolymarketConfig
+            client: Gateway-backed Polymarket client
             wallet_address: Wallet address used for on-chain redemption
             web3: Optional Web3 instance for on-chain operations.
                   Required for redeem intents.
         """
         if isinstance(client, PolymarketConfig):
-            # GATEWAY_VIOLATION: direct ClobClient instantiation from PolymarketConfig
-            # is a legacy backwards-compatibility path for tests and local-only usage.
-            # Production wiring always passes GatewayPolymarketClient.
-            # Tech debt: remove once all callers are updated.
-            # Linear ticket: https://linear.app/almanak/issue/VIB-XXXX
-            import warnings
-
-            warnings.warn(
-                "PolymarketAdapter(PolymarketConfig(...)) uses a direct HTTP client, bypassing "
-                "the gateway boundary. Pass GatewayPolymarketClient instead for hosted/production use.",
-                DeprecationWarning,
-                stacklevel=2,
+            raise ValueError(
+                "PolymarketAdapter requires a gateway-backed Polymarket client. "
+                "PolymarketConfig is not accepted here because it would bypass the gateway boundary."
             )
-            from .clob_client import ClobClient
-
-            self.client = ClobClient(client)
-            self.wallet_address = wallet_address or client.wallet_address
-        else:
-            if wallet_address is None:
-                raise ValueError("wallet_address is required when initializing PolymarketAdapter with a client")
-            self.client = client
-            self.wallet_address = wallet_address
+        if wallet_address is None:
+            raise ValueError("wallet_address is required when initializing PolymarketAdapter with a client")
+        self.client = client
+        self.wallet_address = wallet_address
         # Compatibility alias for older tests/callers that still reference
         # ``adapter.clob`` even though the adapter now accepts any Polymarket
         # client implementation (gateway-backed or direct).
@@ -833,9 +824,7 @@ class PolymarketAdapter:
         if effective_tick <= 0:
             return
         remainder = price % effective_tick
-        tolerance = effective_tick / Decimal("1000")
-        is_valid = remainder < tolerance or (effective_tick - remainder) < tolerance
-        if not is_valid:
+        if remainder != 0:
             ticks = price / effective_tick
             nearest_ticks = round(ticks)
             nearest_valid = nearest_ticks * effective_tick

@@ -133,6 +133,25 @@ def _make_clob_bundle():
     return bundle
 
 
+def _make_order_request_bundle():
+    """ActionBundle for the gateway-backed order_request path."""
+    bundle = MagicMock()
+    bundle.transactions = []
+    bundle.metadata = {
+        "protocol": "polymarket",
+        "intent_id": "pred-intent-001",
+        "order_request": {
+            "token_id": "0x123",
+            "side": "BUY",
+            "price": "0.50",
+            "size": "100",
+            "time_in_force": "IOC",
+            "fee_rate_bps": "1000",
+        },
+    }
+    return bundle
+
+
 def _make_onchain_bundle():
     """ActionBundle for a normal on-chain swap."""
     bundle = MagicMock()
@@ -285,6 +304,63 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
     assert result.execution_result.prediction_fill.requested_shares == _D("100")
     assert result.execution_result.prediction_fill.avg_fill_price == _D("0.50")
     assert result.execution_result.prediction_fill.is_fully_filled is True
+
+
+@pytest.mark.asyncio
+async def test_order_request_bundle_routes_to_clob_handler() -> None:
+    """Gateway-backed order_request bundles should route to ClobActionHandler."""
+    intent = _make_prediction_intent()
+    strategy = _make_strategy(intent)
+    clob_bundle = _make_order_request_bundle()
+
+    orch = FakeGatewayExecutionOrchestrator()
+
+    runner = _make_runner(execution_orchestrator=orch)
+
+    mock_clob_handler = MagicMock()
+    mock_clob_handler.can_handle.return_value = True
+    from decimal import Decimal as _D
+
+    mock_clob_handler.execute = AsyncMock(
+        return_value=ClobExecutionResult(
+            success=False,
+            order_id="order-ioc-unmatched",
+            status=ClobOrderStatus.FAILED,
+            filled_size=_D("0"),
+            avg_fill_price=None,
+            requested_size=_D("100"),
+            error="CLOB order rejected (status=failed)",
+        )
+    )
+
+    patches = _common_patches(clob_bundle)
+    patches.extend([
+        patch(
+            "almanak.framework.execution.gateway_orchestrator.GatewayExecutionOrchestrator",
+            FakeGatewayExecutionOrchestrator,
+        ),
+        patch(
+            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            return_value=object(),
+        ),
+        patch(
+            "almanak.framework.execution.clob_handler.ClobActionHandler",
+            return_value=mock_clob_handler,
+        ),
+    ])
+
+    with apply_patches(patches):
+        result = await runner._execute_single_chain(
+            strategy=strategy,
+            intent=intent,
+            start_time=datetime.now(UTC),
+        )
+
+    mock_clob_handler.execute.assert_awaited_once_with(clob_bundle)
+    orch.execute.assert_not_awaited()
+    assert result.status == IterationStatus.EXECUTION_FAILED
+    assert result.execution_result is not None
+    assert result.execution_result.extracted_data["clob_status"] == ClobOrderStatus.FAILED.value
 
 
 @pytest.mark.asyncio

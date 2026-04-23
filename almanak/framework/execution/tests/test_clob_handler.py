@@ -91,6 +91,27 @@ def valid_clob_bundle():
 
 
 @pytest.fixture
+def valid_order_request_bundle():
+    """Create a valid gateway-backed CLOB order_request bundle."""
+    return ActionBundle(
+        intent_type="PREDICTION_BUY",
+        transactions=[],
+        metadata={
+            "protocol": "polymarket",
+            "intent_id": "test-intent-123",
+            "order_request": {
+                "token_id": "12345...",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "100",
+                "time_in_force": "IOC",
+                "fee_rate_bps": "1000",
+            },
+        },
+    )
+
+
+@pytest.fixture
 def on_chain_bundle():
     """Create an on-chain transaction bundle (not CLOB)."""
     return ActionBundle(
@@ -187,6 +208,27 @@ class TestExecute:
         assert result.error is None
         mock_clob_client.submit_order_payload.assert_called_once_with(valid_clob_bundle.metadata["order_payload"])
 
+    def test_execute_order_request_calls_create_and_post_order(
+        self, handler, mock_clob_client, valid_order_request_bundle, mock_order_response
+    ):
+        """Gateway-backed bundles must use create_and_post_order()."""
+        valid_order_request_bundle.metadata["order_request"]["time_in_force"] = "GTC"
+        mock_clob_client.create_and_post_order.return_value = mock_order_response
+
+        result = asyncio.run(handler.execute(valid_order_request_bundle))
+
+        assert result.success is True
+        mock_clob_client.create_and_post_order.assert_called_once_with(
+            token_id="12345...",
+            price=Decimal("0.50"),
+            size=Decimal("100"),
+            side="BUY",
+            time_in_force="GTC",
+            expiration=0,
+            fee_rate_bps="1000",
+        )
+        mock_clob_client.submit_order_payload.assert_not_called()
+
     def test_execute_without_client(self, handler_no_client, valid_clob_bundle):
         """Test that execute fails gracefully without client."""
         result = asyncio.run(handler_no_client.execute(valid_clob_bundle))
@@ -277,6 +319,25 @@ class TestExecute:
         assert result.success is False  # FAILED classification flows into success
         assert result.status == ClobOrderStatus.FAILED
         assert result.filled_size == Decimal("0")
+        assert result.error is not None
+
+    def test_order_request_ioc_zero_fill_uses_nested_order_type_and_size(
+        self, handler, mock_clob_client, valid_order_request_bundle
+    ):
+        """IOC order_request bundles must classify zero-fill as FAILED."""
+        mock_response = MagicMock()
+        mock_response.order_id = "order-ioc-unmatched"
+        mock_response.status = MagicMock()
+        mock_response.status.value = "LIVE"
+        mock_response.filled_size = Decimal("0")
+        mock_response.avg_fill_price = None
+        mock_clob_client.create_and_post_order.return_value = mock_response
+
+        result = asyncio.run(handler.execute(valid_order_request_bundle))
+
+        assert result.success is False
+        assert result.status == ClobOrderStatus.FAILED
+        assert result.requested_size == Decimal("100")
         assert result.error is not None
 
     def test_partial_ioc_fill_is_terminal_matched(self, handler, mock_clob_client, valid_clob_bundle):

@@ -195,6 +195,11 @@ class TestAdapterInitialization:
         # Close should have been called
         adapter_with_mocks.clob.close.assert_called_once()
 
+    def test_rejects_polymarket_config_direct_client_path(self, config):
+        """Adapter must reject direct config-based initialization."""
+        with pytest.raises(ValueError, match="gateway-backed Polymarket client"):
+            PolymarketAdapter(config)
+
 
 # =============================================================================
 # Buy Intent Compilation Tests

@@ -196,6 +196,26 @@ class TestBuyOffTickPrice:
         # The signer must not have been reached — dry-run integrity.
         adapter.clob.create_and_sign_limit_order.assert_not_called()
 
+    def test_buy_tiny_off_tick_price_is_not_tolerance_accepted(
+        self,
+        adapter: PolymarketAdapter,
+        test_market: GammaMarket,
+    ) -> None:
+        """A price slightly off-grid must still fail on a 0.01-tick market."""
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("100"),
+            max_price=Decimal("0.650009"),
+        )
+
+        bundle = adapter.compile_intent(intent)
+
+        assert "error" in bundle.metadata
+        assert "breaks minimum tick size rule" in bundle.metadata["error"]
+        assert "0.01" in bundle.metadata["error"]
+        adapter.clob.create_and_sign_limit_order.assert_not_called()
+
     def test_buy_off_tick_price_0001_market_rejects(
         self,
         adapter: PolymarketAdapter,

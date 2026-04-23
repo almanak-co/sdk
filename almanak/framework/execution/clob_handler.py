@@ -578,8 +578,12 @@ class ClobActionHandler:
         order_payload = bundle.metadata.get("order_payload")
         order_request = bundle.metadata.get("order_request", {})
         intent_id = bundle.metadata.get("intent_id")
-        requested_size = _parse_decimal(bundle.metadata.get("size"))
-        order_type_hint = str(bundle.metadata.get("order_type", "")).upper()
+        requested_size = _parse_decimal(bundle.metadata.get("size") or order_request.get("size"))
+        order_type_hint = str(
+            bundle.metadata.get("order_type")
+            or order_request.get("order_type")
+            or order_request.get("time_in_force", "")
+        ).upper()
 
         try:
             # Submit order to CLOB API
@@ -587,9 +591,9 @@ class ClobActionHandler:
                 "Submitting CLOB order",
                 extra={
                     "intent_id": intent_id,
-                    "side": bundle.metadata.get("side"),
-                    "size": bundle.metadata.get("size"),
-                    "price": bundle.metadata.get("price"),
+                    "side": bundle.metadata.get("side") or order_request.get("side"),
+                    "size": bundle.metadata.get("size") or order_request.get("size"),
+                    "price": bundle.metadata.get("price") or order_request.get("price"),
                     "order_type": order_type_hint or None,
                 },
             )
