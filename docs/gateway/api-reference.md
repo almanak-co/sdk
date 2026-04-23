@@ -8,7 +8,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 4 | Price data, balances, batch balances, and technical indicators |
-| StateService | 8 | Strategy state persistence and portfolio snapshots/metrics |
+| StateService | 9 | Strategy state persistence, portfolio snapshots/metrics, and transaction ledger |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
@@ -270,6 +270,49 @@ Retrieve stored portfolio metrics.
 
 ```protobuf
 rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData)
+```
+
+### SaveLedgerEntry
+
+Persist a single structured trade record to the transaction ledger.
+
+```protobuf
+rpc SaveLedgerEntry(SaveLedgerEntryRequest) returns (SaveLedgerEntryResponse)
+```
+
+**Request:**
+```protobuf
+message SaveLedgerEntryRequest {
+  string id = 1;                   // UUID primary key (idempotent ON CONFLICT target)
+  string cycle_id = 2;
+  string strategy_id = 3;
+  string deployment_id = 4;
+  string execution_mode = 5;       // "live" | "paper" | "dry_run"
+  int64 timestamp = 6;             // Unix epoch seconds
+  string intent_type = 7;
+  string token_in = 8;
+  string amount_in = 9;            // Decimal string
+  string token_out = 10;
+  string amount_out = 11;          // Decimal string
+  string effective_price = 12;     // Decimal string, "" when not applicable
+  optional double slippage_bps = 13;
+  int64 gas_used = 14;
+  string gas_usd = 15;             // Decimal string, "" when unknown
+  string tx_hash = 16;
+  string chain = 17;
+  string protocol = 18;
+  bool success = 19;
+  string error = 20;
+  bytes extracted_data_json = 21;  // Serialised extracted_data dict
+}
+```
+
+**Response:**
+```protobuf
+message SaveLedgerEntryResponse {
+  bool success = 1;
+  string error = 2;
+}
 ```
 
 ## ExecutionService
