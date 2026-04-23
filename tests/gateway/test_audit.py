@@ -1,7 +1,7 @@
 """Tests for gateway audit logging module."""
 
+import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -330,6 +330,98 @@ class TestAuditInterceptor:
         """Log level is normalized to lowercase."""
         interceptor = AuditInterceptor(log_level="WARNING")
         assert interceptor.log_level == "warning"
+
+
+class TestAuditWrapperCancellation:
+    """Regression tests: wrappers must record CancelledError without crashing.
+
+    asyncio.CancelledError is a BaseException (not Exception) in Python 3.8+,
+    so a bare `except Exception` lets it bypass audit bookkeeping. The
+    unary_unary / stream_unary wrappers additionally referenced
+    ``response_summary`` in their ``finally`` block without initializing it
+    on the cancel path, producing an UnboundLocalError that masked the real
+    error and broke gRPC's error-status return.
+    """
+
+    @pytest.fixture
+    def interceptor(self):
+        return AuditInterceptor()
+
+    @pytest.fixture
+    def context(self):
+        return MagicMock()
+
+    @patch("almanak.gateway.audit.log_audit_record")
+    def test_unary_unary_records_cancelled_error(self, mock_log, interceptor, context):
+        async def behavior(request, ctx):
+            raise asyncio.CancelledError()
+
+        wrapped = interceptor._wrap_unary_unary(behavior, "Svc", "M")
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(wrapped(MagicMock(), context))
+
+        mock_log.assert_called_once()
+        record = mock_log.call_args[0][0]
+        assert record.success is False
+        assert record.error_type == "CancelledError"
+        assert record.response_summary == {}
+
+    @patch("almanak.gateway.audit.log_audit_record")
+    def test_stream_unary_records_cancelled_error(self, mock_log, interceptor, context):
+        async def behavior(iterator, ctx):
+            raise asyncio.CancelledError()
+
+        wrapped = interceptor._wrap_stream_unary(behavior, "Svc", "M")
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(wrapped(iter([]), context))
+
+        mock_log.assert_called_once()
+        record = mock_log.call_args[0][0]
+        assert record.success is False
+        assert record.error_type == "CancelledError"
+        assert record.response_summary == {}
+
+    @patch("almanak.gateway.audit.log_audit_record")
+    def test_unary_stream_records_cancelled_error(self, mock_log, interceptor, context):
+        async def behavior(request, ctx):
+            raise asyncio.CancelledError()
+            yield  # pragma: no cover — unreachable, makes this a generator
+
+        wrapped = interceptor._wrap_unary_stream(behavior, "Svc", "M")
+
+        async def drain():
+            async for _ in wrapped(MagicMock(), context):
+                pass
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(drain())
+
+        mock_log.assert_called_once()
+        record = mock_log.call_args[0][0]
+        assert record.success is False
+        assert record.error_type == "CancelledError"
+
+    @patch("almanak.gateway.audit.log_audit_record")
+    def test_stream_stream_records_cancelled_error(self, mock_log, interceptor, context):
+        async def behavior(iterator, ctx):
+            raise asyncio.CancelledError()
+            yield  # pragma: no cover
+
+        wrapped = interceptor._wrap_stream_stream(behavior, "Svc", "M")
+
+        async def drain():
+            async for _ in wrapped(iter([]), context):
+                pass
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(drain())
+
+        mock_log.assert_called_once()
+        record = mock_log.call_args[0][0]
+        assert record.success is False
+        assert record.error_type == "CancelledError"
 
 
 class TestStructlogConfiguration:

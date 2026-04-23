@@ -1180,13 +1180,15 @@ class TokenResolver:
                 token=symbol,
                 chain=chain_lower,
             )
-            # VIB-2715: 5s budget for symbol lookups. The gateway's
-            # CoinGecko/Jupiter path is usually <1s when the symbol
-            # exists; 30s was only ever the CoinGecko rate-limit
-            # worst case. Keeping it that high turned unknown-symbol
-            # lookups into 30s hangs, which is far worse UX than
-            # accepting the occasional slow-path miss.
-            response = stub.ResolveToken(request, timeout=5.0)
+            # VIB-2715: budget for symbol lookups. The gateway's
+            # CoinGecko/Jupiter path is usually <1s for cache hits, but
+            # the on-chain confirm step (CoinGecko search + eth_chain_id
+            # + decimals() + symbol()) takes ~3.5-4s on a fresh lookup.
+            # 5s was clipping legitimate resolutions mid-confirm; 15s
+            # gives headroom over observed p99 (~4.1s) while staying
+            # well under the 30s CoinGecko rate-limit worst case that
+            # VIB-2715 was originally trying to avoid.
+            response = stub.ResolveToken(request, timeout=15.0)
 
             if not response.success:
                 with self._lock:

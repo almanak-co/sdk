@@ -314,6 +314,49 @@ class TestResolverGatewaySymbolFallback:
 
         assert result is None
 
+    def test_resolve_symbol_via_gateway_uses_15s_timeout(self):
+        """Regression guard for VIB-2715: the on-chain confirm step in the
+        gateway's dynamic path takes ~3.5-4s p99, so the client-side gRPC
+        deadline must give it enough headroom.  A silent revert back to the
+        historical 5s value re-introduces the production bug where fresh
+        CoinGecko/DexScreener resolutions were clipped mid-confirm and
+        returned false NOT_FOUND errors.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from almanak.framework.data.tokens.resolver import TokenResolver, _normalize_chain
+
+        resolver = self._make_resolver_with_gateway()
+        chain_lower, chain_enum = _normalize_chain("arbitrum")
+
+        # Minimal happy-path response; we only care about the call args below.
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.symbol = "USDC"
+        mock_response.address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        mock_response.decimals = 6
+        mock_response.name = "USD Coin"
+        mock_response.source = "static"
+        mock_response.is_verified = True
+
+        mock_stub = MagicMock()
+        mock_stub.ResolveToken = MagicMock(return_value=mock_response)
+
+        with patch.object(resolver, "_get_gateway_stub", return_value=mock_stub):
+            with patch.object(resolver, "_check_gateway_available", return_value=True):
+                resolver._resolve_symbol_via_gateway("USDC", chain_lower, chain_enum)
+
+        # ``ResolveToken`` is invoked with a keyword-only ``timeout`` kwarg in
+        # resolver.py:_resolve_symbol_via_gateway — assert its exact value so
+        # any future change to that constant is caught here.
+        mock_stub.ResolveToken.assert_called_once()
+        _, kwargs = mock_stub.ResolveToken.call_args
+        assert kwargs.get("timeout") == 15.0, (
+            f"Expected ResolveToken client deadline to be 15.0s (see VIB-2715 "
+            f"post-mortem in resolver.py:_resolve_symbol_via_gateway); got "
+            f"{kwargs.get('timeout')!r}."
+        )
+
     def teardown_method(self, method):
         from almanak.framework.data.tokens.resolver import TokenResolver
 

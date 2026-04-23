@@ -9,6 +9,7 @@ This module provides structured audit logging for all gateway operations:
 Logs are written to stdout in JSON format for container log aggregation.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -323,16 +324,16 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
             error_type = None
             error_message = None
             success = True
+            response_summary: dict = {}
 
             try:
                 response = await behavior(request, context)
                 response_summary = _summarize_response(response)
                 return response
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 success = False
                 error_type = type(e).__name__
                 error_message = str(e)[:200]  # Truncate long errors
-                response_summary = {}
                 raise
             finally:
                 latency_ms = (time.perf_counter() - start_time) * 1000
@@ -374,7 +375,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
             try:
                 async for response in behavior(request, context):
                     yield response
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 success = False
                 error_type = type(e).__name__
                 error_message = str(e)[:200]
@@ -413,16 +414,16 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
             error_type = None
             error_message = None
             success = True
+            response_summary: dict = {}
 
             try:
                 response = await behavior(request_iterator, context)
                 response_summary = _summarize_response(response)
                 return response
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 success = False
                 error_type = type(e).__name__
                 error_message = str(e)[:200]
-                response_summary = {}
                 raise
             finally:
                 latency_ms = (time.perf_counter() - start_time) * 1000
@@ -462,7 +463,7 @@ class AuditInterceptor(grpc.aio.ServerInterceptor):
             try:
                 async for response in behavior(request_iterator, context):
                     yield response
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 success = False
                 error_type = type(e).__name__
                 error_message = str(e)[:200]
