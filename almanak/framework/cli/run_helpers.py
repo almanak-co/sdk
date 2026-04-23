@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from ..strategies.metadata import LEGACY_COMPAT_DATA_REQUIREMENTS, StrategyDataRequirements
 from ._run_context import ComponentBundle, IdentityInfo, ResumeInfo
 
 if TYPE_CHECKING:
@@ -1540,6 +1541,23 @@ def _build_runtime_config(
 # ---------------------------------------------------------------------------
 
 
+def _get_data_requirements(strategy_instance: Any) -> StrategyDataRequirements:
+    """Return the strategy's declared data requirements, falling back to legacy compat.
+
+    Strategies decorated with @almanak_strategy that omit data_requirements get
+    LEGACY_COMPAT_DATA_REQUIREMENTS (all services wired eagerly) to preserve
+    pre-VIB-3392 behavior. Strategies without a STRATEGY_METADATA attribute
+    (no decorator, test stubs) also fall back to legacy compat.
+    """
+    metadata = getattr(strategy_instance, "STRATEGY_METADATA", None)
+    if metadata is None:
+        return LEGACY_COMPAT_DATA_REQUIREMENTS
+    dr = getattr(metadata, "data_requirements", None)
+    if dr is None:
+        return LEGACY_COMPAT_DATA_REQUIREMENTS
+    return dr
+
+
 def _build_orchestrator_and_providers(
     *,
     multi_chain: bool,
@@ -1568,7 +1586,16 @@ def _build_orchestrator_and_providers(
     from ..data.balance.gateway_provider import GatewayBalanceProvider
     from ..data.price.gateway_oracle import GatewayPriceOracle
     from ..execution.multichain import MultiChainOrchestrator
-    from .run import _get_orca_pool_accounts, _init_prediction_provider, _wire_indicators, create_routing_ohlcv_provider
+    from .run import (
+        _get_orca_pool_accounts,
+        _init_prediction_provider,
+        _wire_core_providers,
+        _wire_indicators,
+        create_routing_ohlcv_provider,
+    )
+
+    requirements = _get_data_requirements(strategy_instance)
+    ohlcv_provider: Any = None
 
     execution_orchestrator: Any
     if multi_chain:
@@ -1616,21 +1643,24 @@ def _build_orchestrator_and_providers(
             )
             click.echo("  Multi-chain providers set on strategy")
 
-        # Create indicator calculators using routed OHLCV provider (CEX + DEX fallback).
-        # NOTE: In multi-chain mode, OHLCV routing is bound to the first chain.
-        # For CEX-listed tokens this is fine (Binance data is chain-agnostic).
-        # For DeFi-native tokens on secondary chains, GeckoTerminal pool search
-        # may resolve to the wrong network. Per-chain providers would require
-        # passing chain context through the indicator callables, which is a larger change.
-        ohlcv_provider = create_routing_ohlcv_provider(
-            gateway_client=gateway_client,
-            chain=strategy_chains[0],
-            strategy_config=strategy_config,
-        )
-        _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
+        if requirements.indicators:
+            # NOTE: In multi-chain mode, OHLCV routing is bound to the first chain.
+            # For CEX-listed tokens this is fine (Binance data is chain-agnostic).
+            # For DeFi-native tokens on secondary chains, GeckoTerminal pool search
+            # may resolve to the wrong network. Per-chain providers would require
+            # passing chain context through the indicator callables, which is a larger change.
+            ohlcv_provider = create_routing_ohlcv_provider(
+                gateway_client=gateway_client,
+                chain=strategy_chains[0],
+                strategy_config=strategy_config,
+            )
+            _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
+        elif requirements.price or requirements.balance:
+            # indicators=False: wire price/balance directly without OHLCV or indicator calculators
+            _wire_core_providers(strategy_instance, price_oracle, balance_provider)
 
-        # Initialize lending rate monitor for multi-chain (uses first chain)
-        if hasattr(strategy_instance, "_rate_monitor"):
+        rate_monitor_wired = False
+        if requirements.lending_rates:
             try:
                 from ..data.rates import RateMonitor
 
@@ -1638,19 +1668,19 @@ def _build_orchestrator_and_providers(
                 chain_rpc_url = runtime_config.rpc_urls.get(primary_chain)
                 rate_monitor = RateMonitor(chain=primary_chain, rpc_url=chain_rpc_url)
                 strategy_instance._rate_monitor = rate_monitor
-                click.echo(f"  Rate monitor initialized (chain={primary_chain})")
+                rate_monitor_wired = True
             except Exception as e:
                 logger.debug(f"Rate monitor not available: {e}")
 
-        # Initialize funding rate provider for perpetual venue rates
-        if hasattr(strategy_instance, "_funding_rate_provider"):
+        funding_wired = False
+        if requirements.funding_rates:
             try:
                 from ..data.funding import GatewayFundingRateProvider
 
                 primary_chain = strategy_chains[0]
                 funding_provider = GatewayFundingRateProvider(gateway_client=gateway_client, chain=primary_chain)
                 strategy_instance._funding_rate_provider = funding_provider
-                click.echo(f"  Funding rate provider initialized (chain={primary_chain})")
+                funding_wired = True
             except (ImportError, ValueError, RuntimeError) as e:
                 logger.warning(
                     "Funding rate provider init failed for chain=%s: %s",
@@ -1659,6 +1689,18 @@ def _build_orchestrator_and_providers(
                     exc_info=True,
                 )
 
+        _wired = []
+        if getattr(strategy_instance, "_price_oracle", None) is not None:
+            _wired.append("price")
+        if getattr(strategy_instance, "_balance_provider", None) is not None:
+            _wired.append("balance")
+        if getattr(strategy_instance, "_indicator_provider", None) is not None:
+            _wired.append("indicators")
+        if rate_monitor_wired:
+            _wired.append("lending_rates")
+        if funding_wired:
+            _wired.append("funding_rates")
+        click.echo(f"  Injected strategy data services: {', '.join(_wired)}")
         click.echo(f"  Multi-chain orchestrator created for {len(strategy_chains)} chains")
     else:
         # Single-chain setup - always use gateway-backed providers
@@ -1738,13 +1780,17 @@ def _build_orchestrator_and_providers(
         )
         click.echo("  Gateway-backed providers created")
 
-        # Create indicator calculators using routed OHLCV provider (CEX + DEX fallback)
-        ohlcv_provider = create_routing_ohlcv_provider(
-            gateway_client=gateway_client,
-            chain=runtime_config.chain,
-            strategy_config=strategy_config,
-        )
-        _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
+        if requirements.indicators:
+            # Create indicator calculators using routed OHLCV provider (CEX + DEX fallback)
+            ohlcv_provider = create_routing_ohlcv_provider(
+                gateway_client=gateway_client,
+                chain=runtime_config.chain,
+                strategy_config=strategy_config,
+            )
+            _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
+        elif requirements.price or requirements.balance:
+            # indicators=False: wire price/balance directly without OHLCV or indicator calculators
+            _wire_core_providers(strategy_instance, price_oracle, balance_provider)
 
         # Initialize prediction market provider for strategies that explicitly
         # declare polymarket support. Non-polymarket strategies skip this
@@ -1752,26 +1798,26 @@ def _build_orchestrator_and_providers(
         if hasattr(strategy_instance, "_prediction_provider"):
             _init_prediction_provider(strategy_instance, chain=runtime_config.chain, gateway_client=gateway_client)
 
-        # Initialize lending rate monitor
-        if hasattr(strategy_instance, "_rate_monitor"):
+        rate_monitor_wired = False
+        if requirements.lending_rates:
             try:
                 from ..data.rates import RateMonitor
 
                 rpc_url = getattr(runtime_config, "rpc_url", None)
                 rate_monitor = RateMonitor(chain=runtime_config.chain, rpc_url=rpc_url)
                 strategy_instance._rate_monitor = rate_monitor
-                click.echo(f"  Rate monitor initialized (chain={runtime_config.chain})")
+                rate_monitor_wired = True
             except Exception as e:
                 logger.debug(f"Rate monitor not available: {e}")
 
-        # Initialize funding rate provider for perpetual venue rates
-        if hasattr(strategy_instance, "_funding_rate_provider"):
+        funding_wired = False
+        if requirements.funding_rates:
             try:
                 from ..data.funding import GatewayFundingRateProvider
 
                 funding_provider = GatewayFundingRateProvider(gateway_client=gateway_client, chain=runtime_config.chain)
                 strategy_instance._funding_rate_provider = funding_provider
-                click.echo(f"  Funding rate provider initialized (chain={runtime_config.chain})")
+                funding_wired = True
             except (ImportError, ValueError, RuntimeError) as e:
                 logger.warning(
                     "Funding rate provider init failed for chain=%s: %s",
@@ -1779,6 +1825,19 @@ def _build_orchestrator_and_providers(
                     e,
                     exc_info=True,
                 )
+
+        _wired = []
+        if getattr(strategy_instance, "_price_oracle", None) is not None:
+            _wired.append("price")
+        if getattr(strategy_instance, "_balance_provider", None) is not None:
+            _wired.append("balance")
+        if getattr(strategy_instance, "_indicator_provider", None) is not None:
+            _wired.append("indicators")
+        if rate_monitor_wired:
+            _wired.append("lending_rates")
+        if funding_wired:
+            _wired.append("funding_rates")
+        click.echo(f"  Injected strategy data services: {', '.join(_wired)}")
 
     components.execution_orchestrator = execution_orchestrator
     components.price_oracle = price_oracle

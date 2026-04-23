@@ -94,7 +94,9 @@ from .indicator_models import (  # noqa: F401
     StochasticData,
 )
 from .metadata import (  # noqa: F401
+    LEGACY_COMPAT_DATA_REQUIREMENTS,
     StrategyClassT,
+    StrategyDataRequirements,
     StrategyMetadata,
     almanak_strategy,
 )
@@ -3393,6 +3395,8 @@ __all__ = [
     "ExecutionResult",
     # Decorator
     "almanak_strategy",
+    "StrategyDataRequirements",
+    "LEGACY_COMPAT_DATA_REQUIREMENTS",
     "StrategyMetadata",
     "StrategyClassT",
 ]

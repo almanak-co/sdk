@@ -49,6 +49,7 @@ from .base import (
 )
 from .exceptions import ConfigValidationError
 from .intent_strategy import (
+    LEGACY_COMPAT_DATA_REQUIREMENTS,
     AaveAvailableBorrowProvider,
     # Protocol Health Metric Providers
     AaveHealthFactorProvider,
@@ -82,6 +83,7 @@ from .intent_strategy import (
     RSIProvider,
     StaleDataError,
     StochasticData,
+    StrategyDataRequirements,
     StrategyMetadata,
     TokenBalance,
     almanak_strategy,
@@ -373,6 +375,8 @@ __all__ = [
     "BalanceProvider",
     "ExecutionResult",
     "almanak_strategy",
+    "LEGACY_COMPAT_DATA_REQUIREMENTS",
+    "StrategyDataRequirements",
     "StrategyMetadata",
     # Technical Indicator Data Classes
     "MACDData",

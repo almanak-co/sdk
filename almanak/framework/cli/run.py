@@ -699,6 +699,25 @@ def _wire_indicators(
         click.echo("  Providers injected into strategy (RSI + full indicator suite incl. ADX/OBV/CCI/Ichimoku)")
 
 
+def _wire_core_providers(
+    strategy_instance: Any,
+    price_oracle: PriceOracle,
+    balance_provider: BalanceProviderInterface,
+) -> None:
+    """Wire price oracle and balance provider onto strategy instance without indicator calculators.
+
+    Called when StrategyDataRequirements.indicators=False but price/balance are still needed
+    (the common case for non-indicator strategies). _wire_indicators handles all three when
+    indicators=True, so this is only needed when indicators=False.
+    Each attribute is checked and assigned independently so a strategy declaring only
+    price=True does not also receive a balance provider (and vice versa).
+    """
+    if hasattr(strategy_instance, "_price_oracle"):
+        strategy_instance._price_oracle = create_sync_price_oracle_func(price_oracle)
+    if hasattr(strategy_instance, "_balance_provider"):
+        strategy_instance._balance_provider = create_sync_balance_func(balance_provider, price_oracle)
+
+
 def _init_prediction_provider(
     strategy_instance: Any,
     chain: str | None = None,
