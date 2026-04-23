@@ -2,7 +2,8 @@
 
 The provider is now gateway-backed. Strategies that declare
 ``polymarket`` support must fail-fast when no connected gateway client is
-available; opportunistic Polygon users get a warning instead.
+available. Non-polymarket strategies skip initialization entirely,
+including on Polygon.
 """
 
 from __future__ import annotations
@@ -68,10 +69,10 @@ class TestInitPredictionProviderFailFast:
         assert strategy._prediction_provider is None
 
 
-class TestInitPredictionProviderWarns:
-    """Non-polymarket strategies on Polygon get a warning (was DEBUG)."""
+class TestInitPredictionProviderSkips:
+    """Helper no-ops for strategies that do not declare polymarket."""
 
-    def test_non_polymarket_strategy_missing_env_warns(
+    def test_non_polymarket_strategy_on_polygon_skips_silently(
         self, caplog: pytest.LogCaptureFixture
     ):
         strategy = _make_strategy(supported_protocols=["aave_v3"])
@@ -79,24 +80,20 @@ class TestInitPredictionProviderWarns:
         with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
             _init_prediction_provider(strategy, chain="polygon")
 
-        assert any("Prediction market provider not available" in r.message for r in caplog.records)
+        assert not any("Prediction market provider" in r.message for r in caplog.records)
         assert strategy._prediction_provider is None
 
-    def test_no_metadata_strategy_on_polygon_warns_does_not_raise(
+    def test_no_metadata_strategy_on_polygon_skips_silently(
         self, caplog: pytest.LogCaptureFixture
     ):
         # A strategy with no STRATEGY_METADATA at all → can't declare polymarket
-        # support, so warn rather than fail-fast.
+        # support, so skip rather than fail-fast.
         strategy = _make_strategy(supported_protocols=None)
 
         with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
             _init_prediction_provider(strategy, chain="polygon")
 
-        assert any("Prediction market provider not available" in r.message for r in caplog.records)
-
-
-class TestInitPredictionProviderSkips:
-    """Helper no-ops for non-polymarket strategies on non-Polygon chains."""
+        assert not any("Prediction market provider" in r.message for r in caplog.records)
 
     def test_non_polymarket_non_polygon_skips_silently(
         self, caplog: pytest.LogCaptureFixture

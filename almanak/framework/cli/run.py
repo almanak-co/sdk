@@ -709,15 +709,12 @@ def _init_prediction_provider(
     Strategies that declare ``polymarket`` in their ``supported_protocols``
     must abort startup if the provider can't initialize — silently HOLDing
     a polymarket-trading strategy because no gateway-backed client was
-    available was the failure mode that drove PM Exp 14 / VIB-3132. Strategies that merely
-    *might* consume prediction data (any Polygon strategy) get a WARNING
-    so the absence is visible without ``--verbose``.
+    available was the failure mode that drove PM Exp 14 / VIB-3132.
 
-    The helper gates itself: it runs unconditionally for strategies that
-    declare polymarket support (any chain — multi-chain strategies that
-    target Polygon among others would otherwise bypass fail-fast), and
-    opportunistically when ``chain == "polygon"`` for non-declarers.
-    Other strategies skip the helper entirely. (Per CodeRabbit on PR #1567.)
+    The helper is strict opt-in: only strategies that explicitly declare
+    ``polymarket`` support initialize the provider. Non-polymarket
+    strategies (including Polygon strategies) skip initialization entirely
+    to avoid irrelevant warnings and confusing operator noise.
     """
     strategy_metadata = getattr(strategy_instance, "STRATEGY_METADATA", None)
     # Use getattr on supported_protocols as well: STRATEGY_METADATA is normally
@@ -726,11 +723,8 @@ def _init_prediction_provider(
     supported_protocols = getattr(strategy_metadata, "supported_protocols", None) or []
     requires_polymarket = "polymarket" in supported_protocols
 
-    # Skip entirely if the strategy neither declares polymarket nor runs on
-    # Polygon — the polymarket import is unnecessary and would otherwise
-    # warn for every non-polygon non-polymarket strategy.
-    on_polygon = chain is not None and chain.lower() == "polygon"
-    if not requires_polymarket and not on_polygon:
+    # Strict opt-in: only strategies declaring polymarket attempt provider init.
+    if not requires_polymarket:
         return
 
     try:

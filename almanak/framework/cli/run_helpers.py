@@ -1746,10 +1746,9 @@ def _build_orchestrator_and_providers(
         )
         _wire_indicators(strategy_instance, ohlcv_provider, price_oracle, balance_provider)
 
-        # Initialize prediction market provider — helper self-gates by
-        # strategy metadata + chain. Multi-chain strategies declaring
-        # polymarket fail-fast on any chain; non-declarers on Polygon
-        # get an opportunistic init with WARNING fallback.
+        # Initialize prediction market provider for strategies that explicitly
+        # declare polymarket support. Non-polymarket strategies skip this
+        # entirely (including Polygon runs) to avoid irrelevant warnings.
         if hasattr(strategy_instance, "_prediction_provider"):
             _init_prediction_provider(strategy_instance, chain=runtime_config.chain, gateway_client=gateway_client)
 
