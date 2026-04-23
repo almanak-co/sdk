@@ -41,6 +41,19 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.backtesting.models import BacktestMetrics, BacktestResult
+from almanak.framework.backtesting.pnl.calculators._monte_carlo_helpers import (
+    _calculate_percentile as _helper_percentile,
+)
+from almanak.framework.backtesting.pnl.calculators._monte_carlo_helpers import (
+    _calculate_std as _helper_std,
+)
+from almanak.framework.backtesting.pnl.calculators._monte_carlo_helpers import (
+    aggregate_successful_results,
+    build_empty_result,
+    determine_paths_to_run,
+    dispatch_backtests,
+    resolve_runtime_defaults,
+)
 from almanak.framework.backtesting.pnl.calculators.monte_carlo import PricePathResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
@@ -479,6 +492,9 @@ async def _run_single_path_backtest(
 def _calculate_percentile(values: list[Decimal], percentile: float) -> Decimal:
     """Calculate a percentile from a list of values.
 
+    Thin wrapper kept for backward compatibility; delegates to
+    :func:`almanak.framework.backtesting.pnl.calculators._monte_carlo_helpers._calculate_percentile`.
+
     Args:
         values: Sorted list of values
         percentile: Percentile (0-100)
@@ -486,15 +502,14 @@ def _calculate_percentile(values: list[Decimal], percentile: float) -> Decimal:
     Returns:
         Value at the given percentile
     """
-    if not values:
-        return Decimal("0")
-    idx = int((percentile / 100) * (len(values) - 1))
-    idx = max(0, min(idx, len(values) - 1))
-    return values[idx]
+    return _helper_percentile(values, percentile)
 
 
 def _calculate_std(values: list[Decimal], mean: Decimal) -> Decimal:
     """Calculate standard deviation.
+
+    Thin wrapper kept for backward compatibility; delegates to
+    :func:`almanak.framework.backtesting.pnl.calculators._monte_carlo_helpers._calculate_std`.
 
     Args:
         values: List of values
@@ -503,16 +518,7 @@ def _calculate_std(values: list[Decimal], mean: Decimal) -> Decimal:
     Returns:
         Standard deviation
     """
-    if len(values) < 2:
-        return Decimal("0")
-    variance = sum((v - mean) ** 2 for v in values) / Decimal(len(values) - 1)
-    # Use Newton's method for square root
-    if variance <= 0:
-        return Decimal("0")
-    x = variance
-    for _ in range(50):  # Converges quickly
-        x = (x + variance / x) / 2
-    return x
+    return _helper_std(values, mean)
 
 
 async def run_monte_carlo(
@@ -558,161 +564,62 @@ async def run_monte_carlo(
         print(f"95% CI: [{result.return_percentile_5th:.2%}, {result.return_percentile_95th:.2%}]")
     """
     # Import here to avoid circular import
-    from almanak.framework.backtesting.pnl.engine import (
-        DefaultFeeModel,
-        DefaultSlippageModel,
-        PnLBacktester,
-    )
+    from almanak.framework.backtesting.pnl.engine import PnLBacktester
 
-    # Use defaults if not provided
-    if mc_config is None:
-        mc_config = MonteCarloConfig()
+    # Phase 1: resolve runtime defaults (mc_config / fee_models / slippage_models)
+    mc_config, fee_models, slippage_models = resolve_runtime_defaults(mc_config, fee_models, slippage_models)
 
-    if fee_models is None:
-        fee_models = {"default": DefaultFeeModel()}
-
-    if slippage_models is None:
-        slippage_models = {"default": DefaultSlippageModel()}
-
-    # Determine number of paths to run
-    n_available_paths = len(paths.paths)
-    n_paths_to_run = min(mc_config.n_paths, n_available_paths)
-
-    if n_paths_to_run < mc_config.n_paths:
-        logger.warning(f"Requested {mc_config.n_paths} paths but only {n_available_paths} available")
-
+    # Phase 2: determine number of paths to run (with warning log if clamped).
+    # Pass the runner logger so ``record.name`` matches the pre-refactor path
+    # (preserves downstream log filters / alerts keyed to this module).
+    n_paths_to_run = determine_paths_to_run(paths, mc_config.n_paths, logger_=logger)
     logger.info(f"Starting Monte Carlo simulation with {n_paths_to_run} paths")
 
-    # Run backtests - parallel or sequential
-    results: list[MonteCarloPathBacktestResult] = []
+    # Phase 3: dispatch per-path backtests (parallel or sequential).
+    # The per-path runner is injected so tests and future variants can swap it.
+    async def _run_path(path_idx: int) -> MonteCarloPathBacktestResult:
+        return await _run_single_path_backtest(
+            strategy=strategy,
+            price_path=paths.paths[path_idx],
+            backtest_config=backtest_config,
+            mc_config=mc_config,
+            path_index=path_idx,
+            backtester_class=PnLBacktester,
+            fee_models=fee_models,
+            slippage_models=slippage_models,
+        )
 
-    if mc_config.parallel_workers > 1:
-        # Parallel execution with semaphore to limit concurrency
-        semaphore = asyncio.Semaphore(mc_config.parallel_workers)
+    results = await dispatch_backtests(
+        n_paths_to_run=n_paths_to_run,
+        parallel_workers=mc_config.parallel_workers,
+        run_path=_run_path,
+        progress_callback=mc_config.progress_callback,
+    )
 
-        async def run_with_semaphore(path_idx: int) -> MonteCarloPathBacktestResult:
-            async with semaphore:
-                result = await _run_single_path_backtest(
-                    strategy=strategy,
-                    price_path=paths.paths[path_idx],
-                    backtest_config=backtest_config,
-                    mc_config=mc_config,
-                    path_index=path_idx,
-                    backtester_class=PnLBacktester,
-                    fee_models=fee_models,
-                    slippage_models=slippage_models,
-                )
-                if mc_config.progress_callback:
-                    # Count completed so far (approximate in parallel)
-                    mc_config.progress_callback(path_idx + 1, n_paths_to_run)
-                return result
-
-        tasks = [run_with_semaphore(i) for i in range(n_paths_to_run)]
-        results = await asyncio.gather(*tasks)
-    else:
-        # Sequential execution
-        for i in range(n_paths_to_run):
-            result = await _run_single_path_backtest(
-                strategy=strategy,
-                price_path=paths.paths[i],
-                backtest_config=backtest_config,
-                mc_config=mc_config,
-                path_index=i,
-                backtester_class=PnLBacktester,
-                fee_models=fee_models,
-                slippage_models=slippage_models,
-            )
-            results.append(result)
-            if mc_config.progress_callback:
-                mc_config.progress_callback(i + 1, n_paths_to_run)
-
-    # Aggregate results
+    # Partition successful / failed.
     successful_results = [r for r in results if r.success]
     n_successful = len(successful_results)
     n_failed = len(results) - n_successful
-
     logger.info(f"Monte Carlo complete: {n_successful} successful, {n_failed} failed")
 
+    # Phase 4: all-failed early return.
     if n_successful == 0:
-        # All failed - return empty result
-        return MonteCarloSimulationResult(
-            n_paths=n_paths_to_run,
-            n_successful=0,
+        return build_empty_result(
+            n_paths_to_run=n_paths_to_run,
             n_failed=n_failed,
-            return_mean=Decimal("0"),
-            return_std=Decimal("0"),
-            return_percentile_5th=Decimal("0"),
-            return_percentile_25th=Decimal("0"),
-            return_percentile_50th=Decimal("0"),
-            return_percentile_75th=Decimal("0"),
-            return_percentile_95th=Decimal("0"),
-            max_drawdown_mean=Decimal("0"),
-            max_drawdown_worst=Decimal("0"),
-            max_drawdown_percentile_95th=Decimal("0"),
-            probability_negative_return=Decimal("1"),
-            probability_loss_exceeds_10pct=Decimal("0"),
-            probability_loss_exceeds_20pct=Decimal("0"),
-            probability_gain_exceeds_10pct=Decimal("0"),
-            individual_results=results if mc_config.collect_individual_results else [],
-            price_paths_config=paths.to_dict(),
-            monte_carlo_config=mc_config.to_dict(),
+            results=results,
+            mc_config=mc_config,
+            paths=paths,
         )
 
-    # Calculate return statistics
-    returns = sorted([r.final_return for r in successful_results])
-    return_mean = sum(returns) / Decimal(len(returns))
-    return_std = _calculate_std(returns, return_mean)
-
-    # Calculate drawdown statistics
-    drawdowns = sorted([r.max_drawdown for r in successful_results])
-    max_drawdown_mean = sum(drawdowns) / Decimal(len(drawdowns))
-
-    # Calculate probabilities
-    n = Decimal(len(successful_results))
-    prob_negative = Decimal(sum(1 for r in successful_results if r.final_return < 0)) / n
-    prob_loss_10 = Decimal(sum(1 for r in successful_results if r.final_return < Decimal("-0.1"))) / n
-    prob_loss_20 = Decimal(sum(1 for r in successful_results if r.final_return < Decimal("-0.2"))) / n
-    prob_gain_10 = Decimal(sum(1 for r in successful_results if r.final_return > Decimal("0.1"))) / n
-
-    # Calculate probability of max drawdown exceeding each threshold
-    prob_drawdown_exceeds: dict[str, Decimal] = {}
-    for threshold in mc_config.drawdown_thresholds:
-        # Count paths where max_drawdown exceeds the threshold
-        count_exceeds = sum(1 for r in successful_results if r.max_drawdown > threshold)
-        prob_drawdown_exceeds[str(threshold)] = Decimal(count_exceeds) / n
-
-    # Calculate Sharpe statistics
-    sharpes = [r.sharpe_ratio for r in successful_results if r.sharpe_ratio is not None]
-    sharpe_mean = None
-    sharpe_std = None
-    if sharpes:
-        sharpe_mean = sum(sharpes) / Decimal(len(sharpes))
-        sharpe_std = _calculate_std(sharpes, sharpe_mean)
-
-    return MonteCarloSimulationResult(
-        n_paths=n_paths_to_run,
-        n_successful=n_successful,
+    # Phase 5: aggregate successful results.
+    return aggregate_successful_results(
+        results=results,
+        successful=successful_results,
+        n_paths_to_run=n_paths_to_run,
         n_failed=n_failed,
-        return_mean=return_mean,
-        return_std=return_std,
-        return_percentile_5th=_calculate_percentile(returns, 5),
-        return_percentile_25th=_calculate_percentile(returns, 25),
-        return_percentile_50th=_calculate_percentile(returns, 50),
-        return_percentile_75th=_calculate_percentile(returns, 75),
-        return_percentile_95th=_calculate_percentile(returns, 95),
-        max_drawdown_mean=max_drawdown_mean,
-        max_drawdown_worst=drawdowns[-1] if drawdowns else Decimal("0"),
-        max_drawdown_percentile_95th=_calculate_percentile(drawdowns, 95),
-        probability_negative_return=prob_negative,
-        probability_loss_exceeds_10pct=prob_loss_10,
-        probability_loss_exceeds_20pct=prob_loss_20,
-        probability_gain_exceeds_10pct=prob_gain_10,
-        probability_drawdown_exceeds_threshold=prob_drawdown_exceeds,
-        sharpe_mean=sharpe_mean,
-        sharpe_std=sharpe_std,
-        individual_results=results if mc_config.collect_individual_results else [],
-        price_paths_config=paths.to_dict(),
-        monte_carlo_config=mc_config.to_dict(),
+        mc_config=mc_config,
+        paths=paths,
     )
 
 
