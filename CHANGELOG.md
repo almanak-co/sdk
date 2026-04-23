@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-04-23
+
+### Added
+
+- Aerodrome Slipstream (CL) connector for Base - full CL LP lifecycle: `lp_open`, `lp_close`, `collect_fees`, plus `aerodrome_slipstream_lp` demo strategy (VIB-3321) (#1688)
+- `StrategyDataRequirements` - strategies declare data dependencies; runner skips unused fetches (VIB-3392) (#1821)
+- Generalized ERC-4626 vault dispatch - `Intent.vault_deposit` / `vault_redeem` now works with any compliant vault, not just MetaMorpho (VIB-3363) (#1795)
+- `SaveLedgerEntry` RPC on `StateService` - structured trade records persisted to the transaction ledger (VIB-3201) (#1794)
+- On-chain Zodiac Roles permission verification harness with SWAP, LEND, and LP dispatch coverage (#1819, #1822, #1823, #1824)
+- `DATA_ERROR` escalation - HOLD cycles caused by critical market data failures now surface as `DATA_ERROR` instead of counting as silent no-ops (#1810)
+- `ax resolve` expanded via Pendle API + auto-spawns gateway if none is running (#1772)
+
+### Fixed
+
+- Token aliases: ETH and DAI.E resolved to canonical on-chain addresses (#1747); BTC aliased to BTCB on BSC (#1796); POL preferred over MATIC for Polygon native (#1820)
+- Polymarket now routed entirely through the gateway - no direct network calls from strategy container (#1808, #1816)
+- Gateway: `CancelledError` unmasked in audit wrapper; dynamic token resolution restored (#1769)
+- Runner: stuck-resume now runs before the circuit-breaker gate for multi-chain strategies (#1674)
+- Runner: reconciliation enforcement gated behind config flag (defaults to observation mode) - VIB-3158 / VIB-3348 (#1803)
+- Runner: `ACCOUNTING_FAILED` duration includes snapshot-phase time; `_consecutive_errors` double-count eliminated (#1777, #1786)
+- Execution: `_emit_event` None guard; error propagated from receipt in `_phase_enrich`; `_init_pipeline_state` failures routed through exception handler (#1669, #1670, #1671)
+- GMX perp lifecycle: teardown state transition and USD price resolution (#1644)
+- Simulator: `eth_estimateGas` now times out instead of hanging indefinitely (VIB-3295) (#1645)
+- Dashboard: 8-issue latent bug bundle (#1750)
+- CLI: latent bug bundles in run, status, and backtest helpers (#1689, #1695, #1744, #1754)
+- Gateway: OKX data extraction latent bugs (#1760)
+- Uniswap V4 direction fallback; ledger `Decimal(0)` init (#1774)
+- Gateway client pre-validated before strategy loop starts (#1676)
+
 ## [2.14.0] - 2026-04-21
 
 ### Added
