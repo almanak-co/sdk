@@ -78,24 +78,37 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
             yield response
 
     async def RegisterChains(self, request, context):
-        """Pre-initialize orchestrators and compilers for requested chains."""
-        from almanak.gateway.validation import validate_chain
+        """Pre-initialize orchestrators and compilers for requested chains.
+
+        Thin orchestrator: delegates each phase of the workflow to the helper
+        module so this method stays declarative. Phases (see
+        ``_register_chains_helpers.py`` for the contracts):
+
+        1. Derive the default wallet from settings / request.
+        2. Guard: wallet missing AND no registry -> error response.
+        3. Resolve per-chain wallets from the registry (first pass).
+        4. Guard: Solana chain leaked into the resolved map -> error response.
+        5. Validate + map each requested chain to an effective wallet.
+        6. Merge in non-requested registry chains so cross-chain intents can
+           route.
+        7. Publish session topology to the execution servicer and invalidate
+           the compiler cache.
+        8. Pre-warm orchestrator + compiler for every mapped chain.
+        9. Record initialized chains, reinit MarketService, build response.
+        """
+        from almanak.gateway._register_chains_helpers import (
+            derive_default_wallet,
+            find_solana_chain_in_wallets,
+            merge_all_registry_chains,
+            prewarm_chains,
+            reinitialize_market_service,
+            resolve_requested_chain_wallets,
+            validate_and_map_chains,
+        )
 
         chains = list(request.chains)
-        wallet_address = request.wallet_address
 
-        # If no wallet_address provided, use Safe address or derive from private key
-        if not wallet_address:
-            safe_mode_enabled = self._settings.safe_mode in ("direct", "zodiac")
-            if self._settings.safe_address and safe_mode_enabled:
-                wallet_address = self._settings.safe_address
-            elif self._settings.private_key:
-                from eth_account import Account
-
-                key = self._settings.private_key
-                if not key.startswith("0x"):
-                    key = "0x" + key
-                wallet_address = Account.from_key(key).address
+        wallet_address = derive_default_wallet(self._settings, request.wallet_address)
 
         if not wallet_address and not self._wallet_registry:
             return gateway_pb2.RegisterChainsResponse(
@@ -103,88 +116,31 @@ class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
                 error="No wallet_address provided and no private key configured in gateway",
             )
 
-        # Resolve per-chain wallets from the wallet registry (if available)
-        chain_wallets: dict[str, str] = {}
-        if self._wallet_registry is not None:
-            for raw_chain in chains:
-                try:
-                    validated = validate_chain(raw_chain)
-                    resolved = self._wallet_registry.resolve(validated)
-                    # Solana reject guard
-                    if hasattr(resolved, "family") and str(resolved.family) == "solana":
-                        continue
-                    chain_wallets[validated] = resolved.account_address
-                except Exception as e:
-                    logger.debug(f"Wallet registry: no entry for {raw_chain}: {e}")
+        chain_wallets = resolve_requested_chain_wallets(self._wallet_registry, chains)
 
-        # Solana reject guard (wallet registry does not yet support Solana)
-        from almanak.gateway.validation import is_solana_chain
+        solana_chain = find_solana_chain_in_wallets(chains, chain_wallets)
+        if solana_chain is not None:
+            return gateway_pb2.RegisterChainsResponse(
+                success=False,
+                error=f"Wallet registry does not support Solana chain: {solana_chain}",
+            )
 
-        for chain in chains:
-            if is_solana_chain(chain) and chain.lower() in chain_wallets:
-                return gateway_pb2.RegisterChainsResponse(
-                    success=False,
-                    error=f"Wallet registry does not support Solana chain: {chain}",
-                )
+        chain_wallet_map, errors = validate_and_map_chains(chains, chain_wallets, wallet_address)
 
-        initialized = []
-        errors = []
-        chain_wallet_map: dict[str, str] = {}
-        for raw_chain in chains:
-            try:
-                chain = validate_chain(raw_chain)
-            except Exception as e:
-                errors.append(f"{raw_chain}: {e}")
-                continue
-
-            effective_wallet = chain_wallets.get(chain, wallet_address or "")
-            if not effective_wallet:
-                errors.append(f"{chain}: No wallet address available")
-                continue
-
-            chain_wallet_map[chain] = effective_wallet
-
-        # Store session topology BEFORE creating compilers so they pick up chain_wallets.
-        # Include ALL registry chains (not just requested ones) so cross-chain intents
-        # can resolve destination wallets for chains not explicitly registered.
-        full_chain_wallets = dict(chain_wallet_map)
-        if self._wallet_registry is not None:
-            for reg_chain in self._wallet_registry.all_chains():
-                if reg_chain not in full_chain_wallets:
-                    try:
-                        resolved = self._wallet_registry.resolve(reg_chain)
-                        if hasattr(resolved, "family") and str(resolved.family) == "solana":
-                            continue
-                        full_chain_wallets[reg_chain] = resolved.account_address
-                    except Exception:
-                        pass
+        # Publish session topology BEFORE pre-warm so compilers pick it up, and
+        # include ALL registry chains (not just requested) so cross-chain
+        # intents can resolve destination wallets.
+        full_chain_wallets = merge_all_registry_chains(self._wallet_registry, chain_wallet_map)
         self._execution._registered_chain_wallets = full_chain_wallets if full_chain_wallets else None
-        # Invalidate cached compilers so they get recreated with chain_wallets
         self._execution._compiler_cache.clear()
 
-        for chain, effective_wallet in chain_wallet_map.items():
-            try:
-                await self._execution._get_orchestrator(chain, effective_wallet)
-                self._execution._get_compiler(chain, effective_wallet)
-                initialized.append(chain)
-                logger.info(f"Pre-warmed orchestrator and compiler for {chain} (wallet={effective_wallet[:10]}...)")
-            except Exception as e:
-                errors.append(f"{chain}: {e}")
-                logger.error(f"Failed to pre-warm {chain}: {e}")
-
-        # Store initialized chains
+        initialized, prewarm_errors = await prewarm_chains(self._execution, chain_wallet_map)
+        errors.extend(prewarm_errors)
         self._execution._registered_chains = set(initialized)
 
-        # Re-initialize MarketService with full pricing stack now that we know
-        # the chain. This upgrades from CoinGecko-only (the default when no
-        # chains are configured at startup) to the full 4-source stack.
-        if self._market is not None and initialized:
-            try:
-                await self._market.reinitialize(initialized[0])
-            except Exception as e:
-                logger.warning("MarketService reinit failed for chain %s: %s", initialized[0], e)
+        await reinitialize_market_service(self._market, initialized)
 
-        # Derive a legacy wallet_address for backward compat
+        # Derive a legacy wallet_address for backward compat.
         legacy_wallet = wallet_address or (full_chain_wallets.get(initialized[0], "") if initialized else "")
 
         if errors:
