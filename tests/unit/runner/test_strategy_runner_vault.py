@@ -34,6 +34,7 @@ def _make_strategy():
     strategy.wallet_address = "0xWALLET"
     strategy.decide.return_value = HoldIntent(reason="No action")
     strategy.create_market_snapshot.return_value = MagicMock()
+    strategy.create_market_snapshot.return_value.has_critical_data_failures.return_value = False
     strategy.should_teardown.return_value = False
     return strategy
 

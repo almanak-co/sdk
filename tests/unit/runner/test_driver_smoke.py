@@ -65,6 +65,7 @@ def _make_strategy(*, intent=None) -> MagicMock:
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890AbcdEF1234567890aBcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
+    strategy.create_market_snapshot.return_value.has_critical_data_failures.return_value = False
     strategy.decide.return_value = intent if intent is not None else HoldIntent(reason="default hold")
     strategy.generate_teardown_intents.side_effect = NotImplementedError
     # Remove wallet activity provider so periodic hooks are no-op

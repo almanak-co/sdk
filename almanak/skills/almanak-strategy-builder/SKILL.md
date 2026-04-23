@@ -783,6 +783,20 @@ market.fork_rpc_url     # str | None - Local Anvil fork RPC URL (paper trading o
 market.fork_block       # int | None - current fork block number (paper trading only)
 ```
 
+### Critical Data Failure Tracking
+
+The runner uses these methods to detect when a strategy returns HOLD while market-data lookups
+were failing (e.g. price oracle timeouts, unknown tokens), and escalates those cycles into
+`IterationStatus.DATA_ERROR` so the consecutive-error circuit breaker fires correctly.
+
+```python
+market.has_critical_data_failures()          # bool - True if any data lookup failed this cycle
+market.critical_data_failure_count()         # int - number of tracked failures
+market.classify_critical_data_failures()     # str - "transient", "permanent", "mixed", or "none"
+market.summarize_critical_data_failures()    # str - human-readable summary (for logs)
+market.clear_critical_data_failures()        # None - reset all failures (called by runner after pre-warm)
+```
+
 <!-- almanak-sdk-end: market-snapshot-api -->
 
 <!-- almanak-sdk-start: state-management -->

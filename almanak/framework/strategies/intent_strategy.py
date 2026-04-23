@@ -236,6 +236,10 @@ class MarketSnapshot:
         self._price_cache: dict[str, PriceData] = {}
         self._rsi_cache: dict[tuple[str, str, int], RSIData] = {}
         self._balance_cache: dict[str, TokenBalance] = {}
+        # Critical data failures observed while strategies queried this
+        # snapshot. Runner can use this to avoid treating "HOLD forever because
+        # market data is broken" as healthy behavior.
+        self._critical_data_failures: dict[tuple[str, str], str] = {}
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
         self._macd_cache: dict[tuple[str, str, int, int, int], MACDData] = {}
@@ -357,10 +361,17 @@ class MarketSnapshot:
                     else self._price_oracle(token, quote)
                 )
                 self._price_cache[cache_key] = PriceData(price=price_value)
+                self._critical_data_failures.pop(("price", cache_key), None)
                 return price_value
             except Exception as e:
+                self._record_critical_data_failure("price", cache_key, e)
                 logger.warning(f"Price oracle failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure(
+            "price",
+            cache_key,
+            f"Cannot determine price for {token}/{quote} on {requested_chain}",
+        )
         raise ValueError(f"Cannot determine price for {token}/{quote} on {requested_chain}")
 
     def price_data(self, token: str, quote: str = "USD", chain: str | None = None) -> PriceData:
@@ -425,15 +436,25 @@ class MarketSnapshot:
             try:
                 rsi_data = self._rsi_provider(token, period, timeframe=timeframe)
                 self._rsi_cache[cache_key] = rsi_data
+                self._critical_data_failures.pop(("rsi", str(cache_key)), None)
                 return rsi_data
             except TypeError:
                 # Backward compat: older RSI providers only accept (token, period)
-                rsi_data = self._rsi_provider(token, period)
-                self._rsi_cache[cache_key] = rsi_data
-                return rsi_data
+                try:
+                    rsi_data = self._rsi_provider(token, period)
+                    self._rsi_cache[cache_key] = rsi_data
+                    self._critical_data_failures.pop(("rsi", str(cache_key)), None)
+                    return rsi_data
+                except Exception as e:
+                    self._record_critical_data_failure("rsi", str(cache_key), e)
+                    logger.warning(f"RSI provider failed for {cache_key}: {e}")
             except Exception as e:
+                self._record_critical_data_failure("rsi", str(cache_key), e)
                 logger.warning(f"RSI provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure(
+            "rsi", str(cache_key), f"Cannot calculate RSI for {token} with period {period}"
+        )
         raise ValueError(f"Cannot calculate RSI for {token} with period {period}")
 
     def price_across_dexs(
@@ -598,10 +619,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._macd_cache[cache_key] = macd_data
+                self._critical_data_failures.pop(("macd", str(cache_key)), None)
                 return macd_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("macd", str(cache_key), e)
                 logger.warning(f"MACD provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("macd", str(cache_key), f"MACD data not available for {token}")
         raise ValueError(f"MACD data not available for {token}")
 
     def bollinger_bands(
@@ -657,10 +681,15 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._bollinger_cache[cache_key] = bb_data
+                self._critical_data_failures.pop(("bollinger", str(cache_key)), None)
                 return bb_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("bollinger", str(cache_key), e)
                 logger.warning(f"Bollinger provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure(
+            "bollinger", str(cache_key), f"Bollinger Bands data not available for {token}"
+        )
         raise ValueError(f"Bollinger Bands data not available for {token}")
 
     def stochastic(
@@ -716,10 +745,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._stochastic_cache[cache_key] = stoch_data
+                self._critical_data_failures.pop(("stochastic", str(cache_key)), None)
                 return stoch_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("stochastic", str(cache_key), e)
                 logger.warning(f"Stochastic provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("stochastic", str(cache_key), f"Stochastic data not available for {token}")
         raise ValueError(f"Stochastic data not available for {token}")
 
     def atr(self, token: str, period: int = 14, timeframe: str | None = None) -> ATRData:
@@ -773,10 +805,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._atr_cache[cache_key] = atr_data
+                self._critical_data_failures.pop(("atr", str(cache_key)), None)
                 return atr_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("atr", str(cache_key), e)
                 logger.warning(f"ATR provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("atr", str(cache_key), f"ATR data not available for {token}")
         raise ValueError(f"ATR data not available for {token}")
 
     def sma(self, token: str, period: int = 20, timeframe: str | None = None) -> MAData:
@@ -822,10 +857,15 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._ma_cache[cache_key] = sma_data
+                self._critical_data_failures.pop(("sma", str(cache_key)), None)
                 return sma_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("sma", str(cache_key), e)
                 logger.warning(f"SMA provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure(
+            "sma", str(cache_key), f"SMA data not available for {token} with period {period}"
+        )
         raise ValueError(f"SMA data not available for {token} with period {period}")
 
     def ema(self, token: str, period: int = 12, timeframe: str | None = None) -> MAData:
@@ -872,10 +912,15 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._ma_cache[cache_key] = ema_data
+                self._critical_data_failures.pop(("ema", str(cache_key)), None)
                 return ema_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("ema", str(cache_key), e)
                 logger.warning(f"EMA provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure(
+            "ema", str(cache_key), f"EMA data not available for {token} with period {period}"
+        )
         raise ValueError(f"EMA data not available for {token} with period {period}")
 
     def adx(self, token: str, period: int = 14, timeframe: str | None = None) -> ADXData:
@@ -917,10 +962,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._adx_cache[cache_key] = adx_data
+                self._critical_data_failures.pop(("adx", str(cache_key)), None)
                 return adx_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("adx", str(cache_key), e)
                 logger.warning(f"ADX provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("adx", str(cache_key), f"ADX data not available for {token}")
         raise ValueError(f"ADX data not available for {token}")
 
     def obv(self, token: str, signal_period: int = 21, timeframe: str | None = None) -> OBVData:
@@ -962,10 +1010,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._obv_cache[cache_key] = obv_data
+                self._critical_data_failures.pop(("obv", str(cache_key)), None)
                 return obv_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("obv", str(cache_key), e)
                 logger.warning(f"OBV provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("obv", str(cache_key), f"OBV data not available for {token}")
         raise ValueError(f"OBV data not available for {token}")
 
     def cci(self, token: str, period: int = 20, timeframe: str | None = None) -> CCIData:
@@ -1007,10 +1058,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._cci_cache[cache_key] = cci_data
+                self._critical_data_failures.pop(("cci", str(cache_key)), None)
                 return cci_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("cci", str(cache_key), e)
                 logger.warning(f"CCI provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("cci", str(cache_key), f"CCI data not available for {token}")
         raise ValueError(f"CCI data not available for {token}")
 
     def ichimoku(
@@ -1068,10 +1122,13 @@ class MarketSnapshot:
                     timeframe=timeframe,
                 )
                 self._ichimoku_cache[cache_key] = ichimoku_data
+                self._critical_data_failures.pop(("ichimoku", str(cache_key)), None)
                 return ichimoku_data
             except Exception as e:  # noqa: BLE001
+                self._record_critical_data_failure("ichimoku", str(cache_key), e)
                 logger.warning(f"Ichimoku provider failed for {cache_key}: {e}")
 
+        self._record_critical_data_failure("ichimoku", str(cache_key), f"Ichimoku data not available for {token}")
         raise ValueError(f"Ichimoku data not available for {token}")
 
     def balance(self, token: str, protocol: str | None = None) -> TokenBalance:
@@ -1108,11 +1165,100 @@ class MarketSnapshot:
             try:
                 balance_data = self._balance_provider(resolved)
                 self._balance_cache[resolved] = balance_data
+                self._critical_data_failures.pop(("balance", resolved), None)
                 return balance_data
             except Exception as e:
+                self._record_critical_data_failure("balance", resolved, e)
                 logger.warning(f"Balance provider failed for {resolved}: {e}")
 
+        self._record_critical_data_failure("balance", resolved, f"Cannot determine balance for {resolved}")
         raise ValueError(f"Cannot determine balance for {resolved}")
+
+    def _record_critical_data_failure(self, source: str, key: str, error: Exception | str) -> None:
+        """Record a market-data failure that can invalidate a HOLD outcome."""
+        # Keep the first (most specific) failure detail for each key.
+        self._critical_data_failures.setdefault((source, key), str(error))
+
+    def clear_critical_data_failures(self) -> None:
+        """Clear all tracked critical data failures.
+
+        Called by the runner after pre-warming the price cache and before
+        strategy.decide() runs, so that pre-warm failures (which are retried
+        inside decide()) do not incorrectly poison the HOLD-escalation check.
+        """
+        self._critical_data_failures.clear()
+
+    def has_critical_data_failures(self) -> bool:
+        """Return True when this snapshot observed any critical data failures."""
+        return bool(self._critical_data_failures)
+
+    def critical_data_failure_count(self) -> int:
+        """Number of currently tracked critical failures for this snapshot."""
+        return len(self._critical_data_failures)
+
+    def classify_critical_data_failures(self) -> str:
+        """Classify observed data failures as transient, permanent, or mixed."""
+        if not self._critical_data_failures:
+            return "none"
+
+        transient_hints = (
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "rate limit",
+            "429",
+            "connection",
+            "unavailable",
+            "resource exhausted",
+            "service unavailable",
+        )
+        permanent_hints = (
+            "cannot resolve token",
+            "token '",
+            "unknown token",
+            "no chainlink feed",
+            "not found",
+            "unsupported",
+            "invalid",
+            "no pairs found",
+            "symbol",
+        )
+
+        has_transient = False
+        has_permanent = False
+        for detail in self._critical_data_failures.values():
+            lowered = detail.lower()
+            if any(hint in lowered for hint in permanent_hints):
+                has_permanent = True
+                continue
+            if any(hint in lowered for hint in transient_hints):
+                has_transient = True
+                continue
+            # Unknown failure class: be conservative and treat as transient so
+            # the runner can retry/escalate through the existing error pipeline.
+            has_transient = True
+
+        if has_transient and has_permanent:
+            return "mixed"
+        if has_permanent:
+            return "permanent"
+        return "transient"
+
+    def summarize_critical_data_failures(self, *, limit: int = 3) -> str:
+        """Create a concise summary for logs/lifecycle error messages."""
+        if not self._critical_data_failures:
+            return ""
+
+        chunks: list[str] = []
+        for idx, ((source, key), detail) in enumerate(self._critical_data_failures.items()):
+            if idx >= limit:
+                break
+            chunks.append(f"{source}({key}): {detail}")
+
+        remaining = len(self._critical_data_failures) - len(chunks)
+        if remaining > 0:
+            chunks.append(f"... and {remaining} more")
+        return "; ".join(chunks)
 
     def _resolve_protocol_variant(self, token: str, protocol: str | None) -> str:
         """Translate a generic symbol to the protocol's preferred variant.

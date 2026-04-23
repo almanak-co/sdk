@@ -162,6 +162,62 @@ class TestMultiChainMarketSnapshotSetPriceData:
             pass
 
 
+class TestCriticalDataFailureTracking:
+    def test_price_failure_is_tracked_as_permanent_when_symbol_invalid(self):
+        market = MarketSnapshot(
+            chain="bsc",
+            wallet_address="0xtest",
+            price_oracle=MagicMock(side_effect=ValueError("Unknown token: USD")),
+        )
+
+        with pytest.raises(ValueError):
+            market.price("USD")
+
+        assert market.has_critical_data_failures()
+        assert market.classify_critical_data_failures() == "permanent"
+        assert "Unknown token: USD" in market.summarize_critical_data_failures()
+
+    def test_timeout_failure_is_tracked_as_transient(self):
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            price_oracle=MagicMock(side_effect=TimeoutError("request timed out")),
+        )
+
+        with pytest.raises(ValueError):
+            market.price("ETH")
+
+        assert market.has_critical_data_failures()
+        assert market.classify_critical_data_failures() == "transient"
+
+    def test_successful_lookup_clears_previous_failure_for_same_key(self):
+        oracle = MagicMock(side_effect=[ValueError("Unknown token"), Decimal("1800")])
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest", price_oracle=oracle)
+
+        with pytest.raises(ValueError):
+            market.price("ETH")
+        assert market.has_critical_data_failures()
+
+        assert market.price("ETH") == Decimal("1800")
+        assert not market.has_critical_data_failures()
+
+    def test_clear_critical_data_failures_resets_all(self):
+        """clear_critical_data_failures() wipes all tracked failures (used after pre-warm)."""
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0xtest",
+            price_oracle=MagicMock(side_effect=ValueError("Unknown token: USD")),
+        )
+
+        with pytest.raises(ValueError):
+            market.price("ETH")
+        assert market.has_critical_data_failures()
+
+        market.clear_critical_data_failures()
+        assert not market.has_critical_data_failures()
+        assert market.critical_data_failure_count() == 0
+
+
 class TestMultiDexFacadeMethods:
     """Tests for price_across_dexs() and best_dex_price() facade methods (VIB-292)."""
 

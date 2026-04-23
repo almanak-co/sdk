@@ -856,6 +856,14 @@ class StrategyRunner:
         # exceeds the 30s decide_timeout. Pre-warming populates the snapshot's
         # _price_cache OUTSIDE the timeout budget so decide() hits cache.
         await self._pre_warm_prices(market, strategy)
+
+        # Step 1c: Reset any critical-data-failure markers left by pre-warming.
+        # Pre-warm failures are expected (the snapshot retries inside decide())
+        # and should not be counted against the HOLD-escalation check, which is
+        # only meaningful for failures that occurred during decide() itself.
+        if hasattr(market, "clear_critical_data_failures"):
+            market.clear_critical_data_failures()
+
         return None
 
     async def _step_decide(self, state: RunIterationState) -> IterationResult | None:
@@ -982,6 +990,41 @@ class StrategyRunner:
         if not intents or (len(intents) == 1 and isinstance(intents[0], HoldIntent)):
             hold_intent = intents[0] if intents else None
             reason = hold_intent.reason if isinstance(hold_intent, HoldIntent) else "No action"
+
+            # HOLD should only be considered healthy when the strategy had
+            # valid data to make that decision. If market-data provider calls
+            # failed unexpectedly, route this cycle into the regular failure
+            # path (SadFlow/consecutive-error escalation) instead of silently
+            # counting it as success forever.
+            market = state.market
+            if (
+                market is not None
+                and hasattr(market, "has_critical_data_failures")
+                and callable(market.has_critical_data_failures)
+                and market.has_critical_data_failures()
+            ):
+                classification = "unknown"
+                if hasattr(market, "classify_critical_data_failures") and callable(
+                    market.classify_critical_data_failures
+                ):
+                    classification = market.classify_critical_data_failures()
+                details = ""
+                if hasattr(market, "summarize_critical_data_failures") and callable(
+                    market.summarize_critical_data_failures
+                ):
+                    details = market.summarize_critical_data_failures(limit=3)
+                error = f"Critical market-data failures while strategy returned HOLD (classification={classification})"
+                if details:
+                    error = f"{error}: {details}"
+                logger.error("%s", error)
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.DATA_ERROR,
+                    error,
+                    state.start_time,
+                    intent=hold_intent,
+                )
+
             hold_prefix = "⏸️" if _emojis_enabled() else "[HOLD]"
             logger.info(f"{hold_prefix} {strategy_id} HOLD: {reason}")
             self._record_success()

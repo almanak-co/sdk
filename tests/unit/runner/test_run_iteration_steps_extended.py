@@ -97,6 +97,7 @@ def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
+    strategy.create_market_snapshot.return_value.has_critical_data_failures.return_value = False
     strategy.decide.return_value = HoldIntent(reason="unit test hold")
     strategy.generate_teardown_intents.side_effect = NotImplementedError
     del strategy._wallet_activity_provider
@@ -437,6 +438,51 @@ class TestStepExtractIntentsExtended:
         assert result.status == IterationStatus.HOLD
         # Without a hold intent, the fallback message is used
         assert state.intents == []
+
+    def test_hold_with_critical_market_data_failures_escalates_to_data_error(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        hold = HoldIntent(reason="warming up baseline")
+        state.decide_result = [hold]
+
+        market = MagicMock()
+        market.has_critical_data_failures.return_value = True
+        market.classify_critical_data_failures.return_value = "permanent"
+        market.summarize_critical_data_failures.return_value = (
+            "price(USD/USD@bsc): unknown token USD; balance(BTC): unknown token BTC"
+        )
+        state.market = market
+
+        result = runner._step_extract_intents(state)
+        assert result is not None
+        assert result.status == IterationStatus.DATA_ERROR
+        assert result.intent == hold
+        assert result.error is not None
+        assert "classification=permanent" in result.error
+        assert "Critical market-data failures" in result.error
+        assert "unknown token USD" in result.error
+
+    def test_no_action_with_critical_market_data_failures_escalates_to_data_error(self) -> None:
+        """Empty decide result (no HoldIntent) with failures also escalates."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        state.decide_result = []  # No intents at all
+
+        market = MagicMock()
+        market.has_critical_data_failures.return_value = True
+        market.classify_critical_data_failures.return_value = "transient"
+        market.summarize_critical_data_failures.return_value = "price(ETH/USD@arbitrum): timeout"
+        state.market = market
+
+        result = runner._step_extract_intents(state)
+        assert result is not None
+        assert result.status == IterationStatus.DATA_ERROR
+        assert result.intent is None
+        assert result.error is not None
+        assert "classification=transient" in result.error
+        assert "Critical market-data failures" in result.error
 
 
 # =============================================================================

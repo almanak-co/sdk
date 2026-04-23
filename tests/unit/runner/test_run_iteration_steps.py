@@ -72,6 +72,7 @@ def _make_strategy(strategy_id: str = "test-strategy") -> MagicMock:
     strategy.chain = "arbitrum"
     strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     strategy.create_market_snapshot.return_value = MagicMock()
+    strategy.create_market_snapshot.return_value.has_critical_data_failures.return_value = False
     strategy.decide.return_value = HoldIntent(reason="unit test hold")
     strategy.generate_teardown_intents.side_effect = NotImplementedError
     # Ensure these optional hooks are absent so the hook dispatcher is a no-op

@@ -340,6 +340,11 @@ class MultiChainMarketSnapshot:
         self._price_cache: dict[str, dict[str, PriceData]] = {c: {} for c in self._chains}
         self._balance_cache: dict[str, dict[str, TokenBalance]] = {c: {} for c in self._chains}
 
+        # Critical data failures observed while strategies queried this snapshot.
+        # Mirrors the same field on MarketSnapshot so the runner can call the
+        # has/classify/summarize API uniformly across single- and multi-chain snapshots.
+        self._critical_data_failures: dict[tuple[str, str], str] = {}
+
         # Per-chain protocol metrics caches: {chain: data}
         self._aave_health_factor_cache: dict[str, Decimal | None] = {}
         self._aave_available_borrow_cache: dict[str, dict[str, Decimal | None]] = {c: {} for c in self._chains}
@@ -654,10 +659,16 @@ class MultiChainMarketSnapshot:
             try:
                 price_value = self._price_oracle(token, quote, chain_lower)
                 self._price_cache[chain_lower][cache_key] = PriceData(price=price_value)
+                self._critical_data_failures.pop(("price", f"{cache_key}@{chain_lower}"), None)
                 return price_value
             except Exception as e:
+                self._critical_data_failures.setdefault(("price", f"{cache_key}@{chain_lower}"), str(e))
                 logger.warning(f"Price oracle failed for {token}/{quote} on {chain_lower}: {e}")
 
+        self._critical_data_failures.setdefault(
+            ("price", f"{cache_key}@{chain_lower}"),
+            f"Cannot determine price for {token}/{quote} on {chain}",
+        )
         raise ValueError(f"Cannot determine price for {token}/{quote} on {chain}")
 
     def balance(self, token: str, chain: str) -> TokenBalance:
@@ -690,10 +701,16 @@ class MultiChainMarketSnapshot:
             try:
                 balance_data = self._balance_provider(token, chain_lower)
                 self._balance_cache[chain_lower][token] = balance_data
+                self._critical_data_failures.pop(("balance", f"{token}@{chain_lower}"), None)
                 return balance_data
             except Exception as e:
+                self._critical_data_failures.setdefault(("balance", f"{token}@{chain_lower}"), str(e))
                 logger.warning(f"Balance provider failed for {token} on {chain_lower}: {e}")
 
+        self._critical_data_failures.setdefault(
+            ("balance", f"{token}@{chain_lower}"),
+            f"Cannot determine balance for {token} on {chain}",
+        )
         raise ValueError(f"Cannot determine balance for {token} on {chain}")
 
     def balance_usd(self, token: str, chain: str) -> Decimal:
@@ -1345,6 +1362,87 @@ class MultiChainMarketSnapshot:
                 for chain, balances in self._balances.items()
             },
         }
+
+    # ------------------------------------------------------------------
+    # Critical-data-failure tracking API
+    # Mirrors MarketSnapshot so the runner can call these methods uniformly
+    # across single-chain and multi-chain strategies without hasattr guards.
+    # ------------------------------------------------------------------
+
+    def has_critical_data_failures(self) -> bool:
+        """Return True when this snapshot observed any critical data failures."""
+        return bool(self._critical_data_failures)
+
+    def critical_data_failure_count(self) -> int:
+        """Number of currently tracked critical failures for this snapshot."""
+        return len(self._critical_data_failures)
+
+    def clear_critical_data_failures(self) -> None:
+        """Clear all tracked critical data failures (called after price pre-warm)."""
+        self._critical_data_failures.clear()
+
+    def classify_critical_data_failures(self) -> str:
+        """Classify observed failures as transient, permanent, or mixed."""
+        if not self._critical_data_failures:
+            return "none"
+
+        transient_hints = (
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "rate limit",
+            "429",
+            "connection",
+            "unavailable",
+            "resource exhausted",
+            "service unavailable",
+        )
+        permanent_hints = (
+            "cannot resolve token",
+            "token '",
+            "unknown token",
+            "no chainlink feed",
+            "not found",
+            "unsupported",
+            "invalid",
+            "no pairs found",
+            "symbol",
+        )
+
+        has_transient = False
+        has_permanent = False
+        for detail in self._critical_data_failures.values():
+            lowered = detail.lower()
+            if any(hint in lowered for hint in permanent_hints):
+                has_permanent = True
+                continue
+            if any(hint in lowered for hint in transient_hints):
+                has_transient = True
+                continue
+            # Unknown class: be conservative and treat as transient.
+            has_transient = True
+
+        if has_transient and has_permanent:
+            return "mixed"
+        if has_permanent:
+            return "permanent"
+        return "transient"
+
+    def summarize_critical_data_failures(self, *, limit: int = 3) -> str:
+        """Create a concise summary for logs/lifecycle error messages."""
+        if not self._critical_data_failures:
+            return ""
+
+        chunks: list[str] = []
+        for idx, ((source, key), detail) in enumerate(self._critical_data_failures.items()):
+            if idx >= limit:
+                break
+            chunks.append(f"{source}({key}): {detail}")
+
+        remaining = len(self._critical_data_failures) - len(chunks)
+        if remaining > 0:
+            chunks.append(f"... and {remaining} more")
+        return "; ".join(chunks)
 
 
 __all__ = [
