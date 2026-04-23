@@ -32,9 +32,7 @@ class TestAxResolveStatic:
         assert "decimals    6" in result.output
 
     def test_json_payload_shape(self, runner: CliRunner) -> None:
-        result = runner.invoke(
-            ax_cli, ["-c", "arbitrum", "--json", "resolve", "--no-gateway", "USDC"]
-        )
+        result = runner.invoke(ax_cli, ["-c", "arbitrum", "--json", "resolve", "--no-gateway", "USDC"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["symbol"] == "USDC"
@@ -49,9 +47,7 @@ class TestAxResolveStatic:
 
         If this flips to 6, every amount calc on BSC is off by 10^12.
         """
-        result = runner.invoke(
-            ax_cli, ["-c", "bsc", "--json", "resolve", "--no-gateway", "USDC"]
-        )
+        result = runner.invoke(ax_cli, ["-c", "bsc", "--json", "resolve", "--no-gateway", "USDC"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["decimals"] == 18
@@ -92,17 +88,13 @@ class TestAxResolveStatic:
         """USDC exists on ethereum in the registry but not zerog -- the
         resolver must never silently fall back to another chain's address.
         """
-        result = runner.invoke(
-            ax_cli, ["-c", "zerog", "--json", "resolve", "--no-gateway", "USDC"]
-        )
+        result = runner.invoke(ax_cli, ["-c", "zerog", "--json", "resolve", "--no-gateway", "USDC"])
         assert result.exit_code == 1, result.output
         payload = json.loads(result.output)
         assert payload["status"] == "not_found"
 
     def test_lowercase_symbol_still_matches(self, runner: CliRunner) -> None:
-        result = runner.invoke(
-            ax_cli, ["-c", "arbitrum", "resolve", "--no-gateway", "usdc"]
-        )
+        result = runner.invoke(ax_cli, ["-c", "arbitrum", "resolve", "--no-gateway", "usdc"])
         assert result.exit_code == 0, result.output
 
     def test_chain_envvar_default(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,15 +120,9 @@ class TestAxResolveGatewayUnreachable:
 
         # Stub the gateway-symbol and gateway-address helpers. Return None
         # (transient miss) so the resolver uses the static registry.
-        monkeypatch.setattr(
-            resolver_mod.TokenResolver, "_check_gateway_available", lambda self: False
-        )
-        monkeypatch.setattr(
-            resolver_mod.TokenResolver, "_resolve_symbol_via_gateway", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            resolver_mod.TokenResolver, "_resolve_via_gateway", lambda *a, **k: None
-        )
+        monkeypatch.setattr(resolver_mod.TokenResolver, "_check_gateway_available", lambda self: False)
+        monkeypatch.setattr(resolver_mod.TokenResolver, "_resolve_symbol_via_gateway", lambda *a, **k: None)
+        monkeypatch.setattr(resolver_mod.TokenResolver, "_resolve_via_gateway", lambda *a, **k: None)
 
         result = runner.invoke(
             ax_cli,
@@ -147,17 +133,17 @@ class TestAxResolveGatewayUnreachable:
         assert payload["symbol"] == "USDC"
         assert payload["source"] in {"static", "cache"}
 
-    def test_unknown_symbol_adds_gateway_note(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unknown_symbol_adds_gateway_note(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
         from almanak.framework.data.tokens import resolver as resolver_mod
 
-        monkeypatch.setattr(
-            resolver_mod.TokenResolver, "_check_gateway_available", lambda self: False
-        )
-        monkeypatch.setattr(
-            resolver_mod.TokenResolver, "_resolve_symbol_via_gateway", lambda *a, **k: None
-        )
+        monkeypatch.setattr(resolver_mod.TokenResolver, "_check_gateway_available", lambda self: False)
+        monkeypatch.setattr(resolver_mod.TokenResolver, "_resolve_symbol_via_gateway", lambda *a, **k: None)
+        # Short-circuit the TCP probe so ``_build_resolver_for_cli`` skips the
+        # managed-gateway auto-spawn path — the test is asserting the
+        # static-fallback + gateway-note contract, not the spawn path, and
+        # ManagedGateway.start() reconfigures logging which un-hooks pytest's
+        # log capture and leaks warnings into CliRunner's stdout.
+        monkeypatch.setattr("almanak.framework.cli.ax._gateway_is_reachable", lambda *a, **k: True)
 
         result = runner.invoke(
             ax_cli,
@@ -177,9 +163,7 @@ class TestAxResolveGatewayUnreachable:
         assert "gateway" in payload
         assert "59999" in payload["gateway"]
 
-    def test_command_does_not_mutate_singleton_gateway_channel(
-        self, runner: CliRunner
-    ) -> None:
+    def test_command_does_not_mutate_singleton_gateway_channel(self, runner: CliRunner) -> None:
         from almanak.framework.data.tokens import get_token_resolver
 
         resolver = get_token_resolver()
@@ -197,9 +181,7 @@ class TestAxResolveGatewayUnreachable:
         finally:
             resolver.set_gateway_channel(original_channel)
 
-    def test_build_resolver_wraps_gateway_channel_with_auth(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_build_resolver_wraps_gateway_channel_with_auth(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import grpc
 
         from almanak.framework.cli.ax import _build_resolver_for_cli
@@ -224,6 +206,10 @@ class TestAxResolveGatewayUnreachable:
         monkeypatch.setattr(grpc, "insecure_channel", lambda target: raw_channel)
         monkeypatch.setattr(grpc, "intercept_channel", fake_intercept_channel)
         monkeypatch.setattr("almanak.framework.data.tokens.create_token_resolver", fake_create_token_resolver)
+        # Pretend the configured gateway is already listening so the helper
+        # takes the direct-channel path instead of trying to spawn a
+        # ManagedGateway (which would fail in a unit-test environment).
+        monkeypatch.setattr("almanak.framework.cli.ax._gateway_is_reachable", lambda *a, **k: True)
 
         ctx = SimpleNamespace(
             obj={
@@ -242,6 +228,50 @@ class TestAxResolveGatewayUnreachable:
         assert intercepted["channel"] is raw_channel
         assert len(intercepted["interceptors"]) == 1
         assert isinstance(intercepted["interceptors"][0], _AuthClientInterceptor)
+
+    def test_build_resolver_reads_auth_token_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``ctx.obj`` carries no auth token, fall back to the
+        ``ALMANAK_GATEWAY_AUTH_TOKEN`` / ``GATEWAY_AUTH_TOKEN`` env vars —
+        same contract ``_get_executor`` uses for swap / balance / etc.
+        """
+        import grpc
+
+        from almanak.framework.cli.ax import _build_resolver_for_cli
+        from almanak.framework.gateway_client import _AuthClientInterceptor
+
+        raw_channel = MagicMock(name="raw_channel")
+        intercepted_channel = MagicMock(name="intercepted_channel")
+        resolver_with_channel = MagicMock(name="resolver_with_channel")
+        captured_tokens: list[str] = []
+
+        def fake_create_token_resolver(*, gateway_channel=None):
+            return resolver_with_channel if gateway_channel is not None else MagicMock()
+
+        class _CapturingInterceptor(_AuthClientInterceptor):
+            def __init__(self, token):
+                captured_tokens.append(token)
+                super().__init__(token)
+
+        monkeypatch.setattr(grpc, "insecure_channel", lambda target: raw_channel)
+        monkeypatch.setattr(grpc, "intercept_channel", lambda *a, **k: intercepted_channel)
+        monkeypatch.setattr("almanak.framework.data.tokens.create_token_resolver", fake_create_token_resolver)
+        monkeypatch.setattr("almanak.framework.cli.ax._gateway_is_reachable", lambda *a, **k: True)
+        monkeypatch.setattr("almanak.framework.gateway_client._AuthClientInterceptor", _CapturingInterceptor)
+        monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "env-token")
+        monkeypatch.delenv("GATEWAY_AUTH_TOKEN", raising=False)
+
+        # ctx.obj deliberately has no 'gateway_auth_token' — exercises env path.
+        ctx = SimpleNamespace(obj={"gateway_host": "localhost", "gateway_port": 59999})
+
+        resolver, channel, note = _build_resolver_for_cli(ctx, use_gateway=True)
+
+        assert resolver is resolver_with_channel
+        assert channel is intercepted_channel
+        assert note == "attempted dynamic lookup via localhost:59999"
+        assert captured_tokens == ["env-token"], (
+            "Expected _build_resolver_for_cli to read the auth token from "
+            "ALMANAK_GATEWAY_AUTH_TOKEN when ctx.obj is empty."
+        )
 
 
 class TestAxResolveMalformedInput:

@@ -32,8 +32,8 @@ from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType, Resol
 from almanak.framework.data.tokens.resolver import (
     TokenResolver,
     _is_address,
-    _looks_like_address,
     _normalize_chain,
+    _normalize_symbol_input,
     _validate_address,
     get_token_resolver,
 )
@@ -147,6 +147,60 @@ class TestHelperFunctions:
         with pytest.raises(TokenResolutionError) as exc_info:
             _normalize_chain("unknown_chain")
         assert "Unknown chain" in str(exc_info.value)
+
+
+class TestSymbolInputNormalization:
+    """Tests for _normalize_symbol_input: whitespace stripping + CG-ID translation.
+
+    Callers (Edge, AlmanakCode) sometimes ship CoinGecko IDs in the symbol
+    field (``"tether"``, ``"usd-coin"``). The resolver's normalization
+    layer translates these to canonical symbols so the rest of the
+    cascade hits the static registry cleanly.
+    """
+
+    @pytest.mark.parametrize(
+        "cg_id, expected_symbol",
+        [
+            ("tether", "USDT"),
+            ("usd-coin", "USDC"),
+            ("wrapped-bitcoin", "WBTC"),
+            ("weth", "WETH"),
+            ("ethereum", "ETH"),
+            ("chainlink", "LINK"),
+        ],
+    )
+    def test_coingecko_id_maps_to_canonical_symbol(self, cg_id, expected_symbol):
+        assert _normalize_symbol_input(cg_id) == expected_symbol
+
+    def test_prefers_non_bridged_canonical(self):
+        """``tether`` must resolve to ``USDT``, not the bridged ``USDT.E`` variant."""
+        assert _normalize_symbol_input("tether") == "USDT"
+        assert _normalize_symbol_input("usd-coin") == "USDC"
+        assert _normalize_symbol_input("weth") == "WETH"
+
+    def test_unknown_cg_id_passed_through_unchanged(self):
+        assert _normalize_symbol_input("not-a-real-cg-id") == "not-a-real-cg-id"
+
+    def test_whitespace_stripped(self):
+        assert _normalize_symbol_input("  USDC  ") == "USDC"
+        assert _normalize_symbol_input("\tUSDC\n") == "USDC"
+
+    def test_empty_string_passed_through(self):
+        assert _normalize_symbol_input("") == ""
+        assert _normalize_symbol_input("   ") == ""
+
+    def test_uppercase_symbols_not_touched(self):
+        """Standard symbols like ``USDC`` / ``WETH`` should pass through unchanged
+        — they aren't CG IDs and the downstream cascade handles them."""
+        assert _normalize_symbol_input("USDC") == "USDC"
+        assert _normalize_symbol_input("WETH") == "WETH"
+        assert _normalize_symbol_input("stETH") == "stETH"  # mixed-case preserved
+
+    def test_bridged_suffix_not_misinterpreted_as_cg_id(self):
+        """``usdc.e`` is lowercase but contains ``.`` — it's a bridged symbol,
+        not a CG ID. Must pass through so standard alias lookup fires."""
+        assert _normalize_symbol_input("usdc.e") == "usdc.e"
+        assert _normalize_symbol_input("weth.e") == "weth.e"
 
 
 class TestTokenResolverSingleton:

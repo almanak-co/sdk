@@ -22,6 +22,7 @@ from urllib.parse import quote as _url_quote
 
 import grpc
 
+from almanak.core.enums import Chain
 from almanak.framework.data.tokens import (
     InvalidTokenAddressError,
     ResolvedToken,
@@ -82,6 +83,153 @@ DEFAULT_RATE_LIMIT = 10  # lookups per second
 # with the candidate list) from a genuine "not found" (which is safe to
 # negative-cache for 5 minutes).
 AMBIGUOUS_SYMBOL_MARKER = "AMBIGUOUS_SYMBOL"
+
+
+# =============================================================================
+# Protocol symbol detection (Pendle / Aave)
+# =============================================================================
+
+# Prefixes that identify a Pendle-authored token symbol.  Bare-bones
+# startswith check: Pendle symbols are consistently namespaced as
+# ``PT-...``, ``YT-...``, ``SY-...``, or ``LP-...`` (plus the legacy
+# ``PENDLE-LPT`` for pool tokens).  Anything matching these patterns goes
+# through the Pendle API tier before falling back to CoinGecko/DexScreener.
+_PENDLE_SYMBOL_PREFIXES: tuple[str, ...] = ("PT-", "YT-", "SY-", "LP-")
+
+
+def _looks_like_pendle_symbol(symbol: str) -> bool:
+    """Return True if ``symbol`` follows the Pendle PT/YT/SY/LP naming convention."""
+    if not symbol:
+        return False
+    upper = symbol.upper()
+    if upper.startswith(_PENDLE_SYMBOL_PREFIXES):
+        return True
+    # Legacy pool token naming, seen on early markets.
+    return upper == "PENDLE-LPT"
+
+
+# Prefixes for Aave v3 receipt tokens.  Aave uses a chain abbreviation
+# (``aEth``, ``aArb``, ...) plus an optional deployment tag
+# (``aEthLido``, ``aEthEtherFi``, ``aHorRwa``) before the underlying
+# asset symbol.  Variable-debt tokens carry the ``variableDebt`` prefix
+# instead of ``a``.  Anything matching these patterns gets routed to the
+# Aave API tier before falling back to CoinGecko/DexScreener.
+_AAVE_SYMBOL_PREFIXES: tuple[str, ...] = (
+    "AETH",  # aEthUSDC, aEthLidoWETH, aEthEtherFiweETH, ...
+    "AARB",  # Arbitrum
+    "AOPT",  # Optimism
+    "ABAS",  # Base
+    "ABNB",  # BSC
+    "APOL",  # Polygon
+    "AAVA",  # Avalanche
+    "AGNO",  # Gnosis
+    "ALIN",  # Linea
+    "AHORRWA",  # Horizon RWA deployment on ethereum
+    "VARIABLEDEBT",  # vToken: variableDebtEthUSDC, variableDebtArbUSDT, ...
+)
+
+
+def _looks_like_aave_symbol(symbol: str) -> bool:
+    """Return True if ``symbol`` follows the Aave v3 aToken / vToken naming."""
+    if not symbol:
+        return False
+    return symbol.upper().startswith(_AAVE_SYMBOL_PREFIXES)
+
+
+def _looks_like_compound_symbol(symbol: str) -> bool:
+    """Return True if ``symbol`` looks like a Compound v3 (Comet) cToken.
+
+    Comet markets are consistently named ``c<BASE>v3`` — ``cUSDCv3``,
+    ``cWETHv3``, ``cWstETHv3``, etc. — on every deployment. Matches
+    the ``c``-prefix case-insensitively (so ``cUSDCv3``, ``CUSDCV3``,
+    and ``cusdcv3`` all qualify — ``lookup_by_symbol`` is case-
+    insensitive anyway, so the predicate has no business being stricter
+    than the lookup). The ``v3`` suffix check keeps out governance
+    tokens like ``COMP``, Aave aTokens (``aEth...``), and unrelated
+    c-prefixed tokens (``cbBTC``, ``crvUSD``) that don't terminate in
+    ``v3``.
+    """
+    if not symbol or len(symbol) < 4:
+        return False
+    upper = symbol.upper()
+    return upper.startswith("C") and upper.endswith("V3")
+
+
+def _looks_like_beefy_symbol(symbol: str) -> bool:
+    """Return True if ``symbol`` looks like a Beefy mooToken.
+
+    Beefy's active vaults consistently prefix share-token symbols with
+    ``moo`` — ``mooCurveUSDC-USDf``, ``mooAaveV3WETH``, ``MooSkyUSDS_SPK``,
+    etc.  False positives are cheap (just a dict miss before falling
+    through to CoinGecko/DexScreener), so we keep the check loose:
+    any symbol whose uppercased form starts with ``MOO`` qualifies.
+    """
+    if not symbol:
+        return False
+    return symbol.upper().startswith("MOO")
+
+
+def _looks_like_yearn_symbol(symbol: str) -> bool:
+    """Return True if ``symbol`` looks like a Yearn yvToken.
+
+    Yearn's v2 and v3 vaults share a strict ``yv<...>`` naming scheme
+    (``yvUSDC``, ``yvDAI``, ``yvCurve-stETH-frxETH-f``, ...).  Tight
+    prefix check — any false positive costs a dict miss and falls
+    through to CoinGecko/DexScreener.
+    """
+    if not symbol:
+        return False
+    return symbol.upper().startswith("YV")
+
+
+def _looks_like_fluid_symbol(symbol: str) -> bool:
+    """Return True if ``symbol`` looks like a Fluid fToken.
+
+    Fluid's canonical shape is ``f`` + underlying symbol — ``fUSDC``,
+    ``fWETH``, ``fGHO``, ``fwstETH``, ``fARB``, etc. The predicate
+    matches the ``f`` prefix case-insensitively (so ``fUSDC``, ``FUSDC``,
+    and ``fusdc`` all qualify) because ``FluidMarketLookup.lookup_by_symbol``
+    is already case-insensitive — a stricter gate here would skip the
+    Fluid tier for lowercase or all-caps user input. Symbols like
+    ``FRAX`` / ``FXS`` still drop out at the dict-miss step; a false
+    positive costs one dict miss, which is acceptable.
+    """
+    if not symbol or len(symbol) < 2:
+        return False
+    return symbol[:1].casefold() == "f"
+
+
+# =============================================================================
+# Chain enum helper
+# =============================================================================
+
+
+# Pre-built lookup: lowercased enum value → Chain member.  The protocol
+# lookup services return ``meta.chain`` as a lowercased string (the same
+# key they use to index tokens per chain), but ``Chain`` enum *values*
+# are uppercase ("ETHEREUM", "ARBITRUM", ...).  Naive ``Chain(meta.chain)``
+# therefore always raises ``ValueError`` for lowercase inputs, silently
+# falling back to whatever the caller uses as its default — which in the
+# ``_build_resolved_from_*`` helpers is ``Chain.ETHEREUM``, meaning every
+# non-ethereum protocol resolution would stamp the wrong chain onto the
+# returned ``ResolvedToken``.  This helper makes the lookup explicit and
+# case-insensitive.
+def _resolve_chain_enum(name: str) -> Chain:
+    """Return the ``Chain`` enum for a lowercased chain name.
+
+    Accepts any case ("ethereum", "ETHEREUM", "Ethereum") and falls back
+    to ``Chain.ETHEREUM`` for unknown / empty names.  Callers expect the
+    fallback so they can still construct a ``ResolvedToken`` even when a
+    protocol lookup returns a chain we don't recognize (e.g. a newer
+    Pendle/Morpho deployment on a chain that isn't in our ``Chain`` enum
+    yet).
+    """
+    if not name:
+        return Chain.ETHEREUM
+    try:
+        return Chain[name.upper()]
+    except KeyError:
+        return Chain.ETHEREUM
 
 
 # =============================================================================
@@ -182,9 +330,13 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         # Get the shared TokenResolver instance (no gateway client for circular ref)
         self._resolver = get_token_resolver()
 
-        # Jupiter token lookup (Solana dynamic resolution) -- loaded lazily on first use
-        self._jupiter: Any = None  # JupiterTokenLookup, typed as Any to avoid import cycle
-        self._jupiter_lock = asyncio.Lock()
+        # Protocol lookup singletons live at module scope in each
+        # ``*_lookup.py`` file and are accessed via ``_get_<protocol>``
+        # below. We deliberately do NOT cache an instance on ``self``
+        # here: each accessor round-trips through the module factory,
+        # which owns the singleton + retry-after-failure backoff so a
+        # transient first-load failure can recover without a gateway
+        # restart.
 
         # SPL mint RPC lookup (Solana on-chain fallback for any valid mint,
         # including long-tail tokens Jupiter's curated list doesn't cover).
@@ -302,16 +454,65 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             source="",
         )
 
-    async def _get_jupiter(self) -> Any:
-        """Get (or lazily load) the JupiterTokenLookup singleton."""
-        if self._jupiter is not None:
-            return self._jupiter
-        async with self._jupiter_lock:
-            if self._jupiter is None:
-                from almanak.gateway.services.jupiter_token_lookup import get_jupiter_lookup
+    # ------------------------------------------------------------------
+    # Protocol lookup accessors
+    #
+    # Each accessor delegates to the corresponding module-level factory
+    # (``get_pendle_lookup``, ``get_aave_lookup``, ...).  Do NOT cache the
+    # returned instance on ``self`` here — the factory is idempotent and
+    # owns both the singleton lifecycle and the retry-after-failure
+    # backoff (``ProtocolTokenLookup._load`` re-enters after the backoff
+    # window passes).  A per-instance cache would pin a failed first load
+    # and silently disable retries until the gateway restarts.
+    # ------------------------------------------------------------------
 
-                self._jupiter = await get_jupiter_lookup()
-            return self._jupiter
+    async def _get_jupiter(self) -> Any:
+        """Get the JupiterTokenLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.jupiter_token_lookup import get_jupiter_lookup
+
+        return await get_jupiter_lookup()
+
+    async def _get_pendle(self) -> Any:
+        """Get the PendleMarketLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.pendle_market_lookup import get_pendle_lookup
+
+        return await get_pendle_lookup()
+
+    async def _get_aave(self) -> Any:
+        """Get the AaveMarketLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.aave_market_lookup import get_aave_lookup
+
+        return await get_aave_lookup()
+
+    async def _get_morpho(self) -> Any:
+        """Get the MorphoVaultLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.morpho_vault_lookup import get_morpho_lookup
+
+        return await get_morpho_lookup()
+
+    async def _get_compound(self) -> Any:
+        """Get the CompoundMarketLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.compound_market_lookup import get_compound_lookup
+
+        return await get_compound_lookup()
+
+    async def _get_beefy(self) -> Any:
+        """Get the BeefyVaultLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.beefy_vault_lookup import get_beefy_lookup
+
+        return await get_beefy_lookup()
+
+    async def _get_yearn(self) -> Any:
+        """Get the YearnVaultLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.yearn_vault_lookup import get_yearn_lookup
+
+        return await get_yearn_lookup()
+
+    async def _get_fluid(self) -> Any:
+        """Get the FluidMarketLookup singleton (factory handles retry/load)."""
+        from almanak.gateway.services.fluid_market_lookup import get_fluid_lookup
+
+        return await get_fluid_lookup()
 
     async def _get_spl_lookup(self) -> SplMintLookup:
         """Get (or lazily create) the SplMintLookup for Solana.
@@ -473,9 +674,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
     def _build_resolved_from_jupiter(self, meta: Any) -> ResolvedToken:
         """Build a ResolvedToken from JupiterTokenMetadata."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
-        from almanak.core.enums import Chain
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
         chain_enum = Chain.SOLANA
@@ -494,22 +694,433 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             bridge_type=BridgeType.NATIVE,
             source="jupiter",
             is_verified=True,  # Jupiter is a trusted source
-            resolved_at=datetime.now(),
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_aave_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve an Aave v3 aToken or vToken via the Aave markets API.
+
+        Aave's own GraphQL API is authoritative for these receipt tokens —
+        the protocol authors both the API and the contracts it references,
+        so the returned (symbol, address, decimals) tuple is trusted the
+        same way Jupiter / Pendle are trusted.
+
+        Returns a TokenMetadataResponse on success, None if the lookup
+        misses or the Aave API is unavailable.
+        """
+        try:
+            aave = await self._get_aave()
+            meta = aave.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_aave(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_aave symbol=%s chain=%s address=%s type=%s underlying=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.token_type,
+                meta.underlying_symbol,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Aave symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_aave(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from AaveReserveToken."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        source = "aave_atoken" if meta.token_type == "A" else "aave_vtoken"
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source=source,
+            is_verified=True,  # Aave is a trusted source
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_fluid_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Fluid fToken via Fluid's per-chain API.
+
+        Fluid's API is the protocol's own authoritative source — same
+        trust model as every other protocol tier. Gated behind the
+        lowercase-``f`` prefix predicate to avoid loading the vault
+        list for unrelated tokens like ``FRAX``.
+        """
+        try:
+            fluid = await self._get_fluid()
+            meta = fluid.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_fluid(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_fluid symbol=%s chain=%s address=%s underlying=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.underlying_symbol,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Fluid symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_fluid(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from FluidMarketToken."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source="fluid_ftoken",
+            is_verified=True,  # Fluid-authored contracts; Fluid API is trusted
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_yearn_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Yearn yvToken via ydaemon.
+
+        ydaemon is Yearn-authored, authoritative for every yvToken
+        address and decimals. Gated behind the ``yv`` prefix predicate.
+
+        Returns a TokenMetadataResponse on success, None if the lookup
+        misses or the ydaemon endpoint is unavailable.
+        """
+        try:
+            yearn = await self._get_yearn()
+            meta = yearn.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_yearn(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_yearn symbol=%s chain=%s address=%s underlying=%s kind=%s ver=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.underlying_symbol,
+                meta.kind,
+                meta.version,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Yearn symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_yearn(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from YearnVaultToken."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source="yearn_vault",
+            is_verified=True,  # Yearn-authored contracts; ydaemon is trusted
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_beefy_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Beefy mooToken via the Beefy vaults API.
+
+        Beefy's API is the protocol's own authoritative source — same
+        trust model as every other protocol tier. Gated behind the
+        ``moo`` prefix predicate so unrelated symbols never trigger
+        the initial vault-list fetch.
+
+        Returns a TokenMetadataResponse on success, None if the lookup
+        misses or the Beefy API is unavailable.
+        """
+        try:
+            beefy = await self._get_beefy()
+            meta = beefy.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_beefy(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_beefy symbol=%s chain=%s address=%s underlying=%s platform=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.underlying_symbol,
+                meta.platform,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Beefy symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_beefy(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from BeefyVaultToken."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source="beefy_vault",
+            is_verified=True,  # Beefy-authored contracts; Beefy API is trusted
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_compound_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Compound v3 (Comet) cToken via the aggregator JSON.
+
+        The aggregator mirrors Compound's own deployment configs across
+        every Comet network in one HTTP call.  Compound-authored
+        contracts + Compound-recommended source ⇒ trusted, same model
+        as Pendle / Aave / Morpho.
+
+        Returns a TokenMetadataResponse on success, None if the lookup
+        misses or the aggregator is unavailable.
+        """
+        try:
+            compound = await self._get_compound()
+            meta = compound.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_compound(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_compound symbol=%s chain=%s address=%s underlying=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.underlying_symbol,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Compound symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_compound(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from CompoundMarketToken."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source="compound_ctoken",
+            is_verified=True,  # Compound-authored contracts; aggregator is trusted
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_morpho_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Morpho vault share token via the Morpho vaults API.
+
+        Morpho's GraphQL API is authoritative for whitelisted vault
+        addresses — same trust model used for Jupiter / Pendle / Aave.
+        Vault symbols are curator-chosen (``gtUSDC``, ``sparkUSDCbc``,
+        ``kpk_USDC_Prime``, ...) so there is no prefix predicate to
+        gate this tier; callers invoke it on every EVM symbol miss.
+
+        Returns a TokenMetadataResponse on success, None if the lookup
+        misses or the Morpho API is unavailable.
+        """
+        try:
+            morpho = await self._get_morpho()
+            meta = morpho.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_morpho(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_morpho symbol=%s chain=%s address=%s underlying=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.underlying_symbol,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Morpho symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_morpho(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from MorphoVaultToken."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source="morpho_vault",
+            is_verified=True,  # Morpho whitelisted vaults are a trusted source
+            resolved_at=datetime.now(UTC),
+        )
+
+    async def _try_pendle_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+        """Try to resolve a Pendle PT/YT/SY/LP token via the Pendle assets API.
+
+        The Pendle v1 ``/assets/all`` endpoint is authoritative for these
+        derivative tokens: Pendle authors both the API and the contracts it
+        references, so the returned (symbol, address, decimals) tuple is
+        trusted the same way Jupiter's list is trusted for Solana.
+
+        Returns a TokenMetadataResponse on success, None if the lookup misses
+        or the Pendle API is unavailable.
+        """
+        try:
+            pendle = await self._get_pendle()
+            meta = pendle.lookup_by_symbol(symbol, chain)
+            if meta is None:
+                return None
+
+            resolved = self._build_resolved_from_pendle(meta)
+            self._resolver.register(resolved)
+            logger.info(
+                "token_dynamic_resolved_pendle symbol=%s chain=%s address=%s type=%s",
+                symbol,
+                chain,
+                meta.address,
+                meta.token_type,
+            )
+            return self._resolved_to_response(resolved)
+        except Exception as exc:
+            logger.warning("Pendle symbol lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+    def _build_resolved_from_pendle(self, meta: Any) -> ResolvedToken:
+        """Build a ResolvedToken from PendleTokenMetadata."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
+
+        chain_enum = _resolve_chain_enum(meta.chain)
+
+        return ResolvedToken(
+            symbol=meta.symbol,
+            address=meta.address,
+            decimals=meta.decimals,
+            chain=chain_enum,
+            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            name=meta.name or None,
+            coingecko_id=None,
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol=meta.symbol,
+            bridge_type=BridgeType.NATIVE,
+            source=f"pendle_{meta.token_type.lower()}",
+            is_verified=True,  # Pendle is a trusted source
+            resolved_at=datetime.now(UTC),
         )
 
     async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
-        """Try to resolve an EVM token by symbol via CoinGecko, then DexScreener.
+        """Try to resolve an EVM token by symbol via Pendle, Aave, Compound, Beefy, Yearn, Morpho, CoinGecko, then DexScreener.
 
         Resolution tiers:
-        1. CoinGecko free-tier search (established tokens with broad listings)
-        2. DexScreener symbol search with 4-gate scam-resistance policy
-           (new launches and chains CoinGecko does not index)
+        1. Pendle markets (PT-/YT-/SY-/LP- tokens).
+        2. Aave v3 reserves (aToken / vToken symbols).
+        3. Compound v3 markets (``c<BASE>v3`` cToken symbols).
+        4. Beefy vaults (``moo<...>`` share tokens, active only).
+        5. Yearn vaults (``yv<...>`` share tokens, v2 + v3).
+        6. Fluid fTokens (lending receipts like ``fUSDC``, ``fWETH``).
+        7. Morpho whitelisted vaults (ERC4626 share tokens — curator-
+           chosen symbols that neither CoinGecko nor DexScreener surface).
+        8. CoinGecko free-tier search.
+        9. DexScreener symbol search (4-gate scam-resistance).
 
-        For any positive result, an on-chain ERC20 lookup confirms decimals and
-        name before the address is returned and cached.
+        For CoinGecko/DexScreener results, an on-chain ERC20 lookup confirms
+        decimals and name. Pendle/Aave/Compound/Beefy/Yearn/Morpho responses
+        are trusted directly — same as Jupiter for Solana — because the
+        protocol authors both the API/data source and the contracts it
+        references.
 
         Returns:
-            TokenMetadataResponse on success, None if neither source produced
+            TokenMetadataResponse on success, None if no source produced
             a confirmable address.
 
         Raises:
@@ -518,6 +1129,56 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 caller should surface the message so strategy authors can
                 disambiguate with an explicit address.
         """
+        # Tier 0: Pendle (PT/YT/SY symbols — these never appear on CoinGecko
+        # or DexScreener in a useful way, and the /assets/all endpoint is cheap)
+        if _looks_like_pendle_symbol(symbol):
+            pendle_response = await self._try_pendle_symbol_lookup(symbol, chain)
+            if pendle_response is not None:
+                return pendle_response
+
+        # Tier 0b: Aave v3 (aToken / vToken symbols — same rationale:
+        # CoinGecko/DexScreener don't list receipt tokens usefully, and
+        # Aave's /markets query is cheap and gated behind a prefix check).
+        if _looks_like_aave_symbol(symbol):
+            aave_response = await self._try_aave_symbol_lookup(symbol, chain)
+            if aave_response is not None:
+                return aave_response
+
+        # Tier 0c: Compound v3 (c<BASE>v3 cTokens — tight prefix check
+        # avoids loading the aggregator for unrelated tokens).
+        if _looks_like_compound_symbol(symbol):
+            compound_response = await self._try_compound_symbol_lookup(symbol, chain)
+            if compound_response is not None:
+                return compound_response
+
+        # Tier 0d: Beefy vaults (moo* mooTokens — prefix check keeps
+        # unrelated symbols from loading the vault list).
+        if _looks_like_beefy_symbol(symbol):
+            beefy_response = await self._try_beefy_symbol_lookup(symbol, chain)
+            if beefy_response is not None:
+                return beefy_response
+
+        # Tier 0e: Yearn vaults (yv* yvTokens — tight prefix check).
+        if _looks_like_yearn_symbol(symbol):
+            yearn_response = await self._try_yearn_symbol_lookup(symbol, chain)
+            if yearn_response is not None:
+                return yearn_response
+
+        # Tier 0f: Fluid fTokens (lowercase-f prefix + uppercase suffix
+        # distinguishes from ``FRAX``/``FXS``-style tokens).
+        if _looks_like_fluid_symbol(symbol):
+            fluid_response = await self._try_fluid_symbol_lookup(symbol, chain)
+            if fluid_response is not None:
+                return fluid_response
+
+        # Tier 0g: Morpho vaults (curator-chosen symbols — no clean prefix
+        # predicate, so we always consult the in-memory index. First call
+        # triggers a one-time API fetch + cache; subsequent calls are
+        # O(1) dict lookups.)
+        morpho_response = await self._try_morpho_symbol_lookup(symbol, chain)
+        if morpho_response is not None:
+            return morpho_response
+
         # Tier 1: CoinGecko (if the chain is listed)
         platform = COINGECKO_PLATFORM_IDS.get(chain.lower())
         if platform:
@@ -1002,6 +1663,28 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
     # the in-memory/disk cache.
     _SOURCE_RANK: dict[str, int] = {
         "static": 100,
+        # Protocol-authoritative sources for receipt / vault share tokens.
+        # Each of these comes straight from the protocol's own API (Pendle
+        # assets, Aave GraphQL, Compound aggregator, Morpho vaults,
+        # Beefy vaults, Yearn ydaemon, Fluid lending) and is trusted at
+        # the same level as hand-curated static registry entries — rank
+        # them above the generic CoinGecko/DexScreener dynamic sources so
+        # a later DexScreener hit on the same symbol can't silently
+        # overwrite a Pendle / Aave / Compound / Morpho / Beefy / Yearn /
+        # Fluid entry. Using a shared rank (90) because they're equally
+        # authoritative for their respective token families; static
+        # remains top-ranked (100) for intentional curator overrides.
+        "pendle_pt": 90,
+        "pendle_yt": 90,
+        "pendle_sy": 90,
+        "pendle_lp": 90,
+        "aave_atoken": 90,
+        "aave_vtoken": 90,
+        "compound_ctoken": 90,
+        "morpho_vault": 90,
+        "beefy_vault": 90,
+        "yearn_vault": 90,
+        "fluid_ftoken": 90,
         "coingecko_dynamic": 60,
         "on_chain": 50,
         "dexscreener_dynamic": 40,
@@ -1030,9 +1713,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 ``"on_chain"``, ``"dexscreener_dynamic"``, ``"coingecko_dynamic"``).
         """
         try:
-            from datetime import datetime
+            from datetime import UTC, datetime
 
-            from almanak.core.enums import Chain
             from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
             # Find Chain enum
@@ -1098,7 +1780,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 bridge_type=BridgeType.NATIVE,
                 source=source,
                 is_verified=False,
-                resolved_at=datetime.now(),
+                resolved_at=datetime.now(UTC),
             )
 
             # Register in resolver (which handles caching)

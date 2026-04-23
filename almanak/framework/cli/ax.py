@@ -414,7 +414,13 @@ def _start_managed_gateway(
     settings = GatewaySettings(**gateway_kwargs)
     anvil_chains = [chain] if resolved_network == "anvil" else []
 
-    click.echo(click.style("Auto-starting gateway", bold=True) + f" ({resolved_network}) on {host}:{gw_port}...")
+    # Status messages go to STDERR so they don't corrupt the CLI's actual
+    # stdout payload — critical for ``--json`` output mode where callers
+    # parse stdout directly.
+    click.echo(
+        click.style("Auto-starting gateway", bold=True) + f" ({resolved_network}) on {host}:{gw_port}...",
+        err=True,
+    )
 
     managed = ManagedGateway(
         settings=settings,
@@ -438,7 +444,7 @@ def _start_managed_gateway(
     ctx.obj["gateway_host"] = managed.host
     ctx.obj["gateway_port"] = managed.port
 
-    click.echo(click.style("Gateway ready.", fg="green", bold=True))
+    click.echo(click.style("Gateway ready.", fg="green", bold=True), err=True)
     ctx.obj["gateway_auth_token"] = session_auth_token
     return managed
 
@@ -564,6 +570,7 @@ def resolve(ctx, token, gateway: bool):
     import json as _json
 
     from almanak.framework.cli.ax_render import render_error
+    from almanak.framework.data.tokens import create_token_resolver
     from almanak.framework.data.tokens.exceptions import (
         InvalidTokenAddressError,
         TokenNotFoundError,
@@ -572,6 +579,28 @@ def resolve(ctx, token, gateway: bool):
 
     json_output = ctx.obj["json_output"]
     chain = ctx.obj["chain"]
+
+    # Fast path: when gateway is permitted, try a static-only resolution first.
+    # If the token lives in memory cache / disk cache / tokens.json / aliases
+    # we skip the ~1-2s cost of auto-spawning a ManagedGateway entirely.  The
+    # slow path below kicks in only when the static layer genuinely misses —
+    # i.e., exactly when the gateway's dynamic path could add value.
+    if gateway:
+        static_only = create_token_resolver()
+        try:
+            resolved = static_only.resolve(token, chain, skip_gateway=True, log_errors=False)
+            _render_resolved_token(resolved, chain=chain, json_output=json_output)
+            return
+        except InvalidTokenAddressError as e:
+            render_error(f"Invalid address: {e}", json_output=json_output)
+            sys.exit(2)
+        except TokenNotFoundError:
+            # Static miss — fall through to the gateway-enabled path.
+            # Do NOT catch TokenResolutionError (parent): AmbiguousTokenError
+            # and any future static-layer resolution errors must propagate
+            # so the outer handler maps them to the correct exit code /
+            # JSON payload instead of being silently retried dynamically.
+            pass
 
     resolver, gateway_channel, gateway_note = _build_resolver_for_cli(ctx, use_gateway=gateway)
 
@@ -634,6 +663,17 @@ def resolve(ctx, token, gateway: bool):
             except Exception:
                 pass
 
+    _render_resolved_token(resolved, chain=chain, json_output=json_output)
+
+
+def _render_resolved_token(resolved, *, chain: str, json_output: bool) -> None:
+    """Render a resolved token either as JSON or as a friendly CLI summary.
+
+    Extracted so the fast-path (static-only) and slow-path (gateway) in
+    ``resolve`` share identical output formatting.
+    """
+    import json as _json
+
     payload = {
         "symbol": resolved.symbol,
         "address": resolved.address,
@@ -670,10 +710,17 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
     isolated from the process-wide resolver singleton used by long-lived
     runtimes.
 
-    If the gateway channel can't be built we fall back to static-only
+    If the configured gateway isn't reachable we auto-start a
+    ``ManagedGateway`` on the fly — same behaviour as the other ax
+    subcommands (``swap``, ``balance``, ...).  Without this step
+    ``ax resolve`` would silently fall through to the static registry
+    and look like the token doesn't exist, which is the wrong answer
+    for anything the gateway's dynamic path would have found (Pendle
+    PT/YT/SY, CoinGecko-only tokens, etc.).
+
+    If the auto-start itself fails we fall back to static-only
     resolution and return a human-readable note explaining what we
-    tried. Never blocks or hangs: we only verify the channel is
-    constructable here, the resolver's own 5s timeout handles calls.
+    tried.
     """
     from almanak.framework.data.tokens import create_token_resolver
 
@@ -682,22 +729,69 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
     if not use_gateway:
         return resolver, None, None
 
+    import os
+
     host = ctx.obj.get("gateway_host", "localhost")
     port = ctx.obj.get("gateway_port", 50051)
-    gateway_auth_token = ctx.obj.get("gateway_auth_token")
+    network = ctx.obj.get("network")
+    # Match ``_get_executor``: fall back to the ALMANAK_GATEWAY_AUTH_TOKEN /
+    # GATEWAY_AUTH_TOKEN env vars when no CLI-provided token is on the
+    # context.  ``ax resolve`` frequently attaches to a gateway that was
+    # started by another process (a long-running strategy, or the shared
+    # sidecar in CI), and that process is the one that sets the env var —
+    # without this fallback, auth-enabled gateways reject the probe.
+    gateway_auth_token = (
+        ctx.obj.get("gateway_auth_token")
+        or os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN")
+        or os.environ.get("GATEWAY_AUTH_TOKEN")
+    )
+
     try:
         import grpc
+    except Exception as e:  # grpc import failure
+        return resolver, None, f"gRPC unavailable: {e}"
 
+    # Probe the configured host:port. If nothing's listening, auto-start a
+    # ManagedGateway the same way _get_executor does for swap/balance.
+    if not _gateway_is_reachable(host, port):
+        try:
+            managed = _start_managed_gateway(ctx, host, port, network)
+            ctx.obj["managed_gateway"] = managed
+            # _start_managed_gateway may have picked a different free port.
+            host = ctx.obj.get("gateway_host", host)
+            port = ctx.obj.get("gateway_port", port)
+            gateway_auth_token = ctx.obj.get("gateway_auth_token", gateway_auth_token)
+        except Exception as e:
+            return resolver, None, (f"no gateway running on {host}:{port} and auto-start failed: {e}")
+
+    try:
         channel = grpc.insecure_channel(f"{host}:{port}")
         if gateway_auth_token:
             from almanak.framework.gateway_client import _AuthClientInterceptor
 
             channel = grpc.intercept_channel(channel, _AuthClientInterceptor(gateway_auth_token))
-    except Exception as e:  # grpc import or construction failure
+    except Exception as e:  # grpc channel construction failure
         return resolver, None, f"could not build gRPC channel to {host}:{port}: {e}"
 
     resolver = create_token_resolver(gateway_channel=channel)
     return resolver, channel, f"attempted dynamic lookup via {host}:{port}"
+
+
+def _gateway_is_reachable(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Return True if a TCP socket can connect to ``host:port`` within ``timeout``.
+
+    Used as a quick probe before deciding whether to auto-start a managed
+    gateway.  We check the TCP layer instead of opening a gRPC channel
+    because a gRPC call would only fail lazily on first request, too late
+    to decide whether to spawn.
+    """
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------

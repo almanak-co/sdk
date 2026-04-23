@@ -177,6 +177,57 @@ def _normalize_address_for_chain(address: str, chain: str) -> str:
     return address.lower()
 
 
+# Lazy cache of the CoinGecko-ID -> canonical-symbol reverse map.  Populated
+# on first call to _normalize_symbol_input(); ~1357 entries built from
+# DEFAULT_TOKENS.  Cheap to build but we cache to avoid the cost on every
+# resolve() call.
+_CG_ID_TO_SYMBOL_CACHE: dict[str, str] | None = None
+
+
+def _cg_id_to_symbol_map() -> dict[str, str]:
+    global _CG_ID_TO_SYMBOL_CACHE
+    if _CG_ID_TO_SYMBOL_CACHE is None:
+        from almanak.framework.data.tokens.defaults import (
+            get_coingecko_id_to_canonical_symbol,
+        )
+
+        _CG_ID_TO_SYMBOL_CACHE = get_coingecko_id_to_canonical_symbol()
+    return _CG_ID_TO_SYMBOL_CACHE
+
+
+def _normalize_symbol_input(token: str) -> str:
+    """Normalize a symbol input before lookup.
+
+    Callers (Edge, AlmanakCode, CLI users) sometimes ship CoinGecko IDs
+    (``"tether"``, ``"usd-coin"``, ``"wrapped-bitcoin"``) in the symbol
+    field instead of the canonical symbol. Recognise those up front and
+    translate to the canonical symbol (``USDT``, ``USDC``, ``WBTC``) so
+    the rest of the resolve cascade can hit the static registry cleanly.
+
+    Also strips leading/trailing whitespace — a cheap guard against
+    copy-paste errors in prompts and notebooks.
+
+    Only non-address inputs are considered; address-shaped strings are
+    passed through unchanged (those go down the address resolve path).
+    Symbol strings that don't look like a CG ID (i.e. not all-lowercase
+    or not hyphenated) are returned with just whitespace stripped —
+    standard case-insensitive symbol lookup handles the rest.
+    """
+    stripped = token.strip()
+    if not stripped:
+        return stripped
+
+    # CG ID shape: all-lowercase, may contain hyphens, no dots/underscores
+    # (the registry uses ``.e`` / ``.E`` for bridged symbols — those are
+    # symbol-shaped, not ID-shaped, so leave them alone).
+    if stripped == stripped.lower() and "." not in stripped and "_" not in stripped:
+        canonical = _cg_id_to_symbol_map().get(stripped)
+        if canonical:
+            return canonical
+
+    return stripped
+
+
 def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
     """Normalize chain input to both string and Chain enum.
 
@@ -583,6 +634,14 @@ class TokenResolver:
                 _validate_address(token, chain_lower)
             elif _looks_like_address(token):
                 _validate_address(token, chain_lower)
+
+            # Symbol-input normalization: handle stray whitespace and translate
+            # CoinGecko IDs that leak through as symbols (``"usd-coin"`` ->
+            # ``"USDC"``, ``"tether"`` -> ``"USDT"``). Only applies to
+            # non-address inputs; the rest of the cascade (negative cache,
+            # static registry, gateway) then uses the canonical form.
+            if not is_address:
+                token = _normalize_symbol_input(token)
 
             # Negative cache short-circuit (VIB-2715). Normalize the key
             # the same way we store it so hits don't depend on caller

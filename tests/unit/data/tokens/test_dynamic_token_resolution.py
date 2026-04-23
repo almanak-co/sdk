@@ -164,15 +164,16 @@ class TestJupiterTokenLookup:
 
     def test_read_disk_cache_fresh(self, tmp_path):
         """_read_disk_cache returns data when cache is fresh."""
-        import time
-
         from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
 
-        lookup = JupiterTokenLookup()
         cache_path = tmp_path / "jupiter_token_cache.json"
         cache_path.write_text(json.dumps(self.SAMPLE_TOKENS))
 
+        # Patch the module-level CACHE_PATH before constructing the lookup —
+        # ``JupiterTokenLookup.__init__`` captures the path via the base
+        # class, so the patch must be active at construction time.
         with patch("almanak.gateway.services.jupiter_token_lookup.CACHE_PATH", cache_path):
+            lookup = JupiterTokenLookup()
             data = lookup._read_disk_cache()
 
         assert data is not None
@@ -185,7 +186,6 @@ class TestJupiterTokenLookup:
 
         from almanak.gateway.services.jupiter_token_lookup import JupiterTokenLookup
 
-        lookup = JupiterTokenLookup()
         cache_path = tmp_path / "jupiter_token_cache.json"
         cache_path.write_text(json.dumps(self.SAMPLE_TOKENS))
 
@@ -193,7 +193,9 @@ class TestJupiterTokenLookup:
         old_mtime = time.time() - (25 * 60 * 60)
         os.utime(cache_path, (old_mtime, old_mtime))
 
+        # Patch CACHE_PATH before construction so the base class picks it up.
         with patch("almanak.gateway.services.jupiter_token_lookup.CACHE_PATH", cache_path):
+            lookup = JupiterTokenLookup()
             data = lookup._read_disk_cache()
 
         assert data is None

@@ -9,6 +9,12 @@ Key Features:
     - Disk cache at ~/.almanak/jupiter_token_cache.json with 24h TTL
     - Graceful degradation: network errors return None, never raise
 
+Inherits plumbing (disk cache, load orchestration, backoff) from
+``ProtocolTokenLookup`` — same base class used by PendleMarketLookup
+and AaveMarketLookup.  The public API (``lookup_by_mint``,
+``lookup_by_symbol``, ``is_loaded``, ``get_jupiter_lookup``) is
+unchanged.
+
 Usage:
     from almanak.gateway.services.jupiter_token_lookup import get_jupiter_lookup
 
@@ -19,13 +25,12 @@ Usage:
 """
 
 import asyncio
-import json
 import logging
-import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from almanak.gateway.services._protocol_lookup import ProtocolTokenLookup
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,7 @@ class JupiterTokenMetadata:
     tags: list[str]
 
 
-class JupiterTokenLookup:
+class JupiterTokenLookup(ProtocolTokenLookup):
     """Jupiter token list lookup with disk caching.
 
     Provides fast symbol and mint address lookups for Solana tokens.
@@ -63,68 +68,23 @@ class JupiterTokenLookup:
     """
 
     def __init__(self) -> None:
+        super().__init__(
+            cache_path=CACHE_PATH,
+            protocol_name="Jupiter token list",
+            cache_ttl_seconds=CACHE_TTL_SECONDS,
+        )
         self._mint_index: dict[str, JupiterTokenMetadata] = {}
         self._symbol_index: dict[str, JupiterTokenMetadata] = {}
-        self._loaded: bool = False
-        self._load_lock = asyncio.Lock()
-        # Retry state: allow re-fetch after transient network failures
-        self._load_failed: bool = False
-        self._retry_after: float = 0.0  # monotonic time after which a retry is allowed
 
-    async def _load(self) -> None:
-        """Load the Jupiter token list (disk cache or network fetch)."""
-        async with self._load_lock:
-            if self._loaded:
-                return
+    def _loaded_summary(self) -> str:
+        return f"loaded: {len(self._mint_index)} tokens indexed"
 
-            # If a previous load failed, only retry after the backoff period
-            if self._load_failed and time.time() < self._retry_after:
-                return
-
-            data = self._read_disk_cache()
-            if data is None:
-                data = await self._fetch_from_network()
-
-            if data is not None:
-                self._build_indices(data)
-                self._loaded = True
-                self._load_failed = False
-                logger.info("Jupiter token list loaded: %d tokens indexed", len(self._mint_index))
-            else:
-                # Transient failure — do NOT permanently mark as loaded.
-                # Allow a retry after a 5-minute backoff so the gateway can
-                # recover from transient network issues without requiring a restart.
-                self._load_failed = True
-                self._retry_after = time.time() + 300  # 5-minute backoff
-                logger.warning(
-                    "Jupiter token list unavailable; Solana dynamic resolution will be limited. "
-                    "Will retry in 5 minutes."
-                )
-
-    def _read_disk_cache(self) -> list[dict[str, Any]] | None:
-        """Read cached token list from disk if still fresh."""
-        if not CACHE_PATH.exists():
-            return None
-
-        try:
-            mtime = CACHE_PATH.stat().st_mtime
-            if time.time() - mtime > CACHE_TTL_SECONDS:
-                logger.debug("Jupiter disk cache expired, will re-fetch")
-                return None
-
-            with CACHE_PATH.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-
-            if not isinstance(data, list):
-                logger.warning("Jupiter disk cache has unexpected format, re-fetching")
-                return None
-
-            logger.debug("Jupiter token list loaded from disk cache (%d tokens)", len(data))
-            return data
-
-        except Exception as exc:
-            logger.warning("Failed to read Jupiter disk cache: %s", exc)
-            return None
+    def _validate_payload(self, data: Any) -> bool:
+        # Jupiter returns a flat list of token objects. Reject empty or
+        # non-list payloads so a format regression / bogus cache
+        # triggers a re-fetch instead of silently pinning the lookup at
+        # zero indices until the disk TTL expires.
+        return isinstance(data, list) and bool(data)
 
     async def _fetch_from_network(self) -> list[dict[str, Any]] | None:
         """Fetch the Jupiter token list from the network."""
@@ -143,25 +103,12 @@ class JupiterTokenLookup:
                 logger.warning("Jupiter token list unexpected format: %s", type(data))
                 return None
 
-            # Write to disk cache
             self._write_disk_cache(data)
             return data
 
         except Exception as exc:
             logger.warning("Jupiter token list fetch failed: %s", exc)
             return None
-
-    def _write_disk_cache(self, data: list[dict[str, Any]]) -> None:
-        """Write token list to disk cache."""
-        try:
-            CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = CACHE_PATH.with_suffix(".tmp")
-            with tmp_path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh)
-            os.replace(tmp_path, CACHE_PATH)
-            logger.debug("Jupiter token list cached to disk (%d tokens)", len(data))
-        except Exception as exc:
-            logger.warning("Failed to write Jupiter disk cache: %s", exc)
 
     def _build_indices(self, data: list[dict[str, Any]]) -> None:
         """Build mint and symbol indices from raw token list."""
@@ -196,7 +143,11 @@ class JupiterTokenLookup:
                     self._symbol_index[symbol_key] = meta
 
             except Exception as exc:
-                logger.debug("Skipping malformed Jupiter token entry %s: %s", raw.get("address", "unknown"), exc)
+                logger.debug(
+                    "Skipping malformed Jupiter token entry %s: %s",
+                    raw.get("address", "unknown"),
+                    exc,
+                )
                 continue
 
     def lookup_by_mint(self, mint: str) -> JupiterTokenMetadata | None:
@@ -223,15 +174,6 @@ class JupiterTokenLookup:
             JupiterTokenMetadata or None if not found
         """
         return self._symbol_index.get(symbol.upper())
-
-    @property
-    def is_loaded(self) -> bool:
-        """Return True if the token list has been successfully loaded.
-
-        Returns False if the last load attempt failed (even if _loaded was not set),
-        so that get_jupiter_lookup() knows to retry after the backoff period.
-        """
-        return self._loaded and not self._load_failed
 
 
 async def get_jupiter_lookup() -> JupiterTokenLookup:

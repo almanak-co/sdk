@@ -220,6 +220,47 @@ def get_coingecko_ids() -> dict[str, str]:
     return {symbol: next(iter(ids)) for symbol, ids in by_symbol.items() if len(ids) == 1}
 
 
+def get_coingecko_id_to_canonical_symbol() -> dict[str, str]:
+    """Return a mapping of CoinGecko ID -> canonical token symbol.
+
+    Used to normalise inputs where an Edge signal or external caller ships
+    the CoinGecko *ID* (``"usd-coin"``, ``"tether"``, ``"wrapped-bitcoin"``)
+    in the symbol field instead of the symbol itself. Without this reverse
+    map, the resolver rejects ``"usd-coin"`` as an unknown symbol even
+    though we know exactly which asset it refers to.
+
+    A single CoinGecko ID often appears on multiple tokens in the registry
+    because every chain has its bridged variant (``USDT`` on Ethereum and
+    ``USDT.E`` on Arbitrum both have the ID ``"tether"``). To pick the
+    canonical one, rank candidates by:
+
+    1. Symbols WITHOUT a ``.`` suffix first (bridged variants carry
+       ``.E``, ``.e``, ``.B``, etc.).
+    2. Most cross-chain coverage first (``USDT`` has 10 addresses,
+       ``USDT.E`` has 1 — ``USDT`` is the canonical choice).
+
+    The result: ``"tether" -> "USDT"``, ``"usd-coin" -> "USDC"``,
+    ``"weth" -> "WETH"`` (not their bridged .e variants).
+    """
+    by_cg_id: dict[str, list[Any]] = {}
+    for token in DEFAULT_TOKENS:
+        if not token.coingecko_id:
+            continue
+        by_cg_id.setdefault(token.coingecko_id, []).append(token)
+
+    result: dict[str, str] = {}
+    for cg_id, tokens in by_cg_id.items():
+        ranked = sorted(
+            tokens,
+            key=lambda t: (
+                "." in t.symbol,  # bridged variants last
+                -len(t.addresses),  # most cross-chain coverage first
+            ),
+        )
+        result[cg_id] = ranked[0].symbol.upper()
+    return result
+
+
 # -----------------------------------------------------------------------------
 # __all__ — keep the legacy export surface. Backward-compat imports rely on
 # this module exposing specific token variable names.
@@ -238,6 +279,7 @@ __all__: list[str] = [
     "DEFAULT_TOKENS",
     "get_coingecko_id",
     "get_coingecko_ids",
+    "get_coingecko_id_to_canonical_symbol",
     # Models re-exported so callers can `from .defaults import Token, BridgeType`
     "Token",
     "BridgeType",
