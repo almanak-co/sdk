@@ -1169,6 +1169,171 @@ class VerboseRevertReport:
         }
 
 
+def _unwrap_enum_value(value: Any) -> Any:
+    """If ``value`` has a ``.value`` attribute (enum-like), return it;
+    otherwise return ``value`` unchanged.
+    """
+    if hasattr(value, "value"):
+        return value.value
+    return value
+
+
+def _object_to_params(obj: Any) -> dict[str, Any]:
+    """Convert a parameter-bearing object to a plain dict.
+
+    Prefers Pydantic's ``model_dump`` (when present), then falls back to
+    ``__dict__`` with private (underscore-prefixed) keys stripped. Objects
+    exposing neither yield ``{"raw": str(obj)}`` so downstream formatting has
+    at least one human-readable line (matches pre-refactor behaviour for
+    action params).
+    """
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    return {"raw": str(obj)}
+
+
+def _build_intent_details(intent: Any | None) -> IntentDetails | None:
+    """Build IntentDetails from a raw intent object.
+
+    Returns ``None`` when no intent is provided. Intent params follow the
+    model_dump → __dict__ → empty ladder (NOT the {"raw": str(...)} fallback,
+    which is reserved for action params to keep the two surfaces distinct
+    with their pre-refactor behaviour).
+    """
+    if intent is None:
+        return None
+
+    intent_type_value = _unwrap_enum_value(getattr(intent, "intent_type", "UNKNOWN"))
+
+    if hasattr(intent, "model_dump"):
+        intent_params = intent.model_dump()
+    elif hasattr(intent, "__dict__"):
+        intent_params = {k: v for k, v in intent.__dict__.items() if not k.startswith("_")}
+    else:
+        intent_params = {}
+
+    return IntentDetails(
+        intent_type=str(intent_type_value),
+        intent_id=str(getattr(intent, "id", getattr(intent, "intent_id", ""))),
+        params=intent_params,
+    )
+
+
+def _build_action_details(action: Any) -> ActionDetails:
+    """Build a single ActionDetails record from a raw action."""
+    action_type = _unwrap_enum_value(getattr(action, "type", "UNKNOWN"))
+    protocol = _unwrap_enum_value(getattr(action, "protocol", "UNKNOWN"))
+
+    params = getattr(action, "params", None)
+    params_dict: dict[str, Any] = {} if params is None else _object_to_params(params)
+
+    return ActionDetails(
+        action_type=str(action_type),
+        protocol=str(protocol),
+        params=params_dict,
+    )
+
+
+def _extract_action_details_list(action_bundle: Any) -> list[ActionDetails]:
+    """Extract the list of ActionDetails from an ActionBundle.
+
+    Bundles without an ``actions`` attribute yield an empty list (matches
+    the pre-refactor guard).
+    """
+    if not hasattr(action_bundle, "actions"):
+        return []
+    return [_build_action_details(a) for a in action_bundle.actions]
+
+
+def _collect_bundle_tx_dicts(action_bundle: Any) -> list[dict[str, Any]]:
+    """Collect non-empty ``tx_dict`` payloads from the bundle's transactions.
+
+    Bundle transactions whose ``tx_dict`` is missing or falsy are filtered
+    out; remaining dicts are returned in order so they can be index-aligned
+    with ``transaction_results``.
+    """
+    if not hasattr(action_bundle, "transactions"):
+        return []
+    return [tx.tx_dict for tx in action_bundle.transactions if getattr(tx, "tx_dict", None)]
+
+
+def _receipt_to_address(receipt: Any) -> str:
+    """Resolve a ``to`` address from a transaction receipt.
+
+    Matches the pre-refactor behaviour: ``getattr(receipt, "to_address", ...)``
+    with fallback to ``receipt.to`` when ``to_address`` is absent. When both
+    are missing, returns ``""``.
+    """
+    if not receipt:
+        return ""
+    return getattr(receipt, "to_address", getattr(receipt, "to", ""))
+
+
+def _build_transaction_details(
+    tr: Any,
+    bundle_tx_dict: dict[str, Any] | None,
+) -> TransactionDetails:
+    """Build a single TransactionDetails record from a TransactionResult
+    and an optional bundle tx_dict.
+
+    The bundle tx_dict (when provided) overlays ``to``, ``value``,
+    ``gas``/``gasLimit``, ``nonce``, and ``data``/``input`` onto the
+    fields sourced from the TransactionResult.
+    """
+    tx_hash = getattr(tr, "tx_hash", "")
+    success = getattr(tr, "success", False)
+    gas_used = getattr(tr, "gas_used", None)
+    error = getattr(tr, "error", None)
+
+    to_address = _receipt_to_address(getattr(tr, "receipt", None))
+
+    value_wei = 0
+    gas_limit = 0
+    nonce = 0
+    calldata = ""
+
+    if bundle_tx_dict is not None:
+        to_address = to_address or bundle_tx_dict.get("to", "")
+        value_wei = int(bundle_tx_dict.get("value", 0))
+        gas_limit = bundle_tx_dict.get("gas", bundle_tx_dict.get("gasLimit", 0))
+        nonce = bundle_tx_dict.get("nonce", 0)
+        calldata = bundle_tx_dict.get("data", bundle_tx_dict.get("input", ""))
+
+    calldata_selector = calldata[:10] if calldata and len(calldata) >= 10 else ""
+    calldata_decoded = decode_calldata_selector(calldata)
+
+    return TransactionDetails(
+        tx_hash=tx_hash,
+        to_address=to_address,
+        value_wei=value_wei,
+        gas_limit=gas_limit,
+        gas_used=gas_used,
+        nonce=nonce,
+        calldata_selector=calldata_selector,
+        calldata_decoded=calldata_decoded,
+        calldata_full=calldata,
+        success=success,
+        revert_reason=error,
+    )
+
+
+def _extract_transaction_details_list(
+    action_bundle: Any,
+    transaction_results: list[Any],
+) -> list[TransactionDetails]:
+    """Produce TransactionDetails for each transaction result, overlaying
+    bundle tx_dicts by position where available.
+    """
+    bundle_tx_dicts = _collect_bundle_tx_dicts(action_bundle)
+    out: list[TransactionDetails] = []
+    for i, tr in enumerate(transaction_results):
+        bundle_tx_dict = bundle_tx_dicts[i] if i < len(bundle_tx_dicts) else None
+        out.append(_build_transaction_details(tr, bundle_tx_dict))
+    return out
+
+
 def build_verbose_revert_report(
     context: Any,  # ExecutionContext
     action_bundle: Any,  # ActionBundle
@@ -1178,6 +1343,12 @@ def build_verbose_revert_report(
     started_at: datetime | None = None,
 ) -> VerboseRevertReport:
     """Build a comprehensive revert report from available execution data.
+
+    Composed from four phase helpers (intent details, action details,
+    transaction details, and the assembled report) so the top-level
+    function stays small enough to read in one glance. Output text is
+    preserved byte-for-byte from the pre-refactor version — operator
+    dashboards scrape ``format()`` lines directly.
 
     Args:
         context: ExecutionContext with strategy_id, chain, wallet, etc.
@@ -1199,127 +1370,18 @@ def build_verbose_revert_report(
         )
         logger.error(report.format())
     """
-    # Build intent details if intent is provided
-    intent_details = None
-    if intent is not None:
-        intent_type_value = getattr(intent, "intent_type", "UNKNOWN")
-        if hasattr(intent_type_value, "value"):
-            intent_type_value = intent_type_value.value
-
-        # Get intent params - try model_dump first (Pydantic), then __dict__
-        if hasattr(intent, "model_dump"):
-            intent_params = intent.model_dump()
-        elif hasattr(intent, "__dict__"):
-            intent_params = {k: v for k, v in intent.__dict__.items() if not k.startswith("_")}
-        else:
-            intent_params = {}
-
-        intent_details = IntentDetails(
-            intent_type=str(intent_type_value),
-            intent_id=str(getattr(intent, "id", getattr(intent, "intent_id", ""))),
-            params=intent_params,
-        )
-
-    # Build action details from action_bundle
-    action_details_list: list[ActionDetails] = []
-    if hasattr(action_bundle, "actions"):
-        for action in action_bundle.actions:
-            action_type = getattr(action, "type", "UNKNOWN")
-            if hasattr(action_type, "value"):
-                action_type = action_type.value
-
-            protocol = getattr(action, "protocol", "UNKNOWN")
-            if hasattr(protocol, "value"):
-                protocol = protocol.value
-
-            # Get action params
-            params = getattr(action, "params", None)
-            if params is not None:
-                if hasattr(params, "model_dump"):
-                    params_dict = params.model_dump()
-                elif hasattr(params, "__dict__"):
-                    params_dict = {k: v for k, v in params.__dict__.items() if not k.startswith("_")}
-                else:
-                    params_dict = {"raw": str(params)}
-            else:
-                params_dict = {}
-
-            action_details_list.append(
-                ActionDetails(
-                    action_type=str(action_type),
-                    protocol=str(protocol),
-                    params=params_dict,
-                )
-            )
-
-    # Build transaction details
-    tx_details_list: list[TransactionDetails] = []
-
-    # Get transaction dicts from action_bundle if available
-    bundle_tx_dicts: list[dict[str, Any]] = []
-    if hasattr(action_bundle, "transactions"):
-        for tx in action_bundle.transactions:
-            if hasattr(tx, "tx_dict") and tx.tx_dict:
-                bundle_tx_dicts.append(tx.tx_dict)
-
-    for i, tr in enumerate(transaction_results):
-        # Get base info from TransactionResult
-        tx_hash = getattr(tr, "tx_hash", "")
-        success = getattr(tr, "success", False)
-        gas_used = getattr(tr, "gas_used", None)
-        error = getattr(tr, "error", None)
-
-        # Try to get receipt for additional info
-        receipt = getattr(tr, "receipt", None)
-        to_address = ""
-        if receipt:
-            to_address = getattr(receipt, "to_address", getattr(receipt, "to", ""))
-
-        # Try to get tx_dict for calldata, value, nonce, gas
-        value_wei = 0
-        gas_limit = 0
-        nonce = 0
-        calldata = ""
-
-        if i < len(bundle_tx_dicts):
-            tx_dict = bundle_tx_dicts[i]
-            to_address = to_address or tx_dict.get("to", "")
-            value_wei = int(tx_dict.get("value", 0))
-            gas_limit = tx_dict.get("gas", tx_dict.get("gasLimit", 0))
-            nonce = tx_dict.get("nonce", 0)
-            calldata = tx_dict.get("data", tx_dict.get("input", ""))
-
-        # Decode calldata
-        calldata_selector = calldata[:10] if calldata and len(calldata) >= 10 else ""
-        calldata_decoded = decode_calldata_selector(calldata)
-
-        tx_details_list.append(
-            TransactionDetails(
-                tx_hash=tx_hash,
-                to_address=to_address,
-                value_wei=value_wei,
-                gas_limit=gas_limit,
-                gas_used=gas_used,
-                nonce=nonce,
-                calldata_selector=calldata_selector,
-                calldata_decoded=calldata_decoded,
-                calldata_full=calldata,
-                success=success,
-                revert_reason=error,
-            )
-        )
-
+    now = datetime.now(UTC)
     return VerboseRevertReport(
         strategy_id=getattr(context, "strategy_id", "unknown"),
         chain=getattr(context, "chain", "unknown"),
         wallet_address=getattr(context, "wallet_address", "unknown"),
         correlation_id=getattr(context, "correlation_id", ""),
         intent_description=getattr(context, "intent_description", ""),
-        started_at=started_at or datetime.now(UTC),
-        failed_at=datetime.now(UTC),
+        started_at=started_at or now,
+        failed_at=now,
         execution_phase="CONFIRMATION",  # Reverts happen at confirmation
-        intent=intent_details,
-        actions=action_details_list,
-        transactions=tx_details_list,
+        intent=_build_intent_details(intent),
+        actions=_extract_action_details_list(action_bundle),
+        transactions=_extract_transaction_details_list(action_bundle, transaction_results),
         raw_error=raw_error,
     )
