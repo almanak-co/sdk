@@ -767,99 +767,38 @@ class CanaryDeployment:
         Evaluates performance metrics against promotion criteria
         and returns a decision recommendation.
 
+        The function is a thin orchestrator over four pure helpers:
+        ``_compare_insufficient_metrics`` (short-circuit when either side
+        is missing), ``_compute_metric_ratios`` (produce the four ratios
+        with the documented division-by-zero sentinels),
+        ``_decide_promotion`` (evaluate the decision cascade), and
+        ``CanaryComparison`` assembly.
+
         Returns:
             CanaryComparison with metrics and decision
         """
-        if not self.state.canary_metrics or not self.state.stable_metrics:
-            return CanaryComparison(
-                canary_metrics=self.state.canary_metrics
-                or CanaryMetrics(
-                    version_id=self.canary_version_id,
-                    capital_allocated_usd=Decimal("0"),
-                    metrics=PerformanceMetrics(),
-                    is_canary=True,
-                ),
-                stable_metrics=self.state.stable_metrics
-                or CanaryMetrics(
-                    version_id=self.stable_version_id,
-                    capital_allocated_usd=Decimal("0"),
-                    metrics=PerformanceMetrics(),
-                    is_canary=False,
-                ),
-                decision=CanaryDecision.CONTINUE,
-                decision_reasons=["Insufficient metrics data"],
-            )
+        missing = self._compare_insufficient_metrics()
+        if missing is not None:
+            return missing
 
+        # Narrowing for type checkers - ``_compare_insufficient_metrics``
+        # returning ``None`` guarantees both sides are populated.
+        assert self.state.canary_metrics is not None
+        assert self.state.stable_metrics is not None
         canary = self.state.canary_metrics
         stable = self.state.stable_metrics
         criteria = self.config.promotion_criteria
-        reasons: list[str] = []
 
-        # Calculate ratios (handle division by zero)
-        pnl_ratio: Decimal | None = None
-        drawdown_ratio: Decimal | None = None
-        sharpe_ratio: Decimal | None = None
-        win_rate_ratio: Decimal | None = None
+        pnl_ratio, drawdown_ratio, sharpe_ratio, win_rate_ratio = self._compute_metric_ratios(canary, stable)
 
-        # PnL ratio
-        if stable.metrics.net_pnl_usd != Decimal("0"):
-            pnl_ratio = canary.metrics.net_pnl_usd / stable.metrics.net_pnl_usd
-        elif canary.metrics.net_pnl_usd > Decimal("0"):
-            pnl_ratio = Decimal("999")  # Canary positive, stable zero
-        elif canary.metrics.net_pnl_usd < Decimal("0"):
-            pnl_ratio = Decimal("-999")  # Canary negative, stable zero
-
-        # Drawdown ratio (lower is better, so we invert the check)
-        if stable.metrics.max_drawdown > Decimal("0"):
-            drawdown_ratio = canary.metrics.max_drawdown / stable.metrics.max_drawdown
-        elif canary.metrics.max_drawdown > Decimal("0"):
-            drawdown_ratio = Decimal("999")  # Canary has drawdown, stable zero
-
-        # Sharpe ratio
-        if stable.metrics.sharpe_ratio and stable.metrics.sharpe_ratio != Decimal("0"):
-            if canary.metrics.sharpe_ratio:
-                sharpe_ratio = canary.metrics.sharpe_ratio / stable.metrics.sharpe_ratio
-
-        # Win rate ratio
-        if stable.metrics.win_rate and stable.metrics.win_rate > Decimal("0"):
-            if canary.metrics.win_rate:
-                win_rate_ratio = canary.metrics.win_rate / stable.metrics.win_rate
-
-        # Determine decision based on criteria
-        decision = CanaryDecision.CONTINUE
-
-        # Check minimum trades
-        if canary.trade_count < criteria.min_trades:
-            reasons.append(f"Insufficient trades: {canary.trade_count} < {criteria.min_trades}")
-            decision = CanaryDecision.CONTINUE
-        else:
-            # Check error rate
-            if canary.error_rate > criteria.max_error_rate:
-                reasons.append(f"Error rate too high: {canary.error_rate} > {criteria.max_error_rate}")
-                decision = CanaryDecision.ROLLBACK
-            # Check positive PnL requirement
-            elif criteria.require_positive_pnl and canary.metrics.net_pnl_usd <= Decimal("0"):
-                reasons.append(f"Canary PnL not positive: {canary.metrics.net_pnl_usd}")
-                decision = CanaryDecision.ROLLBACK
-            # Check PnL ratio
-            elif pnl_ratio is not None and pnl_ratio < criteria.min_pnl_ratio:
-                reasons.append(f"PnL ratio too low: {pnl_ratio:.4f} < {criteria.min_pnl_ratio}")
-                decision = CanaryDecision.ROLLBACK
-            # Check drawdown ratio
-            elif drawdown_ratio is not None and drawdown_ratio > criteria.max_drawdown_ratio:
-                reasons.append(f"Drawdown ratio too high: {drawdown_ratio:.4f} > {criteria.max_drawdown_ratio}")
-                decision = CanaryDecision.ROLLBACK
-            # Check Sharpe ratio
-            elif sharpe_ratio is not None and sharpe_ratio < criteria.min_sharpe_ratio:
-                reasons.append(f"Sharpe ratio too low: {sharpe_ratio:.4f} < {criteria.min_sharpe_ratio}")
-                decision = CanaryDecision.MANUAL_REVIEW  # Sharpe is less critical
-            # Check win rate ratio
-            elif win_rate_ratio is not None and win_rate_ratio < criteria.min_win_rate_ratio:
-                reasons.append(f"Win rate ratio too low: {win_rate_ratio:.4f} < {criteria.min_win_rate_ratio}")
-                decision = CanaryDecision.MANUAL_REVIEW  # Win rate is less critical
-            else:
-                reasons.append("All promotion criteria met")
-                decision = CanaryDecision.PROMOTE
+        decision, reasons = self._decide_promotion(
+            canary=canary,
+            criteria=criteria,
+            pnl_ratio=pnl_ratio,
+            drawdown_ratio=drawdown_ratio,
+            sharpe_ratio=sharpe_ratio,
+            win_rate_ratio=win_rate_ratio,
+        )
 
         return CanaryComparison(
             canary_metrics=canary,
@@ -871,6 +810,196 @@ class CanaryDeployment:
             decision=decision,
             decision_reasons=reasons,
         )
+
+    def _compare_insufficient_metrics(self) -> CanaryComparison | None:
+        """Return an insufficient-data ``CanaryComparison`` if metrics are
+        missing on either side, otherwise ``None``.
+
+        Preserves the prior behaviour of synthesising a placeholder
+        ``CanaryMetrics`` for whichever side is missing so callers always
+        receive a populated ``canary_metrics`` + ``stable_metrics`` pair.
+        """
+        if self.state.canary_metrics and self.state.stable_metrics:
+            return None
+
+        canary_metrics = self.state.canary_metrics or CanaryMetrics(
+            version_id=self.canary_version_id,
+            capital_allocated_usd=Decimal("0"),
+            metrics=PerformanceMetrics(),
+            is_canary=True,
+        )
+        stable_metrics = self.state.stable_metrics or CanaryMetrics(
+            version_id=self.stable_version_id,
+            capital_allocated_usd=Decimal("0"),
+            metrics=PerformanceMetrics(),
+            is_canary=False,
+        )
+        return CanaryComparison(
+            canary_metrics=canary_metrics,
+            stable_metrics=stable_metrics,
+            decision=CanaryDecision.CONTINUE,
+            decision_reasons=["Insufficient metrics data"],
+        )
+
+    @staticmethod
+    def _compute_metric_ratios(
+        canary: CanaryMetrics, stable: CanaryMetrics
+    ) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+        """Compute the four comparison ratios (pnl, drawdown, sharpe,
+        win_rate).
+
+        Division-by-zero is encoded via sentinel values that preserve
+        the pre-refactor semantics:
+        - ``pnl_ratio`` = ``+999`` when stable=0 and canary>0;
+          ``-999`` when stable=0 and canary<0; ``None`` when both are 0.
+        - ``drawdown_ratio`` = ``+999`` when stable=0 and canary>0;
+          ``None`` when both are 0.
+        - ``sharpe_ratio`` / ``win_rate_ratio`` = ``None`` whenever the
+          stable side is zero/None or the canary side is falsy.
+        """
+        return (
+            CanaryDeployment._compare_pnl(canary, stable),
+            CanaryDeployment._compare_drawdown(canary, stable),
+            CanaryDeployment._compare_sharpe(canary, stable),
+            CanaryDeployment._compare_win_rate(canary, stable),
+        )
+
+    @staticmethod
+    def _compare_pnl(canary: CanaryMetrics, stable: CanaryMetrics) -> Decimal | None:
+        """PnL ratio with divide-by-zero sentinels. See ``_compute_metric_ratios``."""
+        if stable.metrics.net_pnl_usd != Decimal("0"):
+            return canary.metrics.net_pnl_usd / stable.metrics.net_pnl_usd
+        if canary.metrics.net_pnl_usd > Decimal("0"):
+            return Decimal("999")  # Canary positive, stable zero
+        if canary.metrics.net_pnl_usd < Decimal("0"):
+            return Decimal("-999")  # Canary negative, stable zero
+        return None
+
+    @staticmethod
+    def _compare_drawdown(canary: CanaryMetrics, stable: CanaryMetrics) -> Decimal | None:
+        """Drawdown ratio (lower is better) with divide-by-zero sentinel."""
+        if stable.metrics.max_drawdown > Decimal("0"):
+            return canary.metrics.max_drawdown / stable.metrics.max_drawdown
+        if canary.metrics.max_drawdown > Decimal("0"):
+            return Decimal("999")  # Canary has drawdown, stable zero
+        return None
+
+    @staticmethod
+    def _compare_sharpe(canary: CanaryMetrics, stable: CanaryMetrics) -> Decimal | None:
+        """Sharpe ratio, or ``None`` when either side is missing/zero."""
+        stable_sharpe = stable.metrics.sharpe_ratio
+        canary_sharpe = canary.metrics.sharpe_ratio
+        if stable_sharpe and stable_sharpe != Decimal("0") and canary_sharpe:
+            return canary_sharpe / stable_sharpe
+        return None
+
+    @staticmethod
+    def _compare_win_rate(canary: CanaryMetrics, stable: CanaryMetrics) -> Decimal | None:
+        """Win-rate ratio, or ``None`` when either side is missing/zero."""
+        stable_wr = stable.metrics.win_rate
+        canary_wr = canary.metrics.win_rate
+        if stable_wr and stable_wr > Decimal("0") and canary_wr:
+            return canary_wr / stable_wr
+        return None
+
+    @staticmethod
+    def _decide_promotion(
+        *,
+        canary: CanaryMetrics,
+        criteria: PromotionCriteria,
+        pnl_ratio: Decimal | None,
+        drawdown_ratio: Decimal | None,
+        sharpe_ratio: Decimal | None,
+        win_rate_ratio: Decimal | None,
+    ) -> tuple[CanaryDecision, list[str]]:
+        """Evaluate the promotion decision cascade.
+
+        Cascade order (preserved from pre-refactor):
+          0. any Decimal-NaN ratio                   -> MANUAL_REVIEW (new guard)
+          1. ``trade_count < min_trades``            -> CONTINUE
+          2. ``error_rate > max_error_rate``         -> ROLLBACK
+          3. ``require_positive_pnl`` and pnl <= 0   -> ROLLBACK
+          4. ``pnl_ratio < min_pnl_ratio``           -> ROLLBACK
+          5. ``drawdown_ratio > max_drawdown_ratio`` -> ROLLBACK
+          6. ``sharpe_ratio < min_sharpe_ratio``     -> MANUAL_REVIEW (soft)
+          7. ``win_rate_ratio < min_win_rate_ratio`` -> MANUAL_REVIEW (soft)
+          8. otherwise                               -> PROMOTE
+
+        Short-circuits on the first matching gate. Returns the decision
+        and a single-element ``reasons`` list explaining that gate.
+        """
+        # Gate 0: Decimal NaN short-circuit. NaN is non-orderable and
+        # raises ``decimal.InvalidOperation`` on ``<`` / ``>`` under the
+        # default context. ``PerformanceMetrics.from_dict`` can surface
+        # NaN when external data is corrupt; surface as MANUAL_REVIEW
+        # rather than crashing the promotion gate.
+        if any(
+            ratio is not None and ratio.is_nan() for ratio in (pnl_ratio, drawdown_ratio, sharpe_ratio, win_rate_ratio)
+        ):
+            return CanaryDecision.MANUAL_REVIEW, ["Non-comparable metric ratio (NaN)"]
+
+        # Gate 1: sample size.
+        if canary.trade_count < criteria.min_trades:
+            return CanaryDecision.CONTINUE, [
+                f"Insufficient trades: {canary.trade_count} < {criteria.min_trades}",
+            ]
+
+        # Gates 2-5: hard fails -> ROLLBACK.
+        hard = CanaryDeployment._apply_hard_gates(
+            canary=canary,
+            criteria=criteria,
+            pnl_ratio=pnl_ratio,
+            drawdown_ratio=drawdown_ratio,
+        )
+        if hard is not None:
+            return CanaryDecision.ROLLBACK, [hard]
+
+        # Gates 6-7: soft fails -> MANUAL_REVIEW.
+        soft = CanaryDeployment._apply_soft_gates(
+            criteria=criteria,
+            sharpe_ratio=sharpe_ratio,
+            win_rate_ratio=win_rate_ratio,
+        )
+        if soft is not None:
+            return CanaryDecision.MANUAL_REVIEW, [soft]
+
+        # Gate 8: all criteria met.
+        return CanaryDecision.PROMOTE, ["All promotion criteria met"]
+
+    @staticmethod
+    def _apply_hard_gates(
+        *,
+        canary: CanaryMetrics,
+        criteria: PromotionCriteria,
+        pnl_ratio: Decimal | None,
+        drawdown_ratio: Decimal | None,
+    ) -> str | None:
+        """Return the first hard-gate failure reason, or ``None`` if all
+        hard gates pass. Caller maps any failure to ROLLBACK."""
+        if canary.error_rate > criteria.max_error_rate:
+            return f"Error rate too high: {canary.error_rate} > {criteria.max_error_rate}"
+        if criteria.require_positive_pnl and canary.metrics.net_pnl_usd <= Decimal("0"):
+            return f"Canary PnL not positive: {canary.metrics.net_pnl_usd}"
+        if pnl_ratio is not None and pnl_ratio < criteria.min_pnl_ratio:
+            return f"PnL ratio too low: {pnl_ratio:.4f} < {criteria.min_pnl_ratio}"
+        if drawdown_ratio is not None and drawdown_ratio > criteria.max_drawdown_ratio:
+            return f"Drawdown ratio too high: {drawdown_ratio:.4f} > {criteria.max_drawdown_ratio}"
+        return None
+
+    @staticmethod
+    def _apply_soft_gates(
+        *,
+        criteria: PromotionCriteria,
+        sharpe_ratio: Decimal | None,
+        win_rate_ratio: Decimal | None,
+    ) -> str | None:
+        """Return the first soft-gate failure reason, or ``None`` if all
+        soft gates pass. Caller maps any failure to MANUAL_REVIEW."""
+        if sharpe_ratio is not None and sharpe_ratio < criteria.min_sharpe_ratio:
+            return f"Sharpe ratio too low: {sharpe_ratio:.4f} < {criteria.min_sharpe_ratio}"
+        if win_rate_ratio is not None and win_rate_ratio < criteria.min_win_rate_ratio:
+            return f"Win rate ratio too low: {win_rate_ratio:.4f} < {criteria.min_win_rate_ratio}"
+        return None
 
     async def promote_canary(self) -> CanaryResult:
         """Promote the canary version to stable.
