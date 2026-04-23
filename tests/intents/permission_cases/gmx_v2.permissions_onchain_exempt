@@ -1,0 +1,1 @@
+Deferred — PERP coverage is not in the current phased rollout (docs/internal/zodiac-permission-onchain-coverage-plan.md covers SWAP/LEND/LP/BRIDGE). Harness lacks PerpOpen/Close dispatch; follow-up ticket required before lifting this sentinel.

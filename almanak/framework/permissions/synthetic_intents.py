@@ -9,6 +9,7 @@ any RPC calls.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from decimal import Decimal
 from typing import Literal, cast
 
@@ -64,6 +65,45 @@ _LP_PROTOCOLS = {
 _LENDING_PROTOCOLS = {"aave_v3", "morpho_blue", "spark", "compound_v3", "radiant_v2"}
 _PERP_PROTOCOLS = {"gmx_v2", "aster_perps", "pancakeswap_perps"}
 _FLASH_LOAN_PROVIDERS = {"aave", "balancer"}
+
+
+def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
+    """Return ``{protocol: frozenset[IntentType]}`` for every pair the manifest
+    generator covers via synthetic intent compilation.
+
+    Authoritative source for any caller that needs to enumerate the full set of
+    ``(protocol, intent_type)`` pairs whose generated permissions must be
+    exercised on-chain. Single source of truth — keep this function and the
+    ``_build_*_intents`` dispatch in ``build_synthetic_intents`` in lockstep.
+
+    Excludes pairs that bypass the synthetic-discovery path:
+    - ``BRIDGE`` (bridge connectors are not yet wired through the generator)
+    - ``WRAP_NATIVE`` / ``UNWRAP_NATIVE`` (infra, not protocol-specific)
+    - ``FLASH_LOAN`` (provider strings ``aave`` / ``balancer`` are not
+      connector-directory names, so they need separate handling)
+    """
+    matrix: dict[str, set[IntentType]] = defaultdict(set)
+    for proto in _SWAP_PROTOCOLS:
+        matrix[proto].add(IntentType.SWAP)
+    for proto in _LP_PROTOCOLS:
+        matrix[proto].update({IntentType.LP_OPEN, IntentType.LP_CLOSE})
+        if get_permission_hints(proto).supports_standalone_fee_collection:
+            matrix[proto].add(IntentType.LP_COLLECT_FEES)
+    for proto in _LENDING_PROTOCOLS:
+        matrix[proto].update(
+            {
+                IntentType.SUPPLY,
+                IntentType.WITHDRAW,
+                IntentType.BORROW,
+                IntentType.REPAY,
+            }
+        )
+    for proto in _PERP_PROTOCOLS:
+        matrix[proto].update({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
+    for proto, chains in VAULT_PROTOCOL_REPRESENTATIVE.items():
+        if chains:
+            matrix[proto].update({IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM})
+    return {proto: frozenset(types) for proto, types in matrix.items()}
 
 
 def _get_token_pair(chain: str) -> tuple[str, str]:

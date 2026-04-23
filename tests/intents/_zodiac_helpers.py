@@ -1,7 +1,8 @@
 """Safe + Zodiac Roles v2 deployment and target-application helpers for intent tests.
 
-These helpers are only used by the Q2b on-chain permission-verification tests
-(``tests/intents/<chain>/test_zodiac_permission_correctness.py``). They build
+These helpers are only used by the on-chain permission-authorisation tests
+(``tests/intents/<chain>/test_zodiac_permission_correctness.py`` and the
+parametrized harness in ``_permission_onchain_harness.py``). They build
 everything on top of the canonical CREATE2 factories that already live on any
 Anvil fork of a real EVM chain (Arbitrum, Base, Optimism, …):
 
@@ -23,7 +24,7 @@ Key entry points:
     assign_role_to_member(web3, roles, safe, role_key, member_eoa, owner_private_key)
     apply_manifest_targets(web3, roles, safe, role_key, targets, owner_private_key)
 
-Reference: ``docs/internal/zodiac-q2b-implementation-plan.md``.
+Reference: ``docs/internal/zodiac-permission-onchain-coverage-plan.md``.
 """
 
 from __future__ import annotations
