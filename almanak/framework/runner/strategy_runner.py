@@ -2558,9 +2558,24 @@ class StrategyRunner:
         recon_incident = bool(recon and recon.get("incident"))
 
         if recon_incident:
-            return await self._single_chain_handle_recon_incident(state, recon)
+            if self.config.reconciliation_enforcement:
+                return await self._single_chain_handle_recon_incident(state, recon)
+            # Observation mode (default until VIB-3348 block-anchored
+            # balance reads land): the dual-layer balance cache produces
+            # false-positive incidents on confirmed-on-chain swaps, so
+            # enforcement is gated off and incidents are surfaced via logs
+            # + IterationResult only. The recon dict still flows onto
+            # ``balance_reconciliation`` in the success path below, so
+            # dashboards and metrics keep full visibility. Flip
+            # ``RunnerConfig.reconciliation_enforcement`` to True
+            # per-strategy (or change the default) once the block-anchored
+            # read work ships and the race is closed.
+            logger.warning(
+                "Reconciliation incident detected (observation mode, enforcement disabled): %s",
+                self._format_reconciliation_error(recon),
+            )
 
-        # Clean reconciliation -> commit the success path.
+        # Clean reconciliation (or observation-mode pass-through) -> commit the success path.
         # Emit timeline event for successful execution
         self._emit_execution_timeline_event(strategy, intent, success=True, result=state.last_execution_result)
         # Write structured trade record to transaction ledger (VIB-2402)

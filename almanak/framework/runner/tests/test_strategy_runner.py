@@ -8,11 +8,12 @@ This module tests the StrategyRunner class including:
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -595,6 +596,10 @@ class TestRunIteration:
         runner MUST NOT commit the iteration as clean. Instead it returns
         RECONCILIATION_FAILED so the downstream failure handler (circuit breaker,
         consecutive-errors alert) engages instead of the success path.
+
+        Enforcement is now gated behind ``RunnerConfig.reconciliation_enforcement``
+        (default False = observation mode while VIB-3348 block-anchored reads are in
+        flight). This test exercises the enforcement path, so it opts in explicitly.
         """
         orch = _make_orchestrator_without_swap_amounts()
 
@@ -604,6 +609,7 @@ class TestRunIteration:
             execution_orchestrator=orch,
             state_manager=state_manager,
             alert_manager=alert_manager,
+            config=RunnerConfig(reconciliation_enforcement=True),
         )
 
         fake_recon = {
@@ -652,6 +658,90 @@ class TestRunIteration:
         # did NOT treat this as a success path.
         metrics = runner.get_metrics()
         assert metrics["successful_iterations"] == 0
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_incident_observation_mode_does_not_halt(
+        self,
+        price_oracle: MockPriceOracle,
+        balance_provider: MockBalanceProvider,
+        state_manager: MockStateManager,
+        alert_manager: MockAlertManager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Default observation mode: incident is WARNING-logged and attached to the
+        IterationResult but DOES NOT halt the iteration.
+
+        Guards the VIB-3348 stable-release contract: while block-anchored balance
+        reads are in flight, the dual-layer cache produces false-positive incidents
+        on confirmed-on-chain swaps. Halting on those would kill strategies on a
+        plumbing race, not a real accounting breach. Observation mode preserves
+        full observability (log + ``balance_reconciliation`` on the result) without
+        triggering the circuit-breaker path.
+        """
+        orch = _make_orchestrator_without_swap_amounts()
+
+        # Observation mode = RunnerConfig default (reconciliation_enforcement=False).
+        runner = StrategyRunner(
+            price_oracle=price_oracle,
+            balance_provider=balance_provider,
+            execution_orchestrator=orch,
+            state_manager=state_manager,
+            alert_manager=alert_manager,
+        )
+
+        fake_recon = {
+            "tokens_checked": ["USDC", "ETH"],
+            "pre_balances": {"USDC": "10000", "ETH": "10"},
+            "post_balances": {"USDC": "9000", "ETH": "10"},
+            "actual_deltas": {"USDC": "-1000", "ETH": "0"},
+            "expected_ranges": {
+                "USDC": {"min": "-1010", "max": "-990"},
+                "ETH": {"min": "0.49", "max": "0.51"},
+            },
+            "mismatches": [
+                {"token": "ETH", "actual": "0", "expected_min": "0.49", "expected_max": "0.51"},
+            ],
+            "warnings": [],
+            "incident": True,
+            "enforced": False,
+        }
+
+        async def fake_reconcile(strategy, intent, execution_result, pre_snapshot=None):
+            return fake_recon
+
+        runner._reconcile_post_execution_balances = fake_reconcile  # type: ignore[method-assign]
+
+        # Spy to prove the enforcement handler is bypassed in observation mode.
+        # Locks the contract at the call-site boundary, not just the outcome.
+        runner._single_chain_handle_recon_incident = AsyncMock()  # type: ignore[method-assign]
+
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("1000"),
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"):
+            result = await runner.run_iteration(strategy)
+
+        # Iteration stays SUCCESS — no halt on plumbing-race false positives.
+        assert result.status == IterationStatus.SUCCESS
+        assert result.success is True
+        # Recon data still flows to dashboards/metrics via the IterationResult.
+        assert result.balance_reconciliation is fake_recon
+        # Enforcement handler must be bypassed entirely in observation mode.
+        runner._single_chain_handle_recon_incident.assert_not_called()
+        # Circuit breaker / consecutive-errors counters stay clean.
+        metrics = runner.get_metrics()
+        assert metrics["successful_iterations"] == 1
+        # Operator visibility: incident is logged at WARNING so it surfaces in
+        # ops dashboards and log-based alerting.
+        assert any(
+            "Reconciliation incident detected (observation mode" in rec.message and rec.levelname == "WARNING"
+            for rec in caplog.records
+        ), "observation-mode incident must be WARNING-logged for ops visibility"
 
     @pytest.mark.asyncio
     async def test_reconciliation_clean_keeps_success_status(

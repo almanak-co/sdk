@@ -2075,6 +2075,22 @@ def _maybe_auto_deploy_vault(
     return vault_lifecycle
 
 
+def _reconciliation_enforcement_from_env() -> bool:
+    """Return True iff ``ALMANAK_RECONCILIATION_ENFORCEMENT`` opts the CLI back
+    into fail-closed reconciliation.
+
+    Default is observation mode (False) until VIB-3348 block-anchored balance
+    reads close the false-positive race. Truthy values: ``1``, ``true``, ``yes``
+    (case-insensitive, surrounding whitespace tolerated). Anything else — unset,
+    empty, ``0``, ``false``, arbitrary strings — returns False.
+    """
+    return os.environ.get("ALMANAK_RECONCILIATION_ENFORCEMENT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def _build_runner(
     *,
     interval: int,
@@ -2103,6 +2119,7 @@ def _build_runner(
         dry_run=effective_dry_run,
         enable_state_persistence=True,
         enable_alerting=False,  # No alert manager configured
+        reconciliation_enforcement=_reconciliation_enforcement_from_env(),
     )
 
     # Create safety components for fail-closed execution

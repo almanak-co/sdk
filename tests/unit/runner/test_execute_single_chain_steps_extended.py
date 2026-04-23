@@ -46,6 +46,7 @@ def _make_runner(
     balance_provider: MagicMock | None = None,
     execution_orchestrator: MagicMock | None = None,
     max_retries: int = 2,
+    reconciliation_enforcement: bool = False,
 ) -> StrategyRunner:
     config = RunnerConfig(
         default_interval_seconds=1,
@@ -53,6 +54,7 @@ def _make_runner(
         enable_alerting=False,
         dry_run=dry_run,
         max_retries=max_retries,
+        reconciliation_enforcement=reconciliation_enforcement,
     )
     if state_manager is None:
         state_manager = MagicMock()
@@ -495,8 +497,46 @@ class TestSingleChainHandleSuccess:
         runner._reconcile_post_execution_balances.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_recon_incident_routes_to_recon_failed(self) -> None:
+    async def test_recon_incident_observation_mode_still_returns_success(self) -> None:
+        """Default observation mode: incident passes through to the SUCCESS path.
+
+        Recon dict still lands on the IterationResult for dashboards, the
+        enforcement handler is NOT called, and the circuit-breaker-adjacent
+        success accounting proceeds normally.
+        """
+        # Default: reconciliation_enforcement=False.
         runner = _make_runner()
+        runner._emit_execution_timeline_event = MagicMock()
+        runner._write_ledger_entry = AsyncMock()
+        runner._reconcile_post_execution_balances = AsyncMock(return_value={"incident": True, "breach": 1000})
+        runner._format_reconciliation_error = MagicMock(return_value="recon failure (obs-mode)")
+        runner._handle_execution_error = AsyncMock()
+        # Spy on the enforcement handler to guarantee it is NOT called.
+        runner._single_chain_handle_recon_incident = AsyncMock()  # type: ignore[method-assign]
+
+        strategy = _make_strategy()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
+        state = _make_state(strategy, intent=intent)
+        state.state_machine = MagicMock()
+        state.state_machine.retry_count = 0
+        state.last_execution_result = ExecutionResult(
+            success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
+        )
+        state.last_execution_context = ExecutionContext(strategy_id=strategy.strategy_id)
+
+        with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
+            MockEnricher.return_value.enrich.return_value = state.last_execution_result
+            result = await runner._single_chain_handle_success(state)
+
+        assert result.status == IterationStatus.SUCCESS
+        assert result.balance_reconciliation == {"incident": True, "breach": 1000}
+        runner._single_chain_handle_recon_incident.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recon_incident_routes_to_recon_failed(self) -> None:
+        # Enforcement gate (VIB-3348) is off by default; opt in explicitly here
+        # since this test exercises the RECONCILIATION_FAILED branch.
+        runner = _make_runner(reconciliation_enforcement=True)
         runner._emit_execution_timeline_event = MagicMock()
         runner._write_ledger_entry = AsyncMock()
         runner._reconcile_post_execution_balances = AsyncMock(return_value={"incident": True, "breach": 1000})

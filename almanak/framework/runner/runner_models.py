@@ -415,6 +415,18 @@ class RunnerConfig:
             TeardownManager safety features (no loss caps, no slippage escalation, no
             approval gates, no verification). Default False — only enable for local
             development/testing where safety features aren't needed.
+        reconciliation_enforcement: If True, post-execution balance reconciliation
+            incidents flip the iteration to IterationStatus.RECONCILIATION_FAILED and
+            engage the downstream failure handler (circuit breaker, consecutive-errors
+            alert, operator card). If False (default, "observation mode"), incidents
+            are logged at WARNING and attached to the IterationResult via
+            ``balance_reconciliation`` but DO NOT halt the iteration. Default is False
+            until block-anchored balance reads ship (VIB-3348): the dual-layer
+            balance cache today produces false-positive incidents on confirmed-on-chain
+            swaps, so enforcing would halt strategies on a plumbing race rather than on
+            real accounting breaches. CLI users can opt in early by setting
+            ``ALMANAK_RECONCILIATION_ENFORCEMENT=1``; flip the default back to True
+            once the cache race is closed.
     """
 
     default_interval_seconds: int = 60
@@ -428,6 +440,7 @@ class RunnerConfig:
     lifecycle_poll_interval: float = 2.0
     decide_timeout_seconds: float = 30.0
     allow_unsafe_teardown_fallback: bool = False
+    reconciliation_enforcement: bool = False
 
 
 # =============================================================================
