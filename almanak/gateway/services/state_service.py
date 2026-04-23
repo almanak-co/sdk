@@ -630,10 +630,24 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         request: gateway_pb2.SaveMetricsRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.SaveMetricsResponse:
-        """Save or update portfolio metrics (PnL baseline)."""
-        from decimal import Decimal, InvalidOperation
+        """Save or update portfolio metrics (PnL baseline).
 
-        from almanak.framework.portfolio.models import PortfolioMetrics
+        Orchestrates three phases decomposed into
+        :mod:`._save_metrics_helpers`:
+
+        1. ``validate_strategy_id`` + ``resolve_agent_id`` (local, small).
+        2. :func:`parse_metrics_inputs` — decimals + timestamp validation.
+        3. Branch on ``_snapshot_pool``: PostgreSQL UPSERT or SQLite warm-
+           backend delegation.
+
+        Error-path ``grpc.StatusCode`` / ``set_details`` / response wording
+        are preserved byte-for-byte against the pre-refactor behaviour —
+        downstream observability may grep the exact strings.
+        """
+        from almanak.gateway.services._save_metrics_helpers import (
+            MetricsValidationError,
+            parse_metrics_inputs,
+        )
 
         try:
             strategy_id = validate_strategy_id(request.strategy_id)
@@ -645,136 +659,94 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         strategy_id = resolve_agent_id(strategy_id)
 
         try:
-            initial_value_usd = Decimal(request.initial_value_usd or "0")
-            deposits_usd = Decimal(request.deposits_usd or "0")
-            withdrawals_usd = Decimal(request.withdrawals_usd or "0")
-            gas_spent_usd = Decimal(request.gas_spent_usd or "0")
-        except InvalidOperation:
+            inputs = parse_metrics_inputs(request, strategy_id)
+        except MetricsValidationError as exc:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("metrics fields must be valid decimal strings")
-            return gateway_pb2.SaveMetricsResponse(success=False, error="metrics fields must be valid decimal strings")
-
-        if request.initial_timestamp < 0:
-            error = "initial_timestamp must be non-negative"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(error)
-            return gateway_pb2.SaveMetricsResponse(success=False, error=error)
-
-        try:
-            ts = (
-                datetime.fromtimestamp(request.initial_timestamp, tz=UTC)
-                if request.initial_timestamp
-                else datetime.now(UTC)
-            )
-        except (OverflowError, OSError, ValueError):
-            error = "initial_timestamp is out of range"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(error)
-            return gateway_pb2.SaveMetricsResponse(success=False, error=error)
+            context.set_details(exc.message)
+            return gateway_pb2.SaveMetricsResponse(success=False, error=exc.message)
 
         now = datetime.now(UTC)
 
         await self._ensure_snapshot_pool()
 
         if self._snapshot_pool is not None:
-            # PostgreSQL mode (deployed)
-            try:
-                await self._snapshot_fetchrow(
-                    """
-                    INSERT INTO portfolio_metrics (
-                        agent_id, initial_value_usd, initial_timestamp,
-                        deposits_usd, withdrawals_usd, gas_spent_usd,
-                        deployment_id, cycle_id, execution_mode, is_complete,
-                        updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    ON CONFLICT (agent_id) DO UPDATE SET
-                        initial_value_usd = EXCLUDED.initial_value_usd,
-                        initial_timestamp = EXCLUDED.initial_timestamp,
-                        deposits_usd = EXCLUDED.deposits_usd,
-                        withdrawals_usd = EXCLUDED.withdrawals_usd,
-                        gas_spent_usd = EXCLUDED.gas_spent_usd,
-                        deployment_id = EXCLUDED.deployment_id,
-                        cycle_id = EXCLUDED.cycle_id,
-                        execution_mode = EXCLUDED.execution_mode,
-                        is_complete = EXCLUDED.is_complete,
-                        updated_at = EXCLUDED.updated_at
-                    RETURNING agent_id
-                    """,
-                    strategy_id,
-                    str(initial_value_usd),
-                    ts,
-                    str(deposits_usd),
-                    str(withdrawals_usd),
-                    str(gas_spent_usd),
-                    request.deployment_id or "",
-                    request.cycle_id or "",
-                    request.execution_mode or "",
-                    request.is_complete,
-                    now,
-                )
-                logger.debug("Portfolio metrics saved for strategy=%s", strategy_id)
-                return gateway_pb2.SaveMetricsResponse(success=True)
-            except Exception as e:
-                logger.error("SavePortfolioMetrics failed for %s: %s", strategy_id, e)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
-        else:
-            # SQLite mode (local dev) — delegate to StateManager's SQLiteStore
-            try:
-                await self._ensure_initialized()
-                assert self._state_manager is not None
+            return await self._save_portfolio_metrics_pg(inputs, request, now, context)
+        return await self._save_portfolio_metrics_sqlite(inputs, request, context)
 
-                # Resolve total_value_usd from the latest snapshot (VIB-2765).
-                # The proto doesn't carry total_value_usd, so we read it from
-                # the most recent snapshot which was saved moments before this call.
-                total_value_usd = Decimal("0")
-                try:
-                    warm_be = self._state_manager.warm_backend
-                    if warm_be and hasattr(warm_be, "get_latest_snapshot"):
-                        latest = await warm_be.get_latest_snapshot(strategy_id)
-                        if latest is not None:
-                            total_value_usd = latest.total_value_usd
-                except Exception as snap_err:
-                    logger.warning(
-                        "Could not resolve total_value_usd from snapshot for %s: %s",
-                        strategy_id,
-                        snap_err,
-                    )
+    async def _save_portfolio_metrics_pg(
+        self,
+        inputs: Any,
+        request: gateway_pb2.SaveMetricsRequest,
+        now: datetime,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveMetricsResponse:
+        """PostgreSQL (deployed) persistence path for SavePortfolioMetrics.
 
-                metrics = PortfolioMetrics(
-                    strategy_id=strategy_id,
-                    timestamp=ts,
-                    total_value_usd=total_value_usd,
-                    initial_value_usd=initial_value_usd,
-                    deposits_usd=deposits_usd,
-                    withdrawals_usd=withdrawals_usd,
-                    gas_spent_usd=gas_spent_usd,
-                    # Phase 4 accounting identity fields (VIB-2835/2837/2839)
-                    deployment_id=request.deployment_id or "",
-                    cycle_id=request.cycle_id or None,
-                    execution_mode=request.execution_mode or "",
-                    is_complete=request.is_complete,
-                )
+        Uses the prepared UPSERT query + positional args from
+        :mod:`._save_metrics_helpers`. Any exception maps to a uniform
+        ``INTERNAL`` response with ``internal server error`` details —
+        wording preserved byte-for-byte.
+        """
+        from almanak.gateway.services._save_metrics_helpers import (
+            PG_UPSERT_QUERY,
+            build_pg_upsert_args,
+        )
 
-                warm = self._state_manager.warm_backend
-                if warm and hasattr(warm, "save_portfolio_metrics"):
-                    result = await warm.save_portfolio_metrics(metrics)
-                    if result:
-                        logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", strategy_id)
-                        return gateway_pb2.SaveMetricsResponse(success=True)
-                    return gateway_pb2.SaveMetricsResponse(
-                        success=False, error="Backend save_portfolio_metrics returned False"
-                    )
+        try:
+            await self._snapshot_fetchrow(PG_UPSERT_QUERY, *build_pg_upsert_args(inputs, request, now))
+            logger.debug("Portfolio metrics saved for strategy=%s", inputs.strategy_id)
+            return gateway_pb2.SaveMetricsResponse(success=True)
+        except Exception as e:
+            logger.error("SavePortfolioMetrics failed for %s: %s", inputs.strategy_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
 
+    async def _save_portfolio_metrics_sqlite(
+        self,
+        inputs: Any,
+        request: gateway_pb2.SaveMetricsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveMetricsResponse:
+        """SQLite (local dev) persistence path for SavePortfolioMetrics.
+
+        Delegates to the StateManager's warm backend:
+        - resolves ``total_value_usd`` best-effort from the latest snapshot;
+        - builds the ``PortfolioMetrics`` dataclass;
+        - dispatches to ``warm.save_portfolio_metrics`` when available;
+        - maps the (result / no-backend / missing-method / exception)
+          outcomes to the exact pre-refactor response shapes.
+        """
+        from almanak.gateway.services._save_metrics_helpers import (
+            build_portfolio_metrics,
+            resolve_total_value_usd,
+        )
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+
+            total_value_usd = await resolve_total_value_usd(warm, inputs.strategy_id)
+            metrics = build_portfolio_metrics(inputs, request, total_value_usd)
+
+            if warm and hasattr(warm, "save_portfolio_metrics"):
+                result = await warm.save_portfolio_metrics(metrics)
+                if result:
+                    logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", inputs.strategy_id)
+                    return gateway_pb2.SaveMetricsResponse(success=True)
                 return gateway_pb2.SaveMetricsResponse(
-                    success=False, error="No warm backend with portfolio metrics support"
+                    success=False, error="Backend save_portfolio_metrics returned False"
                 )
-            except Exception as e:
-                logger.error("SavePortfolioMetrics (SQLite) failed for %s: %s", strategy_id, e)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
+
+            return gateway_pb2.SaveMetricsResponse(
+                success=False, error="No warm backend with portfolio metrics support"
+            )
+        except Exception as e:
+            logger.error("SavePortfolioMetrics (SQLite) failed for %s: %s", inputs.strategy_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
 
     async def GetPortfolioMetrics(
         self,
