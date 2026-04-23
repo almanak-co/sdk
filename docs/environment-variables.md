@@ -63,11 +63,18 @@ Only needed if your strategy uses these specific protocols.
 
 | Variable | Description |
 |----------|-------------|
-| `POLYMARKET_WALLET_ADDRESS` | Polymarket wallet address |
-| `POLYMARKET_PRIVATE_KEY` | Polymarket signing key |
-| `POLYMARKET_API_KEY` | CLOB API key |
-| `POLYMARKET_SECRET` | HMAC secret |
-| `POLYMARKET_PASSPHRASE` | API passphrase |
+| `ALMANAK_PRIVATE_KEY` | Preferred local EOA signer for the managed gateway. The gateway derives the Polymarket signer address from this key. |
+| `ALMANAK_GATEWAY_SAFE_ADDRESS` | Hosted Safe funder address for deployed strategies. When set with Safe mode, the gateway submits Polymarket orders for the Safe wallet instead of an EOA wallet. |
+| `POLYMARKET_WALLET_ADDRESS` | Optional gateway-side override for the Polymarket funder address. Usually unnecessary; defaults to the Safe address in Safe mode, otherwise the signer address. |
+| `POLYMARKET_API_KEY` | Optional pre-provisioned CLOB API key. If unset, the gateway derives/creates credentials from the signer when needed. |
+| `POLYMARKET_SECRET` | Optional pre-provisioned HMAC secret paired with `POLYMARKET_API_KEY`. |
+| `POLYMARKET_PASSPHRASE` | Optional pre-provisioned API passphrase paired with `POLYMARKET_API_KEY`. |
+| `POLYMARKET_PRIVATE_KEY` | Legacy gateway-only fallback for Polymarket signing. Prefer `ALMANAK_PRIVATE_KEY`; strategy containers should not require this. |
+
+Notes:
+- Strategy containers should not need `POLYMARKET_*` secrets.
+- Local SDK usage should typically only need the gateway signer key (`ALMANAK_PRIVATE_KEY`).
+- Hosted Safe deployments should use the Safe variables below plus the gateway signer setup; Polymarket-specific API credentials can be auto-derived by the gateway.
 
 ### Pendle
 

@@ -1348,7 +1348,8 @@ class ClobClient:
         if params.side == "BUY":
             self._validate_order_value_usd(params.size * params.price)
 
-        wallet = self.config.wallet_address
+        signer = self.config.wallet_address
+        maker = self.config.funder_address or signer
         sig_type = self.config.signature_type.value
 
         # Derive maker/taker so that the integer ratio == params.price exactly.
@@ -1363,8 +1364,8 @@ class ClobClient:
         # Build the order struct
         return UnsignedOrder(
             salt=self._generate_salt(),
-            maker=wallet,
-            signer=wallet,  # For EOA, maker and signer are the same
+            maker=maker,
+            signer=signer,
             taker="0x0000000000000000000000000000000000000000",  # Public order
             token_id=int(params.token_id),
             maker_amount=maker_amount,
@@ -1431,7 +1432,8 @@ class ClobClient:
             # Note: MAX_PRICE (0.99) and MIN_PRICE (0.01) are always valid ticks
             price = self.MAX_PRICE if params.side == "BUY" else self.MIN_PRICE
 
-        wallet = self.config.wallet_address
+        signer = self.config.wallet_address
+        maker = self.config.funder_address or signer
         sig_type = self.config.signature_type.value
 
         if params.side == "BUY":
@@ -1454,8 +1456,8 @@ class ClobClient:
 
         return UnsignedOrder(
             salt=self._generate_salt(),
-            maker=wallet,
-            signer=wallet,
+            maker=maker,
+            signer=signer,
             taker="0x0000000000000000000000000000000000000000",
             token_id=int(params.token_id),
             maker_amount=maker_amount,
@@ -1585,6 +1587,29 @@ class ClobClient:
         data = self._post("/order", json_body=payload)
         return OrderResponse.from_api_response(data)
 
+    def create_and_post_order(
+        self,
+        *,
+        token_id: str,
+        price: Decimal,
+        size: Decimal,
+        side: str,
+        time_in_force: str = "GTC",
+        expiration: int = 0,
+        fee_rate_bps: str = "0",
+    ) -> OrderResponse:
+        """Compatibility helper used by gateway-backed and legacy callers."""
+        params = LimitOrderParams(
+            token_id=token_id,
+            side=side,  # type: ignore[arg-type]
+            price=price,
+            size=size,
+            expiration=expiration,
+            fee_rate_bps=int(fee_rate_bps or 0),
+        )
+        signed = self.create_and_sign_limit_order(params)
+        return self.submit_order(signed, OrderType(time_in_force))
+
     def submit_order_payload(self, payload: dict[str, Any]) -> OrderResponse:
         """Submit an order from a pre-built payload dict.
 
@@ -1615,10 +1640,14 @@ class ClobClient:
         Returns:
             OpenOrder if found, None otherwise
         """
-        # The CLOB API doesn't have a single order endpoint, so we query open orders
-        # and filter. For filled/cancelled orders, we query order history.
+        # Scan open orders first (consistent auth path). If the order has
+        # been filled or cancelled it won't appear there, so fall back to
+        # the single-order endpoint for settled/historical lookups.
         try:
-            # First check open orders
+            for order in self.get_open_orders():
+                if order.order_id == order_id:
+                    return order
+
             data = self._get("/data/orders", params={"orderID": order_id}, authenticated=True)
             if isinstance(data, list) and len(data) > 0:
                 item = data[0]
@@ -1789,7 +1818,7 @@ class ClobClient:
             ...     print(f"{pos.outcome}: {pos.size} shares at {pos.avg_price}")
         """
         if wallet is None:
-            wallet = self.config.wallet_address
+            wallet = self.config.funder_address or self.config.wallet_address
 
         params: dict[str, Any] = {"user": wallet}
         if filters:

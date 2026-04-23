@@ -26,7 +26,7 @@ Example:
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
 from ...data.market_snapshot import MarketSnapshot
@@ -37,16 +37,16 @@ from ...intents.vocabulary import (
     PredictionSellIntent,
 )
 from ...models.reproduction_bundle import ActionBundle
-from .clob_client import ClobClient
 from .ctf_sdk import BINARY_PARTITION, INDEX_SET_NO, INDEX_SET_YES, CtfSDK
 from .exceptions import (
     PolymarketInvalidPrecisionError,
+    PolymarketInvalidTickSizeError,
     PolymarketMarketNotFoundError,
     PolymarketMarketNotResolvedError,
+    PolymarketMinimumOrderError,
 )
 from .models import (
     GammaMarket,
-    LimitOrderParams,
     OrderType,
     PolymarketConfig,
 )
@@ -162,19 +162,46 @@ class PolymarketAdapter:
 
     def __init__(
         self,
-        config: PolymarketConfig,
+        client: Any,
+        wallet_address: str | None = None,
         web3: Any | None = None,
     ) -> None:
         """Initialize the Polymarket adapter.
 
         Args:
-            config: Polymarket configuration with wallet and credentials
+            client: Gateway-backed Polymarket client, or a legacy PolymarketConfig
+            wallet_address: Wallet address used for on-chain redemption
             web3: Optional Web3 instance for on-chain operations.
                   Required for redeem intents.
         """
-        self.config = config
+        if isinstance(client, PolymarketConfig):
+            # GATEWAY_VIOLATION: direct ClobClient instantiation from PolymarketConfig
+            # is a legacy backwards-compatibility path for tests and local-only usage.
+            # Production wiring always passes GatewayPolymarketClient.
+            # Tech debt: remove once all callers are updated.
+            # Linear ticket: https://linear.app/almanak/issue/VIB-XXXX
+            import warnings
+
+            warnings.warn(
+                "PolymarketAdapter(PolymarketConfig(...)) uses a direct HTTP client, bypassing "
+                "the gateway boundary. Pass GatewayPolymarketClient instead for hosted/production use.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            from .clob_client import ClobClient
+
+            self.client = ClobClient(client)
+            self.wallet_address = wallet_address or client.wallet_address
+        else:
+            if wallet_address is None:
+                raise ValueError("wallet_address is required when initializing PolymarketAdapter with a client")
+            self.client = client
+            self.wallet_address = wallet_address
+        # Compatibility alias for older tests/callers that still reference
+        # ``adapter.clob`` even though the adapter now accepts any Polymarket
+        # client implementation (gateway-backed or direct).
+        self.clob = self.client
         self.web3 = web3
-        self.clob = ClobClient(config)
         self.ctf = CtfSDK()
 
         # Cache for resolved markets
@@ -183,14 +210,16 @@ class PolymarketAdapter:
         logger.info(
             "PolymarketAdapter initialized",
             extra={
-                "wallet": config.wallet_address,
+                "wallet": self.wallet_address,
                 "has_web3": web3 is not None,
             },
         )
 
     def close(self) -> None:
         """Close adapter and release resources."""
-        self.clob.close()
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
 
     def __enter__(self) -> "PolymarketAdapter":
         return self
@@ -282,15 +311,7 @@ class PolymarketAdapter:
                     size=size,
                     market=market,
                 )
-                price = self.clob.round_price_to_tick(intent.max_price, "BUY", market=market)
-                params = LimitOrderParams(
-                    token_id=token_id,
-                    side="BUY",
-                    price=price,
-                    size=size,
-                    expiration=self._calculate_expiration(intent.expiration_hours),
-                )
-                signed_order = self.clob.create_and_sign_limit_order(params, market=market)
+                price = self._round_price_to_tick(intent.max_price, "BUY", market=market)
                 # If the strategy declared order_type='market' (the default), it
                 # expected fail-fast immediacy. Routing to LIMIT for safety must
                 # NOT silently downgrade that to a long-lived GTC order resting
@@ -319,15 +340,6 @@ class PolymarketAdapter:
                     "through the LIMIT path."
                 )
 
-            # Build order payload (owner = API key, required by CLOB matcher).
-            # Use get_or_create_credentials() so lazy L2 derivation works when
-            # the adapter was initialized with wallet-only config.
-            credentials = self.clob.get_or_create_credentials()
-            order_payload = signed_order.to_api_payload(
-                owner=credentials.api_key,
-                order_type=order_type.value,
-            )
-
             logger.info(
                 "Compiled buy intent",
                 extra={
@@ -352,7 +364,14 @@ class PolymarketAdapter:
                     "price": str(price),
                     "size": str(size),
                     "order_type": order_type.value,
-                    "order_payload": order_payload,
+                    "order_request": {
+                        "token_id": token_id,
+                        "side": "BUY",
+                        "price": str(price),
+                        "size": str(size),
+                        "time_in_force": order_type.value,
+                        "expiration": self._calculate_expiration(intent.expiration_hours),
+                    },
                     "protocol": "polymarket",
                     "chain": "polygon",
                 },
@@ -411,7 +430,7 @@ class PolymarketAdapter:
             # Resolve shares amount
             if intent.shares == "all":
                 # Query current position size
-                positions = self.clob.get_positions()
+                positions = self.client.get_positions()
                 position = next(
                     (p for p in positions if p.token_id == token_id),
                     None,
@@ -445,14 +464,7 @@ class PolymarketAdapter:
                 size=size,
                 market=market,
             )
-            price = self.clob.round_price_to_tick(intent.min_price, "SELL", market=market)
-            params = LimitOrderParams(
-                token_id=token_id,
-                side="SELL",
-                price=price,
-                size=size,
-            )
-            signed_order = self.clob.create_and_sign_limit_order(params, market=market)
+            price = self._round_price_to_tick(intent.min_price, "SELL", market=market)
             # Mirror the BUY routing: when the strategy declared 'market' but
             # we elevated to LIMIT for safety, force IOC so we don't leave a
             # long-lived GTC order resting on the book.
@@ -460,15 +472,6 @@ class PolymarketAdapter:
                 order_type = OrderType.IOC
             else:
                 order_type = self._map_time_in_force(intent.time_in_force)
-
-            # Build order payload (owner = API key, required by CLOB matcher).
-            # Use get_or_create_credentials() so lazy L2 derivation works when
-            # the adapter was initialized with wallet-only config.
-            credentials = self.clob.get_or_create_credentials()
-            order_payload = signed_order.to_api_payload(
-                owner=credentials.api_key,
-                order_type=order_type.value,
-            )
 
             logger.info(
                 "Compiled sell intent",
@@ -494,7 +497,14 @@ class PolymarketAdapter:
                     "price": str(price),
                     "size": str(size),
                     "order_type": order_type.value,
-                    "order_payload": order_payload,
+                    "order_request": {
+                        "token_id": token_id,
+                        "side": "SELL",
+                        "price": str(price),
+                        "size": str(size),
+                        "time_in_force": order_type.value,
+                        "expiration": 0,
+                    },
                     "protocol": "polymarket",
                     "chain": "polygon",
                 },
@@ -566,7 +576,7 @@ class PolymarketAdapter:
             tx_data = self.ctf.build_redeem_tx(
                 condition_id=market.condition_id,
                 index_sets=index_sets,
-                sender=self.config.wallet_address,
+                sender=self.wallet_address,
             )
 
             transaction = {
@@ -643,13 +653,13 @@ class PolymarketAdapter:
         # Try by ID first (if it looks like an ID - numeric or alphanumeric)
         market = None
         try:
-            market = self.clob.get_market(market_id)
+            market = self.client.get_market(market_id)
         except Exception:
             pass
 
         # If not found, try by slug
         if market is None:
-            market = self.clob.get_market_by_slug(market_id)
+            market = self.client.get_market_by_slug(market_id)
 
         if market is None:
             raise PolymarketMarketNotFoundError(f"Market not found: {market_id}")
@@ -782,9 +792,7 @@ class PolymarketAdapter:
             PolymarketMinimumOrderError: BUY order value (size * price) is
                 below the $1 USD floor.
         """
-        # 1. Tick size — the ClobClient helper raises with the exact CLOB text
-        #    (see PolymarketInvalidTickSizeError) when the price is off-tick.
-        self.clob._validate_tick_size(price, market=market)
+        self._validate_tick_size(price, market=market)
 
         # 2. Price precision — Decimal.as_tuple().exponent is negative for
         #    fractional values; -5 means 5 decimal places. Normalize() strips
@@ -800,11 +808,54 @@ class PolymarketAdapter:
                 max_decimals=CLOB_MAX_PRICE_DECIMALS,
             )
 
-        # 3. Minimum order value — $1 USD floor for BUY only. Delegates to
+        # 3. Minimum share size — market.order_min_size floor (applies to both
+        #    sides). Previously enforced inside ClobClient.build_limit_order();
+        #    with the gateway-backed path the build step is deferred to the
+        #    gateway, so the check must happen here to keep dry-run parity.
+        if market and market.order_min_size and size < market.order_min_size:
+            raise PolymarketMinimumOrderError(
+                size=str(size),
+                minimum=str(market.order_min_size),
+            )
+
+        # 4. Minimum order value — $1 USD floor for BUY only. Delegates to
         #    the ClobClient so we emit the same error text that the post-sign
         #    path does.
         if side == "BUY":
-            self.clob._validate_order_value_usd(size * price)
+            self._validate_order_value_usd(size * price)
+
+    def _validate_order_value_usd(self, value_usd: Decimal) -> None:
+        if value_usd < Decimal("1"):
+            raise PolymarketMinimumOrderError(size=f"${value_usd}", minimum="$1")
+
+    def _validate_tick_size(self, price: Decimal, market: GammaMarket | None = None) -> None:
+        effective_tick = market.order_price_min_tick_size if market else Decimal("0.01")
+        if effective_tick <= 0:
+            return
+        remainder = price % effective_tick
+        tolerance = effective_tick / Decimal("1000")
+        is_valid = remainder < tolerance or (effective_tick - remainder) < tolerance
+        if not is_valid:
+            ticks = price / effective_tick
+            nearest_ticks = round(ticks)
+            nearest_valid = nearest_ticks * effective_tick
+            raise PolymarketInvalidTickSizeError(
+                price=str(price),
+                tick_size=str(effective_tick),
+                nearest_valid=str(nearest_valid),
+            )
+
+    def _round_price_to_tick(self, price: Decimal, side: str, market: GammaMarket | None = None) -> Decimal:
+        effective_tick = market.order_price_min_tick_size if market else Decimal("0.01")
+        if effective_tick <= 0:
+            return price
+        ticks = price / effective_tick
+        if side == "BUY":
+            rounded_ticks = ticks.quantize(Decimal("1"), rounding=ROUND_FLOOR)
+        else:
+            rounded_ticks = ticks.quantize(Decimal("1"), rounding=ROUND_CEILING)
+        rounded_price = rounded_ticks * effective_tick
+        return max(Decimal("0.01"), min(Decimal("0.99"), rounded_price))
 
     def _map_time_in_force(self, tif: str) -> OrderType:
         """Map time-in-force string to OrderType enum.

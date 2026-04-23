@@ -1,8 +1,8 @@
 """Unit tests for Polymarket warning deferral (VIB-307).
 
-VIB-307: The Polymarket warning ("IntentCompiler on Polygon without PolymarketConfig")
-was firing at init time, polluting logs for ALL Polygon strategies even if they
-have nothing to do with prediction markets.
+VIB-307: The Polymarket warning ("IntentCompiler on Polygon without a
+gateway-backed Polymarket client") was firing at init time, polluting logs for
+ALL Polygon strategies even if they have nothing to do with prediction markets.
 
 Fix: warning is now deferred to compile time, so only strategies that actually
 attempt prediction intents see the warning.
@@ -21,7 +21,7 @@ class TestPolymarketWarningDeferral:
     """VIB-307: Polymarket warning should not fire at compiler init time."""
 
     def test_no_warning_at_init_on_polygon_without_config(self):
-        """Creating an IntentCompiler on Polygon WITHOUT PolymarketConfig should NOT warn."""
+        """Creating an IntentCompiler on Polygon without gateway wiring should NOT warn."""
         config = IntentCompilerConfig(allow_placeholder_prices=True)
 
         with patch("almanak.framework.intents.compiler.logger") as mock_logger:
@@ -34,7 +34,7 @@ class TestPolymarketWarningDeferral:
         # Check that no Polymarket-related warning was emitted at init
         warning_calls = mock_logger.warning.call_args_list
         warning_messages = [str(call) for call in warning_calls]
-        assert not any("PolymarketConfig" in msg or "polymarket_config" in msg for msg in warning_messages), (
+        assert not any("gateway-backed Polymarket client" in msg for msg in warning_messages), (
             f"Unexpected Polymarket warning at init: {warning_messages}"
         )
 
@@ -51,7 +51,7 @@ class TestPolymarketWarningDeferral:
 
         warning_calls = mock_logger.warning.call_args_list
         warning_messages = [str(call) for call in warning_calls]
-        assert not any("PolymarketConfig" in msg or "polymarket_config" in msg for msg in warning_messages)
+        assert not any("gateway-backed Polymarket client" in msg for msg in warning_messages)
 
     def test_warning_fires_when_prediction_buy_attempted_without_config(self):
         """Attempting PredictionBuyIntent on Polygon without config SHOULD warn."""
@@ -75,9 +75,9 @@ class TestPolymarketWarningDeferral:
 
         # Should fail compilation (no adapter)
         assert result.status.name == "FAILED"
-        # Should warn about missing config
+        # Should warn about missing gateway-backed client
         warning_calls = mock_logger.warning.call_args_list
         warning_messages = [str(call) for call in warning_calls]
-        assert any("polymarket_config" in msg for msg in warning_messages), (
-            f"Expected warning about polymarket_config, got: {warning_messages}"
+        assert any("gateway-backed Polymarket client" in msg for msg in warning_messages), (
+            f"Expected warning about missing gateway-backed client, got: {warning_messages}"
         )

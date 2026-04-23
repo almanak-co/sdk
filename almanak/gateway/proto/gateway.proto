@@ -1226,7 +1226,8 @@ service PolymarketService {
 // =============================================================================
 
 message PolymarketGetMarketRequest {
-  string condition_id = 1;    // Market condition ID
+  string condition_id = 1;    // Backward-compatible alias for market ID
+  string slug = 2;            // Optional market slug
 }
 
 message PolymarketMarketResponse {
@@ -1244,10 +1245,32 @@ message PolymarketMarketResponse {
   string minimum_tick_size = 12;
   bool success = 13;
   string error = 14;
+  string market_id = 15;
+  string question = 16;
+  string slug = 17;
+  repeated string outcomes = 18;
+  repeated string outcome_prices = 19;
+  repeated string clob_token_ids = 20;
+  string volume = 21;
+  string volume_24hr = 22;
+  string liquidity = 23;
+  string end_date = 24;
+  bool enable_order_book = 25;
+  string maker_base_fee_bps = 26;
+  string taker_base_fee_bps = 27;
+  string best_bid = 28;
+  string best_ask = 29;
+  string last_trade_price = 30;
+  string event_id = 31;
+  string event_slug = 32;
+  string group_slug = 33;
+  repeated string tags = 34;
+  string raw_json = 35;       // Full Gamma market payload
 }
 
 message PolymarketGetMarketsRequest {
   string next_cursor = 1;     // Pagination cursor (optional)
+  string filters_json = 2;    // JSON-encoded MarketFilters payload
 }
 
 message PolymarketMarketsResponse {
@@ -1375,6 +1398,10 @@ message PolymarketOrderResponse {
   bool success = 5;
   string error = 6;
   string error_code = 7;
+  string price = 8;
+  string size = 9;
+  string avg_fill_price = 10;
+  string created_at = 11;
 }
 
 message PolymarketCancelOrderRequest {
@@ -1412,6 +1439,10 @@ message PolymarketPosition {
   string avg_price = 4;
   string realized_pnl = 5;
   string cur_price = 6;
+  string market_id = 7;
+  string token_id = 8;
+  string outcome = 9;
+  string market_question = 10;
 }
 
 message PolymarketPositionsResponse {

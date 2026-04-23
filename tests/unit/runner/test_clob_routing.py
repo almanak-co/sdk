@@ -69,6 +69,15 @@ def _make_runner(**overrides) -> StrategyRunner:
     return StrategyRunner(**defaults)
 
 
+class FakeGatewayExecutionOrchestrator:
+    """Minimal gateway orchestrator shim for gateway-routed CLOB tests."""
+
+    def __init__(self) -> None:
+        self._client = SimpleNamespace(is_connected=True)
+        self.execute = AsyncMock()
+        self.tx_risk_config = None
+
+
 def _make_prediction_intent():
     """Return a mock PredictionBuyIntent-like object for Polygon."""
     intent = MagicMock()
@@ -216,9 +225,7 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
     strategy = _make_strategy(intent)
     clob_bundle = _make_clob_bundle()
 
-    orch = MagicMock()
-    orch.execute = AsyncMock()
-    orch.tx_risk_config = None
+    orch = FakeGatewayExecutionOrchestrator()
 
     runner = _make_runner(execution_orchestrator=orch)
 
@@ -239,21 +246,19 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
         )
     )
 
-    mock_polymarket_config = MagicMock()
-    mock_polymarket_config.wallet_address = "0xPOLYWALLET1234567890"
-
     patches = _common_patches(clob_bundle)
     patches.extend([
         patch(
-            "almanak.framework.connectors.polymarket.PolymarketConfig.from_env",
-            return_value=mock_polymarket_config,
+            "almanak.framework.execution.gateway_orchestrator.GatewayExecutionOrchestrator",
+            FakeGatewayExecutionOrchestrator,
+        ),
+        patch(
+            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            return_value=object(),
         ),
         patch(
             "almanak.framework.execution.clob_handler.ClobActionHandler",
             return_value=mock_clob_handler,
-        ),
-        patch(
-            "almanak.framework.connectors.polymarket.clob_client.ClobClient",
         ),
     ])
 
@@ -320,9 +325,7 @@ async def test_clob_failure_propagates() -> None:
     strategy = _make_strategy(intent)
     clob_bundle = _make_clob_bundle()
 
-    orch = MagicMock()
-    orch.execute = AsyncMock()
-    orch.tx_risk_config = None
+    orch = FakeGatewayExecutionOrchestrator()
 
     runner = _make_runner(execution_orchestrator=orch)
 
@@ -336,21 +339,19 @@ async def test_clob_failure_propagates() -> None:
         )
     )
 
-    mock_polymarket_config = MagicMock()
-    mock_polymarket_config.wallet_address = "0xPOLYWALLET1234567890"
-
     patches = _common_patches(clob_bundle)
     patches.extend([
         patch(
-            "almanak.framework.connectors.polymarket.PolymarketConfig.from_env",
-            return_value=mock_polymarket_config,
+            "almanak.framework.execution.gateway_orchestrator.GatewayExecutionOrchestrator",
+            FakeGatewayExecutionOrchestrator,
+        ),
+        patch(
+            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+            return_value=object(),
         ),
         patch(
             "almanak.framework.execution.clob_handler.ClobActionHandler",
             return_value=mock_clob_handler,
-        ),
-        patch(
-            "almanak.framework.connectors.polymarket.clob_client.ClobClient",
         ),
     ])
 
@@ -397,8 +398,8 @@ async def test_no_clob_handler_when_non_polygon_chain() -> None:
     with (
         apply_patches(patches),
         patch(
-            "almanak.framework.connectors.polymarket.PolymarketConfig.from_env",
-        ) as mock_from_env,
+            "almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient",
+        ) as mock_gateway_client,
     ):
         result = await runner._execute_single_chain(
             strategy=strategy,
@@ -406,7 +407,7 @@ async def test_no_clob_handler_when_non_polygon_chain() -> None:
             start_time=datetime.now(UTC),
         )
 
-    # For non-polygon chain, PolymarketConfig.from_env is never called
-    mock_from_env.assert_not_called()
+    # For non-polygon chain, gateway Polymarket client is never constructed.
+    mock_gateway_client.assert_not_called()
     orch.execute.assert_awaited_once()
     assert result.status == IterationStatus.SUCCESS

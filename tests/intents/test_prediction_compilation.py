@@ -223,7 +223,7 @@ class TestPredictionCompilationNoConfig:
 
         assert result.status == CompilationStatus.FAILED
         assert "PolymarketAdapter not initialized" in result.error
-        assert "polymarket_config" in result.error
+        assert "gateway" in result.error.lower()
 
     def test_prediction_sell_fails_without_config(self, test_wallet):
         """Test that prediction sell fails without Polymarket config."""

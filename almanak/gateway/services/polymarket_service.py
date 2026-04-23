@@ -10,13 +10,12 @@ The service proxies calls to:
 - Gamma API: Market metadata
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import logging
-import os
-import secrets
 import time
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from urllib.parse import urlencode
@@ -25,7 +24,18 @@ import aiohttp
 import grpc
 from eth_account import Account
 from eth_account.messages import encode_typed_data
+from pydantic import SecretStr
 
+from almanak.framework.connectors.polymarket import (
+    CLOB_AUTH_DOMAIN,
+    CLOB_AUTH_MESSAGE,
+    CLOB_AUTH_TYPES,
+    ApiCredentials,
+    ClobClient,
+    OrderFilters,
+    PolymarketConfig,
+    SignatureType,
+)
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 
@@ -38,47 +48,6 @@ logger = logging.getLogger(__name__)
 
 CLOB_BASE_URL = "https://clob.polymarket.com"
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
-
-# EIP-712 domain and types for L1 auth
-CLOB_AUTH_DOMAIN = {
-    "name": "ClobAuthDomain",
-    "version": "1",
-    "chainId": 137,
-}
-
-CLOB_AUTH_TYPES = {
-    "ClobAuth": [
-        {"name": "address", "type": "address"},
-        {"name": "timestamp", "type": "string"},
-        {"name": "nonce", "type": "uint256"},
-        {"name": "message", "type": "string"},
-    ],
-}
-
-CLOB_AUTH_MESSAGE = "This message attests that I control the given wallet"
-
-# Contract addresses (Polygon Mainnet)
-CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-POLYGON_CHAIN_ID = 137
-
-# Order signing types
-ORDER_TYPES = {
-    "Order": [
-        {"name": "salt", "type": "uint256"},
-        {"name": "maker", "type": "address"},
-        {"name": "signer", "type": "address"},
-        {"name": "taker", "type": "address"},
-        {"name": "tokenId", "type": "uint256"},
-        {"name": "makerAmount", "type": "uint256"},
-        {"name": "takerAmount", "type": "uint256"},
-        {"name": "expiration", "type": "uint256"},
-        {"name": "nonce", "type": "uint256"},
-        {"name": "feeRateBps", "type": "uint256"},
-        {"name": "side", "type": "uint8"},
-        {"name": "signatureType", "type": "uint8"},
-    ],
-}
 
 
 class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
@@ -95,34 +64,84 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         """
         self.settings = settings
         self._http_session: aiohttp.ClientSession | None = None
+        self._credentials_lock = asyncio.Lock()
 
-        # Load credentials from settings or environment
-        self._private_key = getattr(settings, "polymarket_private_key", None) or os.environ.get(
-            "POLYMARKET_PRIVATE_KEY"
+        self._private_key = settings.private_key or settings.polymarket_private_key
+        self._wallet_address = self._resolve_signer_address()
+        self._funder_address = self._resolve_funder_address()
+        self._signature_type = (
+            SignatureType.POLY_GNOSIS_SAFE
+            if settings.safe_address and (settings.safe_mode or "").lower() in {"direct", "zodiac"}
+            else SignatureType.EOA
         )
-        self._wallet_address = getattr(settings, "polymarket_wallet_address", None) or os.environ.get(
-            "POLYMARKET_WALLET_ADDRESS"
-        )
-        self._api_key = getattr(settings, "polymarket_api_key", None) or os.environ.get("POLYMARKET_API_KEY")
-        self._api_secret = getattr(settings, "polymarket_secret", None) or os.environ.get("POLYMARKET_SECRET")
-        self._api_passphrase = getattr(settings, "polymarket_passphrase", None) or os.environ.get(
-            "POLYMARKET_PASSPHRASE"
-        )
+        self._api_key = settings.polymarket_api_key
+        self._api_secret = settings.polymarket_secret
+        self._api_passphrase = settings.polymarket_passphrase
 
-        # Derive wallet address from private key if not provided
-        if self._private_key and not self._wallet_address:
-            account = Account.from_key(self._private_key)
-            self._wallet_address = account.address
-
-        # Check if service is available
         self._available = bool(self._private_key and self._wallet_address)
         self._credentials_available = bool(self._api_key and self._api_secret and self._api_passphrase)
 
         logger.debug(
-            "PolymarketService initialized: available=%s, credentials=%s",
+            "PolymarketService initialized: available=%s, credentials=%s, signer=%s, funder=%s, signature_type=%s",
             self._available,
             self._credentials_available,
+            self._wallet_address,
+            self._funder_address,
+            self._signature_type.name,
         )
+
+    def _resolve_signer_address(self) -> str | None:
+        if self.settings.eoa_address:
+            return self.settings.eoa_address
+        if self.settings.private_key:
+            return Account.from_key(self.settings.private_key).address
+        if self.settings.polymarket_private_key:
+            return Account.from_key(self.settings.polymarket_private_key).address
+        return None
+
+    def _resolve_funder_address(self) -> str | None:
+        if self.settings.polymarket_wallet_address:
+            return self.settings.polymarket_wallet_address
+        if self.settings.safe_address:
+            return self.settings.safe_address
+        return self._wallet_address
+
+    def _build_client(self) -> ClobClient:
+        if not self._available or not self._wallet_address or not self._private_key:
+            raise ValueError("Polymarket signing identity is not configured in the gateway")
+
+        api_credentials = None
+        if self._credentials_available and self._api_key and self._api_secret and self._api_passphrase:
+            api_credentials = ApiCredentials(
+                api_key=self._api_key,
+                secret=SecretStr(self._api_secret),
+                passphrase=SecretStr(self._api_passphrase),
+            )
+
+        config = PolymarketConfig(
+            wallet_address=self._wallet_address,
+            private_key=SecretStr(self._private_key),
+            signature_type=self._signature_type,
+            funder_address=self._funder_address if self._funder_address != self._wallet_address else None,
+            api_credentials=api_credentials,
+        )
+        return ClobClient(config)
+
+    async def _build_authenticated_client(self) -> ClobClient:
+        """Build a CLOB client with stable gateway-owned API credentials.
+
+        Polymarket API keys are wallet-scoped but some authenticated endpoints
+        are sensitive to which API key created the order. Re-deriving a fresh
+        key for each RPC can make a just-created order unreadable via
+        ``GetOrder`` even though ``CreateAndPostOrder`` succeeded. Resolve or
+        derive once, cache on the service, and reuse the same credentials for
+        subsequent authenticated calls.
+        """
+        if not self._credentials_available:
+            ok = await self._ensure_credentials()
+            if not ok:
+                raise ValueError("Polymarket API credentials could not be derived in gateway")
+        return self._build_client()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -181,6 +200,14 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         if not self._available:
             return False
 
+        async with self._credentials_lock:
+            # Re-check inside lock in case another coroutine just derived them.
+            if self._credentials_available:
+                return True
+            return await self._derive_or_create_credentials()
+
+    async def _derive_or_create_credentials(self) -> bool:
+        """Inner credential derivation/creation (must be called while holding _credentials_lock)."""
         # Try to derive existing credentials
         try:
             session = await self._get_session()
@@ -227,7 +254,8 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                         logger.info("Created new API credentials")
                         return True
                 else:
-                    logger.error("Failed to create credentials: %s", await response.text())
+                    error_body = (await response.text())[:200]
+                    logger.error("Failed to create credentials: HTTP %s, body: %s", response.status, error_body)
         except (TimeoutError, aiohttp.ClientError):
             logger.exception("Failed to create credentials")
 
@@ -345,83 +373,149 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     # Market Data RPCs
     # =========================================================================
 
+    @staticmethod
+    def _market_response_from_gamma(data: dict) -> gateway_pb2.PolymarketMarketResponse:
+        outcomes_raw = data.get("outcomes")
+        outcome_prices_raw = data.get("outcomePrices")
+        token_ids_raw = data.get("clobTokenIds")
+        tags_raw = data.get("tags")
+
+        try:
+            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else list(outcomes_raw or [])
+        except (TypeError, ValueError):
+            outcomes = []
+        try:
+            outcome_prices = (
+                [str(value) for value in json.loads(outcome_prices_raw)]
+                if isinstance(outcome_prices_raw, str)
+                else [str(value) for value in (outcome_prices_raw or [])]
+            )
+        except (TypeError, ValueError):
+            outcome_prices = []
+        try:
+            token_ids = (
+                [str(value) for value in json.loads(token_ids_raw)]
+                if isinstance(token_ids_raw, str)
+                else [str(value) for value in (token_ids_raw or [])]
+            )
+        except (TypeError, ValueError):
+            token_ids = []
+        try:
+            tags = json.loads(tags_raw) if isinstance(tags_raw, str) else list(tags_raw or [])
+        except (TypeError, ValueError):
+            tags = []
+
+        return gateway_pb2.PolymarketMarketResponse(
+            condition_id=data.get("conditionId", ""),
+            question_id=data.get("questionID", data.get("questionId", "")),
+            tokens=token_ids,
+            active=data.get("active", False),
+            closed=data.get("closed", False),
+            accepting_orders=data.get("acceptingOrders", data.get("active", False)),
+            minimum_order_size=str(data.get("orderMinSize", "5")),
+            minimum_tick_size=str(data.get("orderPriceMinTickSize", "0.01")),
+            success=True,
+            market_id=str(data.get("id", "")),
+            question=data.get("question", ""),
+            slug=data.get("slug", ""),
+            outcomes=outcomes,
+            outcome_prices=outcome_prices,
+            clob_token_ids=token_ids,
+            volume=str(data.get("volume", "0")),
+            volume_24hr=str(data.get("volume24hr", "0")),
+            liquidity=str(data.get("liquidity", "0")),
+            end_date=data.get("endDate", ""),
+            enable_order_book=data.get("enableOrderBook", False),
+            maker_base_fee_bps=str(data.get("makerBaseFee", "0")),
+            taker_base_fee_bps=str(data.get("takerBaseFee", "0")),
+            best_bid=str(data.get("bestBid", "")),
+            best_ask=str(data.get("bestAsk", "")),
+            last_trade_price=str(data.get("lastTradePrice", "")),
+            event_id=str(data.get("eventId", "")),
+            event_slug=data.get("eventSlug", ""),
+            group_slug=data.get("groupItemSlug", data.get("group_slug", "")),
+            tags=[str(tag) for tag in tags],
+            raw_json=json.dumps(data, separators=(",", ":")),
+        )
+
     async def GetMarket(
         self,
         request: gateway_pb2.PolymarketGetMarketRequest,
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketMarketResponse:
-        """Get market by condition ID."""
+        """Get market by slug, market ID, or condition ID."""
+        if request.slug:
+            success, data, error = await self._request(
+                "GET",
+                GAMMA_BASE_URL,
+                "/markets",
+                params={"slug": request.slug, "limit": "1"},
+            )
+            if not success:
+                return gateway_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
+            items: list[dict] = data if isinstance(data, list) else []
+            if not items:
+                return gateway_pb2.PolymarketMarketResponse(success=False, error="Market not found")
+            return self._market_response_from_gamma(items[0])
+
         success, data, error = await self._request(
             "GET",
-            CLOB_BASE_URL,
+            GAMMA_BASE_URL,
             f"/markets/{request.condition_id}",
         )
+        if success and isinstance(data, dict):
+            return self._market_response_from_gamma(data)
 
-        if not success or not data:
-            return gateway_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
-
-        return gateway_pb2.PolymarketMarketResponse(
-            condition_id=data.get("condition_id", ""),
-            question_id=data.get("question_id", ""),
-            tokens=[str(t) for t in data.get("tokens", [])],
-            rewards_daily_rate=str(data.get("rewards", {}).get("daily_rate", "0")),
-            rewards_min_size=str(data.get("rewards", {}).get("min_size", "0")),
-            rewards_max_spread=str(data.get("rewards", {}).get("max_spread", "0")),
-            active=data.get("active", False),
-            closed=data.get("closed", False),
-            accepting_orders=data.get("accepting_orders", False),
-            accepting_order_timestamp=data.get("accepting_order_timestamp", ""),
-            minimum_order_size=str(data.get("minimum_order_size", "0")),
-            minimum_tick_size=str(data.get("minimum_tick_size", "0.01")),
-            success=True,
+        success, data, error = await self._request(
+            "GET",
+            GAMMA_BASE_URL,
+            "/markets",
+            params={"condition_ids": request.condition_id, "limit": "1"},
         )
+        if not success:
+            return gateway_pb2.PolymarketMarketResponse(success=False, error=error or "Market not found")
+        items = data if isinstance(data, list) else []
+        if not items:
+            return gateway_pb2.PolymarketMarketResponse(success=False, error="Market not found")
+        return self._market_response_from_gamma(items[0])
 
     async def GetMarkets(
         self,
         request: gateway_pb2.PolymarketGetMarketsRequest,
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketMarketsResponse:
-        """Get list of markets."""
-        params = {}
+        """Get list of markets from the Gamma API."""
         if request.next_cursor:
-            params["next_cursor"] = request.next_cursor
+            return gateway_pb2.PolymarketMarketsResponse(
+                success=False,
+                error="Cursor pagination is not yet supported by GetMarkets",
+            )
+        params: dict[str, str] = {}
+        if request.filters_json:
+            try:
+                raw_filters = json.loads(request.filters_json)
+            except json.JSONDecodeError:
+                return gateway_pb2.PolymarketMarketsResponse(success=False, error="Invalid filters_json")
+            for key, value in raw_filters.items():
+                if value is None:
+                    continue
+                if isinstance(value, list):
+                    params[key] = ",".join(str(item) for item in value)
+                elif isinstance(value, bool):
+                    params[key] = str(value).lower()
+                else:
+                    params[key] = str(value)
 
-        success, data, error = await self._request("GET", CLOB_BASE_URL, "/markets", params=params)
+        success, data, error = await self._request("GET", GAMMA_BASE_URL, "/markets", params=params or None)
 
         if not success:
             return gateway_pb2.PolymarketMarketsResponse(success=False, error=error or "")
-
-        # Guard against data being None (e.g., JSON null response)
-        if data is None:
-            items = []
-        elif isinstance(data, list):
-            items = data
-        else:
-            items = data.get("data", [])
-
-        markets = []
-        for item in items:
-            markets.append(
-                gateway_pb2.PolymarketMarketResponse(
-                    condition_id=item.get("condition_id", ""),
-                    question_id=item.get("question_id", ""),
-                    tokens=[str(t) for t in item.get("tokens", [])],
-                    active=item.get("active", False),
-                    closed=item.get("closed", False),
-                    accepting_orders=item.get("accepting_orders", False),
-                    minimum_order_size=str(item.get("minimum_order_size", "0")),
-                    minimum_tick_size=str(item.get("minimum_tick_size", "0.01")),
-                    success=True,
-                )
-            )
-
-        next_cursor = ""
-        if isinstance(data, dict):
-            next_cursor = data.get("next_cursor", "")
+        items: list[dict] = data if isinstance(data, list) else []
+        markets = [self._market_response_from_gamma(item) for item in items]
 
         return gateway_pb2.PolymarketMarketsResponse(
             markets=markets,
-            next_cursor=next_cursor,
+            next_cursor="",
             success=True,
         )
 
@@ -598,157 +692,55 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     # Order Management RPCs
     # =========================================================================
 
-    def _generate_salt(self) -> int:
-        """Generate a random salt for order uniqueness."""
-        return int(secrets.token_hex(32), 16)
-
-    def _to_token_units(self, amount: Decimal) -> int:
-        """Convert decimal amount to token units (6 decimals)."""
-        scaled = amount * Decimal("1000000")
-        return int(scaled.quantize(Decimal("1"), rounding=ROUND_DOWN))
-
-    def _sign_order(self, order_data: dict, is_neg_risk: bool = False) -> str:
-        """Sign an order using EIP-712."""
-        exchange = NEG_RISK_EXCHANGE if is_neg_risk else CTF_EXCHANGE
-
-        domain = {
-            "name": "Polymarket CTF Exchange",
-            "version": "1",
-            "chainId": POLYGON_CHAIN_ID,
-            "verifyingContract": exchange,
-        }
-
-        typed_data = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"},
-                ],
-                **ORDER_TYPES,
-            },
-            "primaryType": "Order",
-            "domain": domain,
-            "message": order_data,
-        }
-
-        signable = encode_typed_data(full_message=typed_data)
-        signed = Account.sign_message(signable, self._private_key)
-        return signed.signature.hex()
-
     async def CreateAndPostOrder(
         self,
         request: gateway_pb2.PolymarketCreateOrderRequest,
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketOrderResponse:
-        """Create and post a limit order."""
+        """Create and post a limit order via the gateway-owned signer."""
         if not self._available:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Polymarket not configured")
-
-        # Validate side
-        side_upper = request.side.upper() if request.side else ""
-        if side_upper not in ("BUY", "SELL"):
             return gateway_pb2.PolymarketOrderResponse(
-                success=False, error=f"Invalid side: must be BUY or SELL, got '{request.side}'"
+                success=False,
+                error="Polymarket signer not configured in gateway",
             )
 
-        # Parse and validate price
         try:
             price = Decimal(request.price)
-        except InvalidOperation:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error=f"Invalid price format: '{request.price}'")
-        if price <= 0:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Price must be positive")
-
-        # Parse and validate size
-        try:
             size = Decimal(request.size)
-        except InvalidOperation:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error=f"Invalid size format: '{request.size}'")
-        if size <= 0:
-            return gateway_pb2.PolymarketOrderResponse(success=False, error="Size must be positive")
-
-        try:
-            side = 0 if side_upper == "BUY" else 1
-
-            # Calculate amounts per Polymarket CLOB API semantics:
-            # - makerAmount = what the maker (order creator) gives/spends
-            # - takerAmount = what the maker receives
-            if side == 0:  # BUY: maker gives USDC, receives tokens
-                maker_amount = self._to_token_units(size * price)  # USDC to spend
-                taker_amount = self._to_token_units(size)  # tokens to receive
-            else:  # SELL: maker gives tokens, receives USDC
-                maker_amount = self._to_token_units(size)  # tokens to sell
-                taker_amount = self._to_token_units(size * price)  # USDC to receive
-
-            # Build order
-            salt = self._generate_salt()
-            nonce = int(request.nonce) if request.nonce else 0
-            expiration = request.expiration if request.expiration > 0 else 0
-            fee_rate_bps = int(request.fee_rate_bps) if request.fee_rate_bps else 0
-
-            order_data = {
-                "salt": salt,
-                "maker": self._wallet_address,
-                "signer": self._wallet_address,
-                "taker": "0x0000000000000000000000000000000000000000",
-                "tokenId": int(request.token_id),
-                "makerAmount": maker_amount,
-                "takerAmount": taker_amount,
-                "expiration": expiration,
-                "nonce": nonce,
-                "feeRateBps": fee_rate_bps,
-                "side": side,
-                "signatureType": 0,  # EOA
-            }
-
-            signature = self._sign_order(order_data)
-
-            # Post order
-            order_payload = {
-                "order": {
-                    "salt": str(salt),
-                    "maker": self._wallet_address,
-                    "signer": self._wallet_address,
-                    "taker": "0x0000000000000000000000000000000000000000",
-                    "tokenId": request.token_id,
-                    "makerAmount": str(maker_amount),
-                    "takerAmount": str(taker_amount),
-                    "expiration": str(expiration),
-                    "nonce": str(nonce),
-                    "feeRateBps": str(fee_rate_bps),
-                    "side": "BUY" if side == 0 else "SELL",
-                    "signatureType": 0,
-                    "signature": signature,
-                },
-                "owner": self._wallet_address,
-                "orderType": request.time_in_force or "GTC",
-            }
-
-            success, data, error = await self._request(
-                "POST",
-                CLOB_BASE_URL,
-                "/order",
-                json_body=order_payload,
-                authenticated=True,
-            )
-
-            if not success:
-                return gateway_pb2.PolymarketOrderResponse(success=False, error=error or "")
-
-            if data is None:
-                data = {}
+            side = request.side.upper()
+            if side not in ("BUY", "SELL"):
+                return gateway_pb2.PolymarketOrderResponse(
+                    success=False,
+                    error=f"Invalid side '{request.side}': must be 'BUY' or 'SELL'",
+                )
+            client = await self._build_authenticated_client()
+            try:
+                response = await asyncio.to_thread(
+                    client.create_and_post_order,
+                    token_id=request.token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    time_in_force=request.time_in_force or "GTC",
+                    expiration=request.expiration if request.expiration > 0 else 0,
+                    fee_rate_bps=request.fee_rate_bps or "0",
+                )
+            finally:
+                client.close()
             return gateway_pb2.PolymarketOrderResponse(
-                order_id=data.get("orderID", data.get("orderId", "")),
-                status=data.get("status", ""),
-                size_matched=str(data.get("sizeMatched", "0")),
-                transact_time=data.get("transactTime", ""),
+                order_id=response.order_id,
+                status=response.status.value,
+                size_matched=str(response.filled_size),
+                price=str(response.price),
+                size=str(response.size),
+                avg_fill_price=str(response.avg_fill_price) if response.avg_fill_price is not None else "",
+                created_at=response.created_at.isoformat() if response.created_at else "",
                 success=True,
             )
-
-        except (TimeoutError, aiohttp.ClientError, ValueError, InvalidOperation) as e:
-            logger.exception("Failed to create order")
+        except (InvalidOperation, ValueError) as e:
+            return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
+        except Exception as e:
+            logger.exception("Failed to create order through gateway Polymarket client")
             return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
 
     async def CreateAndPostMarketOrder(
@@ -845,27 +837,20 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketCancelResponse:
         """Cancel a single order."""
-        success, _data, error = await self._request(
-            "DELETE",
-            CLOB_BASE_URL,
-            "/order",
-            params={"id": request.order_id},
-            authenticated=True,
-        )
-
-        if not success:
+        try:
+            client = await self._build_authenticated_client()
+            try:
+                await asyncio.to_thread(client.cancel_order, request.order_id)
+            finally:
+                client.close()
+            return gateway_pb2.PolymarketCancelResponse(canceled=[request.order_id], not_canceled=[], success=True)
+        except Exception as e:
             return gateway_pb2.PolymarketCancelResponse(
                 canceled=[],
                 not_canceled=[request.order_id],
                 success=False,
-                error=error or "",
+                error=str(e),
             )
-
-        return gateway_pb2.PolymarketCancelResponse(
-            canceled=[request.order_id],
-            not_canceled=[],
-            success=True,
-        )
 
     async def CancelOrders(
         self,
@@ -873,26 +858,20 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketCancelResponse:
         """Cancel multiple orders."""
-        canceled = []
-        not_canceled = []
-
-        for order_id in request.order_ids:
-            success, _, _ = await self._request(
-                "DELETE",
-                CLOB_BASE_URL,
-                "/order",
-                params={"id": order_id},
-                authenticated=True,
-            )
-            if success:
-                canceled.append(order_id)
-            else:
-                not_canceled.append(order_id)
-
+        canceled: list[str] = []
+        not_canceled: list[str] = []
+        client = await self._build_authenticated_client()
+        try:
+            for order_id in request.order_ids:
+                try:
+                    await asyncio.to_thread(client.cancel_order, order_id)
+                    canceled.append(order_id)
+                except Exception:
+                    not_canceled.append(order_id)
+        finally:
+            client.close()
         return gateway_pb2.PolymarketCancelResponse(
-            canceled=canceled,
-            not_canceled=not_canceled,
-            success=len(not_canceled) == 0,
+            canceled=canceled, not_canceled=not_canceled, success=not not_canceled
         )
 
     async def CancelAll(
@@ -900,29 +879,23 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         request: gateway_pb2.PolymarketCancelAllRequest,
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketCancelResponse:
-        """Cancel all orders."""
-        params = {}
-        if request.market_id:
-            params["market"] = request.market_id
-        if request.asset_id:
-            params["asset_id"] = request.asset_id
-
-        success, data, error = await self._request(
-            "DELETE",
-            CLOB_BASE_URL,
-            "/cancel-all",
-            params=params if params else None,
-            authenticated=True,
-        )
-
-        if not success:
-            return gateway_pb2.PolymarketCancelResponse(success=False, error=error or "")
-
-        return gateway_pb2.PolymarketCancelResponse(
-            canceled=data.get("canceled", []) if data else [],
-            not_canceled=data.get("not_canceled", []) if data else [],
-            success=True,
-        )
+        """Cancel all orders, optionally scoped to market_id and/or asset_id."""
+        client = await self._build_authenticated_client()
+        try:
+            open_orders = await asyncio.to_thread(
+                client.get_open_orders, OrderFilters(market=request.market_id or None)
+            )
+            # Apply asset_id filter client-side (OpenOrder.market stores the token/asset id).
+            if request.asset_id:
+                open_orders = [o for o in open_orders if o.market == request.asset_id]
+            order_ids = [order.order_id for order in open_orders]
+            if order_ids:
+                await asyncio.to_thread(client.cancel_orders, order_ids)
+            return gateway_pb2.PolymarketCancelResponse(canceled=order_ids, not_canceled=[], success=True)
+        except Exception as e:
+            return gateway_pb2.PolymarketCancelResponse(success=False, error=str(e))
+        finally:
+            client.close()
 
     # =========================================================================
     # Position and Trade RPCs
@@ -934,32 +907,30 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketPositionsResponse:
         """Get positions for the wallet."""
-        success, data, error = await self._request(
-            "GET",
-            CLOB_BASE_URL,
-            "/positions",
-            authenticated=True,
-        )
+        try:
+            client = await self._build_authenticated_client()
+            try:
+                data = await asyncio.to_thread(client.get_positions)
+            finally:
+                client.close()
+        except Exception as e:
+            return gateway_pb2.PolymarketPositionsResponse(success=False, error=str(e))
 
-        if not success:
-            return gateway_pb2.PolymarketPositionsResponse(success=False, error=error or "")
-
-        positions = []
-        items_list: list[dict] = (
-            data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
-        )
-        for p in items_list:
-            positions.append(
-                gateway_pb2.PolymarketPosition(
-                    asset=p.get("asset", ""),
-                    condition_id=p.get("conditionId", ""),
-                    size=str(p.get("size", "0")),
-                    avg_price=str(p.get("avgPrice", "0")),
-                    realized_pnl=str(p.get("realizedPnl", "0")),
-                    cur_price=str(p.get("curPrice", "0")),
-                )
+        positions = [
+            gateway_pb2.PolymarketPosition(
+                asset=p.token_id,
+                condition_id=p.condition_id,
+                size=str(p.size),
+                avg_price=str(p.avg_price),
+                realized_pnl=str(p.realized_pnl),
+                cur_price=str(p.current_price),
+                market_id=p.market_id,
+                token_id=p.token_id,
+                outcome=p.outcome,
+                market_question=p.market_question,
             )
-
+            for p in data
+        ]
         return gateway_pb2.PolymarketPositionsResponse(positions=positions, success=True)
 
     async def GetOpenOrders(
@@ -968,44 +939,31 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketOpenOrdersResponse:
         """Get open orders."""
-        params = {}
-        if request.market_id:
-            params["market"] = request.market_id
-        if request.asset_id:
-            params["asset_id"] = request.asset_id
-
-        success, data, error = await self._request(
-            "GET",
-            CLOB_BASE_URL,
-            "/orders",
-            params=params if params else None,
-            authenticated=True,
-        )
-
-        if not success:
-            return gateway_pb2.PolymarketOpenOrdersResponse(success=False, error=error or "")
-
-        orders = []
-        orders_list: list[dict] = (
-            data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
-        )
-        for o in orders_list:
-            orders.append(
-                gateway_pb2.PolymarketOpenOrder(
-                    order_id=o.get("id", o.get("order_id", "")),
-                    market=o.get("market", ""),
-                    asset_id=o.get("asset_id", ""),
-                    side=o.get("side", ""),
-                    price=str(o.get("price", "0")),
-                    original_size=str(o.get("original_size", "0")),
-                    size_matched=str(o.get("size_matched", "0")),
-                    outcome=o.get("outcome", ""),
-                    status=o.get("status", ""),
-                    expiration=str(o.get("expiration", "")),
-                    created_at=o.get("created_at", ""),
+        try:
+            client = await self._build_authenticated_client()
+            try:
+                data = await asyncio.to_thread(
+                    client.get_open_orders,
+                    OrderFilters(market=request.market_id or None),
                 )
-            )
+            finally:
+                client.close()
+        except Exception as e:
+            return gateway_pb2.PolymarketOpenOrdersResponse(success=False, error=str(e))
 
+        orders = [
+            gateway_pb2.PolymarketOpenOrder(
+                order_id=o.order_id,
+                market=o.market,
+                side=o.side,
+                price=str(o.price),
+                original_size=str(o.size),
+                size_matched=str(o.filled_size),
+                expiration=str(o.expiration or ""),
+                created_at=o.created_at.isoformat() if o.created_at else "",
+            )
+            for o in data
+        ]
         return gateway_pb2.PolymarketOpenOrdersResponse(orders=orders, success=True)
 
     async def GetTradesHistory(
@@ -1068,33 +1026,25 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketOrderInfoResponse:
         """Get a specific order by ID."""
-        success, data, error = await self._request(
-            "GET",
-            CLOB_BASE_URL,
-            f"/order/{request.order_id}",
-            authenticated=True,
-        )
-
-        if not success or not data:
-            return gateway_pb2.PolymarketOrderInfoResponse(success=False, error=error or "Order not found")
-
-        associate_trades = data.get("associate_trades", [])
-        trades_json = json.dumps(associate_trades) if associate_trades else ""
-
+        try:
+            client = await self._build_authenticated_client()
+            try:
+                data = await asyncio.to_thread(client.get_order, request.order_id)
+            finally:
+                client.close()
+        except Exception as e:
+            return gateway_pb2.PolymarketOrderInfoResponse(success=False, error=str(e))
+        if data is None:
+            return gateway_pb2.PolymarketOrderInfoResponse(success=False, error="Order not found")
         return gateway_pb2.PolymarketOrderInfoResponse(
-            order_id=data.get("id", data.get("order_id", "")),
-            market=data.get("market", ""),
-            asset_id=data.get("asset_id", ""),
-            side=data.get("side", ""),
-            price=str(data.get("price", "0")),
-            original_size=str(data.get("original_size", "0")),
-            size_matched=str(data.get("size_matched", "0")),
-            status=data.get("status", ""),
-            outcome=data.get("outcome", ""),
-            owner=data.get("owner", ""),
-            expiration=str(data.get("expiration", "")),
-            created_at=data.get("created_at", ""),
-            associate_trades_json=trades_json,
+            order_id=data.order_id,
+            market=data.market,
+            side=data.side,
+            price=str(data.price),
+            original_size=str(data.size),
+            size_matched=str(data.filled_size),
+            expiration=str(data.expiration or ""),
+            created_at=data.created_at.isoformat() if data.created_at else "",
             success=True,
         )
 

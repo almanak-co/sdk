@@ -85,6 +85,15 @@ class GatewaySettings(BaseSettings):
     signer_service_url: str | None = None  # Remote signer service URL (zodiac mode)
     signer_service_jwt: str | None = None  # Remote signer service JWT (zodiac mode)
 
+    # Polymarket gateway-owned credentials/configuration. These are optional:
+    # local EOA mode derives the signer from the gateway execution identity and
+    # lazy-derives L2 credentials automatically when absent.
+    polymarket_wallet_address: str | None = None
+    polymarket_private_key: str | None = None
+    polymarket_api_key: str | None = None
+    polymarket_secret: str | None = None
+    polymarket_passphrase: str | None = None
+
     # State persistence
     database_url: str | None = None
 
@@ -155,6 +164,33 @@ class GatewaySettings(BaseSettings):
             fallback = os.environ.get("ALMANAK_SIGNER_SERVICE_JWT")
             if fallback:
                 self.signer_service_jwt = fallback
+
+        if not self.polymarket_wallet_address:
+            fallback = os.environ.get("POLYMARKET_WALLET_ADDRESS") or os.environ.get(
+                "ALMANAK_POLYMARKET_WALLET_ADDRESS"
+            )
+            if fallback:
+                self.polymarket_wallet_address = fallback
+
+        if not self.polymarket_private_key:
+            fallback = os.environ.get("POLYMARKET_PRIVATE_KEY") or os.environ.get("ALMANAK_POLYMARKET_PRIVATE_KEY")
+            if fallback:
+                self.polymarket_private_key = fallback
+
+        if not self.polymarket_api_key:
+            fallback = os.environ.get("POLYMARKET_API_KEY") or os.environ.get("ALMANAK_POLYMARKET_API_KEY")
+            if fallback:
+                self.polymarket_api_key = fallback
+
+        if not self.polymarket_secret:
+            fallback = os.environ.get("POLYMARKET_SECRET") or os.environ.get("ALMANAK_POLYMARKET_SECRET")
+            if fallback:
+                self.polymarket_secret = fallback
+
+        if not self.polymarket_passphrase:
+            fallback = os.environ.get("POLYMARKET_PASSPHRASE") or os.environ.get("ALMANAK_POLYMARKET_PASSPHRASE")
+            if fallback:
+                self.polymarket_passphrase = fallback
 
         # Third-party API keys: the deployer and docker-compose inject these
         # under their bare names (e.g. ALCHEMY_API_KEY, not

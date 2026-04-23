@@ -1,13 +1,8 @@
-"""Tests for the Polymarket prediction provider init helper (VIB-3132).
+"""Tests for the Polymarket prediction provider init helper.
 
-PM Exp 14 surfaced a silent failure mode: a Polygon strategy declaring
-``polymarket`` as a supported protocol could enter the run loop with an
-uninitialised prediction provider when ``POLYMARKET_*`` env vars were
-missing. The failure was logged at ``DEBUG`` so end-users only saw a
-silent HOLD until they re-ran with ``--verbose``.
-
-The helper now fails-fast for strategies that declare polymarket support
-and warns (not debugs) for strategies that merely run on Polygon.
+The provider is now gateway-backed. Strategies that declare
+``polymarket`` support must fail-fast when no connected gateway client is
+available; opportunistic Polygon users get a warning instead.
 """
 
 from __future__ import annotations
@@ -30,45 +25,36 @@ def _make_strategy(supported_protocols: list[str] | None) -> SimpleNamespace:
     return strategy
 
 
-@pytest.fixture
-def clear_polymarket_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("POLYMARKET_WALLET_ADDRESS", "POLYMARKET_PRIVATE_KEY"):
-        monkeypatch.delenv(var, raising=False)
+def _make_gateway_client(*, is_connected: bool) -> SimpleNamespace:
+    return SimpleNamespace(is_connected=is_connected)
 
 
 class TestInitPredictionProviderFailFast:
     """Strategies declaring polymarket protocol must fail-fast on init failure."""
 
-    def test_polymarket_strategy_missing_env_raises_runtimeerror(self, clear_polymarket_env):
+    def test_polymarket_strategy_missing_gateway_raises_runtimeerror(self):
         strategy = _make_strategy(supported_protocols=["polymarket"])
 
         with pytest.raises(RuntimeError) as exc_info:
             _init_prediction_provider(strategy, chain="polygon")
 
-        # Error message names the strategy and enumerates missing env vars.
         msg = str(exc_info.value)
         assert "test_strategy" in msg
-        assert "POLYMARKET_WALLET_ADDRESS" in msg
-        assert "POLYMARKET_PRIVATE_KEY" in msg
+        assert "initialization failed" in msg
         assert strategy._prediction_provider is None
 
-    def test_polymarket_strategy_partial_env_raises_runtimeerror(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        # Wallet set, key missing → still required, still fail-fast.
-        monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", "0xabc")
-        monkeypatch.delenv("POLYMARKET_PRIVATE_KEY", raising=False)
+    def test_polymarket_strategy_disconnected_gateway_raises_runtimeerror(self):
         strategy = _make_strategy(supported_protocols=["polymarket"])
+        gateway_client = _make_gateway_client(is_connected=False)
 
         with pytest.raises(RuntimeError) as exc_info:
-            _init_prediction_provider(strategy, chain="polygon")
+            _init_prediction_provider(strategy, chain="polygon", gateway_client=gateway_client)
 
         msg = str(exc_info.value)
-        assert "POLYMARKET_PRIVATE_KEY" in msg
-        # Already-set var should not be in the missing list.
-        assert "POLYMARKET_WALLET_ADDRESS" not in msg.split("Missing required env vars:")[1]
+        assert "test_strategy" in msg
+        assert "initialization failed" in msg
 
-    def test_polymarket_strategy_fails_fast_on_non_polygon_chain(self, clear_polymarket_env):
+    def test_polymarket_strategy_fails_fast_on_non_polygon_chain(self):
         """Multi-chain strategy declaring polymarket fails-fast even on a non-Polygon
         chain (CodeRabbit catch on PR #1567): the old polygon-only gate at the call
         site let multi-chain polymarket strategies silently HOLD.
@@ -86,7 +72,7 @@ class TestInitPredictionProviderWarns:
     """Non-polymarket strategies on Polygon get a warning (was DEBUG)."""
 
     def test_non_polymarket_strategy_missing_env_warns(
-        self, clear_polymarket_env, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture
     ):
         strategy = _make_strategy(supported_protocols=["aave_v3"])
 
@@ -97,7 +83,7 @@ class TestInitPredictionProviderWarns:
         assert strategy._prediction_provider is None
 
     def test_no_metadata_strategy_on_polygon_warns_does_not_raise(
-        self, clear_polymarket_env, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture
     ):
         # A strategy with no STRATEGY_METADATA at all → can't declare polymarket
         # support, so warn rather than fail-fast.
@@ -113,7 +99,7 @@ class TestInitPredictionProviderSkips:
     """Helper no-ops for non-polymarket strategies on non-Polygon chains."""
 
     def test_non_polymarket_non_polygon_skips_silently(
-        self, clear_polymarket_env, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture
     ):
         """An aave_v3 strategy on arbitrum has no business importing Polymarket
         — the helper should return early without warning or raising.
@@ -127,7 +113,7 @@ class TestInitPredictionProviderSkips:
         assert strategy._prediction_provider is None
 
     def test_no_metadata_non_polygon_skips_silently(
-        self, clear_polymarket_env, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture
     ):
         strategy = _make_strategy(supported_protocols=None)
 
@@ -138,30 +124,23 @@ class TestInitPredictionProviderSkips:
 
 
 class TestInitPredictionProviderHappyPath:
-    """When env is present and clients construct cleanly the provider is wired."""
+    """When the gateway is connected and clients construct cleanly the provider is wired."""
 
-    def test_provider_assigned_when_init_succeeds(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", "0x" + "a" * 40)
-        monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0x" + "b" * 64)
+    def test_provider_assigned_when_init_succeeds(self):
         strategy = _make_strategy(supported_protocols=["polymarket"])
+        gateway_client = _make_gateway_client(is_connected=True)
 
         sentinel_provider = object()
 
         with (
-            patch(
-                "almanak.framework.connectors.polymarket.PolymarketConfig.from_env"
-            ) as mock_from_env,
-            patch("almanak.framework.connectors.polymarket.ClobClient") as mock_clob,
+            patch("almanak.framework.connectors.polymarket.gateway_client.GatewayPolymarketClient") as mock_clob,
             patch(
                 "almanak.framework.data.prediction_provider.PredictionMarketDataProvider"
             ) as mock_pmdp,
         ):
-            mock_from_env.return_value = object()
             mock_clob.return_value = object()
             mock_pmdp.return_value = sentinel_provider
 
-            _init_prediction_provider(strategy, chain="polygon")
+            _init_prediction_provider(strategy, chain="polygon", gateway_client=gateway_client)
 
         assert strategy._prediction_provider is sentinel_provider

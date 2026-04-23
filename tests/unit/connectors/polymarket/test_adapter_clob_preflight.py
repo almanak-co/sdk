@@ -32,7 +32,6 @@ from almanak.framework.connectors.polymarket import (
     PolymarketConfig,
     SignatureType,
 )
-from almanak.framework.connectors.polymarket.clob_client import ClobClient
 from almanak.framework.connectors.polymarket.exceptions import (
     PolymarketInvalidPrecisionError,
     PolymarketInvalidTickSizeError,
@@ -136,34 +135,20 @@ def adapter(
     config: PolymarketConfig,
     test_market: GammaMarket,
 ) -> PolymarketAdapter:
-    """Adapter with the CLOB mocked for validation-only checks.
+    """Adapter with a mocked client for validation-only checks.
 
-    The ``_validate_tick_size`` and ``_validate_order_value_usd`` methods are
-    wired to real ``ClobClient`` implementations so the adapter's pre-flight
-    raises the same exceptions the post-sign path would — but
-    ``create_and_sign_limit_order`` is stubbed so the happy-path tests don't
-    try to actually sign anything.
+    Pre-flight validation now lives on the adapter itself (not the CLOB client),
+    so we only need to mock the market-resolution and position-query methods.
+    ``create_and_sign_limit_order`` is stubbed for backwards compatibility but
+    is no longer called by the adapter's compile path.
     """
     adapter = PolymarketAdapter.__new__(PolymarketAdapter)
     adapter.config = config
+    adapter.wallet_address = config.wallet_address
     adapter.web3 = None
     adapter._market_cache = {}
 
     mock_clob = MagicMock()
-    # Wire the validators to real ClobClient implementations so preflight
-    # raises the exact CLOB error text (bound to a throwaway client instance
-    # so we don't need credentials).
-    real = ClobClient.__new__(ClobClient)
-    mock_clob._validate_tick_size = real._validate_tick_size.__get__(real, ClobClient)
-    mock_clob._validate_order_value_usd = real._validate_order_value_usd.__get__(
-        real, ClobClient
-    )
-    # round_price_to_tick is called by the adapter AFTER preflight; in these
-    # tests the price is already on the tick grid in happy paths, so the
-    # identity passthrough is correct. Failure-mode tests never reach it.
-    mock_clob.round_price_to_tick.side_effect = (
-        lambda price, side, market=None, tick_size=None: price
-    )
     mock_clob.get_market.return_value = test_market
     mock_clob.get_market_by_slug.return_value = test_market
     mock_clob.get_positions.return_value = []
@@ -171,6 +156,7 @@ def adapter(
     mock_clob.get_or_create_credentials.return_value = MagicMock(api_key="test-api-key")
     mock_clob.credentials.api_key = "test-api-key"
 
+    adapter.client = mock_clob
     adapter.clob = mock_clob
     adapter.ctf = MagicMock()
     return adapter
@@ -298,7 +284,6 @@ class TestBuyBelowMinimumOrderValue:
         # Exact live-CLOB phrase (VIB-3141 greps for this).
         assert "invalid amount for a marketable BUY order" in error
         assert "min size: $1" in error
-        adapter.clob.create_and_sign_limit_order.assert_not_called()
 
     def test_buy_at_one_dollar_notional_passes(
         self,
@@ -317,7 +302,7 @@ class TestBuyBelowMinimumOrderValue:
 
         assert "error" not in bundle.metadata
         assert bundle.intent_type == IntentType.PREDICTION_BUY.value
-        adapter.clob.create_and_sign_limit_order.assert_called_once()
+        assert "order_request" in bundle.metadata
 
     def test_sell_not_subject_to_dollar_floor(
         self,
@@ -472,7 +457,8 @@ class TestHappyPaths:
         assert bundle.intent_type == IntentType.PREDICTION_BUY.value
         assert bundle.metadata["side"] == "BUY"
         assert bundle.metadata["price"] == "0.65"
-        adapter.clob.create_and_sign_limit_order.assert_called_once()
+        assert "order_request" in bundle.metadata
+        assert bundle.metadata["order_request"]["side"] == "BUY"
 
     def test_valid_sell_limit_compiles(
         self,
@@ -495,7 +481,8 @@ class TestHappyPaths:
         assert bundle.intent_type == IntentType.PREDICTION_SELL.value
         assert bundle.metadata["side"] == "SELL"
         assert bundle.metadata["price"] == "0.70"
-        adapter.clob.create_and_sign_limit_order.assert_called_once()
+        assert "order_request" in bundle.metadata
+        assert bundle.metadata["order_request"]["side"] == "SELL"
 
     def test_valid_buy_market_subtype_compiles(
         self,
@@ -521,7 +508,7 @@ class TestHappyPaths:
 
         assert "error" not in bundle.metadata
         assert bundle.metadata["order_type"] == "IOC"  # elevated market->limit
-        adapter.clob.create_and_sign_limit_order.assert_called_once()
+        assert "order_request" in bundle.metadata
 
     def test_valid_sell_market_subtype_compiles(
         self,
@@ -541,7 +528,7 @@ class TestHappyPaths:
 
         assert "error" not in bundle.metadata
         assert bundle.metadata["order_type"] == "IOC"
-        adapter.clob.create_and_sign_limit_order.assert_called_once()
+        assert "order_request" in bundle.metadata
 
 
 # =============================================================================

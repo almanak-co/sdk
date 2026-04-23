@@ -3886,14 +3886,18 @@ class PolymarketGetMarketRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     CONDITION_ID_FIELD_NUMBER: _builtins.int
+    SLUG_FIELD_NUMBER: _builtins.int
     condition_id: _builtins.str
-    """Market condition ID"""
+    """Backward-compatible alias for market ID"""
+    slug: _builtins.str
+    """Optional market slug"""
     def __init__(
         self,
         *,
         condition_id: _builtins.str = ...,
+        slug: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["condition_id", b"condition_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["condition_id", b"condition_id", "slug", b"slug"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PolymarketGetMarketRequest: _TypeAlias = PolymarketGetMarketRequest  # noqa: Y015
@@ -3916,6 +3920,27 @@ class PolymarketMarketResponse(_message.Message):
     MINIMUM_TICK_SIZE_FIELD_NUMBER: _builtins.int
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    QUESTION_FIELD_NUMBER: _builtins.int
+    SLUG_FIELD_NUMBER: _builtins.int
+    OUTCOMES_FIELD_NUMBER: _builtins.int
+    OUTCOME_PRICES_FIELD_NUMBER: _builtins.int
+    CLOB_TOKEN_IDS_FIELD_NUMBER: _builtins.int
+    VOLUME_FIELD_NUMBER: _builtins.int
+    VOLUME_24HR_FIELD_NUMBER: _builtins.int
+    LIQUIDITY_FIELD_NUMBER: _builtins.int
+    END_DATE_FIELD_NUMBER: _builtins.int
+    ENABLE_ORDER_BOOK_FIELD_NUMBER: _builtins.int
+    MAKER_BASE_FEE_BPS_FIELD_NUMBER: _builtins.int
+    TAKER_BASE_FEE_BPS_FIELD_NUMBER: _builtins.int
+    BEST_BID_FIELD_NUMBER: _builtins.int
+    BEST_ASK_FIELD_NUMBER: _builtins.int
+    LAST_TRADE_PRICE_FIELD_NUMBER: _builtins.int
+    EVENT_ID_FIELD_NUMBER: _builtins.int
+    EVENT_SLUG_FIELD_NUMBER: _builtins.int
+    GROUP_SLUG_FIELD_NUMBER: _builtins.int
+    TAGS_FIELD_NUMBER: _builtins.int
+    RAW_JSON_FIELD_NUMBER: _builtins.int
     condition_id: _builtins.str
     question_id: _builtins.str
     rewards_daily_rate: _builtins.str
@@ -3929,10 +3954,36 @@ class PolymarketMarketResponse(_message.Message):
     minimum_tick_size: _builtins.str
     success: _builtins.bool
     error: _builtins.str
+    market_id: _builtins.str
+    question: _builtins.str
+    slug: _builtins.str
+    volume: _builtins.str
+    volume_24hr: _builtins.str
+    liquidity: _builtins.str
+    end_date: _builtins.str
+    enable_order_book: _builtins.bool
+    maker_base_fee_bps: _builtins.str
+    taker_base_fee_bps: _builtins.str
+    best_bid: _builtins.str
+    best_ask: _builtins.str
+    last_trade_price: _builtins.str
+    event_id: _builtins.str
+    event_slug: _builtins.str
+    group_slug: _builtins.str
+    raw_json: _builtins.str
+    """Full Gamma market payload"""
     @_builtins.property
     def tokens(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
         """Token IDs for outcomes"""
 
+    @_builtins.property
+    def outcomes(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def outcome_prices(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def clob_token_ids(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def tags(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     def __init__(
         self,
         *,
@@ -3950,8 +4001,29 @@ class PolymarketMarketResponse(_message.Message):
         minimum_tick_size: _builtins.str = ...,
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+        question: _builtins.str = ...,
+        slug: _builtins.str = ...,
+        outcomes: _abc.Iterable[_builtins.str] | None = ...,
+        outcome_prices: _abc.Iterable[_builtins.str] | None = ...,
+        clob_token_ids: _abc.Iterable[_builtins.str] | None = ...,
+        volume: _builtins.str = ...,
+        volume_24hr: _builtins.str = ...,
+        liquidity: _builtins.str = ...,
+        end_date: _builtins.str = ...,
+        enable_order_book: _builtins.bool = ...,
+        maker_base_fee_bps: _builtins.str = ...,
+        taker_base_fee_bps: _builtins.str = ...,
+        best_bid: _builtins.str = ...,
+        best_ask: _builtins.str = ...,
+        last_trade_price: _builtins.str = ...,
+        event_id: _builtins.str = ...,
+        event_slug: _builtins.str = ...,
+        group_slug: _builtins.str = ...,
+        tags: _abc.Iterable[_builtins.str] | None = ...,
+        raw_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepting_order_timestamp", b"accepting_order_timestamp", "accepting_orders", b"accepting_orders", "active", b"active", "closed", b"closed", "condition_id", b"condition_id", "error", b"error", "minimum_order_size", b"minimum_order_size", "minimum_tick_size", b"minimum_tick_size", "question_id", b"question_id", "rewards_daily_rate", b"rewards_daily_rate", "rewards_max_spread", b"rewards_max_spread", "rewards_min_size", b"rewards_min_size", "success", b"success", "tokens", b"tokens"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepting_order_timestamp", b"accepting_order_timestamp", "accepting_orders", b"accepting_orders", "active", b"active", "best_ask", b"best_ask", "best_bid", b"best_bid", "clob_token_ids", b"clob_token_ids", "closed", b"closed", "condition_id", b"condition_id", "enable_order_book", b"enable_order_book", "end_date", b"end_date", "error", b"error", "event_id", b"event_id", "event_slug", b"event_slug", "group_slug", b"group_slug", "last_trade_price", b"last_trade_price", "liquidity", b"liquidity", "maker_base_fee_bps", b"maker_base_fee_bps", "market_id", b"market_id", "minimum_order_size", b"minimum_order_size", "minimum_tick_size", b"minimum_tick_size", "outcome_prices", b"outcome_prices", "outcomes", b"outcomes", "question", b"question", "question_id", b"question_id", "raw_json", b"raw_json", "rewards_daily_rate", b"rewards_daily_rate", "rewards_max_spread", b"rewards_max_spread", "rewards_min_size", b"rewards_min_size", "slug", b"slug", "success", b"success", "tags", b"tags", "taker_base_fee_bps", b"taker_base_fee_bps", "tokens", b"tokens", "volume", b"volume", "volume_24hr", b"volume_24hr"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PolymarketMarketResponse: _TypeAlias = PolymarketMarketResponse  # noqa: Y015
@@ -3961,14 +4033,18 @@ class PolymarketGetMarketsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     NEXT_CURSOR_FIELD_NUMBER: _builtins.int
+    FILTERS_JSON_FIELD_NUMBER: _builtins.int
     next_cursor: _builtins.str
     """Pagination cursor (optional)"""
+    filters_json: _builtins.str
+    """JSON-encoded MarketFilters payload"""
     def __init__(
         self,
         *,
         next_cursor: _builtins.str = ...,
+        filters_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["next_cursor", b"next_cursor"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["filters_json", b"filters_json", "next_cursor", b"next_cursor"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PolymarketGetMarketsRequest: _TypeAlias = PolymarketGetMarketsRequest  # noqa: Y015
@@ -4418,6 +4494,10 @@ class PolymarketOrderResponse(_message.Message):
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
     ERROR_CODE_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    SIZE_FIELD_NUMBER: _builtins.int
+    AVG_FILL_PRICE_FIELD_NUMBER: _builtins.int
+    CREATED_AT_FIELD_NUMBER: _builtins.int
     order_id: _builtins.str
     status: _builtins.str
     """"LIVE", "MATCHED", "CANCELLED", etc."""
@@ -4426,6 +4506,10 @@ class PolymarketOrderResponse(_message.Message):
     success: _builtins.bool
     error: _builtins.str
     error_code: _builtins.str
+    price: _builtins.str
+    size: _builtins.str
+    avg_fill_price: _builtins.str
+    created_at: _builtins.str
     def __init__(
         self,
         *,
@@ -4436,8 +4520,12 @@ class PolymarketOrderResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
         error_code: _builtins.str = ...,
+        price: _builtins.str = ...,
+        size: _builtins.str = ...,
+        avg_fill_price: _builtins.str = ...,
+        created_at: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_code", b"error_code", "order_id", b"order_id", "size_matched", b"size_matched", "status", b"status", "success", b"success", "transact_time", b"transact_time"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["avg_fill_price", b"avg_fill_price", "created_at", b"created_at", "error", b"error", "error_code", b"error_code", "order_id", b"order_id", "price", b"price", "size", b"size", "size_matched", b"size_matched", "status", b"status", "success", b"success", "transact_time", b"transact_time"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PolymarketOrderResponse: _TypeAlias = PolymarketOrderResponse  # noqa: Y015
@@ -4550,6 +4638,10 @@ class PolymarketPosition(_message.Message):
     AVG_PRICE_FIELD_NUMBER: _builtins.int
     REALIZED_PNL_FIELD_NUMBER: _builtins.int
     CUR_PRICE_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    TOKEN_ID_FIELD_NUMBER: _builtins.int
+    OUTCOME_FIELD_NUMBER: _builtins.int
+    MARKET_QUESTION_FIELD_NUMBER: _builtins.int
     asset: _builtins.str
     """Token ID"""
     condition_id: _builtins.str
@@ -4557,6 +4649,10 @@ class PolymarketPosition(_message.Message):
     avg_price: _builtins.str
     realized_pnl: _builtins.str
     cur_price: _builtins.str
+    market_id: _builtins.str
+    token_id: _builtins.str
+    outcome: _builtins.str
+    market_question: _builtins.str
     def __init__(
         self,
         *,
@@ -4566,8 +4662,12 @@ class PolymarketPosition(_message.Message):
         avg_price: _builtins.str = ...,
         realized_pnl: _builtins.str = ...,
         cur_price: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+        token_id: _builtins.str = ...,
+        outcome: _builtins.str = ...,
+        market_question: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset", b"asset", "avg_price", b"avg_price", "condition_id", b"condition_id", "cur_price", b"cur_price", "realized_pnl", b"realized_pnl", "size", b"size"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset", b"asset", "avg_price", b"avg_price", "condition_id", b"condition_id", "cur_price", b"cur_price", "market_id", b"market_id", "market_question", b"market_question", "outcome", b"outcome", "realized_pnl", b"realized_pnl", "size", b"size", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PolymarketPosition: _TypeAlias = PolymarketPosition  # noqa: Y015

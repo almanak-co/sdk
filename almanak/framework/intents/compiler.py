@@ -407,8 +407,18 @@ class IntentCompiler:
 
         return normalize_protocol(self.chain, intent_protocol)
 
+    def _ensure_polymarket_adapter(self) -> None:
+        """Retry adapter init if gateway has connected since construction."""
+        if self._polymarket_adapter is not None:
+            return
+        if self.chain.lower() != "polygon":
+            return
+        if self._gateway_client is None or not self._gateway_client.is_connected:
+            return
+        self._init_polymarket_adapter()
+
     def _init_polymarket_adapter(self) -> None:
-        """Initialize Polymarket adapter if on Polygon and config is available.
+        """Initialize the Polymarket adapter for gateway-backed Polygon intents.
 
         This method lazily initializes the PolymarketAdapter for prediction market
         intents. The adapter is only initialized when:
@@ -421,36 +431,37 @@ class IntentCompiler:
 
         This lazy initialization ensures:
         - Non-Polygon usage is unaffected (no import overhead)
-        - Missing config is handled gracefully
-        - Clear error messages when prediction intents are attempted without config
+        - Missing gateway connectivity is handled gracefully
+        - Clear error messages when prediction intents are attempted without a
+          gateway-backed Polymarket client
         """
         # Only initialize for Polygon chain
         if self.chain.lower() != "polygon":
             return
 
-        # Check if config is provided -- silently skip if not.
-        # VIB-307: Warning deferred to compile time so non-prediction strategies on Polygon
-        # don't see noisy Polymarket warnings at startup.
-        polymarket_config = self._config.polymarket_config
-        if polymarket_config is None:
-            return
-
         # Lazy import to avoid circular imports and allow optional usage
         try:
             from ..connectors.polymarket.adapter import PolymarketAdapter
+            from ..connectors.polymarket.gateway_client import GatewayPolymarketClient
 
-            # Initialize web3 for redemption intents if rpc_url is available
-            web3_instance = None
-            if self.rpc_url:
-                from web3 import Web3
+            if self._gateway_client is None or not self._gateway_client.is_connected:
+                return
 
-                if self._web3 is None:
-                    self._web3 = Web3(Web3.HTTPProvider(self.rpc_url))
-                web3_instance = self._web3
-                logger.debug("Web3 instance initialized for PolymarketAdapter (redemption support enabled)")
+            from web3 import Web3
 
-            self._polymarket_adapter = PolymarketAdapter(polymarket_config, web3=web3_instance)
-            logger.info(f"PolymarketAdapter initialized for wallet={polymarket_config.wallet_address[:10]}...")
+            from ..web3.gateway_provider import GatewayWeb3Provider
+
+            if self._web3 is None:
+                self._web3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self.chain))
+            web3_instance = self._web3
+            polymarket_client = GatewayPolymarketClient(self._gateway_client)
+
+            self._polymarket_adapter = PolymarketAdapter(
+                client=polymarket_client,
+                wallet_address=self.wallet_address,
+                web3=web3_instance,
+            )
+            logger.info("PolymarketAdapter initialized for wallet=%s...", self.wallet_address[:10])
         except ImportError as e:
             logger.warning(f"Failed to import PolymarketAdapter: {e}. Prediction market intents will not be available.")
         except Exception as e:
@@ -6581,6 +6592,7 @@ class IntentCompiler:
         Returns:
             CompilationResult with prediction buy ActionBundle
         """
+        self._ensure_polymarket_adapter()
         # Check if adapter is available
         if self._polymarket_adapter is None:
             if self.chain.lower() != "polygon":
@@ -6591,15 +6603,12 @@ class IntentCompiler:
                 )
             # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
             # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning(
-                "PredictionBuyIntent requires polymarket_config in IntentCompilerConfig. "
-                "Provide polymarket_config to enable prediction market intents on Polygon."
-            )
+            logger.warning("PredictionBuyIntent requires a gateway-backed Polymarket client on Polygon.")
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
                     "PolymarketAdapter not initialized. "
-                    "Provide polymarket_config in IntentCompilerConfig to enable prediction intents."
+                    "Connect the compiler to the gateway to enable prediction intents."
                 ),
                 intent_id=intent.intent_id,
             )
@@ -6652,6 +6661,7 @@ class IntentCompiler:
         Returns:
             CompilationResult with prediction sell ActionBundle
         """
+        self._ensure_polymarket_adapter()
         # Check if adapter is available
         if self._polymarket_adapter is None:
             if self.chain.lower() != "polygon":
@@ -6662,15 +6672,12 @@ class IntentCompiler:
                 )
             # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
             # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning(
-                "PredictionSellIntent requires polymarket_config in IntentCompilerConfig. "
-                "Provide polymarket_config to enable prediction market intents on Polygon."
-            )
+            logger.warning("PredictionSellIntent requires a gateway-backed Polymarket client on Polygon.")
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
                     "PolymarketAdapter not initialized. "
-                    "Provide polymarket_config in IntentCompilerConfig to enable prediction intents."
+                    "Connect the compiler to the gateway to enable prediction intents."
                 ),
                 intent_id=intent.intent_id,
             )
@@ -6723,6 +6730,7 @@ class IntentCompiler:
         """
         from ..connectors.polymarket.exceptions import PolymarketMarketNotResolvedError
 
+        self._ensure_polymarket_adapter()
         # Check if adapter is available
         if self._polymarket_adapter is None:
             if self.chain.lower() != "polygon":
@@ -6733,15 +6741,12 @@ class IntentCompiler:
                 )
             # VIB-307: Warn at compile time (not at init) so non-prediction Polygon strategies
             # don't see this warning unless they actually attempt a prediction intent.
-            logger.warning(
-                "PredictionRedeemIntent requires polymarket_config in IntentCompilerConfig. "
-                "Provide polymarket_config to enable prediction market intents on Polygon."
-            )
+            logger.warning("PredictionRedeemIntent requires a gateway-backed Polymarket client on Polygon.")
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
                     "PolymarketAdapter not initialized. "
-                    "Provide polymarket_config in IntentCompilerConfig to enable prediction intents."
+                    "Connect the compiler to the gateway to enable prediction intents."
                 ),
                 intent_id=intent.intent_id,
             )

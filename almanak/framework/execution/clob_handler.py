@@ -524,7 +524,7 @@ class ClobActionHandler:
         Detection criteria:
         1. metadata["protocol"] == "polymarket"
         2. transactions list is empty (CLOB orders are off-chain)
-        3. metadata["order_payload"] exists
+        3. metadata["order_payload"] or metadata["order_request"] exists
 
         This method implements the ExecutionHandler protocol interface.
 
@@ -543,7 +543,7 @@ class ClobActionHandler:
             return False
 
         # Must have order payload for CLOB submission
-        if "order_payload" not in bundle.metadata:
+        if "order_payload" not in bundle.metadata and "order_request" not in bundle.metadata:
             return False
 
         return True
@@ -551,8 +551,8 @@ class ClobActionHandler:
     async def execute(self, bundle: "ActionBundle") -> ClobExecutionResult:
         """Execute a CLOB order from an ActionBundle.
 
-        The order payload is extracted from bundle.metadata["order_payload"]
-        and submitted to the CLOB API.
+        The order request is extracted from bundle metadata and submitted
+        through the configured Polymarket client.
 
         Args:
             bundle: ActionBundle containing the order payload
@@ -575,7 +575,8 @@ class ClobActionHandler:
                 error="CLOB client not configured",
             )
 
-        order_payload = bundle.metadata.get("order_payload", {})
+        order_payload = bundle.metadata.get("order_payload")
+        order_request = bundle.metadata.get("order_request", {})
         intent_id = bundle.metadata.get("intent_id")
         requested_size = _parse_decimal(bundle.metadata.get("size"))
         order_type_hint = str(bundle.metadata.get("order_type", "")).upper()
@@ -593,9 +594,25 @@ class ClobActionHandler:
                 },
             )
 
-            # Call CLOB client to submit the order using the payload dict
-            # submit_order_payload accepts the pre-built payload from the adapter
-            order_response = self._clob.submit_order_payload(order_payload)
+            if order_payload is not None:
+                order_response = self._clob.submit_order_payload(order_payload)
+            else:
+                req_price = _parse_decimal(order_request.get("price"))
+                req_size = _parse_decimal(order_request.get("size"))
+                if req_price is None or req_size is None:
+                    raise ValueError(
+                        f"order_request is missing required price or size fields: "
+                        f"price={order_request.get('price')!r}, size={order_request.get('size')!r}"
+                    )
+                order_response = self._clob.create_and_post_order(
+                    token_id=str(order_request.get("token_id", "")),
+                    price=req_price,
+                    size=req_size,
+                    side=str(order_request.get("side", "")),
+                    time_in_force=str(order_request.get("time_in_force", bundle.metadata.get("order_type", "GTC"))),
+                    expiration=int(order_request.get("expiration", 0) or 0),
+                    fee_rate_bps=str(order_request.get("fee_rate_bps", "0")),
+                )
 
             # VIB-3218: propagate filled_size / avg_fill_price so the runner
             # can build a PredictionFill on the ExecutionResult and strategies

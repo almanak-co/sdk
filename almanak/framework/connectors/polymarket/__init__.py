@@ -84,6 +84,7 @@ from .exceptions import (
     PolymarketRedemptionError,
     PolymarketSignatureError,
 )
+from .gateway_client import GatewayPolymarketClient
 from .market_making import (
     MAX_PRICE as MM_MAX_PRICE,
 )
@@ -199,6 +200,7 @@ from .signals import (
 __all__ = [
     # Clients & SDK
     "ClobClient",
+    "GatewayPolymarketClient",
     "CtfSDK",
     "PolymarketSDK",
     # Rate Limiting

@@ -1,13 +1,4 @@
-"""Tests for Polymarket Adapter.
-
-Tests cover:
-- Intent compilation for PredictionBuyIntent
-- Intent compilation for PredictionSellIntent
-- Intent compilation for PredictionRedeemIntent
-- Market resolution by ID and slug
-- Order parameter calculation
-- Error handling
-"""
+"""Tests for the gateway-compatible Polymarket adapter."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -164,10 +155,9 @@ def mock_web3():
 
 
 @pytest.fixture
-def adapter_with_mocks(config, mock_clob_client, mock_ctf_sdk, mock_web3):
+def adapter_with_mocks(test_wallet, mock_clob_client, mock_ctf_sdk, mock_web3):
     """Create adapter with mocked dependencies."""
-    adapter = PolymarketAdapter(config, web3=mock_web3)
-    adapter.clob = mock_clob_client
+    adapter = PolymarketAdapter(mock_clob_client, wallet_address=test_wallet, web3=mock_web3)
     adapter.ctf = mock_ctf_sdk
     return adapter
 
@@ -230,7 +220,7 @@ class TestBuyIntentCompilation:
         assert bundle.metadata["outcome"] == "YES"
         assert bundle.metadata["side"] == "BUY"
         assert bundle.metadata["protocol"] == "polymarket"
-        assert "order_payload" in bundle.metadata
+        assert "order_request" in bundle.metadata
 
     def test_compile_buy_intent_with_shares(self, adapter_with_mocks, test_market):
         """Test compiling a buy with shares. max_price is required (VIB-3131)."""
@@ -280,8 +270,6 @@ class TestBuyIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_called_once()
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
         assert bundle.metadata["price"] == "0.65"
 
     def test_buy_intent_without_max_price_returns_error_bundle(self, adapter_with_mocks, test_market):
@@ -300,8 +288,6 @@ class TestBuyIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
         assert "error" in bundle.metadata
         assert "max_price is required" in bundle.metadata["error"]
 
@@ -350,11 +336,6 @@ class TestBuyIntentCompilation:
         (vs. user-intended 10/0.0135 ≈ 740). The snap should only affect the
         submission price, not the share count.
         """
-        # Configure round_price_to_tick to actually snap (mock returns floor-to-0.01)
-        adapter_with_mocks.clob.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: (
-            Decimal("0.01")
-        )
-
         intent = PredictionBuyIntent(
             market_id=test_market.id,
             outcome="YES",
@@ -364,14 +345,8 @@ class TestBuyIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        # size = amount_usd / pre-snap max_price = 10 / 0.0135 ≈ 740.74
-        # (NOT 10 / 0.01 = 1000 which would silently inflate the position 35%)
-        size_str = bundle.metadata["size"]
-        size = Decimal(size_str)
-        expected = Decimal("10") / Decimal("0.0135")
-        assert size == expected, f"size {size} != pre-snap-derived {expected}"
-        # Snapped price went into submission
-        assert bundle.metadata["price"] == "0.01"
+        assert "error" in bundle.metadata
+        assert "minimum tick size rule" in bundle.metadata["error"]
 
     def test_compile_buy_intent_no_outcome(self, adapter_with_mocks, test_market):
         """Test compiling buy for NO outcome. max_price required (VIB-3131)."""
@@ -389,8 +364,8 @@ class TestBuyIntentCompilation:
 
     def test_compile_buy_intent_with_slug(self, adapter_with_mocks, test_market):
         """Test compiling buy intent using market slug. max_price required (VIB-3131)."""
-        adapter_with_mocks.clob.get_market.side_effect = Exception("Not found")
-        adapter_with_mocks.clob.get_market_by_slug.return_value = test_market
+        adapter_with_mocks.client.get_market.side_effect = Exception("Not found")
+        adapter_with_mocks.client.get_market_by_slug.return_value = test_market
 
         intent = PredictionBuyIntent(
             market_id=test_market.slug,
@@ -402,12 +377,12 @@ class TestBuyIntentCompilation:
         bundle = adapter_with_mocks.compile_intent(intent)
 
         assert bundle.metadata["market_id"] == test_market.id
-        adapter_with_mocks.clob.get_market_by_slug.assert_called()
+        adapter_with_mocks.client.get_market_by_slug.assert_called()
 
     def test_compile_buy_intent_market_not_found(self, adapter_with_mocks):
         """Test buy intent with non-existent market."""
-        adapter_with_mocks.clob.get_market.side_effect = Exception("Not found")
-        adapter_with_mocks.clob.get_market_by_slug.return_value = None
+        adapter_with_mocks.client.get_market.side_effect = Exception("Not found")
+        adapter_with_mocks.client.get_market_by_slug.return_value = None
 
         intent = PredictionBuyIntent(
             market_id="nonexistent-market",
@@ -463,7 +438,7 @@ class TestSellIntentCompilation:
         position = MagicMock()
         position.token_id = test_market.yes_token_id
         position.size = Decimal("100")
-        adapter_with_mocks.clob.get_positions.return_value = [position]
+        adapter_with_mocks.client.get_positions.return_value = [position]
 
         intent = PredictionSellIntent(
             market_id=test_market.id,
@@ -490,8 +465,6 @@ class TestSellIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
         assert "error" in bundle.metadata
         assert "min_price is required" in bundle.metadata["error"]
 
@@ -502,7 +475,7 @@ class TestSellIntentCompilation:
         Without this guard, VIB-3131 enforcement would be nondeterministic in
         common teardown/dry-run flows where positions are not yet open.
         """
-        adapter_with_mocks.clob.get_positions.return_value = []
+        adapter_with_mocks.client.get_positions.return_value = []
 
         intent = PredictionSellIntent(
             market_id=test_market.id,
@@ -512,8 +485,6 @@ class TestSellIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_not_called()
         # Must be the min_price error, NOT "No position to sell".
         assert "error" in bundle.metadata
         assert "min_price is required" in bundle.metadata["error"]
@@ -521,7 +492,7 @@ class TestSellIntentCompilation:
 
     def test_compile_sell_intent_no_position(self, adapter_with_mocks, test_market):
         """Test sell intent with valid min_price but no position to sell."""
-        adapter_with_mocks.clob.get_positions.return_value = []
+        adapter_with_mocks.client.get_positions.return_value = []
 
         intent = PredictionSellIntent(
             market_id=test_market.id,
@@ -564,8 +535,6 @@ class TestSellIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.create_and_sign_limit_order.assert_called_once()
-        adapter_with_mocks.clob.create_and_sign_market_order.assert_not_called()
         # Elevation must use IOC, not GTC, to preserve fail-fast immediacy
         assert bundle.metadata["order_type"] == "IOC"
         assert bundle.metadata["price"] == "0.70"
@@ -574,11 +543,6 @@ class TestSellIntentCompilation:
         """Off-tick ``min_price`` (e.g. 0.7035 on a 0.01-tick market) must be
         snapped via ``round_price_to_tick`` before submission. Mirror of the
         BUY off-tick test on the SELL side."""
-        # SELL rounds UP (ceiling) — mock the snap to return the next tick up
-        adapter_with_mocks.clob.round_price_to_tick.side_effect = lambda price, side, market=None, tick_size=None: (
-            Decimal("0.71")
-        )
-
         intent = PredictionSellIntent(
             market_id=test_market.id,
             outcome="YES",
@@ -588,9 +552,8 @@ class TestSellIntentCompilation:
 
         bundle = adapter_with_mocks.compile_intent(intent)
 
-        adapter_with_mocks.clob.round_price_to_tick.assert_called()
-        # Submitted at the snapped price
-        assert bundle.metadata["price"] == "0.71"
+        assert "error" in bundle.metadata
+        assert "minimum tick size rule" in bundle.metadata["error"]
 
 
 # =============================================================================
@@ -641,14 +604,10 @@ class TestRedeemIntentCompilation:
         with pytest.raises(PolymarketMarketNotResolvedError):
             adapter_with_mocks.compile_intent(intent)
 
-    def test_compile_redeem_intent_no_web3(self, config, mock_clob_client, test_market):
+    def test_compile_redeem_intent_no_web3(self, test_wallet, mock_clob_client, test_market):
         """Test redeem intent without Web3 instance."""
-        adapter = PolymarketAdapter.__new__(PolymarketAdapter)
-        adapter.config = config
-        adapter.web3 = None
-        adapter.clob = mock_clob_client
+        adapter = PolymarketAdapter(mock_clob_client, wallet_address=test_wallet, web3=None)
         adapter.ctf = MagicMock()
-        adapter._market_cache = {}
 
         intent = PredictionRedeemIntent(
             market_id=test_market.id,
@@ -673,12 +632,12 @@ class TestMarketResolution:
         market = adapter_with_mocks._resolve_market(test_market.id)
 
         assert market.id == test_market.id
-        adapter_with_mocks.clob.get_market.assert_called_with(test_market.id)
+        adapter_with_mocks.client.get_market.assert_called_with(test_market.id)
 
     def test_resolve_market_by_slug(self, adapter_with_mocks, test_market):
         """Test resolving market by slug."""
-        adapter_with_mocks.clob.get_market.side_effect = Exception("Not by ID")
-        adapter_with_mocks.clob.get_market_by_slug.return_value = test_market
+        adapter_with_mocks.client.get_market.side_effect = Exception("Not by ID")
+        adapter_with_mocks.client.get_market_by_slug.return_value = test_market
 
         market = adapter_with_mocks._resolve_market(test_market.slug)
 
@@ -688,18 +647,18 @@ class TestMarketResolution:
         """Test that resolved markets are cached."""
         # First resolution
         market1 = adapter_with_mocks._resolve_market(test_market.id)
-        call_count = adapter_with_mocks.clob.get_market.call_count
+        call_count = adapter_with_mocks.client.get_market.call_count
 
         # Second resolution (should use cache)
         market2 = adapter_with_mocks._resolve_market(test_market.id)
 
         assert market1 == market2
-        assert adapter_with_mocks.clob.get_market.call_count == call_count
+        assert adapter_with_mocks.client.get_market.call_count == call_count
 
     def test_resolve_market_not_found(self, adapter_with_mocks):
         """Test market resolution when market doesn't exist."""
-        adapter_with_mocks.clob.get_market.side_effect = Exception("Not found")
-        adapter_with_mocks.clob.get_market_by_slug.return_value = None
+        adapter_with_mocks.client.get_market.side_effect = Exception("Not found")
+        adapter_with_mocks.client.get_market_by_slug.return_value = None
 
         with pytest.raises(PolymarketMarketNotFoundError):
             adapter_with_mocks._resolve_market("nonexistent")

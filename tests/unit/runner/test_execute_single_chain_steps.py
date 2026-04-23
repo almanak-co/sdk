@@ -10,7 +10,7 @@ driver plus per-phase step helpers:
 * ``_single_chain_slippage_guard`` (realized-slippage circuit-breaker)
 * ``_single_chain_handle_recon_incident`` (reconciliation-failure finalizer)
 * ``_single_chain_handle_success`` / ``_single_chain_handle_failure``
-* static helpers ``_build_single_chain_price_oracle`` / ``_build_polymarket_config``
+* static helper ``_build_single_chain_price_oracle``
 
 These tests exercise the small, deterministic pieces of each helper so
 regressions in the early-exit / mutation contract surface at unit level.
@@ -143,34 +143,6 @@ class TestBuildSingleChainPriceOracle:
         # ETH must have been pre-fetched; USDC was already present
         called = {call.args[0] for call in market.price.call_args_list}
         assert "ETH" in called
-
-
-# =============================================================================
-# _build_polymarket_config (static helper)
-# =============================================================================
-
-
-class TestBuildPolymarketConfig:
-    def test_non_polygon_returns_none(self) -> None:
-        assert StrategyRunner._build_polymarket_config("arbitrum") is None
-        assert StrategyRunner._build_polymarket_config("base") is None
-
-    def test_polygon_returns_config_when_available(self) -> None:
-        fake_config = SimpleNamespace(wallet_address="0xpolymarketwallet12345")
-        with patch(
-            "almanak.framework.connectors.polymarket.PolymarketConfig.from_env",
-            return_value=fake_config,
-        ):
-            assert StrategyRunner._build_polymarket_config("polygon") is fake_config
-            # Case insensitivity
-            assert StrategyRunner._build_polymarket_config("Polygon") is fake_config
-
-    def test_polygon_returns_none_when_config_fails_to_load(self) -> None:
-        with patch(
-            "almanak.framework.connectors.polymarket.PolymarketConfig.from_env",
-            side_effect=ValueError("missing env"),
-        ):
-            assert StrategyRunner._build_polymarket_config("polygon") is None
 
 
 # =============================================================================

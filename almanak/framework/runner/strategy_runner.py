@@ -2002,13 +2002,11 @@ class StrategyRunner:
         intent = state.intent
         strategy_id = state.strategy_id
 
-        # Detect gateway orchestrator and use its gateway client for RPC
-        from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
-
-        if isinstance(self.execution_orchestrator, GatewayExecutionOrchestrator):
-            # Use gateway client for RPC queries (preferred mode)
-            state.gateway_client = self.execution_orchestrator._client
-            logger.debug("Using GatewayExecutionOrchestrator - RPC queries go through gateway")
+        # Resolve gateway client from any available source (GatewayExecutionOrchestrator,
+        # MultiChainOrchestrator with _gateway_client, or explicit set_gateway_client()).
+        state.gateway_client = self._get_gateway_client()
+        if state.gateway_client is not None:
+            logger.debug("Gateway client available — RPC queries go through gateway")
         else:
             # Fallback to direct RPC (deprecated for production)
             state.rpc_url = getattr(self.execution_orchestrator, "rpc_url", None)
@@ -2020,15 +2018,12 @@ class StrategyRunner:
         # min_output calculations to be wrong (e.g., ETH at $2000 vs real $3117)
         state.price_oracle = self._build_single_chain_price_oracle(state.market, intent)
 
-        # Initialize Polymarket config for Polygon chain (prediction market support)
-        state.polymarket_config = self._build_polymarket_config(strategy.chain)
-
-        # Build CLOB handler for Polymarket prediction market execution
-        if state.polymarket_config is not None:
-            from ..connectors.polymarket.clob_client import ClobClient
+        # Build gateway-backed Polymarket execution handles for Polygon.
+        if strategy.chain.lower() == "polygon" and state.gateway_client is not None:
+            from ..connectors.polymarket.gateway_client import GatewayPolymarketClient
             from ..execution.clob_handler import ClobActionHandler
 
-            state.clob_client = ClobClient(state.polymarket_config)
+            state.clob_client = GatewayPolymarketClient(state.gateway_client)
             state.clob_handler = ClobActionHandler(clob_client=state.clob_client)
 
         # Build compiler config
@@ -2045,7 +2040,6 @@ class StrategyRunner:
             )
         compiler_config = IntentCompilerConfig(
             allow_placeholder_prices=state.price_oracle is None,
-            polymarket_config=state.polymarket_config,
         )
 
         state.compiler = IntentCompiler(
@@ -2131,27 +2125,6 @@ class StrategyRunner:
             return None
         logger.debug(f"Using real prices from market snapshot: {list(price_oracle.keys())}")
         return price_oracle
-
-    @staticmethod
-    def _build_polymarket_config(chain: str) -> Any | None:
-        """Load PolymarketConfig from env when chain is Polygon, else None."""
-        if chain.lower() != "polygon":
-            return None
-        try:
-            from ..connectors.polymarket import PolymarketConfig
-
-            polymarket_config = PolymarketConfig.from_env()
-            logger.info(
-                f"PolymarketConfig loaded for wallet={polymarket_config.wallet_address[:10]}... "
-                "(prediction market intents enabled)"
-            )
-            return polymarket_config
-        except (ImportError, ValueError) as e:
-            logger.debug(
-                f"PolymarketConfig not available: {e}. "
-                "Prediction market intents will not be available for this strategy."
-            )
-            return None
 
     async def _single_chain_state_machine_loop(self, state: SingleChainExecutionState) -> IterationResult | None:
         """Drive the IntentStateMachine until it reaches a terminal state.

@@ -7,8 +7,7 @@ coverage for: ``_init_single_chain_state``, ``_single_chain_state_machine_loop``
 ``_single_chain_slippage_guard``, ``_single_chain_handle_recon_incident``,
 ``_single_chain_handle_success``, ``_single_chain_handle_failure``,
 ``_single_chain_execute_clob``, ``_single_chain_execute_onchain``, plus the
-static helpers ``_build_single_chain_price_oracle`` and
-``_build_polymarket_config``.
+static helper ``_build_single_chain_price_oracle``.
 """
 
 from __future__ import annotations
@@ -124,21 +123,6 @@ class TestBuildPriceOracleExtended:
         market = SimpleNamespace(get_price_oracle_dict=lambda: {"USDC": Decimal("1"), "ETH": Decimal("2000")})
         result = StrategyRunner._build_single_chain_price_oracle(market, intent)
         assert result == {"USDC": Decimal("1"), "ETH": Decimal("2000")}
-
-
-# =============================================================================
-# _build_polymarket_config - extended
-# =============================================================================
-
-
-class TestBuildPolymarketConfigExtended:
-    def test_import_error_returns_none(self) -> None:
-        """ImportError when loading connector module also returns None."""
-        with patch(
-            "almanak.framework.connectors.polymarket.PolymarketConfig.from_env",
-            side_effect=ImportError("polymarket connector not installed"),
-        ):
-            assert StrategyRunner._build_polymarket_config("polygon") is None
 
 
 # =============================================================================

@@ -1751,7 +1751,7 @@ def _build_orchestrator_and_providers(
         # polymarket fail-fast on any chain; non-declarers on Polygon
         # get an opportunistic init with WARNING fallback.
         if hasattr(strategy_instance, "_prediction_provider"):
-            _init_prediction_provider(strategy_instance, chain=runtime_config.chain)
+            _init_prediction_provider(strategy_instance, chain=runtime_config.chain, gateway_client=gateway_client)
 
         # Initialize lending rate monitor
         if hasattr(strategy_instance, "_rate_monitor"):
