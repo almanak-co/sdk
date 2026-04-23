@@ -1,4 +1,4 @@
-"""Aave V3 Connector.
+"""Aave V3 Connector (pooled lending).
 
 This module provides an adapter for interacting with Aave V3 lending protocol,
 supporting supply, borrow, repay, withdraw, flash loans, E-Mode, isolation mode,

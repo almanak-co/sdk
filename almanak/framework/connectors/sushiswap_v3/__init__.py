@@ -1,4 +1,4 @@
-"""SushiSwap V3 Connector Package.
+"""SushiSwap V3 Connector Package (concentrated liquidity AMM).
 
 This package provides the SushiSwap V3 protocol integration for the Almanak
 Strategy Framework, including SDK, adapter, and receipt parser.

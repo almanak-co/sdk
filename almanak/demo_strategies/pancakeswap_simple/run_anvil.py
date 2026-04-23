@@ -287,6 +287,16 @@ def run_strategy_via_cli(config: dict) -> int:
 
 def main():
     """Run the PancakeSwap simple strategy on Anvil."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run PancakeSwap V3 simple strategy on Anvil")
+    parser.add_argument(
+        "--skip-cli",
+        action="store_true",
+        help="Skip CLI execution (only fund wallet). Keeps Anvil running while this process lives.",
+    )
+    args = parser.parse_args()
+
     print("=" * 70)
     print("PancakeSwap V3 Simple Strategy - Anvil Test")
     print("=" * 70)
@@ -305,6 +315,20 @@ def main():
         sys.exit(1)
 
     try:
+        # In --skip-cli mode (CI sidecar regression), the gateway is started
+        # AFTER this script. Skip the gateway-running precondition, fund the
+        # wallet, then block on input() to keep Anvil alive.
+        if args.skip_cli:
+            try:
+                fund_wallet_with_weth(Decimal("1.0"))
+            except Exception as e:
+                print(f"\nERROR: Failed to fund WETH: {e}")
+                sys.exit(1)
+            print("\n--skip-cli flag set, stopping before CLI execution")
+            print("Wallet has been funded. You can now test manually.")
+            input("Press Enter to stop Anvil...")
+            sys.exit(0)
+
         # Check if gateway is running (required)
         import socket
 

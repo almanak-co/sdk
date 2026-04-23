@@ -164,20 +164,30 @@ class AnvilManager:
 # =============================================================================
 
 
-def fund_wallet_with_token(token_address: str, token_symbol: str, amount: Decimal, decimals: int = 18) -> None:
+def fund_wallet_with_token(
+    token_address: str,
+    token_symbol: str,
+    amount: Decimal,
+    decimals: int = 18,
+    balance_slot: int = 0,
+) -> None:
     """Fund test wallet with a token using cast commands.
 
     Funds on the port that the gateway will use (8549 for Ethereum).
     This ensures the gateway sees the funded balance.
+
+    balance_slot is the storage slot of the ERC-20's `balances` mapping.
+    Defaults to 0 (common), but some tokens use a different slot
+    (e.g. native USDC on Ethereum is slot 9).
     """
     logger.info(f"Funding wallet with {amount} {token_symbol} on gateway's Ethereum port ({ETHEREUM_ANVIL_PORT})...")
 
     amount_wei = int(amount * 10**decimals)
 
     try:
-        # Use cast index to find storage slot (most ERC20s use slot 0 for balances mapping)
+        # Compute the storage key for balances[TEST_WALLET].
         result = subprocess.run(
-            ["cast", "index", "address", TEST_WALLET, "0"],
+            ["cast", "index", "address", TEST_WALLET, str(balance_slot)],
             capture_output=True,
             text=True,
             check=True,
@@ -234,13 +244,13 @@ def fund_wallet_with_token(token_address: str, token_symbol: str, amount: Decima
 
 
 def fund_wallet_with_wsteth(amount: Decimal) -> None:
-    """Fund test wallet with wstETH."""
-    fund_wallet_with_token(WSTETH_ADDRESS, "wstETH", amount, decimals=18)
+    """Fund test wallet with wstETH (balances mapping at slot 0)."""
+    fund_wallet_with_token(WSTETH_ADDRESS, "wstETH", amount, decimals=18, balance_slot=0)
 
 
 def fund_wallet_with_usdc(amount: Decimal) -> None:
-    """Fund test wallet with USDC."""
-    fund_wallet_with_token(USDC_ADDRESS, "USDC", amount, decimals=6)
+    """Fund test wallet with native USDC on Ethereum (balances mapping at slot 9)."""
+    fund_wallet_with_token(USDC_ADDRESS, "USDC", amount, decimals=6, balance_slot=9)
 
 
 def check_anvil_connection() -> Web3 | None:
@@ -432,6 +442,11 @@ Prerequisites:
         choices=["supply", "borrow", "repay", "all"],
         help="Action to test (default: all)",
     )
+    parser.add_argument(
+        "--skip-cli",
+        action="store_true",
+        help="Skip CLI execution (only fund wallet). Keeps Anvil running while this process lives.",
+    )
     return parser.parse_args()
 
 
@@ -458,6 +473,22 @@ def main():
         sys.exit(1)
 
     try:
+        # In --skip-cli mode (CI sidecar regression), the gateway is started
+        # AFTER this script runs. Skip the gateway-running precondition and
+        # fund both tokens so whichever action the caller invokes next has
+        # what it needs.
+        if args.skip_cli:
+            try:
+                fund_wallet_with_wsteth(Decimal("1.0"))
+                fund_wallet_with_usdc(Decimal("500"))
+            except Exception as e:
+                print(f"\nERROR: Funding failed: {e}")
+                sys.exit(1)
+            print("\n--skip-cli flag set, stopping before CLI execution")
+            print("Wallet has been funded. You can now test manually.")
+            input("Press Enter to stop Anvil...")
+            sys.exit(0)
+
         # Check if gateway is running (required)
         import socket
 

@@ -1,4 +1,4 @@
-"""Aerodrome Finance Connector.
+"""Aerodrome Finance Connector (Base L2).
 
 This package provides integration with Aerodrome Finance, a Solidly-based
 AMM on Base chain. Aerodrome supports dual pool types:

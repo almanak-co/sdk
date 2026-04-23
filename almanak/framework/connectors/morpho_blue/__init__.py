@@ -1,4 +1,4 @@
-"""Morpho Blue Connector.
+"""Morpho Blue Connector (isolated lending markets).
 
 This module provides adapters and utilities for interacting with Morpho Blue,
 a permissionless lending protocol that allows creating isolated lending markets.

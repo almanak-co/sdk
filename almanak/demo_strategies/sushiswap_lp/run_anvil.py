@@ -858,6 +858,11 @@ def main():
         default="all",
         help="Test action to run (default: all)",
     )
+    parser.add_argument(
+        "--skip-cli",
+        action="store_true",
+        help="Skip CLI execution (only fund wallet). Keeps Anvil running while this process lives.",
+    )
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
@@ -895,6 +900,14 @@ def main():
         if not fund_wallet_with_usdc(ANVIL_WALLET, FUND_AMOUNT_USDC):
             print("Failed to fund wallet with USDC")
             sys.exit(1)
+
+        # Skip CLI if requested (CI sidecar regression uses this to keep Anvil
+        # alive while the strategy runs separately under the socket sandbox).
+        if args.skip_cli:
+            print("\n--skip-cli flag set, stopping before CLI execution")
+            print("Wallet has been funded. You can now test manually.")
+            input("Press Enter to stop Anvil...")
+            sys.exit(0)
 
         results = {}
 

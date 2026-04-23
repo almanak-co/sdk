@@ -1,4 +1,4 @@
-"""Uniswap V3 Connector.
+"""Uniswap V3 Connector (concentrated liquidity AMM).
 
 This module provides the Uniswap V3 adapter for executing token swaps
 on Uniswap V3 across multiple chains.

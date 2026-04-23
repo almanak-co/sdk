@@ -191,7 +191,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
 
     Configuration Parameters (from config.json):
     --------------------------------------------
-    - pool: Pool identifier (e.g., "WETH/USDC.e/500")
+    - pool: Pool identifier (e.g., "WETH/USDC/500")
     - range_width_pct: Total width of price range (0.20 = 20%)
     - amount0: Amount of token0 to provide (e.g., "0.1" WETH)
     - amount1: Amount of token1 to provide (e.g., "340" USDC)
@@ -201,7 +201,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     Example Config:
     ---------------
     {
-        "pool": "WETH/USDC.e/500",
+        "pool": "WETH/USDC/500",
         "range_width_pct": 0.20,
         "amount0": "0.1",
         "amount1": "340",

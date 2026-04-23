@@ -72,7 +72,7 @@ Edit `config.json` to customize the strategy:
 
 ```json
 {
-    "pool": "WETH/USDC.e/500",     // Pool: TOKEN0/TOKEN1/FEE_TIER
+    "pool": "WETH/USDC/500",       // Pool: TOKEN0/TOKEN1/FEE_TIER (native USDC on Arbitrum)
     "range_width_pct": 0.20,       // 20% total range width (±10%)
     "amount0": "0.1",              // WETH amount to deposit
     "amount1": "340",              // USDC amount to deposit
@@ -108,7 +108,7 @@ The `range_width_pct` determines how concentrated your liquidity is:
 )
 class UniswapLPStrategy(IntentStrategy):
     def __init__(self, config, chain, wallet_address):
-        self.pool = config.get("pool", "WETH/USDC.e/500")
+        self.pool = config.get("pool", "WETH/USDC/500")
         self.range_width_pct = config.get("range_width_pct", 0.20)
         ...
 ```
@@ -123,7 +123,7 @@ def _create_open_intent(self, current_price):
     range_upper = current_price * (1 + half_width)  # e.g., 3740
 
     return Intent.lp_open(
-        pool="WETH/USDC.e/500",
+        pool="WETH/USDC/500",
         amount0=Decimal("0.1"),      # WETH
         amount1=Decimal("340"),      # USDC
         range_lower=range_lower,
@@ -138,7 +138,7 @@ def _create_open_intent(self, current_price):
 def _create_close_intent(self, position_id):
     return Intent.lp_close(
         position_id=position_id,
-        pool="WETH/USDC.e/500",
+        pool="WETH/USDC/500",
         collect_fees=True,  # Collect accumulated fees
         protocol="uniswap_v3",
     )

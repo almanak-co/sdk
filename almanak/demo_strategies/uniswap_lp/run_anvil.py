@@ -66,11 +66,12 @@ ANVIL_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 ANVIL_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 # Arbitrum mainnet token addresses
-USDC_ADDRESS = "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"  # USDC.e (bridged)
+USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # native USDC (CCTP)
 WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 
-# Whale addresses for funding
-USDC_WHALE = "0x489ee077994B6658eAfA855C308275EAd8097C4A"  # Aave V3 pool
+# ERC-20 `balances` mapping storage slot per token (Arbitrum).
+# Native USDC on Arbitrum is at slot 9 (matches tests/intents conftest).
+USDC_BALANCE_SLOT = 9
 
 # Amounts to fund
 FUND_AMOUNT_USDC = 1000  # 1000 USDC
@@ -172,7 +173,12 @@ def parse_cast_uint(output: str) -> int:
 
 
 def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
-    """Fund wallet with USDC by impersonating a whale."""
+    """Fund wallet with native USDC via anvil_setStorageAt on the balances slot.
+
+    Slot-based funding is chosen here (vs whale-impersonation) because it does
+    not depend on any specific whale's balance at the pinned fork block, and
+    mirrors what tests/intents/arbitrum uses.
+    """
     print(f"\n{'=' * 60}")
     print(f"FUNDING WALLET WITH {amount_usdc} USDC")
     print(f"{'=' * 60}")
@@ -180,78 +186,23 @@ def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
     amount_wei = amount_usdc * 10**6
 
     try:
-        # Check whale balance
-        balance = run_cast(
-            [
-                "call",
-                USDC_ADDRESS,
-                "balanceOf(address)(uint256)",
-                USDC_WHALE,
-                "--rpc-url",
-                ANVIL_RPC,
-            ]
-        )
-        whale_balance = parse_cast_uint(balance)
-        print(f"Whale USDC balance: {whale_balance / 10**6:,.2f}")
-
-        if whale_balance < amount_wei:
-            print("ERROR: Whale has insufficient USDC")
-            return False
-
-        # Give whale ETH for gas
+        # Compute storage key = keccak256(abi.encode(wallet, slot)).
+        storage_key = run_cast(["index", "address", wallet, str(USDC_BALANCE_SLOT)])
+        # Pad amount to 32 bytes.
+        storage_value = "0x" + format(amount_wei, "064x")
         run_cast(
             [
                 "rpc",
-                "anvil_setBalance",
-                USDC_WHALE,
-                "0x56BC75E2D63100000",
-                "--rpc-url",
-                ANVIL_RPC,
-            ],
-            check=False,
-        )
-
-        # Impersonate and transfer
-        run_cast(
-            [
-                "rpc",
-                "anvil_impersonateAccount",
-                USDC_WHALE,
-                "--rpc-url",
-                ANVIL_RPC,
-            ],
-            check=False,
-        )
-
-        run_cast(
-            [
-                "send",
+                "anvil_setStorageAt",
                 USDC_ADDRESS,
-                "transfer(address,uint256)(bool)",
-                wallet,
-                str(amount_wei),
-                "--from",
-                USDC_WHALE,
-                "--unlocked",
-                "--gas-limit",
-                "100000",
+                storage_key,
+                storage_value,
                 "--rpc-url",
                 ANVIL_RPC,
             ]
         )
 
-        run_cast(
-            [
-                "rpc",
-                "anvil_stopImpersonatingAccount",
-                USDC_WHALE,
-                "--rpc-url",
-                ANVIL_RPC,
-            ],
-            check=False,
-        )
-
-        # Verify
+        # Verify.
         balance = run_cast(
             [
                 "call",
@@ -367,7 +318,7 @@ def run_strategy_via_cli(force_action: str = "open", position_id: str | None = N
     config = {
         "strategy_id": "demo_uniswap_lp",
         "strategy_name": "demo_uniswap_lp",
-        "pool": "WETH/USDC.e/500",
+        "pool": "WETH/USDC/500",
         "range_width_pct": 0.20,
         "amount0": "0.1",  # 0.1 WETH
         "amount1": "340",  # 340 USDC (roughly matching at $3400/ETH)
@@ -443,6 +394,11 @@ def main():
         default=None,
         help="Position ID for close action",
     )
+    parser.add_argument(
+        "--skip-cli",
+        action="store_true",
+        help="Skip CLI execution (only fund wallet). Keeps Anvil running while this process lives.",
+    )
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
@@ -478,6 +434,14 @@ def main():
         if not fund_wallet_with_weth(ANVIL_WALLET, FUND_AMOUNT_WETH):
             print("Failed to fund wallet with WETH")
             sys.exit(1)
+
+        # Skip CLI if requested (CI sidecar regression uses this to keep Anvil
+        # alive while the strategy runs separately under the socket sandbox).
+        if args.skip_cli:
+            print("\n--skip-cli flag set, stopping before CLI execution")
+            print("Wallet has been funded. You can now test manually.")
+            input("Press Enter to stop Anvil...")
+            sys.exit(0)
 
         # Run strategy via CLI
         exit_code = run_strategy_via_cli(

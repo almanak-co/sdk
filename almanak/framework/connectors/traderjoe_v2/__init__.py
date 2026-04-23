@@ -1,4 +1,4 @@
-"""TraderJoe Liquidity Book V2 Connector.
+"""TraderJoe Liquidity Book V2 Connector (Avalanche).
 
 This module provides the TraderJoe V2 adapter for executing swaps and
 managing liquidity positions on TraderJoe V2's Liquidity Book on Avalanche.

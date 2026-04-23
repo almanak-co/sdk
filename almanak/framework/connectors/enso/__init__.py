@@ -1,4 +1,4 @@
-"""Enso Finance Protocol Connector.
+"""Enso Finance Protocol Connector (DEX aggregator + routing API).
 
 Enso is a routing and composable transaction protocol that aggregates
 liquidity across multiple DEXs and lending protocols.

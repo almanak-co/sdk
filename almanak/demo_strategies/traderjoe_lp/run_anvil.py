@@ -65,9 +65,9 @@ ANVIL_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 WAVAX_ADDRESS = "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
 USDC_ADDRESS = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"  # Native USDC on Avalanche
 
-# Whale addresses for funding (large holders on Avalanche)
-# Using Aave V3 pool as USDC whale
-USDC_WHALE = "0x625E7708f30cA75bfd92586e17077590C60eb4cD"  # Aave aUSDC on Avalanche
+# ERC-20 `balances` mapping storage slot per token (Avalanche).
+# Native USDC on Avalanche is at slot 9 (matches tests/intents conftest).
+USDC_BALANCE_SLOT = 9
 
 # Amounts to fund
 FUND_AMOUNT_USDC = 100  # 100 USDC
@@ -176,95 +176,39 @@ def parse_cast_uint(output: str) -> int:
 
 
 def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
-    """Fund wallet with USDC using whale impersonation (most reliable method)."""
+    """Fund wallet with native USDC via anvil_setStorageAt on the balances slot.
+
+    Slot-based funding is chosen here (vs whale-impersonation) because it does
+    not depend on any specific whale's balance at the pinned fork block, and
+    mirrors what tests/intents/avalanche uses. The previous impersonation flow
+    was silently producing 0-balance results in CI when the whale's holdings
+    didn't match expectations at the fork block, then continuing past
+    verification so the strategy then failed at pre-flight.
+    """
     print(f"\n{'=' * 60}")
     print(f"FUNDING WALLET WITH {amount_usdc} USDC")
     print(f"{'=' * 60}")
 
-    # Use impersonation method directly - it's more reliable
-    return fund_wallet_with_usdc_impersonate(wallet, amount_usdc)
-
-
-def fund_wallet_with_usdc_impersonate(wallet: str, amount_usdc: int) -> bool:
-    """Fund wallet with USDC by impersonating a whale (fallback)."""
-    print("Trying whale impersonation method...")
-
     amount_wei = amount_usdc * 10**6
 
     try:
-        # Check whale balance first
-        balance = run_cast(
+        # Compute storage key = keccak256(abi.encode(wallet, slot)).
+        storage_key = run_cast(["index", "address", wallet, str(USDC_BALANCE_SLOT)])
+        # Pad amount to 32 bytes.
+        storage_value = "0x" + format(amount_wei, "064x")
+        run_cast(
             [
-                "call",
+                "rpc",
+                "anvil_setStorageAt",
                 USDC_ADDRESS,
-                "balanceOf(address)(uint256)",
-                USDC_WHALE,
+                storage_key,
+                storage_value,
                 "--rpc-url",
                 ANVIL_RPC,
-            ],
-            check=False,
+            ]
         )
 
-        if balance:
-            whale_balance = parse_cast_uint(balance)
-            print(f"Whale USDC balance: {whale_balance / 10**6:,.2f}")
-
-            if whale_balance >= amount_wei:
-                # Give whale ETH for gas
-                run_cast(
-                    [
-                        "rpc",
-                        "anvil_setBalance",
-                        USDC_WHALE,
-                        "0x56BC75E2D63100000",
-                        "--rpc-url",
-                        ANVIL_RPC,
-                    ],
-                    check=False,
-                )
-
-                # Impersonate and transfer
-                run_cast(
-                    [
-                        "rpc",
-                        "anvil_impersonateAccount",
-                        USDC_WHALE,
-                        "--rpc-url",
-                        ANVIL_RPC,
-                    ],
-                    check=False,
-                )
-
-                run_cast(
-                    [
-                        "send",
-                        USDC_ADDRESS,
-                        "transfer(address,uint256)(bool)",
-                        wallet,
-                        str(amount_wei),
-                        "--from",
-                        USDC_WHALE,
-                        "--unlocked",
-                        "--gas-limit",
-                        "100000",
-                        "--rpc-url",
-                        ANVIL_RPC,
-                    ],
-                    check=False,
-                )
-
-                run_cast(
-                    [
-                        "rpc",
-                        "anvil_stopImpersonatingAccount",
-                        USDC_WHALE,
-                        "--rpc-url",
-                        ANVIL_RPC,
-                    ],
-                    check=False,
-                )
-
-        # Verify final balance
+        # Verify.
         balance = run_cast(
             [
                 "call",
@@ -276,12 +220,22 @@ def fund_wallet_with_usdc_impersonate(wallet: str, amount_usdc: int) -> bool:
             ]
         )
         new_balance = parse_cast_uint(balance)
-        print(f"Wallet USDC balance after funding: {new_balance / 10**6:,.2f}")
-        return new_balance >= amount_wei
+        print(f"Wallet USDC balance: {new_balance / 10**6:,.2f}")
+        if new_balance < amount_wei:
+            # Fail hard rather than returning False -- the caller historically
+            # treated this as "continuing anyway for testing", which let CI
+            # advertise readiness when the wallet was actually unfunded.
+            raise RuntimeError(
+                f"USDC funding verification failed: got {new_balance / 10**6}, "
+                f"expected at least {amount_usdc}"
+            )
+        return True
 
     except Exception as e:
-        print(f"ERROR: Impersonation method failed: {e}")
-        return False
+        # Re-raise so the outer try in main() catches and exits non-zero.
+        # Returning False here previously masked setup failures and let the
+        # demo proceed past the readiness marker with an empty wallet.
+        raise RuntimeError(f"Failed to fund wallet with USDC: {e}") from e
 
 
 def fund_wallet_with_wavax(wallet: str, amount_wavax: Decimal) -> bool:
@@ -556,8 +510,12 @@ def main():
             print("Failed to fund wallet with WAVAX")
             sys.exit(1)
 
-        if not fund_wallet_with_usdc(ANVIL_WALLET, FUND_AMOUNT_USDC):
-            print("Failed to fund wallet with USDC (continuing anyway for testing)")
+        # fund_wallet_with_usdc raises on any failure (verification or exception)
+        # so we don't need to check its return value -- main()'s outer except will
+        # propagate the failure to a non-zero exit. Previously this branch
+        # silently continued past USDC funding misses, which let CI advertise
+        # readiness even when the wallet was empty.
+        fund_wallet_with_usdc(ANVIL_WALLET, FUND_AMOUNT_USDC)
 
         # Run direct adapter test if requested
         if args.action == "test":

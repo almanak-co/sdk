@@ -1,4 +1,4 @@
-"""PancakeSwap V3 Connector.
+"""PancakeSwap V3 Connector (concentrated liquidity AMM).
 
 This module provides an adapter for interacting with PancakeSwap V3,
 which is a Uniswap V3 fork with different fee tiers and addresses.
