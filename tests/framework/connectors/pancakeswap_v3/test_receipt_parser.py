@@ -276,6 +276,19 @@ class TestPancakeSwapV3ExtractSwapAmounts:
             "data": "0x" + hex(amount)[2:].zfill(64),
         }
 
+    def _make_pcs_swap_log(self, pool_addr: str = "0x" + "ee" * 20) -> dict:
+        """Helper to build a minimal PancakeSwap V3 Swap log.
+
+        Topic-only presence is what ``_has_pcs_swap_log`` checks, so data
+        contents are not decoded by the gate. Required so the pipeline
+        recognizes the receipt as a real swap (CR PR #1798 gate).
+        """
+        return {
+            "address": pool_addr,
+            "topics": [EVENT_TOPICS["Swap"]],
+            "data": "0x" + "0" * 64,
+        }
+
     def test_extract_swap_amounts_uses_correct_decimals(self):
         """Test that USDC (6 decimals) is scaled correctly, not divided by 1e18."""
         from unittest.mock import MagicMock, patch
@@ -291,6 +304,7 @@ class TestPancakeSwapV3ExtractSwapAmounts:
             "status": 1,
             "logs": [
                 self._make_transfer_log(weth_addr, wallet, "0x" + "ee" * 20, 10**18),
+                self._make_pcs_swap_log(),
                 self._make_transfer_log(usdc_addr, "0x" + "ee" * 20, wallet, 5_000_000),
             ],
         }
@@ -358,6 +372,7 @@ class TestPancakeSwapV3ExtractSwapAmounts:
             "status": 1,
             "logs": [
                 self._make_transfer_log("0x" + "dd" * 20, wallet, "0x" + "ee" * 20, 10**18),
+                self._make_pcs_swap_log(),
                 self._make_transfer_log(unknown_token, "0x" + "ee" * 20, wallet, 5_000_000),
             ],
         }

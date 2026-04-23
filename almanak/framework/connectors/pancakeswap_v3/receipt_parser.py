@@ -150,6 +150,50 @@ class ParseResult:
 
 
 # =============================================================================
+# Internal swap-amount extraction state (Phase 8.4 refactor)
+#
+# These dataclasses are NOT part of the public API — they bundle state
+# between the per-phase helpers of ``extract_swap_amounts`` so each helper
+# stays small, pure, and individually testable. Mirrors the Phase 7.3
+# Aerodrome ``_SwapSeed`` and the Phase 6 UniV4 pattern.
+# =============================================================================
+
+
+@dataclass
+class _WalletTransfers:
+    """ERC-20 Transfer events partitioned by wallet involvement.
+
+    Each tuple is (token_address_lowercase, raw_amount_uint256).
+    """
+
+    from_wallet: list[tuple[str, int]]
+    to_wallet: list[tuple[str, int]]
+
+
+@dataclass
+class _SwapSeed:
+    """Raw (pre-decimal-scaling) swap amounts picked from wallet transfers."""
+
+    token_in: str
+    token_out: str
+    amount_in: int
+    amount_out: int
+
+
+@dataclass
+class _SwapDecimals:
+    """Resolved (maybe-partial) token decimals for a swap.
+
+    ``decimals_in`` is ``None`` when the input token could not be resolved —
+    preserves the legacy fail-open behavior on the input side (output is
+    fail-closed at the caller).
+    """
+
+    decimals_in: int | None
+    decimals_out: int
+
+
+# =============================================================================
 # Receipt Parser
 # =============================================================================
 
@@ -322,95 +366,246 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
-        """
-        from almanak.framework.execution.extracted_data import SwapAmounts
 
+        Implementation note:
+            Phase 8.4 — this is a thin orchestrator over per-phase helpers.
+            Each helper is individually testable and keeps CC bounded.
+            Preserves:
+            (1) wallet-level "first transfer out / last transfer in" semantics
+                for multi-hop disambiguation,
+            (2) SwapAmounts field surface,
+            (3) amount0/amount1 sign conventions (the parser is wallet-transfer
+                based and does not inspect Swap-event signs here — that path
+                runs on parse_receipt).
+        """
         try:
-            status = receipt.get("status", 0)
-            if isinstance(status, str):
-                status = int(status, 16) if status.startswith("0x") else int(status)
-            if status != 1:
+            if not self._swap_status_ok(receipt):
                 return None
 
-            raw_wallet = receipt.get("from") or ""
-            wallet = self._normalize_topic(raw_wallet) if raw_wallet else ""
+            # CodeRabbit review (PR #1798): guard against transfer-only
+            # receipts that happen to contain one wallet-out and one wallet-in
+            # ERC-20 Transfer but NO PancakeSwap V3 Swap event. Without this
+            # check, a plain ERC-20 transfer or an LP-add receipt (which can
+            # legitimately produce wallet Transfer logs) would be misclassified
+            # as a swap and pollute downstream PnL. Enforces the method-contract
+            # invariant "returns None if no swap event found".
+            if not self._has_pcs_swap_log(receipt):
+                return None
+
+            wallet = self._swap_wallet(receipt)
             if not wallet:
                 return None
 
-            logs = receipt.get("logs", [])
-            transfer_topic = self._normalize_topic(EVENT_TOPICS["Transfer"])
-            transfers_from_wallet: list[tuple[str, int]] = []
-            transfers_to_wallet: list[tuple[str, int]] = []
-
-            for log in logs:
-                topics = log.get("topics", [])
-                if not topics or len(topics) < 3:
-                    continue
-                topic0 = self._normalize_topic(topics[0])
-                if topic0 != transfer_topic:
-                    continue
-
-                log_from = HexDecoder.topic_to_address(topics[1])
-                log_to = HexDecoder.topic_to_address(topics[2])
-                data = HexDecoder.normalize_hex(log.get("data", ""))
-                if not data:
-                    continue
-                try:
-                    amount = HexDecoder.decode_uint256(data, 0)
-                except (ValueError, IndexError):
-                    continue
-
-                raw_token = log.get("address") or ""
-                token_address = self._normalize_topic(raw_token) if raw_token else ""
-                if log_from == wallet:
-                    transfers_from_wallet.append((token_address, amount))
-                if log_to == wallet:
-                    transfers_to_wallet.append((token_address, amount))
-
-            if not transfers_to_wallet:
+            transfers = self._collect_wallet_transfers(receipt, wallet)
+            seed = self._pick_swap_raw_amounts(transfers)
+            if seed is None:
                 return None
 
-            token_in_addr, amount_in = transfers_from_wallet[0] if transfers_from_wallet else ("", 0)
-            token_out_addr, amount_out = transfers_to_wallet[-1]
-
-            if amount_out == 0:
+            decimals = self._resolve_swap_decimals(seed)
+            if decimals is None:
                 return None
 
-            decimals_in = self._resolve_decimals(token_in_addr)
-            decimals_out = self._resolve_decimals(token_out_addr)
-
-            if decimals_out is None:
-                logger.warning("Cannot compute swap amounts: output token decimals unknown")
-                return None
-
-            amount_in_decimal = (
-                Decimal(amount_in) / Decimal(10**decimals_in) if (amount_in and decimals_in is not None) else Decimal(0)
-            )
-            amount_out_decimal = Decimal(amount_out) / Decimal(10**decimals_out)
-
-            effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
-
-            # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
-            slippage_bps: int | None = None
-            if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
-                realized = (expected_out - amount_out_decimal) / expected_out
-                slippage_bps = int(realized * Decimal(10_000))
-
-            return SwapAmounts(
-                amount_in=amount_in,
-                amount_out=amount_out,
-                amount_in_decimal=amount_in_decimal,
-                amount_out_decimal=amount_out_decimal,
-                effective_price=effective_price,
-                slippage_bps=slippage_bps,
-                expected_out_decimal=expected_out,
-                token_in=token_in_addr or None,
-                token_out=token_out_addr or None,
-            )
+            return self._build_swap_amounts(seed, decimals, expected_out)
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # extract_swap_amounts — per-phase helpers (Phase 8.4 refactor).
+    # Each is small, single-purpose, and independently testable.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _swap_status_ok(receipt: dict[str, Any]) -> bool:
+        """Return True iff ``receipt['status']`` is success (1).
+
+        Accepts int, decimal string, and hex string ('0x0' / '0x1').
+        """
+        status = receipt.get("status", 0)
+        if isinstance(status, str):
+            status = int(status, 16) if status.startswith("0x") else int(status)
+        return status == 1
+
+    def _has_pcs_swap_log(self, receipt: dict[str, Any]) -> bool:
+        """Return True iff the receipt contains at least one PCS V3 Swap log.
+
+        Cheap topic-only scan — does NOT decode the log data. Gatekeeps the
+        ``extract_swap_amounts`` pipeline against transfer-only receipts
+        (e.g. a plain ERC-20 Transfer, or an LP add that still has wallet
+        Transfer logs) so they cannot be misclassified as swaps.
+        """
+        swap_topic = self._normalize_topic(EVENT_TOPICS["Swap"])
+        for log in receipt.get("logs", []) or []:
+            topics = log.get("topics") or []
+            if not topics:
+                continue
+            if self._normalize_topic(topics[0]) == swap_topic:
+                return True
+        return False
+
+    def _swap_wallet(self, receipt: dict[str, Any]) -> str:
+        """Return the normalized wallet address from ``receipt['from']`` or ''."""
+        raw_wallet = receipt.get("from") or ""
+        return self._normalize_topic(raw_wallet) if raw_wallet else ""
+
+    def _collect_wallet_transfers(
+        self,
+        receipt: dict[str, Any],
+        wallet: str,
+    ) -> "_WalletTransfers":
+        """Scan logs once; split ERC-20 Transfers into wallet-out and wallet-in.
+
+        Per-log parsing is delegated to ``_parse_transfer_log`` so this loop
+        stays a thin classifier. Malformed Transfer data (non-hex, truncated)
+        is silently skipped by the parser — better to produce a partial-but-
+        sane result than crash on a stray log from an unrelated contract.
+        """
+        transfer_topic = self._normalize_topic(EVENT_TOPICS["Transfer"])
+        transfers_from_wallet: list[tuple[str, int]] = []
+        transfers_to_wallet: list[tuple[str, int]] = []
+
+        for log in receipt.get("logs", []):
+            parsed = self._parse_transfer_log(log, transfer_topic)
+            if parsed is None:
+                continue
+            log_from, log_to, token_address, amount = parsed
+            if log_from == wallet:
+                transfers_from_wallet.append((token_address, amount))
+            if log_to == wallet:
+                transfers_to_wallet.append((token_address, amount))
+
+        return _WalletTransfers(
+            from_wallet=transfers_from_wallet,
+            to_wallet=transfers_to_wallet,
+        )
+
+    def _parse_transfer_log(
+        self,
+        log: dict[str, Any],
+        transfer_topic: str,
+    ) -> tuple[str, str, str, int] | None:
+        """Decode one ERC-20 Transfer log into (from, to, token, amount).
+
+        Returns None when the log is not an ERC-20 Transfer OR when the data
+        cannot be decoded. Extracted from ``_collect_wallet_transfers`` so the
+        hot-path loop stays CC-small and each branch is independently testable.
+        """
+        topics = log.get("topics", [])
+        if not topics or len(topics) < 3:
+            return None
+        if self._normalize_topic(topics[0]) != transfer_topic:
+            return None
+
+        data = HexDecoder.normalize_hex(log.get("data", ""))
+        if not data:
+            return None
+        try:
+            amount = HexDecoder.decode_uint256(data, 0)
+        except (ValueError, IndexError):
+            return None
+
+        log_from = HexDecoder.topic_to_address(topics[1])
+        log_to = HexDecoder.topic_to_address(topics[2])
+        raw_token = log.get("address") or ""
+        token_address = self._normalize_topic(raw_token) if raw_token else ""
+        return log_from, log_to, token_address, amount
+
+    @staticmethod
+    def _pick_swap_raw_amounts(
+        transfers: "_WalletTransfers",
+    ) -> "_SwapSeed | None":
+        """Pick raw (amount, token) pairs for a wallet-level swap.
+
+        Multi-hop semantics: wallet pays the FIRST token it transfers out,
+        receives the LAST token it transfers in. That covers both direct swaps
+        (1 in, 1 out) and router-orchestrated multi-hops where intermediate
+        transfers traverse router / pool contracts (and thus are not tied to
+        the wallet).
+
+        Returns None when no wallet-in transfer was seen OR when the resulting
+        ``amount_out`` is zero (current PCS V3 behavior — zero output is
+        treated as "no swap signal").
+        """
+        if not transfers.from_wallet or not transfers.to_wallet:
+            return None
+
+        token_in_addr, amount_in = transfers.from_wallet[0]
+        token_out_addr, amount_out = transfers.to_wallet[-1]
+
+        if amount_out == 0:
+            return None
+
+        return _SwapSeed(
+            token_in=token_in_addr,
+            token_out=token_out_addr,
+            amount_in=amount_in,
+            amount_out=amount_out,
+        )
+
+    def _resolve_swap_decimals(
+        self,
+        seed: "_SwapSeed",
+    ) -> "_SwapDecimals | None":
+        """Resolve (in, out) decimals; fail closed only when OUT is unknown.
+
+        Historical invariant (preserved for Phase 8.4):
+        - Output decimals unknown -> return None (would corrupt PnL).
+        - Input decimals unknown  -> proceed with ``decimals_in = None``;
+          ``_build_swap_amounts`` zeros out ``amount_in_decimal`` as a
+          sentinel. See char-test
+          ``test_unresolved_input_decimals_still_returns_with_zero_amount_in``
+          which pins this fail-open behavior.
+        """
+        decimals_in = self._resolve_decimals(seed.token_in)
+        decimals_out = self._resolve_decimals(seed.token_out)
+        if decimals_out is None:
+            logger.warning("Cannot compute swap amounts: output token decimals unknown")
+            return None
+        return _SwapDecimals(decimals_in=decimals_in, decimals_out=decimals_out)
+
+    @staticmethod
+    def _build_swap_amounts(
+        seed: "_SwapSeed",
+        decimals: "_SwapDecimals",
+        expected_out: Decimal | None,
+    ) -> "SwapAmounts":
+        """Assemble the final SwapAmounts, including realized slippage."""
+        from almanak.framework.execution.extracted_data import SwapAmounts
+
+        if seed.amount_in and decimals.decimals_in is not None:
+            amount_in_decimal = Decimal(seed.amount_in) / Decimal(10**decimals.decimals_in)
+        else:
+            amount_in_decimal = Decimal(0)
+
+        amount_out_decimal = Decimal(seed.amount_out) / Decimal(10**decimals.decimals_out)
+
+        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
+
+        # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
+        slippage_bps: int | None = None
+        if expected_out is not None and expected_out > 0 and amount_out_decimal > 0:
+            realized = (expected_out - amount_out_decimal) / expected_out
+            slippage_bps = int(realized * Decimal(10_000))
+
+        # CodeRabbit review (PR #1798): when decimals_in could not be resolved,
+        # amount_in_decimal is a Decimal(0) SENTINEL — flag it as unresolved so
+        # downstream PnL / accounting does not treat it as a real zero amount.
+        # amount_out_decimal is always resolved here (callers have already
+        # fail-closed in _resolve_swap_decimals when decimals_out is None).
+        return SwapAmounts(
+            amount_in=seed.amount_in,
+            amount_out=seed.amount_out,
+            amount_in_decimal=amount_in_decimal,
+            amount_out_decimal=amount_out_decimal,
+            effective_price=effective_price,
+            slippage_bps=slippage_bps,
+            expected_out_decimal=expected_out,
+            token_in=seed.token_in or None,
+            token_out=seed.token_out or None,
+            amount_in_decimal_resolved=decimals.decimals_in is not None,
+            amount_out_decimal_resolved=True,
+        )
 
     def _resolve_decimals(self, token_address: str) -> int | None:
         """Resolve token decimals via the token resolver.
