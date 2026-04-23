@@ -6,6 +6,15 @@ Gnosis Safe contracts, Zodiac Roles modules, and MultiSend contracts.
 Key Components:
     - SafeOperation: Enum for Safe transaction operation types
     - ABIs: Contract ABIs for Safe, Zodiac, and MultiSend interactions
+        - Safe core: execTransaction, nonce, owners/threshold queries
+        - Safe deployment: setup, enableModule, SafeProxyFactory
+        - Zodiac module deployment: ModuleProxyFactory.deployModule
+        - Zodiac Roles v2: setUp, assignRoles, setDefaultRole,
+          allowTarget, scopeTarget, allowFunction, revokeTarget,
+          execTransactionWithRole
+    - Canonical addresses: Safe v1.4.1 factory + singleton,
+      ModuleProxyFactory, Roles Modifier master copy — all CREATE2-
+      deployed at identical addresses on every supported EVM chain
     - MULTISEND_ADDRESSES: Chain-specific MultiSend contract addresses
     - ENSO_DELEGATE_ADDRESSES: Known Enso delegates requiring DELEGATECALL
 """
@@ -130,6 +139,194 @@ SAFE_GET_THRESHOLD_ABI: Final[list[dict]] = [
         "type": "function",
     }
 ]
+
+# Safe's setup initializer — called once on a fresh proxy to install owners/threshold.
+# Source: safe-global/safe-smart-account v1.4.1 Safe.sol
+SAFE_SETUP_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "address[]", "name": "_owners", "type": "address[]"},
+            {"internalType": "uint256", "name": "_threshold", "type": "uint256"},
+            {"internalType": "address", "name": "to", "type": "address"},
+            {"internalType": "bytes", "name": "data", "type": "bytes"},
+            {"internalType": "address", "name": "fallbackHandler", "type": "address"},
+            {"internalType": "address", "name": "paymentToken", "type": "address"},
+            {"internalType": "uint256", "name": "payment", "type": "uint256"},
+            {"internalType": "address payable", "name": "paymentReceiver", "type": "address"},
+        ],
+        "name": "setup",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Safe's enableModule — authorized (must be called by the Safe itself via execTransaction).
+# Source: safe-global/safe-smart-account v1.4.1 ModuleManager.sol
+SAFE_ENABLE_MODULE_ABI: Final[list[dict]] = [
+    {
+        "inputs": [{"internalType": "address", "name": "module", "type": "address"}],
+        "name": "enableModule",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# SafeProxyFactory.createProxyWithNonce — deploys a new Safe proxy for a singleton + initializer.
+# Source: safe-global/safe-smart-account v1.4.1 SafeProxyFactory.sol
+SAFE_PROXY_FACTORY_CREATE_PROXY_WITH_NONCE_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "_singleton", "type": "address"},
+            {"internalType": "bytes", "name": "initializer", "type": "bytes"},
+            {"internalType": "uint256", "name": "saltNonce", "type": "uint256"},
+        ],
+        "name": "createProxyWithNonce",
+        "outputs": [{"internalType": "contract SafeProxy", "name": "proxy", "type": "address"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Gnosis Guild ModuleProxyFactory.deployModule — clones a Zodiac module master copy as an
+# EIP-1167 minimal proxy. Public; anyone can call.
+# Source: gnosisguild/zodiac master/contracts/factory/ModuleProxyFactory.sol
+MODULE_PROXY_FACTORY_DEPLOY_MODULE_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "masterCopy", "type": "address"},
+            {"internalType": "bytes", "name": "initializer", "type": "bytes"},
+            {"internalType": "uint256", "name": "saltNonce", "type": "uint256"},
+        ],
+        "name": "deployModule",
+        "outputs": [{"internalType": "address", "name": "proxy", "type": "address"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 setUp — initializer on a cloned proxy. `initParams` wraps abi.encode(owner, avatar, target).
+# Source: gnosisguild/zodiac-modifier-roles main/packages/evm/contracts/Roles.sol
+ROLES_SET_UP_ABI: Final[list[dict]] = [
+    {
+        "inputs": [{"internalType": "bytes", "name": "initParams", "type": "bytes"}],
+        "name": "setUp",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 assignRoles — grant/revoke role membership. onlyOwner (must route via Safe.execTransaction).
+# The first parameter is named `module` in Solidity but semantically is the member address.
+ROLES_ASSIGN_ROLES_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "module", "type": "address"},
+            {"internalType": "bytes32[]", "name": "roleKeys", "type": "bytes32[]"},
+            {"internalType": "bool[]", "name": "memberOf", "type": "bool[]"},
+        ],
+        "name": "assignRoles",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 setDefaultRole — picks which role applies when a member calls execTransactionFromModule
+# (the non-WithRole variant). onlyOwner.
+ROLES_SET_DEFAULT_ROLE_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "module", "type": "address"},
+            {"internalType": "bytes32", "name": "roleKey", "type": "bytes32"},
+        ],
+        "name": "setDefaultRole",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 allowTarget — wildcard a whole target under a role. onlyOwner.
+# `options` is the ExecutionOptions enum: 0=None, 1=Send, 2=DelegateCall, 3=Both.
+ROLES_ALLOW_TARGET_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "roleKey", "type": "bytes32"},
+            {"internalType": "address", "name": "targetAddress", "type": "address"},
+            {"internalType": "enum ExecutionOptions", "name": "options", "type": "uint8"},
+        ],
+        "name": "allowTarget",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 scopeTarget — put a target in "Function" clearance so selectors can be allowed individually.
+# Pairs with allowFunction or scopeFunction. onlyOwner.
+ROLES_SCOPE_TARGET_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "roleKey", "type": "bytes32"},
+            {"internalType": "address", "name": "targetAddress", "type": "address"},
+        ],
+        "name": "scopeTarget",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 allowFunction — wildcard a selector under a scoped target (no argument constraints). onlyOwner.
+ROLES_ALLOW_FUNCTION_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "roleKey", "type": "bytes32"},
+            {"internalType": "address", "name": "targetAddress", "type": "address"},
+            {"internalType": "bytes4", "name": "selector", "type": "bytes4"},
+            {"internalType": "enum ExecutionOptions", "name": "options", "type": "uint8"},
+        ],
+        "name": "allowFunction",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Roles v2 revokeTarget — remove all clearance for a target under a role. onlyOwner.
+ROLES_REVOKE_TARGET_ABI: Final[list[dict]] = [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "roleKey", "type": "bytes32"},
+            {"internalType": "address", "name": "targetAddress", "type": "address"},
+        ],
+        "name": "revokeTarget",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+
+# =============================================================================
+# Canonical Deployment Addresses (CREATE2 — same address on every EVM chain)
+# =============================================================================
+
+# Gnosis Safe v1.4.1 singletons + factory. Canonical (CREATE2) addresses — identical on all
+# EVM chains where they're deployed. Source: safe-global/safe-deployments v1.4.1.
+SAFE_PROXY_FACTORY_V1_4_1: Final[str] = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67"
+SAFE_L2_SINGLETON_V1_4_1: Final[str] = "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762"
+
+# Gnosis Guild ModuleProxyFactory (v1.2.0) — deploys Zodiac module clones via CREATE2.
+# Source: gnosisguild/zodiac master/sdk/contracts.ts (KnownContracts.FACTORY)
+MODULE_PROXY_FACTORY: Final[str] = "0x000000000000aDdB49795b0f9bA5BC298cDda236"
+
+# Zodiac Roles Modifier v2.1.0 master copy (the post-V1 rewrite with bytes32 roleKey).
+# Source: gnosisguild/zodiac master/sdk/contracts.ts (KnownContracts.ROLES_V2)
+ROLES_MODIFIER_SINGLETON: Final[str] = "0x9646fDAD06d3e24444381f44362a3B0eB343D337"
 
 
 # =============================================================================
@@ -260,11 +457,32 @@ def role_key_to_bytes32(role_name: str) -> bytes:
 __all__ = [
     # Enums
     "SafeOperation",
-    # ABIs
-    "ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI",
+    # ABIs — Safe core
     "SAFE_EXEC_TRANSACTION_ABI",
     "SAFE_GET_TX_HASH_ABI",
     "SAFE_NONCE_ABI",
+    "SAFE_GET_OWNERS_ABI",
+    "SAFE_GET_THRESHOLD_ABI",
+    # ABIs — Safe deployment + module management
+    "SAFE_SETUP_ABI",
+    "SAFE_ENABLE_MODULE_ABI",
+    "SAFE_PROXY_FACTORY_CREATE_PROXY_WITH_NONCE_ABI",
+    # ABIs — Zodiac module deployment
+    "MODULE_PROXY_FACTORY_DEPLOY_MODULE_ABI",
+    # ABIs — Zodiac Roles Modifier v2
+    "ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI",
+    "ROLES_SET_UP_ABI",
+    "ROLES_ASSIGN_ROLES_ABI",
+    "ROLES_SET_DEFAULT_ROLE_ABI",
+    "ROLES_ALLOW_TARGET_ABI",
+    "ROLES_SCOPE_TARGET_ABI",
+    "ROLES_ALLOW_FUNCTION_ABI",
+    "ROLES_REVOKE_TARGET_ABI",
+    # Canonical addresses
+    "SAFE_PROXY_FACTORY_V1_4_1",
+    "SAFE_L2_SINGLETON_V1_4_1",
+    "MODULE_PROXY_FACTORY",
+    "ROLES_MODIFIER_SINGLETON",
     # MultiSend
     "MULTISEND_SELECTOR",
     "MULTISEND_ADDRESSES",
