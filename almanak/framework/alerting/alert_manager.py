@@ -14,6 +14,12 @@ from datetime import UTC, datetime, time
 from decimal import Decimal
 
 from ..models.operator_card import OperatorCard, Severity
+from ._alert_manager_helpers import (
+    collect_channels_to_send,
+    dispatch_to_channels,
+    finalize_result,
+    record_cooldowns_for_sent_rules,
+)
 from .alert_config import AlertChannel, AlertCondition, AlertConfig, AlertRule
 from .channels import SlackChannel, TelegramChannel
 
@@ -374,117 +380,34 @@ class AlertManager:
         """
         result = AlertSendResult(success=False)
 
-        # Check if alerting is enabled
+        # Phase 1: global-disabled short-circuit.
         if not self.config.enabled:
             result.skipped_reason = "Alerting is globally disabled"
             logger.info(f"Alert skipped for {card.strategy_id}: {result.skipped_reason}")
             return result
 
-        # Find matching rules
+        # Phase 1: rule matching.
         matching_rules = self._find_matching_rules(card, metric_values)
-
         if not matching_rules:
             result.skipped_reason = "No matching alert rules"
             logger.debug(f"Alert skipped for {card.strategy_id}: {result.skipped_reason}")
             return result
 
-        # Get unique channels from all matching rules
-        channels_to_send: set[AlertChannel] = set()
-        for rule in matching_rules:
-            # Check if this rule should fire
-            should_send, skip_reason = self._should_send_alert(
-                rule=rule,
-                strategy_id=card.strategy_id,
-                severity=card.severity,
-            )
-
-            if should_send:
-                for channel in rule.channels:
-                    channels_to_send.add(channel)
-            else:
-                logger.debug(f"Rule {rule.condition.value} skipped for {card.strategy_id}: {skip_reason}")
-
+        # Phase 2: suppression gates (quiet hours + cooldown).
+        channels_to_send = collect_channels_to_send(self, matching_rules, card)
         if not channels_to_send:
             result.skipped_reason = "All matching rules on cooldown or quiet hours"
             logger.info(f"Alert skipped for {card.strategy_id}: {result.skipped_reason}")
             return result
 
-        # Send to each channel
-        for channel in channels_to_send:
-            if channel == AlertChannel.TELEGRAM:
-                if self._telegram_channel:
-                    try:
-                        send_result = await self._telegram_channel.send_alert(card)
-                        if send_result.success:
-                            result.channels_sent.append(channel)
-                            logger.info(f"Telegram alert sent for {card.strategy_id} (severity={card.severity.value})")
-                        else:
-                            result.channels_failed.append(channel)
-                            result.errors[channel] = send_result.error or "Unknown error"
-                            logger.error(f"Telegram alert failed for {card.strategy_id}: {send_result.error}")
-                    except Exception as e:
-                        result.channels_failed.append(channel)
-                        result.errors[channel] = str(e)
-                        logger.exception(f"Exception sending Telegram alert for {card.strategy_id}: {e}")
-                else:
-                    result.channels_failed.append(channel)
-                    result.errors[channel] = "Telegram channel not configured"
-                    logger.warning(f"Telegram alert requested but channel not configured for {card.strategy_id}")
+        # Phase 3: per-channel fan-out.
+        await dispatch_to_channels(self, channels_to_send, card, result)
 
-            elif channel == AlertChannel.SLACK:
-                if self._slack_channel:
-                    try:
-                        slack_send_result = await self._slack_channel.send_alert(card)
-                        if slack_send_result.success:
-                            result.channels_sent.append(channel)
-                            thread_info = ""
-                            if slack_send_result.thread_ts:
-                                thread_info = f", thread_ts={slack_send_result.thread_ts}"
-                            logger.info(
-                                f"Slack alert sent for {card.strategy_id} (severity={card.severity.value}{thread_info})"
-                            )
-                        else:
-                            result.channels_failed.append(channel)
-                            result.errors[channel] = slack_send_result.error or "Unknown error"
-                            logger.error(f"Slack alert failed for {card.strategy_id}: {slack_send_result.error}")
-                    except Exception as e:
-                        result.channels_failed.append(channel)
-                        result.errors[channel] = str(e)
-                        logger.exception(f"Exception sending Slack alert for {card.strategy_id}: {e}")
-                else:
-                    result.channels_failed.append(channel)
-                    result.errors[channel] = "Slack channel not configured"
-                    logger.warning(f"Slack alert requested but channel not configured for {card.strategy_id}")
+        # Phase 4: persist cooldown for rules whose channels succeeded.
+        record_cooldowns_for_sent_rules(self.cooldown_tracker, matching_rules, result, card.strategy_id)
 
-            # Other channels handled in future stories
-            elif channel in (AlertChannel.EMAIL, AlertChannel.PAGERDUTY):
-                logger.debug(f"Channel {channel.value} not yet implemented, skipping for {card.strategy_id}")
-
-        # Record cooldown for successfully sent alerts
-        if result.channels_sent:
-            for rule in matching_rules:
-                if any(ch in result.channels_sent for ch in rule.channels):
-                    self.cooldown_tracker.record_alert(
-                        strategy_id=card.strategy_id,
-                        condition=rule.condition,
-                    )
-
-        # Set overall success
-        result.success = len(result.channels_sent) > 0
-
-        # Log summary
-        if result.success:
-            logger.info(
-                f"Alert sent for {card.strategy_id}: "
-                f"channels_sent={[c.value for c in result.channels_sent]}, "
-                f"channels_failed={[c.value for c in result.channels_failed]}"
-            )
-        else:
-            logger.warning(
-                f"Alert failed for {card.strategy_id}: errors={result.errors}, skipped_reason={result.skipped_reason}"
-            )
-
-        return result
+        # Phase 5: finalize success bit + summary log.
+        return finalize_result(result, card.strategy_id)
 
     def send_alert_sync(
         self,
