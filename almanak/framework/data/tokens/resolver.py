@@ -177,6 +177,13 @@ def _normalize_address_for_chain(address: str, chain: str) -> str:
     return address.lower()
 
 
+_STATIC_ADDRESS_CANONICAL_SYMBOLS: dict[tuple[str, str], str] = {
+    # Polygon's native gas token was renamed from MATIC to POL. Keep both
+    # symbols resolvable, but prefer POL when callers resolve the native
+    # sentinel address directly so address->symbol canon matches current naming.
+    ("polygon", NATIVE_SENTINEL.lower()): "POL",
+}
+
 # Lazy cache of the CoinGecko-ID -> canonical-symbol reverse map.  Populated
 # on first call to _normalize_symbol_input(); ~1357 entries built from
 # DEFAULT_TOKENS.  Cheap to build but we cache to avoid the cost on every
@@ -350,6 +357,7 @@ class TokenResolver:
 
         self._build_static_indices()
         self._register_pendle_tokens()
+        self._refresh_canonical_address_cache_entries()
 
         # Performance tracking
         self._stats = {
@@ -458,6 +466,29 @@ class TokenResolver:
                     if addr_key in chain_addresses:
                         existing_addr = chain_addresses[addr_key]
                         if existing_addr is not token:
+                            preferred_symbol = _STATIC_ADDRESS_CANONICAL_SYMBOLS.get((chain_lower, addr_key))
+                            existing_is_preferred = (
+                                preferred_symbol is not None
+                                and existing_addr.symbol.upper() == preferred_symbol.upper()
+                            )
+                            candidate_is_preferred = (
+                                preferred_symbol is not None and token.symbol.upper() == preferred_symbol.upper()
+                            )
+                            if candidate_is_preferred and not existing_is_preferred:
+                                chain_addresses[addr_key] = token
+                                logger.debug(
+                                    "token_registry_address_alias_collision chain=%s address=%s "
+                                    "canonical_symbol=%s kept_symbol=%s dropped_symbol=%s "
+                                    "reason=canonical-symbol-preference",
+                                    chain_lower,
+                                    addr_key,
+                                    preferred_symbol,
+                                    token.symbol,
+                                    existing_addr.symbol,
+                                )
+                                continue
+                            if existing_is_preferred:
+                                continue
                             logger.warning(
                                 "token_registry_address_collision chain=%s address=%s "
                                 "kept_symbol=%s dropped_symbol=%s reason=first-write-wins",
@@ -530,6 +561,22 @@ class TokenResolver:
                             chain_addresses[addr_key].symbol,
                             name,
                         )
+
+    def _refresh_canonical_address_cache_entries(self) -> None:
+        """Overwrite stale cache rows for address->symbol canonical overrides.
+
+        Address lookups hit cache before the static registry. When the preferred
+        symbol for a known address changes but the address itself stays stable,
+        old disk-cache rows would otherwise pin the pre-migration symbol.
+        """
+        for (chain_lower, _addr_key), preferred_symbol in _STATIC_ADDRESS_CANONICAL_SYMBOLS.items():
+            token = self._static_registry.get(chain_lower, {}).get(preferred_symbol.upper())
+            if token is None:
+                continue
+
+            _, chain_enum = _normalize_chain(chain_lower)
+            resolved = self._token_to_resolved(token, chain_lower, chain_enum, source="static")
+            self._cache.put(resolved)
 
     @classmethod
     def get_instance(

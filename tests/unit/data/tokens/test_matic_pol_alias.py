@@ -100,6 +100,16 @@ class TestMaticPolAlias:
         assert matic.address.lower() == pol.address.lower()
         assert matic.address.lower() == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
+    def test_polygon_native_address_resolves_canonically_to_pol(self, temp_cache_file):
+        """Direct address lookup should prefer the current Polygon native symbol."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+
+        token = resolver.resolve("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "polygon")
+
+        assert token.symbol == "POL"
+        assert token.canonical_symbol == "POL"
+        assert token.is_native is True
+
     def test_get_coingecko_id_returns_pol_id_for_matic(self):
         """The symbol -> CoinGecko ID helper must return the POL id.
 

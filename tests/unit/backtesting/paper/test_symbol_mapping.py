@@ -18,6 +18,8 @@ from almanak.framework.backtesting.paper.token_registry import (
     CHAIN_ID_ARBITRUM,
     CHAIN_ID_BASE,
     CHAIN_ID_ETHEREUM,
+    CHAIN_ID_POLYGON,
+    NATIVE_MATIC_ADDRESS,
     TOKEN_REGISTRY,
     _checksum_address,
     get_token_info,
@@ -71,6 +73,11 @@ class TestUSDCAddressMapping:
         """Test WETH maps to correct symbol."""
         symbol = get_token_symbol(CHAIN_ID_ETHEREUM, WETH_ETHEREUM)
         assert symbol == "WETH"
+
+    def test_polygon_native_maps_to_pol_symbol(self):
+        """Polygon native sentinel resolves to POL canonically."""
+        symbol = get_token_symbol(CHAIN_ID_POLYGON, NATIVE_MATIC_ADDRESS)
+        assert symbol == "POL"
 
 
 class TestSwapExecutionShowsSymbols:

@@ -450,9 +450,9 @@ TOKEN_REGISTRY: dict[int, dict[str, TokenInfo]] = {
     # Polygon (Chain ID: 137)
     # =========================================================================
     CHAIN_ID_POLYGON: {
-        # Native MATIC (sentinel address)
+        # Native POL (formerly MATIC; same sentinel address)
         NATIVE_MATIC_ADDRESS: TokenInfo(
-            symbol="MATIC",
+            symbol="POL",
             decimals=18,
             address=NATIVE_MATIC_ADDRESS,
         ),
