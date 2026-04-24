@@ -46,14 +46,21 @@ class TestSwapIntents:
         assert isinstance(intents[0], SwapIntent)
 
     def test_traderjoe_v2_avalanche(self):
-        """traderjoe_v2 swap on avalanche returns empty -- blocked at compiler (VIB-1406).
+        """traderjoe_v2 swap on avalanche produces a SwapIntent (issue #1841).
 
-        LBRouter2 interface is incompatible with DefaultSwapAdapter. Swaps must
-        fail-closed; build_synthetic_intents reflects PROTOCOL_ROUTERS which no
-        longer includes traderjoe_v2.
+        TJv2 has a dedicated compile path (``_compile_swap_traderjoe_v2``, VIB-1928)
+        so its LBRouter address lives in ``LP_POSITION_MANAGERS`` rather than
+        ``PROTOCOL_ROUTERS``. ``_build_swap_intents`` used to skip TJv2 because of
+        the PROTOCOL_ROUTERS check, producing a manifest that omitted the
+        ``swapExactTokensForTokens`` selector (0x2a443fae) and caused Zodiac
+        authorisation to revert on-chain. TJv2 is now exempt from that check so
+        the real compile path runs.
         """
         intents = build_synthetic_intents("traderjoe_v2", "SWAP", "avalanche")
-        assert intents == []
+        assert len(intents) == 1
+        assert isinstance(intents[0], SwapIntent)
+        assert intents[0].protocol == "traderjoe_v2"
+        assert intents[0].chain == "avalanche"
 
     def test_protocol_not_on_chain_returns_empty(self):
         """Protocol without a router on this chain returns empty."""

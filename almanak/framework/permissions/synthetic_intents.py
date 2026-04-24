@@ -179,8 +179,15 @@ def build_synthetic_intents(
 def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _SWAP_PROTOCOLS:
         return []
-    # Check that this protocol has a router on this chain
-    if protocol not in ("enso", "curve", "pendle"):
+    # Check that this protocol has a router on this chain.
+    # Protocols with dedicated swap compile paths (enso, curve, pendle,
+    # traderjoe_v2) are exempt because their router address is not stored in
+    # PROTOCOL_ROUTERS -- the compiler resolves it from protocol-specific
+    # registries (LP_POSITION_MANAGERS for TJv2's LBRouter, the connector's
+    # own module for Enso/Curve/Pendle). Their dedicated compile path
+    # returns FAILED with "not supported" for unsupported chains, which
+    # discover_permissions() treats as a non-fatal skip.
+    if protocol not in ("enso", "curve", "pendle", "traderjoe_v2"):
         routers = PROTOCOL_ROUTERS.get(chain, {})
         if protocol not in routers:
             return []
