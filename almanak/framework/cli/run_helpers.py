@@ -981,8 +981,43 @@ def _setup_gateway(
         external_anvil_ports=external_anvil_ports,
         keep_anvil=keep_anvil,
     )
-    # Anvil forks need extra startup time (forking from mainnet RPC)
-    startup_timeout = 30.0 if anvil_chains else 10.0
+    # Anvil forks need extra startup time (forking from mainnet RPC).
+    # Archive-RPC chains (Avalanche, Ethereum, Polygon) are slower to fork:
+    # cold-cache Anvil startup against an archive node can take 60-90s, and
+    # the default 30s is too short. A 30s timeout causes the managed gateway to
+    # abort before the Anvil fork finishes, leaving a daemon gRPC thread running
+    # that races with the main process's shutdown sequence — producing the
+    # "absl::InitializeLog() called multiple times" error.
+    #
+    # Derive the outer timeout from the per-fork budgets so multi-archive-chain
+    # configs (e.g. [ethereum, polygon]) also get enough time. ManagedGateway
+    # starts forks sequentially, so the total Anvil budget is:
+    #   sum(per_fork_timeout) + gateway_server_warmup_headroom
+    # Keep _ARCHIVE_CHAINS_SLOW_FORK in sync with
+    # ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS in gateway/managed.py.
+    # Canonicalize chain names via resolve_chain_name so aliases such as
+    # "avax" -> "avalanche" and "eth" -> "ethereum" are classified correctly.
+    _ARCHIVE_CHAINS_SLOW_FORK = frozenset({"polygon", "ethereum", "avalanche"})
+    _GATEWAY_WARMUP_HEADROOM = 30.0  # server start + prewarm after all forks ready
+    if anvil_chains:
+        try:
+            from almanak.core.constants import resolve_chain_name as _resolve_chain
+
+            def _canonical(c: str) -> str:
+                try:
+                    return _resolve_chain(c)
+                except ValueError:
+                    return c.strip().lower()
+
+        except ImportError:
+
+            def _canonical(c: str) -> str:
+                return c.strip().lower()
+
+        anvil_fork_budget = sum(90.0 if _canonical(c) in _ARCHIVE_CHAINS_SLOW_FORK else 30.0 for c in anvil_chains)
+        startup_timeout = anvil_fork_budget + _GATEWAY_WARMUP_HEADROOM
+    else:
+        startup_timeout = 10.0
     try:
         managed_gateway.start(timeout=startup_timeout)
     except RuntimeError as e:

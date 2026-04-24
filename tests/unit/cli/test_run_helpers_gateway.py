@@ -84,6 +84,7 @@ class _FakeManagedGateway:
         if _FakeManagedGateway.start_should_fail:
             raise RuntimeError("fake start failure")
         self.started = True
+        self.start_timeout = timeout
 
     def stop(self) -> None:
         self.stopped = True
@@ -1313,3 +1314,105 @@ class TestIdentityInfoShape:
         info = ResumeInfo(is_resume=True, version=1, state_keys=["a"])
         with pytest.raises(Exception):
             info.is_resume = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Archive-chain startup timeout derivation (VIB-2902 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveChainStartupTimeout:
+    """_setup_gateway derives ManagedGateway.start(timeout=...) from per-fork budgets.
+
+    Archive chains (avalanche, ethereum, polygon) get 90s each; non-archive
+    chains get 30s each; plus 30s warmup headroom.  Aliases such as "avax"
+    must resolve to the canonical "avalanche" so they also get the longer budget.
+    """
+
+    def _run_setup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        chain: str | None = None,
+        network: str = "anvil",
+    ) -> float:
+        """Run _setup_gateway with the given chain config and return the timeout used."""
+        _install_gateway_fakes(monkeypatch)
+        import atexit as real_atexit
+
+        monkeypatch.setattr(real_atexit, "register", lambda *a, **kw: None)
+
+        if chain is not None:
+            (tmp_path / "config.json").write_text(json.dumps({"chain": chain}))
+
+        runner = CliRunner()
+        with runner.isolation():
+            run_helpers._setup_gateway(
+                working_dir=str(tmp_path),
+                config_file=None,
+                network=network,
+                gateway_host="127.0.0.1",
+                gateway_port=50051,
+                no_gateway=False,
+                anvil_ports=(),
+                wallet="default",
+                keep_anvil=False,
+                reset_fork=False,
+                once=False,
+            )
+        assert _FakeManagedGateway.last is not None
+        return _FakeManagedGateway.last.start_timeout
+
+    def test_archive_single_chain_avalanche_gets_120s(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Single archive chain: 90s Anvil + 30s warmup = 120s."""
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="avalanche")
+        assert timeout == 120.0
+
+    def test_archive_single_chain_ethereum_gets_120s(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="ethereum")
+        assert timeout == 120.0
+
+    def test_archive_single_chain_polygon_gets_120s(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="polygon")
+        assert timeout == 120.0
+
+    def test_non_archive_chain_arbitrum_gets_60s(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Non-archive chain: 30s Anvil + 30s warmup = 60s."""
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="arbitrum")
+        assert timeout == 60.0
+
+    def test_non_archive_chain_base_gets_60s(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="base")
+        assert timeout == 60.0
+
+    def test_alias_avax_resolves_to_archive_budget(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Chain alias 'avax' must canonicalize to 'avalanche' and get 90s budget."""
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="avax")
+        assert timeout == 120.0
+
+    def test_alias_eth_resolves_to_archive_budget(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Chain alias 'eth' must canonicalize to 'ethereum' and get 90s budget."""
+        timeout = self._run_setup(monkeypatch, tmp_path, chain="eth")
+        assert timeout == 120.0
+
+    def test_no_chains_mainnet_gets_10s(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No anvil_chains (mainnet mode): short 10s health-check timeout."""
+        # No network=anvil → anvil_chains stays empty → 10s timeout.
+        timeout = self._run_setup(monkeypatch, tmp_path, chain=None, network=None)
+        assert timeout == 10.0

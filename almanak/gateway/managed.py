@@ -274,11 +274,20 @@ class ManagedGateway:
                 fork_block = int(fork_block_env) if fork_block_env else None
                 if fork_block:
                     logger.info("Anvil fork for %s pinned to block %d", chain, fork_block)
+                # Archive-RPC chains (Avalanche, Ethereum, Polygon) require
+                # longer startup time: the archive node is queried during fork
+                # setup, which can take 60-90s on cold cache vs ~10s for L2s.
+                # Using the default 30s causes a timeout on these chains before
+                # the gateway server can fully initialise, which in turn produces
+                # a daemon-thread/gRPC cleanup race that manifests as the
+                # "absl::InitializeLog() called multiple times" error.
+                anvil_startup_timeout = 90.0 if chain.lower() in self.ARCHIVE_RPC_REQUIRED_CHAINS else 30.0
                 manager = RollingForkManager(
                     rpc_url=fork_url,
                     chain=chain,
                     anvil_port=port,
                     fork_block_number=fork_block,
+                    startup_timeout_seconds=anvil_startup_timeout,
                 )
                 ok = await manager.start()
                 if not ok:
@@ -302,6 +311,7 @@ class ManagedGateway:
                             chain=chain,
                             anvil_port=port,
                             fork_block_number=fork_block,
+                            startup_timeout_seconds=anvil_startup_timeout,
                         )
                         ok = await manager.start()
                         if ok:
