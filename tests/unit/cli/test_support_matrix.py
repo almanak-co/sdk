@@ -75,6 +75,20 @@ class TestBuildMatrix:
         assert "uniswap_v3" in names
         assert "aave_v3" in names
 
+    def test_bridge_protocols_present(self, matrix_data: dict) -> None:
+        """Bridge protocols (across, stargate) must appear and be categorised as bridge."""
+        names = {p["name"] for p in matrix_data["protocols"]}
+        assert "across" in names, "across missing from support matrix"
+        assert "stargate" in names, "stargate missing from support matrix"
+        bridge_names = {p["name"] for p in matrix_data["protocols"] if p["category"] == "bridge"}
+        assert "across" in bridge_names, "across not in bridge category"
+        assert "stargate" in bridge_names, "stargate not in bridge category"
+
+    def test_curvance_present(self, matrix_data: dict) -> None:
+        """Curvance lending protocol must appear in the matrix."""
+        names = {p["name"] for p in matrix_data["protocols"]}
+        assert "curvance" in names, "curvance missing from support matrix"
+
     def test_known_chains_present(self, matrix_data: dict) -> None:
         """Core chains should always appear."""
         chains = set(matrix_data["chains"])

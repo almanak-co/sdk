@@ -22,6 +22,7 @@ ACTION_FLASH_LOAN = "flash_loan"
 ACTION_YIELD = "yield"
 ACTION_AGGREGATOR = "aggregator"
 ACTION_PREDICTION = "prediction"
+ACTION_BRIDGE = "bridge"
 
 # Ordered list of all supported categories. Used both to emit protocols in a
 # stable order inside `_build_matrix()` and to derive the CLI --category help
@@ -36,6 +37,7 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = (
     ACTION_PREDICTION,
     ACTION_FLASH_LOAN,
     ACTION_AGGREGATOR,
+    ACTION_BRIDGE,
 )
 
 
@@ -158,6 +160,15 @@ def _build_matrix() -> dict:
     except ImportError:
         pass
 
+    # Curvance — Monad isolated leveraged lending markets (VIB-2861)
+    try:
+        from almanak.framework.connectors.curvance.constants import SUPPORTED_CHAINS as CURVANCE_CHAINS
+
+        lending_protocols.setdefault("curvance", set()).update(CURVANCE_CHAINS)
+        all_chains.update(CURVANCE_CHAINS)
+    except ImportError:
+        pass
+
     # --- Perps protocols ---
     perps_protocols: dict[str, set[str]] = {}
     for chain in GMX_V2:
@@ -249,6 +260,30 @@ def _build_matrix() -> dict:
 
         prediction_protocols.setdefault("polymarket", set()).add("polygon")
         all_chains.add("polygon")
+    except ImportError:
+        pass
+
+    # --- Bridge protocols ---
+    bridge_protocols: dict[str, set[str]] = {}
+
+    # Across — fast intent-based bridge (uses spoke pools, no slippage on supported tokens)
+    # zksync is in Across's registry but not in the SDK's Chain enum — excluded.
+    try:
+        from almanak.framework.connectors.across.adapter import ACROSS_CHAIN_IDS
+
+        _sdk_chains = {"ethereum", "arbitrum", "optimism", "base", "polygon", "linea"}
+        bridge_protocols.setdefault("across", set()).update(c for c in ACROSS_CHAIN_IDS if c in _sdk_chains)
+        all_chains.update(c for c in ACROSS_CHAIN_IDS if c in _sdk_chains)
+    except ImportError:
+        pass
+
+    # Stargate — LayerZero-based bridge (native asset + stablecoin transfers)
+    try:
+        from almanak.framework.connectors.stargate.adapter import STARGATE_CHAIN_IDS
+
+        _sdk_chains = {"ethereum", "arbitrum", "optimism", "base", "polygon", "avalanche", "bsc"}
+        bridge_protocols.setdefault("stargate", set()).update(c for c in STARGATE_CHAIN_IDS if c in _sdk_chains)
+        all_chains.update(c for c in STARGATE_CHAIN_IDS if c in _sdk_chains)
     except ImportError:
         pass
 
@@ -405,6 +440,8 @@ def _build_matrix() -> dict:
         _add(name, ACTION_FLASH_LOAN, chains)
     for name, chains in sorted(agg_protocols.items()):
         _add(name, ACTION_AGGREGATOR, chains)
+    for name, chains in sorted(bridge_protocols.items()):
+        _add(name, ACTION_BRIDGE, chains)
 
     # Sort chains in a sensible order
     chain_order = [
