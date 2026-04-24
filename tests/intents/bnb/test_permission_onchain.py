@@ -30,22 +30,25 @@ from web3 import Web3
 
 from tests.intents._permission_onchain_harness import (
     discover_cases,
-    discover_negative_cases,
     run_negative_authorisation_case,
     run_positive_authorisation_case,
 )
 
 CHAIN_NAME = "bsc"
 
-_POSITIVE_CASES = discover_cases(CHAIN_NAME)
-_NEGATIVE_CASES = discover_negative_cases(CHAIN_NAME)
+# Positive and negative tests parametrize over the same list: the harness
+# auto-derives a load-bearing selector from the generated manifest, so every
+# active case is a negative-test candidate. Cases whose manifests are
+# approve-only or wildcard-only skip cleanly inside the harness rather than
+# being filtered out at collection time.
+_CASES = discover_cases(CHAIN_NAME)
 
 
 @pytest.mark.bsc
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
-    _POSITIVE_CASES,
+    _CASES,
     ids=lambda c: f"{c.protocol}-{c.intent_type}",
 )
 async def test_manifest_authorises_intent(  # noqa: layers
@@ -71,7 +74,7 @@ async def test_manifest_authorises_intent(  # noqa: layers
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
-    _NEGATIVE_CASES,
+    _CASES,
     ids=lambda c: f"{c.protocol}-{c.intent_type}",
 )
 async def test_revoking_load_bearing_target_denies_intent(  # noqa: layers

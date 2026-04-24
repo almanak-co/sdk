@@ -7,6 +7,12 @@ collection time to materialise the parametrize list. They must agree on which
 files count as case files and must honour the same DEFERRED_INTENT_TYPES
 semantics (uppercase-compared).
 
+``discover_negative_cases`` used to filter by ``case.negative_selector is not
+None``. It is now a thin alias for ``discover_cases`` because the negative
+runner auto-derives a load-bearing selector from the generated manifest — every
+active case is a negative-test candidate and cases that can't derive one skip
+cleanly at runtime. The alias stays for back-compat with external callers.
+
 Plan doc: ``docs/internal/zodiac-permission-onchain-coverage-plan.md``.
 """
 
@@ -79,20 +85,24 @@ def test_discover_cases_empty_for_unknown_chain() -> None:
     assert discover_cases("chain-that-does-not-exist") == []
 
 
-def test_discover_negative_cases_subset_of_discover_cases() -> None:
-    """Negative discovery is always a subset of positive discovery on the same chain."""
-    positive = discover_cases("arbitrum")
-    negative = discover_negative_cases("arbitrum")
+def test_discover_negative_cases_matches_discover_cases() -> None:
+    """``discover_negative_cases`` returns the same set as ``discover_cases``.
 
-    positive_ids = {(c.protocol, c.intent_type, c.chain) for c in positive}
-    for case in negative:
-        assert (case.protocol, case.intent_type, case.chain) in positive_ids, (
-            f"Negative case {case.protocol}-{case.intent_type} on {case.chain} "
-            "is not in discover_cases — the two helpers diverged."
-        )
-        assert case.negative_selector is not None, (
-            "discover_negative_cases must only return cases with a non-None "
-            f"negative_selector; got {case.protocol}-{case.intent_type}."
+    Post-auto-derivation, every active case is a negative-test candidate —
+    the runner decides case-by-case (by introspecting the generated manifest
+    at runtime) whether to execute or skip. Static discovery can no longer
+    predict that outcome, so the two helpers intentionally return the same
+    list on every chain.
+    """
+    for chain in ("arbitrum", "base", "ethereum", "optimism", "polygon", "bsc", "avalanche"):
+        positive = discover_cases(chain)
+        negative = discover_negative_cases(chain)
+        positive_ids = [(c.protocol, c.intent_type, c.chain) for c in positive]
+        negative_ids = [(c.protocol, c.intent_type, c.chain) for c in negative]
+        assert positive_ids == negative_ids, (
+            f"On {chain}, discover_negative_cases diverged from discover_cases. "
+            f"Positive: {positive_ids}. Negative: {negative_ids}. "
+            "The two helpers are expected to return the same list post-auto-derivation."
         )
 
 

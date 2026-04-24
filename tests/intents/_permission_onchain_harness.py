@@ -274,6 +274,90 @@ def _find_target_by_selector(targets: list[dict], selector_hex: str) -> dict:
     return matches[0]
 
 
+# ERC-20 ``approve(address,uint256)`` — the approval selector the manifest
+# generator writes onto every operand-token target. The load-bearing target
+# the negative test wants to revoke is the protocol's *core* call (swap /
+# supply / mint / etc.), NOT the approve. Exclude it when auto-deriving.
+_ERC20_APPROVE_SELECTOR = "0x095ea7b3"
+
+# Selectors on "infrastructure" targets that the manifest generator always
+# emits but which aren't necessarily hit by every compiled bundle. Revoking
+# these produces a false negative (the bundle still succeeds through a
+# non-infrastructure path), so they must be excluded from auto-derivation.
+#
+# - ``0x8d80ff0a`` — Safe MultiSend ``multiSend(bytes)``. Declared on every
+#   manifest as a DELEGATECALL target so bundles that DO batch through
+#   MultiSend are authorised, but a simple single-leg swap won't hit it.
+_SAFE_MULTISEND_SELECTOR = "0x8d80ff0a"
+
+_NON_LOAD_BEARING_SELECTORS = frozenset(
+    {
+        _ERC20_APPROVE_SELECTOR,
+        _SAFE_MULTISEND_SELECTOR,
+    }
+)
+
+
+def _auto_derive_load_bearing_selector(targets: list[dict]) -> tuple[str, str] | None:
+    """Pick the ``(address, selector)`` pair for the 'load-bearing' negative test.
+
+    Heuristic: scan ``targets`` for function-scoped (``clearance == 2``)
+    entries whose selectors are NOT in ``_NON_LOAD_BEARING_SELECTORS`` (ERC-20
+    ``approve`` + Safe MultiSend). Among those, pick the one with the lowest
+    ``(target_address, selector)`` tuple so the choice is deterministic
+    across runs and Python versions.
+
+    Returns the winning ``(address, selector)`` tuple — caller revokes the
+    exact target without a secondary lookup. Previously this returned just
+    the selector, which forced a second pass via
+    ``_find_target_by_selector`` and went ambiguous when two targets shared
+    a selector (uncommon but possible — e.g. two router deployments at
+    distinct addresses exposing the same core call).
+
+    Returns ``None`` when no candidate exists (manifest is approve-only —
+    e.g. a connector whose core call is issued to a wildcard-scoped target).
+    The caller should skip the negative test cleanly in that case; there is
+    no load-bearing function-scoped target to strip.
+
+    Why function-scoped only: wildcard-scoped (``clearance == 1``) targets
+    can't be "selector-revoked" — revoking them removes the whole address,
+    which the existing ``revoke_target`` flow already handles. The negative
+    path is specifically about proving a *selector-narrowed* permission is
+    load-bearing; wildcards don't participate.
+
+    Why exclude ``approve``: every ERC-20 operand target shares the approve
+    selector. Revoking it causes the bundle to revert on the first ``approve``
+    tx, which proves nothing about whether the core call is gated — the
+    negative test would then pass for trivial reasons (approval blocked, not
+    the core call). The intent is to prove the *protocol* call is gated.
+
+    Why exclude Safe MultiSend: it's a batching primitive included in every
+    manifest as DELEGATECALL so multi-leg bundles CAN batch through it — but
+    single-leg bundles (e.g. a bare SWAP) don't hit MultiSend at execution
+    time. Revoking MultiSend then leaves the bundle succeeding through the
+    non-MultiSend path, which surfaces as "DID NOT RAISE" and hides the real
+    signal the negative test exists to produce.
+    """
+    candidates: list[tuple[str, str]] = []  # (target_address, selector)
+    for t in targets:
+        if t.get("clearance") != 2:
+            continue
+        address = t.get("address", "").lower()
+        if not address:
+            continue
+        for fn in t.get("functions", []):
+            sel = fn.get("selector", "").lower()
+            if sel and sel not in _NON_LOAD_BEARING_SELECTORS:
+                candidates.append((address, sel))
+    if not candidates:
+        return None
+    # Deterministic pick: lowest address, then lowest selector. Tuple compare
+    # handles both naturally — lexicographic on hex strings matches numeric
+    # ordering since every hex string is fixed-width and lowercase here.
+    candidates.sort()
+    return candidates[0]
+
+
 # =============================================================================
 # Intent construction dispatch
 # =============================================================================
@@ -1752,20 +1836,23 @@ def run_negative_authorisation_case(
 ) -> None:
     """Assert that revoking a load-bearing target causes the same intent to revert.
 
-    ``load_bearing_selector`` is the 4-byte function selector (``0x...``) of a
-    function the compiled bundle must call. When ``None``, the harness falls
-    back to ``case.negative_selector``. The harness finds the sole
-    function-scoped target carrying that selector and revokes it, then runs
-    the same intent and asserts both execution reverts and token conservation.
-    """
-    selector = load_bearing_selector or case.negative_selector
-    if not selector:
-        raise ValueError(
-            "run_negative_authorisation_case requires a load-bearing selector: pass "
-            "``load_bearing_selector=`` explicitly or set "
-            "``PermissionTestCase.negative_selector`` on the case."
-        )
+    Selector resolution order:
+      1. ``load_bearing_selector`` kwarg (explicit — pilot path).
+      2. ``case.negative_selector`` (explicit on the case file).
+      3. Auto-derivation from the generated manifest: pick the
+         ``(address, selector)`` tuple with the lowest ordering among
+         function-scoped targets whose selector is not ERC-20 ``approve``.
 
+    When auto-derivation returns ``None`` (manifest has no load-bearing
+    non-approve function-scoped target), the test is skipped with a clear
+    message — there is nothing to strip, so the assertion would be vacuous.
+
+    Paths (1) and (2) locate the target via ``_find_target_by_selector``
+    (unambiguous by construction: the case/pilot author knows which target
+    carries that selector). Path (3) returns both ``(address, selector)`` up
+    front, so the harness revokes that address directly — no second lookup,
+    no ambiguity if two manifest targets ever share a selector.
+    """
     label = role_label or f"PermOnchain:{case.protocol}:{case.intent_type}:neg"
     it = case.intent_type.upper()
 
@@ -1778,6 +1865,23 @@ def run_negative_authorisation_case(
         strategy_suffix="_neg",
     )
 
+    # Resolve the selector AFTER manifest generation so auto-derivation can
+    # introspect ``targets``. Explicit selectors (kwarg or case-declared) still
+    # take precedence — they're the belt-and-suspenders path for the pilot.
+    explicit_selector = load_bearing_selector or case.negative_selector
+    auto_derived_address: str | None = None
+    if explicit_selector:
+        selector = explicit_selector
+    else:
+        derived = _auto_derive_load_bearing_selector(targets)
+        if derived is None:
+            pytest.skip(
+                f"No load-bearing non-approve target in manifest for "
+                f"({case.protocol}, {case.intent_type}) on {case.chain} — "
+                "nothing to strip. Likely an approve-only or wildcard-only manifest."
+            )
+        auto_derived_address, selector = derived
+
     # Fund the Safe's operand tokens identically to the positive path. The
     # negative path must fail on authorisation, not on a missing balance —
     # otherwise the assertion proves nothing about the Roles Modifier.
@@ -1788,13 +1892,20 @@ def run_negative_authorisation_case(
         anvil_rpc_url=anvil_rpc_url,
     )
 
-    load_bearing = _find_target_by_selector(targets, selector)
+    # Auto-derivation hands us the exact address — use it directly. The
+    # explicit-selector paths still do the ``_find_target_by_selector`` lookup
+    # so a typo in a case file fails loudly rather than revoking the wrong
+    # target.
+    if auto_derived_address is not None:
+        target_address = auto_derived_address
+    else:
+        target_address = _find_target_by_selector(targets, selector)["address"]
     revoke_target(
         web3,
         roles,
         safe,
         role_key,
-        load_bearing["address"],
+        target_address,
         owner_eoa=funded_wallet,
         owner_private_key=test_private_key,
     )
@@ -2000,11 +2111,22 @@ def discover_cases(chain: str) -> list[PermissionTestCase]:
 
 
 def discover_negative_cases(chain: str) -> list[PermissionTestCase]:
-    """Return ``discover_cases(chain)`` filtered to cases that declare ``negative_selector``.
+    """Return every active case for ``chain`` — each is a negative-test candidate.
 
-    The negative-authz runner only makes sense for cases that have declared
-    a load-bearing selector on the case itself — callers that still want
-    ad-hoc selectors can continue to use ``run_negative_authorisation_case``
-    with an explicit ``load_bearing_selector=``.
+    Previously this helper filtered to cases declaring ``negative_selector``
+    explicitly. That stopped making sense once ``run_negative_authorisation_case``
+    learned to auto-derive a load-bearing selector from the manifest: every
+    active case is now a candidate, and the per-case outcome (run or skip)
+    is decided at execution time by inspecting the generated manifest.
+
+    Static discovery can't predict the introspection outcome without
+    generating the manifest — that would defeat the point of a cheap
+    collection-time helper. So we return all active cases and let the harness
+    ``pytest.skip`` cleanly when no non-approve target exists to strip.
+
+    The per-chain runners now parametrize both positive and negative tests
+    over the same list, which keeps the two paths in lockstep: any case the
+    positive path covers, the negative path either runs or skips with a clear
+    reason. No silent divergence.
     """
-    return [c for c in discover_cases(chain) if c.negative_selector is not None]
+    return discover_cases(chain)
