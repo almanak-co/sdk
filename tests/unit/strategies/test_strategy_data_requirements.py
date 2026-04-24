@@ -195,6 +195,18 @@ class TestGetDataRequirements:
         req = _get_data_requirements(S())
         assert req == LEGACY_COMPAT_DATA_REQUIREMENTS
 
+    def test_partial_metadata_without_data_requirements_returns_legacy_compat(self):
+        from almanak.framework.cli.run_helpers import _get_data_requirements
+
+        class PartialMetadata:
+            supported_protocols = ["benqi"]
+
+        class Bare:
+            STRATEGY_METADATA = PartialMetadata()
+
+        req = _get_data_requirements(Bare())
+        assert req == LEGACY_COMPAT_DATA_REQUIREMENTS
+
 
 # ---------------------------------------------------------------------------
 # _wire_core_providers — wiring correctness without indicator calculators
