@@ -417,6 +417,9 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     "ethereum": {
         "aave_v3": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
         "radiant_v2": "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07",
+        # Spark is an Aave V3 fork — same pool interface, Spark-specific deployment.
+        # Address mirrors SPARK_POOL_ADDRESSES in almanak/framework/connectors/spark/adapter.py.
+        "spark": "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
     },
     "arbitrum": {
         "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",

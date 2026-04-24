@@ -164,6 +164,77 @@ class TestLendingIntents:
         assert intents == []
 
 
+class TestSparkLendingRegistration:
+    """Regression tests for spark pool registration in LENDING_POOL_ADDRESSES.
+
+    Spark is an Aave V3 fork on Ethereum with a Spark-specific deployment.
+    The synthetic intent builders (_build_supply/withdraw/borrow/repay_intents)
+    short-circuit to ``[]`` when a protocol is missing from
+    ``LENDING_POOL_ADDRESSES[chain]`` (unless it's on the registry-exempt
+    allowlist: morpho_blue, compound_v3). Spark isn't registry-exempt -- it has
+    a conventional Pool contract -- so registering its address is the gate
+    that unblocks synthetic discovery.
+
+    Note on compiler dispatch: spark does NOT go through the
+    AAVE_COMPATIBLE_PROTOCOLS branch. ``compiler_lending.py`` has dedicated
+    ``_compile_{supply,withdraw,borrow,repay}_spark`` functions matched by an
+    explicit ``if protocol_lower == "spark"`` check after the Aave-compatible
+    branch. So pool registration alone (no adapter-registry change) is
+    sufficient to route spark end-to-end.
+    """
+
+    def test_spark_pool_registered_on_ethereum(self):
+        """Spark's Ethereum pool must be in LENDING_POOL_ADDRESSES."""
+        assert "spark" in LENDING_POOL_ADDRESSES["ethereum"], (
+            "Spark missing from LENDING_POOL_ADDRESSES[ethereum]; "
+            "synthetic intent discovery will short-circuit."
+        )
+        # Pin the exact deployment address so a wrong 42-char hex still fails.
+        addr = LENDING_POOL_ADDRESSES["ethereum"]["spark"]
+        assert addr == "0xC13e21B648A5Ee794902342038FF3aDAB66BE987", (
+            f"Unexpected spark pool address on ethereum: {addr}. "
+            "Expected the canonical Spark LendingPool deployment."
+        )
+
+    def test_supply_spark_ethereum(self):
+        """SUPPLY for spark on ethereum produces a SupplyIntent."""
+        intents = build_synthetic_intents("spark", "SUPPLY", "ethereum")
+        assert len(intents) == 1
+        assert isinstance(intents[0], SupplyIntent)
+        assert intents[0].protocol == "spark"
+        assert intents[0].chain == "ethereum"
+
+    def test_withdraw_spark_ethereum(self):
+        """WITHDRAW for spark on ethereum produces a WithdrawIntent."""
+        intents = build_synthetic_intents("spark", "WITHDRAW", "ethereum")
+        assert len(intents) == 1
+        assert isinstance(intents[0], WithdrawIntent)
+        assert intents[0].protocol == "spark"
+
+    def test_borrow_spark_ethereum(self):
+        """BORROW for spark on ethereum produces a BorrowIntent."""
+        intents = build_synthetic_intents("spark", "BORROW", "ethereum")
+        assert len(intents) == 1
+        assert isinstance(intents[0], BorrowIntent)
+        assert intents[0].protocol == "spark"
+        assert intents[0].collateral_token is not None
+        assert intents[0].borrow_token is not None
+
+    def test_repay_spark_ethereum(self):
+        """REPAY for spark on ethereum produces a RepayIntent."""
+        intents = build_synthetic_intents("spark", "REPAY", "ethereum")
+        assert len(intents) == 1
+        assert isinstance(intents[0], RepayIntent)
+        assert intents[0].protocol == "spark"
+
+    def test_spark_off_ethereum_returns_empty(self):
+        """Spark is ethereum-only in the registry; arbitrum has no entry so
+        synthetic discovery must short-circuit. Guards against accidentally
+        leaking a non-deployed address to other chains."""
+        intents = build_synthetic_intents("spark", "SUPPLY", "arbitrum")
+        assert intents == []
+
+
 class TestFlashLoanIntents:
     """Test synthetic flash loan intent creation."""
 
