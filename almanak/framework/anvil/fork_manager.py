@@ -957,9 +957,13 @@ class RollingForkManager:
                     funded = await self._fund_wrapped_native_via_deposit(
                         address, token_address, amount_hex, amount, display_name
                     )
-                    # deposit() is the correct method for wrapped natives;
-                    # storage slot manipulation can produce broken state.
-                    skip_storage_fallback = True
+                    if funded:
+                        # deposit() succeeded: skip storage-slot paths to avoid
+                        # producing mixed on-chain state (balanceOf vs internal).
+                        skip_storage_fallback = True
+                    # else: deposit() failed (e.g. transient RPC error, insufficient
+                    # native balance); fall through to known-slot / anvil_deal / brute-force.
+                    # WAVAX slot 3 is a reliable fallback on Avalanche (VIB-2690).
 
                 # Priority 0b: Whale impersonation (VIB-2571)
                 # For tokens where storage slot patches pass balanceOf but break

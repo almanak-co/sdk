@@ -1,6 +1,7 @@
 """Unit tests for RollingForkManager Anvil flag detection and command building."""
 
-from unittest.mock import patch
+from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -150,3 +151,78 @@ class TestGetTokenBalance:
         with patch.object(manager, "_rpc_call", return_value="0x0"):
             result = await manager._get_token_balance("0x" + "a" * 40, "0x" + "b" * 40)
             assert result == 0
+
+
+class TestFundTokensWrappedNativeFallback:
+    """Test that fund_tokens falls back to storage-slot when deposit() fails.
+
+    VIB-2690: WAVAX on Avalanche (and any other wrapped native) must fall back
+    to known storage-slot / anvil_deal when the deposit() path fails silently
+    (e.g., transient Alchemy RPC outage causes Anvil to use a public fallback
+    RPC that doesn't support impersonation, or wallet balance exactly equals
+    the deposit amount leaving nothing for gas).
+    """
+
+    WAVAX_ADDRESS = "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"
+    WALLET = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+
+    @pytest.fixture()
+    def manager(self):
+        _clear_flags_cache()
+        mgr = RollingForkManager(
+            rpc_url="http://rpc.test",
+            chain="avalanche",
+            anvil_port=9999,
+        )
+        # Pretend the fork is running: _is_running=True + process that poll()=None (alive)
+        mgr._is_running = True
+        patcher = patch("subprocess.Popen")
+        mock_popen = patcher.start()
+        mock_popen.poll.return_value = None  # process alive
+        mgr._process = mock_popen
+        yield mgr
+        patcher.stop()
+
+    @pytest.mark.asyncio()
+    async def test_deposit_success_skips_slot(self, manager):
+        """When deposit() succeeds, storage-slot path must NOT be called."""
+        with (
+            patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=True),
+            patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock) as mock_slot,
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)),
+        ):
+            result = await manager.fund_tokens(self.WALLET, {"WAVAX": Decimal("10")})
+        assert result is True
+        mock_slot.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_deposit_failure_falls_back_to_slot(self, manager):
+        """When deposit() fails, fund_tokens must fall back to known storage slot 3."""
+        with (
+            patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock, return_value=True) as mock_slot,
+            # anvil_deal not needed since slot succeeds; but mock to avoid real RPC calls
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(False, None)),
+        ):
+            result = await manager.fund_tokens(self.WALLET, {"WAVAX": Decimal("10")})
+        assert result is True
+        # Slot 3 is WAVAX's known slot on Avalanche — must have been called
+        mock_slot.assert_called_once()
+        call_args = mock_slot.call_args
+        # _set_balance_at_slot(wallet_address, token_address, amount_hex, slot, symbol)
+        # slot is the 4th positional arg (index 3)
+        assert call_args[0][3] == 3, f"Expected slot 3 for WAVAX, got {call_args[0][3]}"
+
+    @pytest.mark.asyncio()
+    async def test_deposit_failure_falls_back_to_anvil_deal(self, manager):
+        """When deposit() and slot both fail, anvil_deal must be tried."""
+        with (
+            patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)) as mock_rpc,
+        ):
+            result = await manager.fund_tokens(self.WALLET, {"WAVAX": Decimal("10")})
+        assert result is True
+        # anvil_deal should have been called (returns True = success)
+        deal_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_deal"]
+        assert len(deal_calls) == 1, "anvil_deal must be called as fallback"
