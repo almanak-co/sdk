@@ -264,17 +264,41 @@ class TestCompilationSuccess:
         assert result.status.value == "SUCCESS"
         assert len(result.transactions) > 0
 
-    def test_lp_close_compiles_or_warns(self, compiler):
-        """LP_CLOSE may fail in offline mode (needs RPC for position liquidity).
+    def test_lp_close_compiles_in_discovery_mode(self):
+        """LP_CLOSE must compile successfully in permission-discovery mode.
 
-        The discovery module handles this gracefully by recording warnings.
+        VIB-1846 regression: previously the Uniswap-V3-style LP_CLOSE body
+        required an RPC-backed liquidity query and returned FAILED offline,
+        leaving the NonfungiblePositionManager selectors unauthorised in
+        the generated manifest. ``permission_discovery=True`` (set by
+        ``discover_permissions``) now substitutes a synthetic liquidity so
+        the full ``decreaseLiquidity + collect + burn`` flow is emitted.
         """
+        from almanak.framework.intents.compiler import (
+            NFT_POSITION_BURN_SELECTOR,
+            NFT_POSITION_COLLECT_SELECTOR,
+            NFT_POSITION_DECREASE_SELECTOR,
+        )
+
+        compiler = IntentCompiler(
+            chain="arbitrum",
+            config=IntentCompilerConfig(
+                allow_placeholder_prices=True,
+                swap_pool_selection_mode="fixed",
+                fixed_swap_fee_tier=3000,
+                permission_discovery=True,
+            ),
+        )
         intents = build_synthetic_intents("uniswap_v3", "LP_CLOSE", "arbitrum")
         assert len(intents) == 1
         result = compiler.compile(intents[0])
-        # LP_CLOSE needs on-chain state, so it may fail without RPC.
-        # What matters is that it doesn't crash.
-        assert result.status.value in ("SUCCESS", "FAILED")
+        assert result.status.value == "SUCCESS", result.error
+        selectors = {tx.data[:10] for tx in result.transactions if tx.data}
+        assert {
+            NFT_POSITION_DECREASE_SELECTOR,
+            NFT_POSITION_COLLECT_SELECTOR,
+            NFT_POSITION_BURN_SELECTOR,
+        }.issubset(selectors), f"Missing NPM selectors in compiled LP_CLOSE: {selectors}"
 
     def test_supply_compiles(self, compiler):
         intents = build_synthetic_intents("aave_v3", "SUPPLY", "arbitrum")

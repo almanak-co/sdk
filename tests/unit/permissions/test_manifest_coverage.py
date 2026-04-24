@@ -105,6 +105,12 @@ def _get_compiler_for_protocol(protocol: str, chain: str) -> IntentCompiler:
             allow_placeholder_prices=True,
             swap_pool_selection_mode=mode,
             fixed_swap_fee_tier=fee_tier,
+            # Mirror discover_permissions: every compiler built for manifest
+            # generation runs in permission-discovery mode so protocol-
+            # specific LP_CLOSE bodies substitute synthetic on-chain state
+            # when RPC is unavailable and still emit the full teardown
+            # selector surface.
+            permission_discovery=True,
         ),
     )
 
@@ -210,6 +216,74 @@ class TestManifestCoverage:
                     for protocol, intent_type, target, selector in missing
                 )
             )
+
+    # ------------------------------------------------------------------
+    # LP_CLOSE regression coverage (VIB-1846)
+    # ------------------------------------------------------------------
+    # ``LP_CLOSE`` compiles via the NonfungiblePositionManager flow
+    # (``decreaseLiquidity`` + ``collect`` + ``burn``). Before
+    # https://linear.app/almanak/issue/VIB-1846 the manifest generator
+    # short-circuited to FAILED when no RPC was available, leaving the NPM
+    # address + its three selectors unauthorised. This test pins the fix by
+    # diffing manifest pairs against freshly-compiled LP_CLOSE transactions
+    # for the canonical ``uniswap_v3 / ethereum`` deployment.
+    def test_lp_close_manifest_covers_npm_selectors_ethereum_uniswap_v3(self) -> None:
+        """Manifest for uniswap_v3 LP_CLOSE must cover every compiled NPM selector.
+
+        Mirrors the same coverage assertion as
+        ``test_manifest_covers_compiled_intents`` but targeted at the
+        LP_CLOSE flow so the regression gate is obvious from the test name.
+        """
+        chain = "ethereum"
+        protocol = "uniswap_v3"
+
+        manifest = generate_manifest(
+            strategy_name="vib1846_lp_close_regression",
+            chain=chain,
+            supported_protocols=[protocol],
+            intent_types=["LP_CLOSE"],
+        )
+        manifest_pairs: set[tuple[str, str]] = set()
+        for perm in manifest.permissions:
+            for sel in perm.function_selectors:
+                manifest_pairs.add((perm.target.lower(), sel.selector.lower()))
+
+        compiler = _get_compiler_for_protocol(protocol, chain)
+        compiled_pairs: set[tuple[str, str]] = set()
+        for intent in build_synthetic_intents(protocol, "LP_CLOSE", chain):
+            result = compiler.compile(intent)
+            assert result.status.value == "SUCCESS", (
+                f"Synthetic LP_CLOSE failed to compile for {protocol}/{chain}: {result.error}"
+            )
+            for tx in result.transactions:
+                selector = tx.data[:10].lower() if tx.data and len(tx.data) >= 10 else None
+                if selector:
+                    compiled_pairs.add((tx.to.lower(), selector))
+
+        # Exactly the NPM flow: decreaseLiquidity / collect / burn must all appear.
+        from almanak.framework.intents.compiler import (
+            LP_POSITION_MANAGERS,
+            NFT_POSITION_BURN_SELECTOR,
+            NFT_POSITION_COLLECT_SELECTOR,
+            NFT_POSITION_DECREASE_SELECTOR,
+        )
+
+        npm_address = LP_POSITION_MANAGERS[chain][protocol].lower()
+        required = {
+            (npm_address, NFT_POSITION_DECREASE_SELECTOR),
+            (npm_address, NFT_POSITION_COLLECT_SELECTOR),
+            (npm_address, NFT_POSITION_BURN_SELECTOR),
+        }
+        assert required.issubset(compiled_pairs), (
+            f"Synthetic LP_CLOSE compilation did not emit the full NPM flow. "
+            f"compiled_pairs={sorted(compiled_pairs)}, missing={sorted(required - compiled_pairs)}"
+        )
+
+        missing = compiled_pairs - manifest_pairs
+        assert not missing, (
+            f"LP_CLOSE manifest for {protocol}/{chain} is missing "
+            f"{len(missing)} compiled (target, selector) pair(s): {sorted(missing)}"
+        )
 
     @pytest.mark.parametrize(
         "name,path",

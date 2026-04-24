@@ -141,6 +141,12 @@ def discover_permissions(
         uses_rpc = hints.needs_rpc_discovery and rpc_url is not None
         compiler_rpc = rpc_url if uses_rpc else None
 
+        # ``permission_discovery=True`` on every compiler built here — it is
+        # the behavioural flag protocol-specific LP_CLOSE bodies consult to
+        # substitute synthetic on-chain state (liquidity, LP balance) when
+        # RPC is unavailable, so every selector in the teardown flow is
+        # captured even in fully-offline discovery. Orthogonal to whether
+        # ``rpc_url`` was passed through to the compiler.
         key = (mode, fee_tier, uses_rpc)
         if key not in _compilers:
             _compilers[key] = IntentCompiler(
@@ -150,7 +156,7 @@ def discover_permissions(
                     allow_placeholder_prices=True,
                     swap_pool_selection_mode=cast(Literal["auto", "fixed"], mode),
                     fixed_swap_fee_tier=fee_tier,
-                    permission_discovery=uses_rpc,
+                    permission_discovery=True,
                 ),
             )
         return _compilers[key]

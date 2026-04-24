@@ -3892,6 +3892,17 @@ class IntentCompiler:
         """
         liquidity = self._query_position_liquidity(position_manager, token_id)
         if liquidity is None:
+            # In offline permission-discovery mode there is no RPC to query,
+            # but the manifest still needs to see the full decrease + collect
+            # + burn selector surface. Synthesize a non-zero liquidity so the
+            # downstream builder emits all three TXs. Mirrors the same
+            # permission-discovery short-circuit in compile_lp_close_aerodrome.
+            if getattr(self._config, "permission_discovery", False):
+                logger.debug(
+                    "Permission discovery mode: using synthetic liquidity for position #%d",
+                    token_id,
+                )
+                return 10**18, True
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=f"Could not query liquidity for position #{token_id}. Ensure rpc_url is provided to IntentCompiler.",
