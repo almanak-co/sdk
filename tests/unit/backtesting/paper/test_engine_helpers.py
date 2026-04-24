@@ -402,6 +402,35 @@ class TestRunMainLoop:
         )
         assert trader.calls["execute_tick"] == 0
 
+    @pytest.mark.asyncio
+    async def test_indefinite_duration_does_not_overflow(self) -> None:
+        """Regression for #1839: effective_duration=inf must not raise.
+
+        ``PaperTrader.start()`` passes ``float('inf')`` for indefinite paper-
+        trade sessions. ``timedelta(seconds=float('inf'))`` raises
+        ``OverflowError``; the helper must detect the sentinel and skip the
+        time-limit gate entirely, relying on ``_running`` / ``max_ticks`` /
+        externally-cleared flag to terminate the loop.
+        """
+        trader = _make_fake_trader(running=True)
+
+        async def _tick_that_clears(strategy: Any) -> None:
+            trader.calls["execute_tick"] += 1
+            trader._running = False
+
+        trader._execute_tick = _tick_that_clears
+
+        await _engine_helpers.run_main_loop(
+            trader,
+            _Strategy(),
+            float("inf"),
+            None,  # no tick limit either — must still terminate via _running
+            datetime.now(UTC),
+        )
+        # Exactly one tick executed before _running flipped false.
+        assert trader.calls["execute_tick"] == 1
+        assert trader._tick_count == 1
+
 
 # ---------------------------------------------------------------------------
 # classify_run_exception

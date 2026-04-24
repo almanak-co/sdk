@@ -151,14 +151,21 @@ async def run_main_loop(
     5. run position reconciler (only if reconciler enabled AND persistent)
     6. asyncio.sleep(tick_interval_seconds)
     7. refresh fork (if _should_refresh_fork() is True)
+
+    ``effective_duration == float('inf')`` means "run indefinitely" (the
+    contract ``PaperTrader.start()`` relies on): in that case ``end_time`` is
+    ``None`` and the time-limit gate is skipped. Using ``timedelta`` with
+    ``inf`` raises ``OverflowError`` (see issue #1839).
     """
     from datetime import timedelta
 
-    end_time = run_started_at + timedelta(seconds=effective_duration)
+    end_time: datetime | None = None
+    if effective_duration != float("inf"):
+        end_time = run_started_at + timedelta(seconds=effective_duration)
 
     while trader._running:
         now = datetime.now(UTC)
-        if now >= end_time:
+        if end_time is not None and now >= end_time:
             logger.info(f"[{trader._backtest_id}] Duration limit reached, stopping")
             break
 
