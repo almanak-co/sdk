@@ -1,7 +1,9 @@
 """Unit tests for ``almanak ax resolve`` — the AI-agent friendly token lookup.
 
-Exercises the four exit-code contracts (0 resolved / 1 not_found / 2
-malformed) and both ``--gateway`` / ``--no-gateway`` paths.
+Exercises the exit-code contracts (0 resolved / 1 not_found / 2
+malformed / 3 not deployed) and both ``--gateway`` / ``--no-gateway`` paths.
+Also covers the ``--verify`` / ``--no-verify`` on-chain verification feature
+(VIB-3347).
 """
 
 from __future__ import annotations
@@ -312,3 +314,209 @@ class TestAxResolveMalformedInput:
         # (unknown -> exit 1) or an invalid address (exit 2). Both are valid
         # "do not silently resolve" behaviors; accept either here.
         assert result.exit_code in (1, 2), result.output
+
+
+class TestCheckContractDeployed:
+    """Unit tests for the ``_check_contract_deployed`` helper (VIB-3347).
+
+    All tests mock at the network boundary so they are fully offline and
+    deterministic.
+    """
+
+    def test_native_sentinel_returns_none(self) -> None:
+        from almanak.framework.cli.ax import _check_contract_deployed
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        result = _check_contract_deployed(NATIVE_SENTINEL, "arbitrum")
+        assert result is None
+
+    def test_lowercase_sentinel_also_returns_none(self) -> None:
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        # Callers may pass un-checksummed lowercase; must still be skipped.
+        result = _check_contract_deployed(
+            "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "arbitrum"
+        )
+        assert result is None
+
+    def test_zero_address_returns_none(self) -> None:
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        result = _check_contract_deployed(
+            "0x0000000000000000000000000000000000000000", "arbitrum"
+        )
+        assert result is None
+
+    def test_non_evm_address_returns_none(self) -> None:
+        """Solana base58 pubkeys have no 0x prefix — skip silently."""
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        result = _check_contract_deployed(
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "solana"
+        )
+        assert result is None
+
+    def test_short_address_returns_none(self) -> None:
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        result = _check_contract_deployed("0xabc", "arbitrum")
+        assert result is None
+
+    def test_deployed_contract_via_gateway(self) -> None:
+        """When the gateway channel returns non-empty bytecode, return True."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        mock_channel = MagicMock()
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.result = _json.dumps("0x608060405260...")  # non-empty code
+
+        with patch("almanak.gateway.proto.gateway_pb2_grpc.RpcServiceStub") as MockStub:
+            MockStub.return_value.Call.return_value = mock_response
+            result = _check_contract_deployed(
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "arbitrum",
+                gateway_channel=mock_channel,
+            )
+        assert result is True
+
+    def test_not_deployed_via_http(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When HTTP JSON-RPC returns '0x', return False (not deployed)."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        rpc_response_bytes = _json.dumps({"jsonrpc": "2.0", "id": 1, "result": "0x"}).encode()
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = rpc_response_bytes
+        mock_http_response.__enter__ = lambda s: s
+        mock_http_response.__exit__ = MagicMock(return_value=False)
+
+        with patch("almanak.gateway.utils.get_rpc_url", return_value="http://fake-rpc.example.com"):
+            with patch("urllib.request.urlopen", return_value=mock_http_response):
+                result = _check_contract_deployed(
+                    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                    "avalanche",
+                )
+        assert result is False
+
+    def test_rpc_unavailable_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When get_rpc_url raises, return None (graceful skip)."""
+        from unittest.mock import patch
+
+        from almanak.framework.cli.ax import _check_contract_deployed
+
+        with patch(
+            "almanak.gateway.utils.get_rpc_url",
+            side_effect=ValueError("No RPC configured"),
+        ):
+            result = _check_contract_deployed(
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "avalanche",
+            )
+        assert result is None
+
+
+class TestAxResolveVerifyFlag:
+    """Tests for the ``--verify`` / ``--no-verify`` flag (VIB-3347).
+
+    All network I/O is mocked so tests run offline and deterministically.
+    """
+
+    def test_no_verify_skips_check_returns_null(self, runner: CliRunner) -> None:
+        """``--no-verify`` must produce ``contract_verified: null`` in JSON."""
+        result = runner.invoke(
+            ax_cli,
+            ["-c", "arbitrum", "--json", "resolve", "--no-gateway", "--no-verify", "USDC"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["contract_verified"] is None
+
+    def test_verify_deployed_returns_true(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the contract exists on chain, ``contract_verified`` is True and exit 0."""
+        monkeypatch.setattr(
+            "almanak.framework.cli.ax._check_contract_deployed",
+            lambda *a, **k: True,
+        )
+        result = runner.invoke(
+            ax_cli,
+            ["-c", "arbitrum", "--json", "resolve", "--no-gateway", "USDC"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["contract_verified"] is True
+
+    def test_verify_not_deployed_exits_3(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When eth_getCode returns empty bytecode, exit code must be 3."""
+        monkeypatch.setattr(
+            "almanak.framework.cli.ax._check_contract_deployed",
+            lambda *a, **k: False,
+        )
+        result = runner.invoke(
+            ax_cli,
+            ["-c", "avalanche", "--json", "resolve", "--no-gateway", "USDC"],
+        )
+        assert result.exit_code == 3, result.output
+        payload = json.loads(result.output)
+        assert payload["contract_verified"] is False
+
+    def test_verify_not_deployed_shows_warning_in_human_output(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Human output must include a WARNING line when not deployed."""
+        monkeypatch.setattr(
+            "almanak.framework.cli.ax._check_contract_deployed",
+            lambda *a, **k: False,
+        )
+        result = runner.invoke(
+            ax_cli,
+            ["-c", "avalanche", "resolve", "--no-gateway", "USDC"],
+        )
+        assert result.exit_code == 3, result.output
+        assert "WARNING" in result.output
+        assert "not deployed" in result.output
+
+    def test_verify_rpc_unavailable_exits_0(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When RPC is unavailable (returns None), command must still exit 0."""
+        monkeypatch.setattr(
+            "almanak.framework.cli.ax._check_contract_deployed",
+            lambda *a, **k: None,
+        )
+        result = runner.invoke(
+            ax_cli,
+            ["-c", "arbitrum", "--json", "resolve", "--no-gateway", "USDC"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["contract_verified"] is None
+
+    def test_native_token_skips_verification_exits_0(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ETH (native token) must get ``contract_verified: null`` and exit 0."""
+        # Ensure _check_contract_deployed is NOT called for native tokens.
+        called = []
+        monkeypatch.setattr(
+            "almanak.framework.cli.ax._check_contract_deployed",
+            lambda *a, **k: called.append(True) or None,
+        )
+        result = runner.invoke(
+            ax_cli,
+            ["-c", "arbitrum", "--json", "resolve", "--no-gateway", "ETH"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        # _check_contract_deployed IS called but returns None for the sentinel.
+        # What matters is exit code 0 and contract_verified is null.
+        assert payload["contract_verified"] is None

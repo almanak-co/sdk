@@ -539,8 +539,18 @@ def price(ctx, token, sub_chain):
         "speed matter more than coverage)."
     ),
 )
+@click.option(
+    "--verify/--no-verify",
+    default=True,
+    help=(
+        "Verify the contract exists on-chain after a static-registry hit. "
+        "Default ON — catches addresses that are in the registry but not "
+        "deployed on the requested chain. Pass --no-verify to skip the "
+        "on-chain check (faster, offline)."
+    ),
+)
 @click.pass_context
-def resolve(ctx, token, gateway: bool):
+def resolve(ctx, token, gateway: bool, verify: bool):
     """Resolve a token symbol or address to its metadata on a chain.
 
     Checks, in order: memory cache -> disk cache -> static JSON registry
@@ -548,6 +558,14 @@ def resolve(ctx, token, gateway: bool):
     dynamic path (CoinGecko/Jupiter for symbols, on-chain ERC20 for
     addresses). With ``--no-gateway``, stops at the static layers for a
     fast, offline, deterministic lookup.
+
+    After a registry hit, ``--verify`` (default) makes an ``eth_getCode`` RPC
+    call to confirm the contract is actually deployed on the requested chain.
+    This catches silent false positives where a token address is in the
+    registry for chain A but passed with chain B. Uses the running gateway
+    if reachable; otherwise falls back to a direct JSON-RPC call using
+    the configured RPC URL (``ALCHEMY_API_KEY`` or chain-specific env var).
+    Native tokens (ETH, AVAX, etc.) skip the bytecode check automatically.
 
     ``--gateway`` requires a reachable gateway at ``--gateway-host/port``
     (default ``localhost:50051``). If none is reachable the command
@@ -560,12 +578,15 @@ def resolve(ctx, token, gateway: bool):
         almanak ax -c arbitrum --json resolve USDC
         almanak ax -c arbitrum --json resolve LUME              # tries dynamic
         almanak ax -c arbitrum --no-gateway resolve LUME        # static only
+        almanak ax -c arbitrum --no-verify resolve USDC         # skip on-chain check
         almanak ax -c arbitrum resolve 0xaf88d065e77c8cC2239327C5EDb3A432268e5831
 
     Exit codes:
-        0 -- token resolved.
+        0 -- token resolved and on-chain verification passed (or skipped).
         1 -- token not found (address / symbol unknown on this chain).
         2 -- invalid input (e.g. malformed address).
+        3 -- token found in registry but ``eth_getCode`` returned empty
+             bytecode: address is NOT deployed on this chain.
     """
     import json as _json
 
@@ -589,7 +610,21 @@ def resolve(ctx, token, gateway: bool):
         static_only = create_token_resolver()
         try:
             resolved = static_only.resolve(token, chain, skip_gateway=True, log_errors=False)
-            _render_resolved_token(resolved, chain=chain, json_output=json_output)
+            # For on-chain verification on the fast path, prefer the gateway gRPC
+            # channel if one is already running (avoids a direct outbound HTTP
+            # socket from the CLI process in gateway-managed environments).
+            # We only probe — never spawn a ManagedGateway — so the fast path
+            # stays fast even when no gateway is running.
+            fast_channel = _open_channel_if_reachable(ctx) if verify else None
+            try:
+                contract_verified = (
+                    _check_contract_deployed(resolved.address, chain, gateway_channel=fast_channel) if verify else None
+                )
+            finally:
+                _close_channel(fast_channel)
+            _render_resolved_token(resolved, chain=chain, json_output=json_output, contract_verified=contract_verified)
+            if contract_verified is False:
+                sys.exit(3)
             return
         except InvalidTokenAddressError as e:
             render_error(f"Invalid address: {e}", json_output=json_output)
@@ -604,73 +639,89 @@ def resolve(ctx, token, gateway: bool):
 
     resolver, gateway_channel, gateway_note = _build_resolver_for_cli(ctx, use_gateway=gateway)
 
+    # Use try/finally to guarantee gateway_channel is always closed regardless
+    # of which exception (known or unexpected) exits this block.
     try:
-        resolved = resolver.resolve(token, chain, skip_gateway=not gateway, log_errors=False)
-    except InvalidTokenAddressError as e:
-        render_error(f"Invalid address: {e}", json_output=json_output)
-        sys.exit(2)
-    except TokenNotFoundError as e:
-        if json_output:
-            payload = {
-                "status": "not_found",
-                "token": token,
-                "chain": chain,
-                "suggestions": list(e.suggestions or []),
-            }
-            if gateway_note:
-                payload["gateway"] = gateway_note
-            payload["hint"] = (
-                "If you have the contract address, pass it directly or use resolver.register_token() in your strategy."
-            )
-            click.echo(_json.dumps(payload, indent=2))
-        else:
-            if gateway_note:
-                click.echo(f"(gateway: {gateway_note})", err=True)
-            render_error(f"Token not found: {e}", json_output=False)
-        sys.exit(1)
-    except TokenResolutionError as e:
-        # Covers ``TokenResolutionTimeoutError``, ``AmbiguousTokenError``,
-        # and any future subclass. The exit-code contract promises 1 for
-        # "couldn't resolve" (not_found-shaped), 2 for "malformed input"
-        # (the ``InvalidTokenAddressError`` branch above). An ambiguous
-        # or timed-out resolution is functionally "couldn't resolve",
-        # so it falls under exit 1. The JSON payload carries the error
-        # class name so callers can branch on the specifics if they want.
-        if json_output:
-            payload = {
-                "status": "error",
-                "token": token,
-                "chain": chain,
-                "error_type": type(e).__name__,
-                "error": str(e),
-                "suggestions": list(getattr(e, "suggestions", []) or []),
-            }
-            if gateway_note:
-                payload["gateway"] = gateway_note
-            click.echo(_json.dumps(payload, indent=2))
-        else:
-            if gateway_note:
-                click.echo(f"(gateway: {gateway_note})", err=True)
-            render_error(f"{type(e).__name__}: {e}", json_output=False)
-        sys.exit(1)
+        try:
+            resolved = resolver.resolve(token, chain, skip_gateway=not gateway, log_errors=False)
+        except InvalidTokenAddressError as e:
+            render_error(f"Invalid address: {e}", json_output=json_output)
+            sys.exit(2)
+        except TokenNotFoundError as e:
+            if json_output:
+                payload = {
+                    "status": "not_found",
+                    "token": token,
+                    "chain": chain,
+                    "suggestions": list(e.suggestions or []),
+                }
+                if gateway_note:
+                    payload["gateway"] = gateway_note
+                payload["hint"] = (
+                    "If you have the contract address, pass it directly or use resolver.register_token() in your strategy."
+                )
+                click.echo(_json.dumps(payload, indent=2))
+            else:
+                if gateway_note:
+                    click.echo(f"(gateway: {gateway_note})", err=True)
+                render_error(f"Token not found: {e}", json_output=False)
+            sys.exit(1)
+        except TokenResolutionError as e:
+            # Covers ``TokenResolutionTimeoutError``, ``AmbiguousTokenError``,
+            # and any future subclass. The exit-code contract promises 1 for
+            # "couldn't resolve" (not_found-shaped), 2 for "malformed input"
+            # (the ``InvalidTokenAddressError`` branch above). An ambiguous
+            # or timed-out resolution is functionally "couldn't resolve",
+            # so it falls under exit 1. The JSON payload carries the error
+            # class name so callers can branch on the specifics if they want.
+            if json_output:
+                payload = {
+                    "status": "error",
+                    "token": token,
+                    "chain": chain,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                    "suggestions": list(getattr(e, "suggestions", []) or []),
+                }
+                if gateway_note:
+                    payload["gateway"] = gateway_note
+                click.echo(_json.dumps(payload, indent=2))
+            else:
+                if gateway_note:
+                    click.echo(f"(gateway: {gateway_note})", err=True)
+                render_error(f"{type(e).__name__}: {e}", json_output=False)
+            sys.exit(1)
+
+        # Run on-chain verification before closing the channel so the gateway
+        # gRPC path is still available when a channel was created above.
+        contract_verified = (
+            _check_contract_deployed(resolved.address, chain, gateway_channel=gateway_channel) if verify else None
+        )
     finally:
-        # Close the temporary channel if this command created one. The
-        # resolver used here is command-scoped, so there is no global
-        # resolver state to restore.
-        if gateway_channel is not None:
-            try:
-                gateway_channel.close()
-            except Exception:
-                pass
+        # Always close the channel — including on unexpected exceptions, sys.exit
+        # calls (which raise SystemExit), and KeyboardInterrupt.
+        _close_channel(gateway_channel)
 
-    _render_resolved_token(resolved, chain=chain, json_output=json_output)
+    _render_resolved_token(resolved, chain=chain, json_output=json_output, contract_verified=contract_verified)
+    if contract_verified is False:
+        sys.exit(3)
 
 
-def _render_resolved_token(resolved, *, chain: str, json_output: bool) -> None:
+def _render_resolved_token(resolved, *, chain: str, json_output: bool, contract_verified: bool | None = None) -> None:
     """Render a resolved token either as JSON or as a friendly CLI summary.
 
     Extracted so the fast-path (static-only) and slow-path (gateway) in
     ``resolve`` share identical output formatting.
+
+    Args:
+        resolved: The ResolvedToken object.
+        chain: Chain name string (for display).
+        json_output: When True, emit machine-readable JSON.
+        contract_verified: Result of the on-chain ``eth_getCode`` check:
+            True  -- bytecode found; contract is deployed on this chain.
+            False -- no bytecode; address is not deployed on this chain.
+            None  -- check was skipped (native token, --no-verify, or RPC
+                     unavailable).
     """
     import json as _json
 
@@ -688,6 +739,7 @@ def _render_resolved_token(resolved, *, chain: str, json_output: bool) -> None:
         "bridge_type": resolved.bridge_type.value,
         "source": resolved.source,
         "is_verified": resolved.is_verified,
+        "contract_verified": contract_verified,
     }
 
     if json_output:
@@ -700,6 +752,69 @@ def _render_resolved_token(resolved, *, chain: str, json_output: bool) -> None:
         click.echo(f"  coingecko   {resolved.coingecko_id or '-'}")
         click.echo(f"  source      {resolved.source}")
         click.echo(f"  stablecoin  {'yes' if resolved.is_stablecoin else 'no'}")
+        if contract_verified is False:
+            click.echo(
+                click.style(
+                    f"  WARNING: address not deployed on {chain} (eth_getCode returned empty bytecode)",
+                    fg="yellow",
+                    bold=True,
+                )
+            )
+        elif contract_verified is None and not resolved.is_native:
+            # Only emit the skipped note when verification was expected but
+            # couldn't run (RPC unavailable). Native tokens are intentionally
+            # skipped and don't need a note.
+            pass  # Silently skip -- don't spam the user when RPC is simply absent
+
+
+def _open_channel_if_reachable(ctx: click.Context):
+    """Return a gRPC channel to the configured gateway if it is already
+    running, or ``None`` if no gateway is listening on the configured
+    host:port.
+
+    Unlike ``_build_resolver_for_cli``, this helper NEVER auto-spawns a
+    ``ManagedGateway``.  It is only used for the fast-path verification
+    in ``resolve`` where we want to use the gateway's RPC credentials when
+    the user already has one running, but must not impose gateway startup
+    latency on the common static-hit case.
+    """
+    import os
+
+    host = ctx.obj.get("gateway_host", "localhost")
+    port = ctx.obj.get("gateway_port", 50051)
+
+    if not _gateway_is_reachable(host, port):
+        return None
+
+    try:
+        import grpc
+
+        gateway_auth_token = (
+            ctx.obj.get("gateway_auth_token")
+            or os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN")
+            or os.environ.get("GATEWAY_AUTH_TOKEN")
+        )
+        channel = grpc.insecure_channel(f"{host}:{port}")
+        if gateway_auth_token:
+            from almanak.framework.gateway_client import _AuthClientInterceptor
+
+            channel = grpc.intercept_channel(channel, _AuthClientInterceptor(gateway_auth_token))
+        return channel
+    except Exception:
+        return None
+
+
+def _close_channel(channel) -> None:
+    """Silently close a gRPC channel, ignoring any errors.
+
+    Extracted to avoid repetition in the ``resolve`` command's exception
+    handlers, each of which must close the channel before exiting.
+    """
+    if channel is not None:
+        try:
+            channel.close()
+        except Exception:
+            pass
 
 
 def _build_resolver_for_cli(ctx, *, use_gateway: bool):
@@ -775,6 +890,133 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
 
     resolver = create_token_resolver(gateway_channel=channel)
     return resolver, channel, f"attempted dynamic lookup via {host}:{port}"
+
+
+def _check_contract_deployed(
+    address: str,
+    chain: str,
+    *,
+    gateway_channel=None,
+    timeout: float = 4.0,
+) -> bool | None:
+    """Return whether a contract is deployed at ``address`` on ``chain``.
+
+    Makes an ``eth_getCode`` JSON-RPC call and checks for non-empty bytecode.
+    This is the standard way to distinguish a deployed contract (non-empty
+    bytecode) from an EOA or undeployed address (``"0x"`` / empty).
+
+    Only applies to EVM chains. Solana tokens and other non-EVM chains are
+    not checked and this function returns ``None`` for them.
+
+    Args:
+        address: Checksummed or lowercase EVM contract address.
+        chain: Chain name (e.g. ``"arbitrum"``, ``"ethereum"``).
+        gateway_channel: Optional open gRPC channel to an existing gateway.
+            When provided, the call is routed through the gateway's RPC
+            service (no direct outbound socket from this process). When
+            ``None``, falls back to a direct JSON-RPC HTTP call using the
+            RPC URL from ``get_rpc_url(chain)`` (``ALCHEMY_API_KEY`` or
+            chain-specific env var).
+        timeout: Per-call timeout in seconds.
+
+    Returns:
+        ``True``  -- bytecode found; address is a deployed contract.
+        ``False`` -- ``eth_getCode`` returned ``"0x"``; not deployed.
+        ``None``  -- check could not be performed (unsupported chain,
+                     RPC unavailable, or address is a native token
+                     placeholder like ``"0xEeeee..."``)
+    """
+    # Native token sentinel address — no bytecode expected.
+    # Use the canonical constant and normalise to lowercase for comparison so
+    # checksummed / mixed-case inputs are handled uniformly.
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    _SKIP_ADDRESSES = {
+        NATIVE_SENTINEL.lower(),
+        "0x0000000000000000000000000000000000000000",
+    }
+    if address and address.lower() in _SKIP_ADDRESSES:
+        return None
+
+    # Skip non-EVM addresses (Solana base58, etc. — no '0x' prefix).
+    if not address or not address.startswith("0x") or len(address) != 42:
+        return None
+
+    import json as _json
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+
+    # Prefer the gateway gRPC path when a channel is already open — avoids
+    # an additional outbound socket from the CLI process.
+    if gateway_channel is not None:
+        try:
+            from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+
+            rpc_stub = gateway_pb2_grpc.RpcServiceStub(gateway_channel)
+            response = rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_getCode",
+                    params=_json.dumps([address, "latest"]),
+                    id="ax-resolve-verify",
+                ),
+                timeout=timeout,
+            )
+            if response.success and response.result:
+                code = _json.loads(response.result)
+                return code not in (None, "0x", "0x0", "")
+            _log.debug("Gateway eth_getCode returned failure for %s on %s: %s", address, chain, response.error)
+            return None
+        except Exception as exc:
+            _log.debug("Gateway eth_getCode check failed for %s on %s: %s", address, chain, exc)
+            # Fall through to direct HTTP path.
+
+    # Direct JSON-RPC fallback: use the configured RPC URL for the chain.
+    # This is architecturally correct in the CLI layer (not inside the
+    # strategy container), same pattern as almanak/framework/cli/permissions.py.
+    try:
+        from almanak.gateway.utils import get_rpc_url
+
+        rpc_url = get_rpc_url(chain)
+    except Exception as exc:
+        _log.debug("No RPC URL available for %s; skipping on-chain verification: %s", chain, exc)
+        return None
+
+    try:
+        import urllib.request
+
+        req_body = _json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "eth_getCode",
+                "params": [address, "latest"],
+                "id": 1,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            rpc_url,
+            data=req_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        import urllib.error
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 -- CLI layer, not framework
+                data = _json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            _log.debug("eth_getCode HTTP request failed for %s on %s: %s", address, chain, exc)
+            return None
+
+        if not isinstance(data, dict) or data.get("error") is not None:
+            _log.debug("eth_getCode RPC error for %s on %s: %s", address, chain, data)
+            return None
+        code = data.get("result")
+        return code not in (None, "0x", "0x0", "")
+    except Exception as exc:
+        _log.debug("eth_getCode check failed for %s on %s: %s", address, chain, exc)
+        return None
 
 
 def _gateway_is_reachable(host: str, port: int, timeout: float = 0.5) -> bool:
