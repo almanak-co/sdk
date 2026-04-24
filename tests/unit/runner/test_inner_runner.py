@@ -463,6 +463,61 @@ class TestIntentExecutionServiceEnrichment:
         assert result.position_id is None
         assert not result.extracted_data
 
+    @pytest.mark.asyncio
+    async def test_critical_accounting_error_marks_result_failed(self, service, mock_gateway):
+        """VIB-3180: CriticalAccountingError during enrichment must mark result.success=False.
+
+        A transaction that succeeded on-chain but failed enrichment must NOT be
+        returned as a successful result — the ToolExecutor caller would otherwise
+        record a ghost trade. The tx hash is still preserved so operators can
+        inspect the chain directly.
+        """
+        from almanak.framework.execution.extract_result import (
+            CriticalAccountingError,
+            ExtractError,
+        )
+        from almanak.framework.execution.result_enricher import ResultEnricher
+
+        # Fake receipt to trigger enrichment
+        receipt = {
+            "status": "0x1",
+            "transactionHash": "0xdeadbeef",
+            "gasUsed": "0x5208",
+            "logs": [],
+        }
+        mock_gateway.execution.CompileIntent.return_value = _make_compile_resp()
+        mock_gateway.execution.Execute.return_value = _make_exec_resp(
+            success=True,
+            tx_hashes=["0xdeadbeef"],
+            receipts=[receipt],
+        )
+
+        # Patch ResultEnricher.enrich to raise CriticalAccountingError
+        cae = CriticalAccountingError(
+            "Extraction failed for swap_amounts",
+            field_name="swap_amounts",
+            intent_type="SWAP",
+            protocol="uniswap_v3",
+        )
+        with patch.object(ResultEnricher, "enrich", side_effect=cae):
+            result = await service.execute_intent(
+                intent_type="swap",
+                intent_params={"from_token": "USDC", "to_token": "ETH", "protocol": "uniswap_v3"},
+                protocol="uniswap_v3",
+            )
+
+        # Must be marked failed — not a successful result with a warning
+        assert not result.success, (
+            "CriticalAccountingError during enrichment must mark result.success=False; "
+            "the on-chain tx succeeded but accounting is broken"
+        )
+        assert result.error is not None
+        assert "swap_amounts" in result.error or "enrichment" in result.error.lower()
+        # tx hash preserved so operator can inspect the chain
+        assert "0xdeadbeef" in result.tx_hashes
+        # Structured extraction warning also present
+        assert any("CriticalAccountingError" in w for w in result.extraction_warnings)
+
 
 # =============================================================================
 # EnrichedExecutionResult

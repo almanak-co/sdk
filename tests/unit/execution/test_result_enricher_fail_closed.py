@@ -2,8 +2,9 @@
 
 Verifies:
 1. ExtractOk / ExtractMissing / ExtractError dispatch correctly in live and paper modes.
-2. Live mode raises CriticalAccountingError (which is a BaseException, so it
-   propagates through generic except-Exception handlers).
+2. Live mode raises CriticalAccountingError (which is an Exception, so it
+   is caught by the runner's except-Exception recovery handlers and converted
+   to ACCOUNTING_FAILED — VIB-3180).
 3. Paper mode downgrades ExtractError to a structured warning + counter.
 4. Backward compatibility: parsers that still return raw None / value keep
    working and emit a one-shot DeprecationWarning.
@@ -237,22 +238,47 @@ def test_extract_error_live_mode_raises_critical() -> None:
     assert "malformed log shape" in str(err)
 
 
-def test_extract_error_is_base_exception_not_exception() -> None:
-    """CriticalAccountingError must propagate through except-Exception handlers."""
+def test_extract_error_is_exception_subclass() -> None:
+    """CriticalAccountingError must be an Exception subclass.
+
+    VIB-3180: the original implementation used BaseException so the error
+    would escape generic ``except Exception`` handlers.  That is wrong —
+    it escapes the strategy runner's *recovery* handlers (ACCOUNTING_FAILED
+    conversion, operator alerting, finalize_run_loop cleanup), not just
+    accidental catch-all swallowers.  The correct contract is:
+
+    1. CriticalAccountingError IS an Exception so run_iteration's outer
+       except-Exception block can catch it and return ACCOUNTING_FAILED.
+    2. _single_chain_handle_success has an explicit ``except
+       CriticalAccountingError: raise`` BEFORE the generic swallowing
+       ``except Exception: logger.warning(...)`` so the error is never
+       silently downgraded to a warning at the wrong layer.
+    """
+    assert issubclass(CriticalAccountingError, Exception), (
+        "CriticalAccountingError must inherit from Exception so run_iteration "
+        "can catch it and return ACCOUNTING_FAILED"
+    )
+    # Guard against bare BaseException: Exception must be a direct base, not
+    # just transitively reachable.
+    assert Exception in CriticalAccountingError.__bases__, (
+        "CriticalAccountingError.__bases__ must include Exception directly "
+        "(not just via BaseException inheritance chain)"
+    )
+
     enricher = ResultEnricher(parser_registry=_registry_with(_ErrorReturnParser()), live_mode=True)
     intent = _FakeIntent(intent_type="SWAP", protocol="fakeproto")
     result = _make_result()
 
-    caught_generic = False
+    caught_as_exception = False
     try:
-        try:
-            enricher.enrich(result, intent, _FakeContext())
-        except Exception:  # mimics StrategyRunner's generic catch
-            caught_generic = True
-    except CriticalAccountingError:
-        pass
+        enricher.enrich(result, intent, _FakeContext())
+    except Exception:
+        caught_as_exception = True
 
-    assert not caught_generic, "CriticalAccountingError must not be swallowed by except Exception"
+    assert caught_as_exception, (
+        "CriticalAccountingError must be catchable by except Exception so "
+        "run_iteration's recovery handler can convert it to ACCOUNTING_FAILED"
+    )
 
 
 def test_extract_error_raised_inside_method_is_caught_as_variant() -> None:

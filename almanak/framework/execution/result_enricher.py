@@ -254,9 +254,9 @@ class ResultEnricher:
 
         Raises:
             CriticalAccountingError: when live_mode is True and a parser
-                returns ExtractError (or raises). This intentionally uses
-                BaseException as its base so generic except-Exception
-                handlers do not swallow it.
+                returns ExtractError (or raises). Inherits from Exception
+                so the strategy runner's recovery path in run_iteration can
+                catch it and return ACCOUNTING_FAILED (VIB-3180).
 
         Example:
             result = enricher.enrich(result, intent, context)
@@ -622,8 +622,9 @@ class ResultEnricher:
     ) -> None:
         """Route an ExtractError per live/paper-mode policy.
 
-        In live mode we raise CriticalAccountingError (inherits BaseException)
-        so the runner's generic except-Exception handler cannot swallow it.
+        In live mode we raise CriticalAccountingError (inherits Exception).
+        See the module docstring for the VIB-3180 rationale on why this is
+        Exception (not BaseException) and where it is caught.
         In paper mode we log, increment a counter, and attach a structured
         warning so monitoring can still catch the problem.
 

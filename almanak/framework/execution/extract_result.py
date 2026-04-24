@@ -19,11 +19,26 @@ The ``ResultEnricher`` is the primary consumer and decides policy:
   * live mode:  ExtractError -> raise ``CriticalAccountingError``
   * paper mode: ExtractError -> warn + counter, never silently discard
 
-``CriticalAccountingError`` inherits from ``BaseException`` (not ``Exception``)
-so it propagates through generic ``except Exception:`` handlers in callers
-(e.g. ``StrategyRunner``). Accounting failures must never be swallowed by a
-catch-all — that is precisely the ghost-position failure mode VIB-3159
-addresses.
+``CriticalAccountingError`` inherits from ``Exception`` (not ``BaseException``).
+The original implementation used ``BaseException`` with the stated rationale of
+"escape all except Exception handlers so callers cannot swallow it."  That
+rationale is backwards: ``BaseException`` escapes the strategy runner's
+*recovery* ``except Exception`` handlers — the ones that convert accounting
+failures into ``ACCOUNTING_FAILED`` iteration results, trigger consecutive-error
+tracking, send operator alerts, and ensure ``finalize_run_loop`` (cleanup/state
+drain) still executes.  A ``BaseException`` that propagates through all of that
+kills the entire run loop with no cleanup, no durable error state, and no alert.
+
+The correct contract is:
+  1. ``CriticalAccountingError`` is ``Exception`` — it is caught by the runner's
+     outermost ``except Exception`` block in ``run_iteration``, which converts it
+     to ``IterationStatus.ACCOUNTING_FAILED``, alerts the operator, and returns a
+     clean result so ``run_loop``'s consecutive-error handler kicks in.
+  2. The ``_single_chain_handle_success`` enrichment block re-raises
+     ``CriticalAccountingError`` explicitly instead of swallowing it with the
+     generic ``except Exception: logger.warning(...)`` that covers every other
+     enrichment failure.  This ensures the accounting failure is never silently
+     downgraded to a warning.
 
 See ``docs/internal/vib-3159-followup.md`` for the migration plan covering
 the remaining receipt parsers.
@@ -75,15 +90,21 @@ class ExtractError:
 ExtractResult = ExtractOk[T] | ExtractMissing | ExtractError
 
 
-class CriticalAccountingError(BaseException):
+class CriticalAccountingError(Exception):
     """Raised by ``ResultEnricher`` when extraction fails in live mode.
 
-    Inherits from ``BaseException`` (not ``Exception``) on purpose: a parse
-    error at this layer means the framework cannot reliably report what
-    happened on-chain, and accounting / state machines must not proceed on
-    stale beliefs. ``except Exception:`` handlers will not swallow this —
-    only an explicit ``except (Exception, CriticalAccountingError):`` or
-    ``except BaseException:`` will, which is the intended contract.
+    Inherits from ``Exception`` so the strategy runner's recovery path in
+    ``run_iteration`` can catch it and return an ``ACCOUNTING_FAILED``
+    ``IterationResult`` — ensuring consecutive-error tracking, operator
+    alerting, and ``finalize_run_loop`` cleanup still execute.
+
+    The original implementation used ``BaseException`` with the rationale of
+    "escape all except Exception handlers."  That is wrong: it escapes the
+    *recovery* handlers, not just catch-all swallowers.  The correct fix is
+    to use ``Exception`` and add an explicit ``isinstance(e,
+    CriticalAccountingError)`` branch in ``run_iteration``'s outer catch,
+    parallel to the existing ``AccountingPersistenceError`` branch.  See the
+    module-level docstring for the full rationale.
     """
 
     def __init__(

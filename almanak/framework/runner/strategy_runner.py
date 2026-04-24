@@ -55,6 +55,7 @@ from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..data.interfaces import BalanceProvider, PriceOracle
 from ..execution.circuit_breaker import CircuitBreaker
 from ..execution.enso_state_provider import EnsoStateProvider
+from ..execution.extract_result import CriticalAccountingError
 from ..execution.interfaces import TransactionReceipt as FullTransactionReceipt
 from ..execution.multichain import (
     MultiChainOrchestrator,
@@ -631,6 +632,27 @@ class StrategyRunner:
                     strategy_id,
                     IterationStatus.ACCOUNTING_FAILED,
                     f"Accounting persistence failed ({e.write_kind}): {e}",
+                    start_time,
+                )
+            # VIB-3180: receipt parse failure in the enrichment layer. The
+            # on-chain transaction succeeded but we cannot reliably report what
+            # happened — ghost-position territory. Treat exactly like an
+            # AccountingPersistenceError: ACCOUNTING_FAILED result so
+            # run_loop's consecutive-error handler kicks in and the operator
+            # is alerted before the strategy continues trading on stale state.
+            if isinstance(e, CriticalAccountingError):
+                logger.exception(
+                    "Receipt enrichment failed in live mode for %s (field=%s, intent=%s, protocol=%s)",
+                    strategy_id,
+                    e.field_name,
+                    e.intent_type,
+                    e.protocol,
+                )
+                await self._alert_enrichment_failure(strategy, e)
+                return self._create_error_result(
+                    strategy_id,
+                    IterationStatus.ACCOUNTING_FAILED,
+                    f"Receipt enrichment failed (field={e.field_name}, intent={e.intent_type}): {e}",
                     start_time,
                 )
             logger.exception(f"Unexpected error in iteration for {strategy_id}: {e}")
@@ -2539,7 +2561,7 @@ class StrategyRunner:
         # Enrich result with intent-specific extracted data
         if state.last_execution_result and state.last_execution_context:
             try:
-                enricher = ResultEnricher()
+                enricher = ResultEnricher(live_mode=self._is_live_mode())
                 # VIB-3203: thread compiler bundle metadata so swap_amounts
                 # extractors can compute realized slippage_bps from the
                 # persisted expected_output_human quote. We use the
@@ -2552,6 +2574,12 @@ class StrategyRunner:
                     state.last_execution_context,
                     bundle_metadata=state.last_bundle_metadata,
                 )
+            except CriticalAccountingError:
+                # VIB-3180: receipt parse failure — re-raise so run_iteration's
+                # outer except-Exception handler converts it to ACCOUNTING_FAILED.
+                # Must NOT be swallowed here: a stale/missing enrichment result
+                # is accounting-broken and the strategy must not continue on it.
+                raise
             except Exception as e:
                 logger.warning(f"Result enrichment failed: {e}")
 
@@ -4456,6 +4484,64 @@ class StrategyRunner:
             await self.alert_manager.send_alert(card)
         except Exception as alert_err:  # noqa: BLE001
             logger.error("Failed to send accounting failure alert: %s", alert_err)
+
+    async def _alert_enrichment_failure(
+        self,
+        strategy: StrategyProtocol,
+        error: "CriticalAccountingError",
+    ) -> None:
+        """Send a CRITICAL operator alert for receipt-enrichment failure.
+
+        The on-chain transaction succeeded but the framework cannot reliably
+        parse what happened — position IDs, swap amounts, and other enriched
+        fields are unavailable. Strategies that depend on these fields may
+        enter a ghost-position state. Manual reconciliation is required.
+
+        Distinct from ``_alert_accounting_failure`` (which covers ledger /
+        snapshot / metrics write failures) so monitoring rules can route the
+        two failure classes to the appropriate on-call rotation and runbook.
+        """
+        if not self.config.enable_alerting or not self.alert_manager:
+            return
+
+        try:
+            total_value, available = self._query_portfolio_value(strategy)
+            card = OperatorCard(
+                strategy_id=strategy.strategy_id,
+                timestamp=datetime.now(UTC),
+                event_type=EventType.ERROR,
+                reason=StuckReason.UNKNOWN,
+                context={
+                    "accounting_write_kind": "enrichment",
+                    "field_name": error.field_name or "unknown",
+                    "intent_type": error.intent_type or "unknown",
+                    "protocol": error.protocol or "unknown",
+                    "error": str(error),
+                },
+                severity=Severity.CRITICAL,
+                position_summary=PositionSummary(
+                    total_value_usd=total_value,
+                    available_balance_usd=available,
+                ),
+                risk_description=(
+                    f"Receipt enrichment failed (field={error.field_name}, "
+                    f"intent={error.intent_type}, protocol={error.protocol}). "
+                    "On-chain state changed but framework cannot parse the outcome — "
+                    "ghost-position risk. Manual reconciliation required before resuming."
+                ),
+                suggested_actions=[
+                    SuggestedAction(
+                        action=AvailableAction.PAUSE,
+                        description="Pause strategy and reconcile on-chain state with strategy state",
+                        priority=1,
+                        is_recommended=True,
+                    ),
+                ],
+                available_actions=[AvailableAction.PAUSE, AvailableAction.RESUME],
+            )
+            await self.alert_manager.send_alert(card)
+        except Exception as alert_err:  # noqa: BLE001
+            logger.error("Failed to send enrichment failure alert: %s", alert_err)
 
     async def _alert_consecutive_errors(
         self,

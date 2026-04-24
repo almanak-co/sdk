@@ -526,6 +526,33 @@ class IntentExecutionService:
                 )
 
         except Exception as e:
+            from almanak.framework.execution.extract_result import CriticalAccountingError
+
+            if isinstance(e, CriticalAccountingError):
+                # VIB-3180: parse failure in the enrichment layer.  The
+                # transaction succeeded on-chain but the framework cannot
+                # reliably report what happened — ghost-position territory.
+                # Mark the result FAILED so the ToolExecutor caller does not
+                # treat this as a successful execution; a CriticalAccountingError
+                # must never be silently folded into a "success with warnings"
+                # response.  The tx hash is still recorded so operators can
+                # inspect the chain directly.
+                error_msg = (
+                    f"Receipt enrichment failed (field={e.field_name}, "
+                    f"intent={e.intent_type}, protocol={e.protocol}): {e}"
+                )
+                logger.error(
+                    "Receipt enrichment failed for %s (field=%s, intent=%s, protocol=%s): %s",
+                    intent_type,
+                    e.field_name,
+                    e.intent_type,
+                    e.protocol,
+                    e,
+                )
+                result.success = False
+                result.error = error_msg
+                result.extraction_warnings.append(f"CriticalAccountingError[{e.field_name}]: {e}")
+                return
             logger.warning("Result enrichment failed for %s (non-fatal): %s", intent_type, e)
             result.extraction_warnings.append(f"Enrichment failed: {e}")
 
