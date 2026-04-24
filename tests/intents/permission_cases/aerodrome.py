@@ -7,6 +7,13 @@ from __future__ import annotations
 
 from tests.intents._permission_onchain_harness import PermissionTestCase
 
+# Aerodrome on Base runs the classic Solidly (fungible LP) router, not
+# Slipstream. ``permission_hints.synthetic_fee_tier`` is unset for this
+# connector, so the synthetic generator emits ``"{token0}/{token1}"`` without
+# a fee tier (see ``_build_lp_open_intents`` in
+# ``almanak/framework/permissions/synthetic_intents.py``). The aerodrome
+# compiler's LP_OPEN parser defaults ``stable=False`` (volatile) when the
+# third pool segment is omitted, matching what the generator produces.
 CASES: list[PermissionTestCase] = [
     PermissionTestCase(
         chain="base",
@@ -14,8 +21,25 @@ CASES: list[PermissionTestCase] = [
         intent_type="SWAP",
         config={"from_token": "USDC", "to_token": "WETH", "amount": "100"},
     ),
+    PermissionTestCase(
+        chain="base",
+        protocol="aerodrome",
+        intent_type="LP_OPEN",
+        config={
+            "token0": "USDC",
+            "token1": "WETH",
+            # Classic Solidly pool string — no fee tier segment. Mirrors
+            # ``_build_lp_open_intents`` for protocols without synthetic_fee_tier.
+            "pool": "USDC/WETH",
+            "amount0": "100",
+            "amount1": "0.05",
+            "range_lower": "1500",
+            "range_upper": "4000",
+        },
+    ),
 ]
 
-# LP_OPEN / LP_CLOSE coverage lands in Phase D of
-# docs/internal/zodiac-permission-onchain-coverage-plan.md.
-DEFERRED_INTENT_TYPES: list[str] = ["LP_OPEN", "LP_CLOSE"]
+# LP_CLOSE coverage requires setting up a real on-chain position first
+# (the harness's _run_lp_close_positive cannot mint from empty state).
+# Follow-up once the harness gains a "open-then-close" helper.
+DEFERRED_INTENT_TYPES: list[str] = ["LP_CLOSE"]
