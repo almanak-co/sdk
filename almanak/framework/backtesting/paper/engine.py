@@ -68,7 +68,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -78,13 +78,12 @@ if TYPE_CHECKING:
 
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
-    BacktestEngine,
     BacktestMetrics,
     BacktestResult,
     EquityPoint,
     IntentType,
-    TradeRecord,
 )
+from almanak.framework.backtesting.paper import _engine_helpers
 from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
@@ -950,41 +949,18 @@ class PaperTrader:
 
         Raises:
             RuntimeError: If already running
+
+        Phase 9.4 note: the control flow is decomposed into helpers in
+        ``_engine_helpers.py``. Byte-for-byte output parity is enforced by
+        ``tests/unit/backtesting/paper/test_paper_trader_characterization.py``.
+        Do not inline the helpers back into this method without rerunning the
+        characterization suite.
         """
         if self._running:
             raise RuntimeError("PaperTrader is already running")
 
-        run_started_at = datetime.now(UTC)
-        self._session_start = run_started_at
-        self._running = True
-        self._current_strategy = strategy
-        self._trades = []
-        self._errors = []
-        self._equity_curve = []
-        self._tick_count = 0
-        self._reconciler_discrepancies = []
-        self._last_execution_result: ExecutionResult | None = None  # For on_intent_executed callback (VIB-1951)
-        # Reset health telemetry counters (VIB-1957)
-        self._ticks_with_fork = 0
-        self._ticks_with_indicators = 0
-        self._ticks_with_action = 0
-        self._last_successful_decision_at = None
-        self._last_trade_at = None
-
-        # Generate unique backtest_id for correlation across all log messages
-        self._backtest_id = str(uuid.uuid4())
-
-        # Initialize error handler for consistent error handling
-        self._error_handler = BacktestErrorHandler(BacktestErrorConfig())
-
-        # Determine effective duration (max_duration_seconds may be None for indefinite)
-        effective_duration: float = (
-            duration_seconds
-            if duration_seconds is not None
-            else (
-                self.config.max_duration_seconds or 3600.0  # Default to 1 hour if not specified
-            )
-        )
+        run_started_at = _engine_helpers.reset_run_state(self, strategy)
+        effective_duration = _engine_helpers.resolve_effective_duration(self.config, duration_seconds)
 
         lifecycle_label = self.config.fork_lifecycle.value
         logger.info(
@@ -1003,100 +979,18 @@ class PaperTrader:
         )
 
         error: str | None = None
+        final_valuation: _engine_helpers.FinalValuation | None = None
 
         try:
-            # Initialize fork
-            await self._initialize_fork()
-
-            # Initialize orchestrator with fork RPC
-            await self._initialize_orchestrator()
-
-            # Initialize portfolio valuer with fork RPC for LP/lending repricing
-            self._init_portfolio_valuer()
-
-            # Seed initial market snapshot so the first equity point can use
-            # PortfolioValuer (not just simple token x price).
-            await self._seed_initial_market_snapshot()
-
-            # Record initial equity point
-            await self._record_equity_point()
-
-            # Run trading loop
-            end_time = run_started_at + timedelta(seconds=effective_duration)
-
-            while self._running:
-                # Check time limit
-                now = datetime.now(UTC)
-                if now >= end_time:
-                    logger.info(f"[{self._backtest_id}] Duration limit reached, stopping")
-                    break
-
-                # Check tick limit
-                if max_ticks is not None and self._tick_count >= max_ticks:
-                    logger.info(f"[{self._backtest_id}] Max ticks ({max_ticks}) reached, stopping")
-                    break
-
-                # For persistent forks: advance time and poke before tick
-                if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT and self._tick_count > 0:
-                    await self._advance_persistent_fork()
-
-                # Execute tick
-                await self._execute_tick(strategy)
-                self._tick_count += 1
-
-                # For persistent forks: run reconciler after tick to detect divergence
-                if self.config.position_reconciler_enabled and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
-                    await self._run_position_reconciler()
-
-                # Sleep until next tick
-                await asyncio.sleep(self.config.tick_interval_seconds)
-
-                # Check if fork needs refresh
-                if await self._should_refresh_fork():
-                    await self._refresh_fork()
-
-        except asyncio.CancelledError:
-            logger.info(f"[{self._backtest_id}] Paper trading session cancelled")
-            error = "Session cancelled"
-        except Exception as e:
-            # Use error handler for consistent classification
-            if self._error_handler:
-                handler_result = self._error_handler.handle_error(e, context="paper_trading_session")
-                if handler_result.should_stop:
-                    logger.error(f"[{self._backtest_id}] Fatal error in paper trading session: {e}")
-                else:
-                    logger.warning(f"[{self._backtest_id}] Non-critical error in paper trading session: {e}")
-            else:
-                logger.exception(f"[{self._backtest_id}] Paper trading session failed: {e}")
-            error = str(e)
+            await _engine_helpers.setup_session(self)
+            await _engine_helpers.run_main_loop(self, strategy, effective_duration, max_ticks, run_started_at)
+        except (asyncio.CancelledError, Exception) as exc:
+            error = _engine_helpers.classify_run_exception(self, exc)
         finally:
-            # VIB-2550: Refresh price cache for all portfolio tokens before PnL calc.
-            try:
-                await self._get_portfolio_prices()
-            except Exception:
-                logger.debug(
-                    "[%s] Failed to refresh portfolio prices before PnL calc",
-                    self._backtest_id,
-                    exc_info=True,
-                )
-
             # Cache final value BEFORE cleanup clears valuer state.
-            # Fallback chain: rich valuation > last equity point > simple.
-            _cached_rich = self._value_portfolio_rich()
-            if _cached_rich is not None:
-                _cached_final_value = _cached_rich[0]
-                _cached_valuation_source = "portfolio_valuer"
-            elif self._equity_curve:
-                _cached_final_value = self._equity_curve[-1].value_usd
-                _cached_valuation_source = self._equity_curve[-1].valuation_source
-            else:
-                _cached_final_value = self._calculate_portfolio_value()
-                _cached_valuation_source = "simple"
-
+            final_valuation = await _engine_helpers.capture_final_portfolio_value(self)
             self._running = False
             self._current_strategy = None
-
-            # Cleanup
             await self._cleanup()
 
         run_ended_at = datetime.now(UTC)
@@ -1111,39 +1005,14 @@ class PaperTrader:
             },
         )
 
-        # Calculate metrics
         metrics = self._calculate_metrics()
+        trade_records = _engine_helpers.build_trade_records(self._trades)
 
-        # Convert PaperTrades to TradeRecords for BacktestResult
-        trade_records: list[TradeRecord] = []
-        for trade in self._trades:
-            # Build tokens list from token flows
-            tokens = list(trade.tokens_in.keys()) + list(trade.tokens_out.keys())
-
-            record = TradeRecord(
-                timestamp=trade.timestamp,
-                intent_type=IntentType(trade.intent_type) if trade.intent_type else IntentType.UNKNOWN,
-                executed_price=Decimal("0"),  # Price embedded in execution
-                fee_usd=Decimal("0"),  # Fees embedded in execution
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=trade.gas_cost_usd,
-                pnl_usd=trade.net_token_flow_usd,  # Pre-gas PnL: TradeRecord.net_pnl_usd subtracts gas itself
-                success=True,  # All trades in _trades are successful
-                amount_usd=Decimal(trade.metadata.get("amount_usd", "0")),
-                protocol=trade.protocol,
-                tokens=tokens,
-                tx_hash=trade.tx_hash,
-                metadata=trade.metadata,
-            )
-            trade_records.append(record)
-
-        # Use cached final value (computed before cleanup cleared valuer state)
-        final_value = _cached_final_value
-
-        # Get error summary from error handler
-        error_summary = {}
-        if self._error_handler:
-            error_summary = self._error_handler.get_error_summary()
+        # Config dict with optional error summary.
+        config_dict = self.config.to_dict()
+        error_summary = self._error_handler.get_error_summary() if self._error_handler else {}
+        if error_summary:
+            config_dict["error_summary"] = error_summary
 
         logger.info(
             f"[{self._backtest_id}] Paper trading completed for {strategy.strategy_id}: "
@@ -1151,61 +1020,24 @@ class PaperTrader:
             f"PnL=${metrics.net_pnl_usd:,.2f}"
         )
 
-        # Calculate initial capital from config's initial balances
-        initial_capital = self._calculate_initial_capital()
-
-        # Build config dict with error summary
-        config_dict = self.config.to_dict()
-        if error_summary:
-            config_dict["error_summary"] = error_summary
-
-        # Build compliance violations list
-        compliance_violations: list[str] = []
         fallback_usage = self._fallback_usage.copy()
+        compliance_violations, institutional_compliance = _engine_helpers.collect_compliance_violations(fallback_usage)
 
-        # Check if any fallbacks were used
-        if fallback_usage.get("hardcoded_price", 0) > 0:
-            count = fallback_usage["hardcoded_price"]
-            compliance_violations.append(
-                f"Hardcoded price fallback used {count} time(s). "
-                "Set strict_price_mode=True for institutional-grade backtests."
-            )
-        if fallback_usage.get("default_gas_price", 0) > 0:
-            count = fallback_usage["default_gas_price"]
-            compliance_violations.append(f"Default gas price fallback used {count} time(s).")
-        if fallback_usage.get("default_usd_amount", 0) > 0:
-            count = fallback_usage["default_usd_amount"]
-            compliance_violations.append(f"Default USD amount fallback used {count} time(s).")
-        if fallback_usage.get("zero_output_placeholder", 0) > 0:
-            count = fallback_usage["zero_output_placeholder"]
-            compliance_violations.append(
-                f"Zero output placeholder used {count} time(s) due to missing receipt data. "
-                "PnL calculations may be inaccurate."
-            )
-
-        # Determine institutional compliance
-        institutional_compliance = len(compliance_violations) == 0
-
-        return BacktestResult(
-            engine=BacktestEngine.PAPER,
+        return _engine_helpers.assemble_backtest_result(
+            trader=self,
             strategy_id=strategy.strategy_id,
-            start_time=run_started_at,
-            end_time=run_ended_at,
-            metrics=metrics,
-            trades=trade_records,
-            equity_curve=self._equity_curve,
-            initial_capital_usd=initial_capital,
-            final_capital_usd=final_value,
-            chain=self.config.chain,
             run_started_at=run_started_at,
             run_ended_at=run_ended_at,
-            run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),
-            config=config_dict,
+            metrics=metrics,
+            trade_records=trade_records,
+            equity_curve=self._equity_curve,
+            final_value=final_valuation.value_usd if final_valuation is not None else Decimal("0"),
             error=error,
-            backtest_id=self._backtest_id,
+            initial_capital=self._calculate_initial_capital(),
+            config_dict=config_dict,
             fallback_usage=fallback_usage,
-            institutional_compliance=institutional_compliance,
             compliance_violations=compliance_violations,
+            institutional_compliance=institutional_compliance,
         )
 
     async def start(self, strategy: PaperTradeableStrategy) -> None:
@@ -1351,7 +1183,7 @@ class PaperTrader:
         self._errors = []
         self._equity_curve = []
         self._tick_count = 0
-        self._last_execution_result = None
+        self._last_execution_result: ExecutionResult | None = None  # For on_intent_executed callback (VIB-1951)
         # Reset health telemetry counters (VIB-1957)
         self._ticks_with_fork = 0
         self._ticks_with_indicators = 0
