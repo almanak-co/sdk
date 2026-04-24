@@ -23,14 +23,6 @@ from tests.intents._permission_onchain_harness import PermissionTestCase
 
 # BORROW sizing targets ~20% LTV (1 WETH collateral at ~$2.5k, 500 USDC
 # borrow), well inside the ``.claude/rules/intent-tests.md`` ≤30% ceiling.
-#
-# WITHDRAW / BORROW / REPAY need a prior SUPPLY (and BORROW needs prior
-# collateral + debt position) on-chain for this Safe. The cold-Safe harness
-# cannot seed that state yet (plan doc P1 — "harness-seeding of prior state"),
-# so defer these at runtime. Declaration-level coverage gate still runs against
-# them so a connector change that drops selector support still fails PR-time.
-DEFERRED_INTENT_TYPES: list[str] = ["WITHDRAW", "BORROW", "REPAY"]
-
 CASES: list[PermissionTestCase] = [
     PermissionTestCase(
         chain="arbitrum",

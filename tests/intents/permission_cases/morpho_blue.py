@@ -27,13 +27,6 @@ from tests.intents._permission_onchain_harness import PermissionTestCase
 # for this protocol via ``PermissionHints.synthetic_market_id``.
 _MORPHO_BLUE_MARKET_ID = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
 
-# WITHDRAW / BORROW / REPAY require the Safe to have an existing Morpho Blue
-# market position for this market id, which the cold-Safe harness doesn't seed
-# (plan doc P1 — "harness-seeding of prior state"). Deferred at runtime until
-# that lands; the declaration-level coverage gate still runs against them so a
-# future connector change that drops selector support still fails PR-time.
-DEFERRED_INTENT_TYPES: list[str] = ["WITHDRAW", "BORROW", "REPAY"]
-
 CASES: list[PermissionTestCase] = [
     PermissionTestCase(
         chain="ethereum",

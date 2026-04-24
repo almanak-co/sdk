@@ -53,9 +53,24 @@ CASES: list[PermissionTestCase] = [
             "range_upper": "1500",
         },
     ),
+    PermissionTestCase(
+        # LP_CLOSE via the harness's open-then-close seed. Mirrors
+        # uniswap_v3 / sushiswap_v3: mint an NFT position via
+        # Safe.execTransaction, parse the tokenId from the ERC-721
+        # Transfer event, then compile CLOSE against that tokenId.
+        chain="bsc",
+        protocol="pancakeswap_v3",
+        intent_type="LP_CLOSE",
+        config={
+            "token0": "USDC",
+            "token1": "WBNB",
+            "pool": f"{_BSC_USDC}/{_BSC_WBNB}/{_PANCAKE_V3_BSC_FEE_TIER}",
+            "amount0": "100",
+            "amount1": "0.05",
+            "range_lower": "300",
+            "range_upper": "1500",
+            # Harness-overridden at seeding time with the minted tokenId.
+            "position_id": "0",
+        },
+    ),
 ]
-
-# LP_CLOSE still deferred: the harness would need to mint a position
-# first (or seed a pre-existing NFT) before exercising the close path.
-# Tracked in the Phase D successor work item in the coverage plan.
-DEFERRED_INTENT_TYPES: list[str] = ["LP_CLOSE"]

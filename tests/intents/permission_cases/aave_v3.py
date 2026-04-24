@@ -7,14 +7,6 @@ from __future__ import annotations
 
 from tests.intents._permission_onchain_harness import PermissionTestCase
 
-# WITHDRAW / BORROW / REPAY need a prior SUPPLY (and BORROW needs prior
-# collateral + debt position) on-chain for this Safe. The cold-Safe harness
-# cannot seed that state yet (plan doc P1 — "harness-seeding of prior state"),
-# so defer these at runtime until the seeding helper lands. The declaration-
-# level coverage gate still runs against the deferred types, so a connector
-# change that drops selector support still fails PR-time.
-DEFERRED_INTENT_TYPES: list[str] = ["WITHDRAW", "BORROW", "REPAY"]
-
 CASES: list[PermissionTestCase] = [
     PermissionTestCase(
         chain="arbitrum",

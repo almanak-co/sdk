@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from tests.intents._permission_onchain_harness import PermissionTestCase
 
+_TJV2_USDC_WAVAX_POOL = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E/0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
+
 CASES: list[PermissionTestCase] = [
     PermissionTestCase(
         chain="avalanche",
@@ -31,18 +33,45 @@ CASES: list[PermissionTestCase] = [
         config={
             "token0": "USDC",
             "token1": "WAVAX",
-            "pool": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E/0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+            "pool": _TJV2_USDC_WAVAX_POOL,
             "amount0": "100",
             "amount1": "2",
             "range_lower": "20",
             "range_upper": "60",
         },
     ),
+    PermissionTestCase(
+        # LP_CLOSE for TraderJoe V2 LB (fungible LBT positions, bin-based).
+        # The harness's open-then-close seed mints the LB position via
+        # Safe.execTransaction, extracts the bin IDs from the
+        # ``DepositedToBins`` event, and merges them into the CLOSE case's
+        # ``protocol_params["bin_ids"]`` before compilation. The compiler
+        # keys on ``intent.pool`` for the pair + ``protocol_params["bin_ids"]``
+        # for the position; ``position_id`` is a required str on
+        # LPCloseIntent but is unused by the TJv2 LP_CLOSE compile path.
+        chain="avalanche",
+        protocol="traderjoe_v2",
+        intent_type="LP_CLOSE",
+        config={
+            "token0": "USDC",
+            "token1": "WAVAX",
+            "pool": _TJV2_USDC_WAVAX_POOL,
+            "amount0": "100",
+            "amount1": "2",
+            "range_lower": "20",
+            "range_upper": "60",
+            "position_id": "tjv2-lb-position",  # harness-overridden at seeding
+        },
+    ),
 ]
 
-# LP_CLOSE + LP_COLLECT_FEES need a pre-existing on-chain position;
-# the harness's _run_lp_close_positive cannot mint from empty state.
-# Follow-up once the harness gains an "open-then-close/collect" helper.
-# (traderjoe_v2 declares supports_standalone_fee_collection=True, so the
-# matrix includes LP_COLLECT_FEES in addition to open/close.)
-DEFERRED_INTENT_TYPES: list[str] = ["LP_CLOSE", "LP_COLLECT_FEES"]
+# LP_COLLECT_FEES is still deferred: the on-chain permission harness only
+# dispatches LP_OPEN / LP_CLOSE today (see ``_build_intent`` in
+# ``tests/intents/_permission_onchain_harness.py``). Activating
+# LP_COLLECT_FEES requires adding CollectFeesIntent construction, a
+# ``_run_lp_collect_fees_positive`` executor, and a balance-direction
+# assertion distinct from LP_CLOSE (fees trickle vs. full principal return).
+# That wiring is in scope for a follow-up ticket — do not defer LP_CLOSE
+# with this file; LP_CLOSE uses the general open-then-close harness seed
+# and is activated above.
+DEFERRED_INTENT_TYPES: list[str] = ["LP_COLLECT_FEES"]

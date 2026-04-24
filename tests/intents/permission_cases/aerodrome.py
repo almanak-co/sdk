@@ -37,9 +37,25 @@ CASES: list[PermissionTestCase] = [
             "range_upper": "4000",
         },
     ),
+    PermissionTestCase(
+        # LP_CLOSE for classic Aerodrome (Solidly fork, fungible LP tokens).
+        # The harness's open-then-close seed mints the LP position via
+        # Safe.execTransaction, extracts the pool address from the Mint
+        # event (pool address IS the LP token for Solidly), then overwrites
+        # ``position_id`` below with the parsed pool before compiling CLOSE.
+        chain="base",
+        protocol="aerodrome",
+        intent_type="LP_CLOSE",
+        config={
+            "token0": "USDC",
+            "token1": "WETH",
+            "pool": "USDC/WETH",
+            "amount0": "100",
+            "amount1": "0.05",
+            "range_lower": "1500",
+            "range_upper": "4000",
+            # Harness-overridden at seeding time with the parsed pool address.
+            "position_id": "USDC/WETH",
+        },
+    ),
 ]
-
-# LP_CLOSE coverage requires setting up a real on-chain position first
-# (the harness's _run_lp_close_positive cannot mint from empty state).
-# Follow-up once the harness gains a "open-then-close" helper.
-DEFERRED_INTENT_TYPES: list[str] = ["LP_CLOSE"]

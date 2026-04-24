@@ -40,9 +40,24 @@ CASES: list[PermissionTestCase] = [
             "range_upper": "4000",
         },
     ),
+    PermissionTestCase(
+        # LP_CLOSE via the harness's open-then-close seed. Mirrors
+        # uniswap_v3 / pancakeswap_v3: mint an NFT position via
+        # Safe.execTransaction, parse the tokenId from the ERC-721
+        # Transfer event, then compile CLOSE against that tokenId.
+        chain="arbitrum",
+        protocol="sushiswap_v3",
+        intent_type="LP_CLOSE",
+        config={
+            "token0": "USDC",
+            "token1": "WETH",
+            "pool": "USDC/WETH/3000",
+            "amount0": "100",
+            "amount1": "0.05",
+            "range_lower": "1500",
+            "range_upper": "4000",
+            # Harness-overridden at seeding time with the minted tokenId.
+            "position_id": "0",
+        },
+    ),
 ]
-
-# LP_CLOSE coverage requires setting up a real on-chain position first
-# (the harness's _run_lp_close_positive cannot mint from empty state).
-# Follow-up once the harness gains a "open-then-close" helper.
-DEFERRED_INTENT_TYPES: list[str] = ["LP_CLOSE"]

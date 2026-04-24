@@ -44,9 +44,28 @@ CASES: list[PermissionTestCase] = [
             "range_upper": "4000",
         },
     ),
+    PermissionTestCase(
+        # LP_CLOSE executes via the harness's open-then-close seed — it mints
+        # a real on-chain position first (via Safe.execTransaction, no
+        # Zodiac), extracts the NFT tokenId from the mint receipt, then
+        # compiles the CLOSE intent against that position. The ``token0`` /
+        # ``token1`` / ``pool`` / range/amount fields are reused by the
+        # seed step; ``position_id`` below is a placeholder that the harness
+        # overwrites with the real tokenId before compilation.
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        intent_type="LP_CLOSE",
+        config={
+            "token0": "USDC",
+            "token1": "WETH",
+            "pool": f"{_ARBITRUM_USDC}/{_ARBITRUM_WETH}/3000",
+            "amount0": "100",
+            "amount1": "0.05",
+            "range_lower": "1500",
+            "range_upper": "4000",
+            # Harness-overridden at seeding time — set to a sentinel so
+            # LPCloseIntent construction doesn't trip on the required field.
+            "position_id": "0",
+        },
+    ),
 ]
-
-# LP_CLOSE coverage requires setting up a real on-chain position first
-# (the harness's _run_lp_close_positive cannot mint from empty state).
-# Follow-up once the harness gains a "open-then-close" helper.
-DEFERRED_INTENT_TYPES: list[str] = ["LP_CLOSE"]
