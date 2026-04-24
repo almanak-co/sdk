@@ -274,6 +274,64 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     ]
 
 
+def _morpho_blue_synthetic_market_id(chain: str, fallback: str | None) -> str | None:
+    """Return a valid synthetic market_id for morpho_blue on ``chain``.
+
+    Morpho Blue markets are chain-specific: a market_id valid on ethereum
+    will not resolve on arbitrum/base/polygon/monad. The adapter ships with
+    a per-chain registry in ``MORPHO_MARKETS``; prefer its first entry for
+    the requested chain so the compiler can actually build the supply tx.
+
+    Falls back to ``fallback`` (the hint-level default, ethereum-tuned) only
+    when the adapter registry has no entry for the chain.
+    """
+    try:
+        from ..connectors.morpho_blue.adapter import MORPHO_MARKETS
+    except ImportError:
+        return fallback
+    chain_markets = MORPHO_MARKETS.get(chain, {})
+    if chain_markets:
+        return next(iter(chain_markets))
+    return fallback
+
+
+def _morpho_blue_loan_token(chain: str, fallback: str) -> str:
+    """Return the loan-token address for morpho_blue's synthetic market.
+
+    The loan-token path (``supply`` with ``use_as_collateral=False``) requires
+    ``intent.token`` to match the market's loan token. Using the chain default
+    USDC can mismatch the selected market (e.g. polygon's first registered
+    market is USDT-quoted), producing a compile failure that drops both flag
+    variants from the manifest.
+    """
+    try:
+        from ..connectors.morpho_blue.adapter import MORPHO_MARKETS
+    except ImportError:
+        return fallback
+    chain_markets = MORPHO_MARKETS.get(chain, {})
+    if not chain_markets:
+        return fallback
+    first_market = next(iter(chain_markets.values()))
+    return first_market.get("loan_token_address") or fallback
+
+
+def _morpho_blue_collateral_token(chain: str, fallback: str) -> str:
+    """Return the collateral-token address for morpho_blue's synthetic market.
+
+    Mirror of :func:`_morpho_blue_loan_token` for the collateral path
+    (``supply`` with ``use_as_collateral=True`` / ``withdrawCollateral``).
+    """
+    try:
+        from ..connectors.morpho_blue.adapter import MORPHO_MARKETS
+    except ImportError:
+        return fallback
+    chain_markets = MORPHO_MARKETS.get(chain, {})
+    if not chain_markets:
+        return fallback
+    first_market = next(iter(chain_markets.values()))
+    return first_market.get("collateral_token_address") or fallback
+
+
 def _build_supply_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
     if protocol not in _LENDING_PROTOCOLS:
         return []
@@ -282,6 +340,36 @@ def _build_supply_intents(protocol: str, chain: str, usdc: str) -> list[AnyInten
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
+
+    # Morpho Blue routes SUPPLY on ``use_as_collateral``: True calls
+    # ``supplyCollateral``, False calls ``supply``. The manifest needs BOTH
+    # selectors (a strategy may supply loan-side or collateral-side depending
+    # on intent), so we sweep the flag during discovery. Without this sweep,
+    # only one of the two selectors lands on the manifest and the other path
+    # reverts on the Safe.  See codex review 3135601928.
+    if protocol == "morpho_blue":
+        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
+        loan_token = _morpho_blue_loan_token(chain, usdc)
+        collateral_token = _morpho_blue_collateral_token(chain, usdc)
+        return [
+            SupplyIntent(
+                protocol=protocol,
+                token=collateral_token,
+                amount=Decimal("1"),
+                chain=chain,
+                market_id=market_id,
+                use_as_collateral=True,
+            ),
+            SupplyIntent(
+                protocol=protocol,
+                token=loan_token,
+                amount=Decimal("100"),
+                chain=chain,
+                market_id=market_id,
+                use_as_collateral=False,
+            ),
+        ]
+
     return [
         SupplyIntent(
             protocol=protocol,
@@ -300,6 +388,33 @@ def _build_withdraw_intents(protocol: str, chain: str, usdc: str) -> list[AnyInt
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
+
+    # Morpho Blue routes WITHDRAW on ``is_collateral`` (True → withdrawCollateral,
+    # False → withdraw). Sweep both flag variants so the manifest covers loan
+    # reclamation AND collateral withdrawal. See codex review 3135601928.
+    if protocol == "morpho_blue":
+        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
+        loan_token = _morpho_blue_loan_token(chain, usdc)
+        collateral_token = _morpho_blue_collateral_token(chain, usdc)
+        return [
+            WithdrawIntent(
+                protocol=protocol,
+                token=collateral_token,
+                amount=Decimal("1"),
+                chain=chain,
+                market_id=market_id,
+                is_collateral=True,
+            ),
+            WithdrawIntent(
+                protocol=protocol,
+                token=loan_token,
+                amount=Decimal("50"),
+                chain=chain,
+                market_id=market_id,
+                is_collateral=False,
+            ),
+        ]
+
     return [
         WithdrawIntent(
             protocol=protocol,
