@@ -39,6 +39,16 @@ from tests.intents._permission_onchain_harness import PermissionTestCase
 # ``COMPOUND_V3_COMET_ADDRESSES["arbitrum"]`` key.
 _USDC_COMET_MARKET_ID = "usdc"
 
+# WITHDRAW needs a prior SUPPLY on-chain for this Safe. The cold-Safe harness
+# cannot seed that state yet (plan doc P1 — "harness-seeding of prior state"),
+# so defer WITHDRAW at runtime. SUPPLY/BORROW/REPAY are kept active: BORROW on
+# Compound V3 is a single compiled bundle that opens its own collateral
+# position inside the same tx (approve + supplyCollateral + borrow), so it
+# does not need prior state. Declaration-level coverage gate still runs
+# against WITHDRAW, so a connector change that drops selector support still
+# fails PR-time.
+DEFERRED_INTENT_TYPES: list[str] = ["WITHDRAW"]
+
 CASES: list[PermissionTestCase] = [
     PermissionTestCase(
         chain="arbitrum",

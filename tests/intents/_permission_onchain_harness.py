@@ -21,9 +21,13 @@ they land alongside the connector coverage in later phases.
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import lru_cache
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -1142,3 +1146,88 @@ def _prefund_for_negative(
         f"Negative path for {it!r} lands in a follow-up phase. "
         "See docs/internal/zodiac-permission-onchain-coverage-plan.md phases B–E."
     )
+
+
+# =============================================================================
+# Case discovery (Phase F)
+# =============================================================================
+
+
+_CASES_DIR = Path(__file__).resolve().parent / "permission_cases"
+
+
+@lru_cache(maxsize=1)
+def _get_case_modules() -> tuple[tuple[str, ModuleType], ...]:
+    """Return ``(protocol_name, module)`` for every ``permission_cases/<proto>.py``.
+
+    Import-by-path mirrors what the coverage gate does in
+    ``tests/unit/permissions/test_onchain_case_coverage.py`` — the two stay in
+    lockstep so runtime discovery and the gate agree on which files count.
+
+    Cached via ``lru_cache`` because ``discover_cases`` / ``discover_negative_cases``
+    are called at collection time by each per-chain runner (7 chains × 2 calls
+    each = 14+ invocations per session), and re-executing every case module on
+    every call is pure waste. Returning a tuple (not a generator) so the
+    cache works.
+    """
+    collected: list[tuple[str, ModuleType]] = []
+    for case_file in sorted(_CASES_DIR.glob("*.py")):
+        if case_file.name == "__init__.py":
+            continue
+        protocol = case_file.stem
+        spec = importlib.util.spec_from_file_location(
+            f"_perm_cases_runtime.{protocol}", case_file
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Failed to load spec for {case_file}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        collected.append((protocol, module))
+    return tuple(collected)
+
+
+def _deferred_intent_types(module) -> frozenset[str]:
+    """Return the uppercase set of intent types this case file defers at runtime."""
+    deferred = getattr(module, "DEFERRED_INTENT_TYPES", ())
+    return frozenset(str(t).upper() for t in deferred)
+
+
+def discover_cases(chain: str) -> list[PermissionTestCase]:
+    """Return active cases for ``chain``, honouring per-file ``DEFERRED_INTENT_TYPES``.
+
+    Filters:
+      - ``case.chain == chain`` (exact match — ``"bsc"`` does not match ``"bnb"``).
+      - ``case.intent_type.upper()`` not in the module's ``DEFERRED_INTENT_TYPES``.
+
+    Sorted deterministically by ``(protocol, intent_type)`` so pytest test
+    IDs stay stable across runs. Returns a flat list; the per-chain runner
+    parametrizes over it directly.
+    """
+    target = chain
+    collected: list[PermissionTestCase] = []
+    for _protocol, module in _get_case_modules():
+        cases = getattr(module, "CASES", None)
+        if not cases:
+            continue
+        deferred = _deferred_intent_types(module)
+        for case in cases:
+            if not isinstance(case, PermissionTestCase):
+                continue
+            if case.chain != target:
+                continue
+            if case.intent_type.upper() in deferred:
+                continue
+            collected.append(case)
+    collected.sort(key=lambda c: (c.protocol, c.intent_type.upper()))
+    return collected
+
+
+def discover_negative_cases(chain: str) -> list[PermissionTestCase]:
+    """Return ``discover_cases(chain)`` filtered to cases that declare ``negative_selector``.
+
+    The negative-authz runner only makes sense for cases that have declared
+    a load-bearing selector on the case itself — callers that still want
+    ad-hoc selectors can continue to use ``run_negative_authorisation_case``
+    with an explicit ``load_bearing_selector=``.
+    """
+    return [c for c in discover_cases(chain) if c.negative_selector is not None]
