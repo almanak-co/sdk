@@ -1,0 +1,379 @@
+"""Unit tests for phase helpers extracted from ``GatewayServer.start`` (Phase 8.3d).
+
+These tests exercise each helper in isolation with lightweight fakes. They
+complement the RPC-level characterization tests in
+``test_gateway_server_start_characterization.py`` by pinning helper-module
+contracts directly, so later refactors of the start-up wiring cannot mask
+bugs inside the helpers.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from unittest.mock import MagicMock
+
+import pytest
+
+from almanak.gateway._server_start_helpers import (
+    build_interceptors,
+    build_reflection_service_names,
+    initialize_instance_registry,
+    initialize_lifecycle_store,
+    initialize_timeline_store,
+    load_wallet_registry,
+    log_pricing_source_configuration,
+)
+from almanak.gateway.core.settings import GatewaySettings
+
+
+def _settings(**kwargs) -> GatewaySettings:
+    defaults = {
+        "metrics_enabled": False,
+        "audit_enabled": False,
+        "allow_insecure": True,
+        "network": "anvil",
+    }
+    defaults.update(kwargs)
+    return GatewaySettings(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# build_interceptors
+# ---------------------------------------------------------------------------
+class TestBuildInterceptors:
+    def test_insecure_anvil_no_interceptors(self) -> None:
+        interceptors = build_interceptors(
+            _settings(allow_insecure=True, network="anvil", auth_token=None)
+        )
+        assert interceptors == []
+
+    def test_insecure_mainnet_with_auth_token_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="conflicting configuration"):
+            build_interceptors(
+                _settings(allow_insecure=True, network="mainnet", auth_token="tok")  # noqa: S106
+            )
+
+    def test_insecure_mainnet_no_token_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            interceptors = build_interceptors(
+                _settings(allow_insecure=True, network="mainnet", auth_token=None)
+            )
+        assert interceptors == []
+        assert any("INSECURE MODE on network 'mainnet'" in r.message for r in caplog.records)
+
+    def test_insecure_anvil_with_auth_token_ignored(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            interceptors = build_interceptors(
+                _settings(allow_insecure=True, network="anvil", auth_token="tok")  # noqa: S106
+            )
+        assert interceptors == []
+        assert any("auth token ignored" in r.message for r in caplog.records)
+
+    def test_no_auth_token_and_not_insecure_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="No auth_token configured"):
+            build_interceptors(
+                _settings(allow_insecure=False, auth_token=None)
+            )
+
+    def test_auth_token_adds_auth_interceptor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_auth = MagicMock()
+        fake_auth_cls = MagicMock(return_value=fake_auth)
+        monkeypatch.setattr("almanak.gateway._server_start_helpers.AuthInterceptor", fake_auth_cls)
+        interceptors = build_interceptors(
+            _settings(allow_insecure=False, auth_token="tok")  # noqa: S106
+        )
+        fake_auth_cls.assert_called_once_with("tok")
+        assert fake_auth in interceptors
+
+    def test_audit_interceptor_appended(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_audit = MagicMock()
+        fake_audit_cls = MagicMock(return_value=fake_audit)
+        monkeypatch.setattr("almanak.gateway._server_start_helpers.AuditInterceptor", fake_audit_cls)
+        interceptors = build_interceptors(
+            _settings(audit_enabled=True, audit_log_level="debug", allow_insecure=True, network="anvil")
+        )
+        fake_audit_cls.assert_called_once_with(enabled=True, log_level="debug")
+        assert fake_audit in interceptors
+
+    def test_metrics_interceptor_appended(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_metrics = MagicMock()
+        fake_metrics_cls = MagicMock(return_value=fake_metrics)
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.MetricsInterceptor", fake_metrics_cls
+        )
+        interceptors = build_interceptors(
+            _settings(metrics_enabled=True, allow_insecure=True, network="anvil")
+        )
+        fake_metrics_cls.assert_called_once_with()
+        assert fake_metrics in interceptors
+
+    def test_interceptor_order_auth_audit_metrics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Auth must come first (rejects earliest); then audit; then metrics."""
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.AuthInterceptor",
+            lambda _: "AUTH",
+        )
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.AuditInterceptor",
+            lambda **_: "AUDIT",
+        )
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.MetricsInterceptor",
+            lambda: "METRICS",
+        )
+        interceptors = build_interceptors(
+            _settings(
+                allow_insecure=False,
+                auth_token="tok",  # noqa: S106
+                audit_enabled=True,
+                audit_log_level="info",
+                metrics_enabled=True,
+            )
+        )
+        assert interceptors == ["AUTH", "AUDIT", "METRICS"]
+
+
+# ---------------------------------------------------------------------------
+# initialize_timeline_store
+# ---------------------------------------------------------------------------
+class TestInitializeTimelineStore:
+    def test_postgres_when_database_url_set(self) -> None:
+        factory = MagicMock()
+        initialize_timeline_store(
+            _settings(database_url="postgres://x/y"),
+            factory,
+        )
+        factory.assert_called_once_with(database_url="postgres://x/y")
+
+    def test_sqlite_fallback_when_no_database_url(self) -> None:
+        factory = MagicMock()
+        initialize_timeline_store(
+            _settings(database_url=None, gateway_db_path="/tmp/gw.db"),
+            factory,
+        )
+        factory.assert_called_once_with(db_path="/tmp/gw.db")
+
+    def test_timeline_db_path_override_wins(self) -> None:
+        factory = MagicMock()
+        initialize_timeline_store(
+            _settings(
+                database_url=None,
+                gateway_db_path="/tmp/gw.db",
+                timeline_db_path="/tmp/tl.db",
+            ),
+            factory,
+        )
+        factory.assert_called_once_with(db_path="/tmp/tl.db")
+
+
+# ---------------------------------------------------------------------------
+# initialize_instance_registry
+# ---------------------------------------------------------------------------
+class TestInitializeInstanceRegistry:
+    def test_returns_registry_and_skips_log_when_no_stale(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        fake_registry = MagicMock()
+        fake_registry.reconcile_stale_on_startup = MagicMock(return_value=0)
+        monkeypatch.setattr(
+            "almanak.gateway.registry.get_instance_registry",
+            MagicMock(return_value=fake_registry),
+        )
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            result = initialize_instance_registry(_settings(gateway_db_path="/tmp/gw.db"))
+        assert result is fake_registry
+        assert not any("ghost RUNNING instance" in r.message for r in caplog.records)
+
+    def test_logs_when_stale_count_positive(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        fake_registry = MagicMock()
+        fake_registry.reconcile_stale_on_startup = MagicMock(return_value=7)
+        monkeypatch.setattr(
+            "almanak.gateway.registry.get_instance_registry",
+            MagicMock(return_value=fake_registry),
+        )
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            initialize_instance_registry(_settings(gateway_db_path="/tmp/gw.db"))
+        assert any("reconciled 7 ghost RUNNING instance(s)" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# initialize_lifecycle_store
+# ---------------------------------------------------------------------------
+class TestInitializeLifecycleStore:
+    def test_passes_database_url_and_sqlite_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_store = MagicMock()
+        factory = MagicMock(return_value=fake_store)
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.get_lifecycle_store", factory
+        )
+        result = initialize_lifecycle_store(
+            _settings(database_url="postgres://x/y", gateway_db_path="/tmp/gw.db")
+        )
+        assert result is fake_store
+        factory.assert_called_once_with(database_url="postgres://x/y", sqlite_path="/tmp/gw.db")
+
+
+# ---------------------------------------------------------------------------
+# log_pricing_source_configuration
+# ---------------------------------------------------------------------------
+class TestLogPricingSourceConfiguration:
+    def test_logs_when_no_coingecko_key(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Ambient env vars (developer .env) can inject a real key — clear them.
+        monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_COINGECKO_API_KEY", raising=False)
+        s = _settings(coingecko_api_key=None)
+        s.coingecko_api_key = None
+        with caplog.at_level(logging.INFO, logger="almanak.gateway._server_start_helpers"):
+            log_pricing_source_configuration(s)
+        assert any("Chainlink oracles" in r.message for r in caplog.records)
+
+    def test_silent_when_coingecko_key_set(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO, logger="almanak.gateway._server_start_helpers"):
+            log_pricing_source_configuration(_settings(coingecko_api_key="sk-test"))
+        assert not any("Chainlink oracles" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# load_wallet_registry
+# ---------------------------------------------------------------------------
+@dataclass
+class _FakeResolved:
+    account_address: str
+    kind: str = "eoa"
+
+
+class TestLoadWalletRegistry:
+    def test_no_env_var_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ALMANAK_GATEWAY_WALLETS", raising=False)
+        result = load_wallet_registry(_settings())
+        assert result is None
+
+    def test_plugin_not_installed_logs_and_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", "{}")
+        ep_result = MagicMock()
+        ep_result.__iter__ = lambda self: iter([])
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.entry_points",
+            MagicMock(return_value=ep_result),
+        )
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            result = load_wallet_registry(_settings())
+        assert result is None
+        assert any("wallet plugin is not installed" in r.message for r in caplog.records)
+
+    def test_plugin_loaded_returns_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", "{}")
+        # No legacy Safe env var
+        monkeypatch.delenv("SAFE_WALLET_ADDRESS", raising=False)
+        fake_registry = MagicMock()
+        fake_registry.all_chains.return_value = ["arbitrum"]
+        fake_registry.resolve.return_value = _FakeResolved(
+            account_address="0x1234567890abcdef", kind="eoa"
+        )
+        registry_cls = MagicMock(__name__="FakeRegistry")
+        registry_cls.from_env.return_value = fake_registry
+        fake_ep = MagicMock()
+        fake_ep.name = "registry"
+        fake_ep.load.return_value = registry_cls
+        ep_result = MagicMock()
+        ep_result.__iter__ = lambda self: iter([fake_ep])
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.entry_points",
+            MagicMock(return_value=ep_result),
+        )
+
+        result = load_wallet_registry(_settings(chains=["arbitrum"]))
+        assert result is fake_registry
+        registry_cls.from_env.assert_called_once_with(default_chains=["arbitrum"])
+
+    def test_plugin_loaded_with_short_address_does_not_slice(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Short addresses are logged as-is (no slice)."""
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", "{}")
+        monkeypatch.delenv("SAFE_WALLET_ADDRESS", raising=False)
+        fake_registry = MagicMock()
+        fake_registry.all_chains.return_value = ["arbitrum"]
+        # <= 10 chars — exercises the else branch of the ternary.
+        fake_registry.resolve.return_value = _FakeResolved(account_address="0xabc", kind="eoa")
+        registry_cls = MagicMock(__name__="FakeRegistry")
+        registry_cls.from_env.return_value = fake_registry
+        fake_ep = MagicMock()
+        fake_ep.name = "registry"
+        fake_ep.load.return_value = registry_cls
+        ep_result = MagicMock()
+        ep_result.__iter__ = lambda self: iter([fake_ep])
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.entry_points",
+            MagicMock(return_value=ep_result),
+        )
+
+        with caplog.at_level(logging.INFO, logger="almanak.gateway._server_start_helpers"):
+            load_wallet_registry(_settings())
+        # The short address must appear whole (no "..." suffix) in the log.
+        wallet_log = [
+            r.message for r in caplog.records if "Wallet config" in r.getMessage()
+        ]
+        assert wallet_log, "expected a 'Wallet config' log line"
+        assert "0xabc" in wallet_log[0]
+        assert "..." not in wallet_log[0]
+
+    def test_plugin_loaded_with_legacy_safe_env_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", "{}")
+        monkeypatch.setenv("SAFE_WALLET_ADDRESS", "0xSafe")
+        fake_registry = MagicMock()
+        fake_registry.all_chains.return_value = []
+        registry_cls = MagicMock(__name__="FakeRegistry")
+        registry_cls.from_env.return_value = fake_registry
+        fake_ep = MagicMock()
+        fake_ep.name = "registry"
+        fake_ep.load.return_value = registry_cls
+        ep_result = MagicMock()
+        ep_result.__iter__ = lambda self: iter([fake_ep])
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.entry_points",
+            MagicMock(return_value=ep_result),
+        )
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            load_wallet_registry(_settings())
+        assert any("takes precedence" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# build_reflection_service_names
+# ---------------------------------------------------------------------------
+class TestBuildReflectionServiceNames:
+    def test_all_expected_services_present(self) -> None:
+        names = build_reflection_service_names()
+        for expected in (
+            "almanak.gateway.proto.MarketService",
+            "almanak.gateway.proto.StateService",
+            "almanak.gateway.proto.ExecutionService",
+            "almanak.gateway.proto.ObserveService",
+            "almanak.gateway.proto.RpcService",
+            "almanak.gateway.proto.IntegrationService",
+            "almanak.gateway.proto.DashboardService",
+            "almanak.gateway.proto.FundingRateService",
+            "almanak.gateway.proto.SimulationService",
+            "almanak.gateway.proto.PolymarketService",
+            "almanak.gateway.proto.EnsoService",
+            "almanak.gateway.proto.TokenService",
+            "almanak.gateway.proto.LifecycleService",
+        ):
+            assert expected in names
+
+    def test_includes_grpc_health_and_reflection(self) -> None:
+        names = build_reflection_service_names()
+        assert "grpc.health.v1.Health" in names
+        assert "grpc.reflection.v1alpha.ServerReflection" in names

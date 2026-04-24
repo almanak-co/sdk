@@ -111,7 +111,8 @@ async def test_allow_insecure_disables_auth_even_with_configured_token():
     # Patch AuthInterceptor so we can prove it was never constructed.
     # Health.Check is auth-exempt, so asserting the interceptor was not
     # instantiated is the reliable way to prove auth was skipped.
-    with patch("almanak.gateway.server.AuthInterceptor") as auth_interceptor_cls:
+    # Patched at the helper module where it is now imported (Phase 8.3d).
+    with patch("almanak.gateway._server_start_helpers.AuthInterceptor") as auth_interceptor_cls:
         await server.start()
         await asyncio.sleep(0.1)
         assert auth_interceptor_cls.call_count == 0, (

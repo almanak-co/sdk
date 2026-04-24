@@ -7,10 +7,8 @@ access to external services or credentials.
 
 import asyncio
 import logging
-import os
 import signal
 from concurrent import futures
-from importlib.metadata import entry_points
 from typing import Any
 
 import grpc
@@ -19,11 +17,19 @@ from grpc_health.v1.health import aio as health_aio
 from grpc_reflection.v1alpha import reflection
 
 from almanak.core.redaction import install_redaction
-from almanak.gateway.audit import AuditInterceptor, configure_structlog
-from almanak.gateway.auth import AuthInterceptor
+from almanak.gateway._server_start_helpers import (
+    build_interceptors,
+    build_reflection_service_names,
+    initialize_instance_registry,
+    initialize_lifecycle_store,
+    initialize_timeline_store,
+    load_wallet_registry,
+    log_pricing_source_configuration,
+)
+from almanak.gateway.audit import configure_structlog
 from almanak.gateway.core.settings import GatewaySettings, get_settings
-from almanak.gateway.lifecycle import get_lifecycle_store, reset_lifecycle_store
-from almanak.gateway.metrics import MetricsInterceptor, MetricsServer
+from almanak.gateway.lifecycle import reset_lifecycle_store
+from almanak.gateway.metrics import MetricsServer
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services import (
     DashboardServiceServicer,
@@ -182,6 +188,9 @@ class GatewayServer:
         self._executor: futures.ThreadPoolExecutor | None = None
         self._health_servicer = health_aio.HealthServicer()
         self._metrics_server: MetricsServer | None = None
+        # Captured from the singleton factory during ``start`` for
+        # observability; not used elsewhere today.
+        self._instance_registry: Any | None = None
 
         # Execution servicer (needs reference for RegisterChains pre-warming)
         self._execution_servicer: ExecutionServiceServicer | None = None
@@ -226,157 +235,93 @@ class GatewayServer:
                 return
 
     async def start(self) -> None:
-        """Start the gRPC server."""
-        # Create interceptors list
-        # Auth interceptor runs first to reject unauthenticated requests early
-        interceptors = []
-        if self.settings.allow_insecure:
-            network = self.settings.network
-            is_test_network = network in ("anvil", "sepolia")
-            if not is_test_network and self.settings.auth_token:
-                # Contradictory config on a production network: operator has
-                # explicitly configured auth AND asked to disable it. Refuse to
-                # start rather than silently serving unauthenticated RPCs.
-                raise RuntimeError(
-                    f"Gateway startup aborted: conflicting configuration on network '{network}'. "
-                    "ALMANAK_GATEWAY_ALLOW_INSECURE=true is set alongside ALMANAK_GATEWAY_AUTH_TOKEN. "
-                    "Pick one: unset ALMANAK_GATEWAY_ALLOW_INSECURE to keep auth enabled, "
-                    "or unset ALMANAK_GATEWAY_AUTH_TOKEN to run unauthenticated (NOT RECOMMENDED on mainnet)."
-                )
-            if not is_test_network:
-                logger.warning(
-                    "INSECURE MODE on network '%s': Auth interceptor disabled. "
-                    "Gateway authentication is DISABLED on a production network. "
-                    "Remove ALMANAK_GATEWAY_ALLOW_INSECURE to require auth.",
-                    network,
-                )
-            else:
-                logger.warning(
-                    "INSECURE MODE: Auth interceptor disabled. This is acceptable for local development on '%s'.",
-                    network,
-                )
-            if self.settings.auth_token:
-                logger.warning(
-                    "Configured auth token ignored because allow_insecure=True on test network '%s'", network
-                )
-        elif self.settings.auth_token:
-            interceptors.append(AuthInterceptor(self.settings.auth_token))
-            logger.info("Auth interceptor enabled - token authentication required")
-        else:
-            raise RuntimeError(
-                "Gateway startup aborted: No auth_token configured. "
-                "Set ALMANAK_GATEWAY_AUTH_TOKEN environment variable or "
-                "set allow_insecure=True for local development."
-            )
+        """Start the gRPC server.
 
-        if self.settings.audit_enabled:
-            interceptors.append(
-                AuditInterceptor(
-                    enabled=True,
-                    log_level=self.settings.audit_log_level,
-                )
-            )
-            logger.info("Audit interceptor enabled (level=%s)", self.settings.audit_log_level)
-        if self.settings.metrics_enabled:
-            interceptors.append(MetricsInterceptor())
-            logger.info("Metrics interceptor enabled")
-
+        Bootstrap is decomposed into phases; each phase below is a helper
+        (either a method on this class or a pure function in
+        ``_server_start_helpers``) so every branch can be unit-tested without
+        binding a real port.
+        """
+        # Phase 1: interceptors + 2: grpc server build
+        interceptors = build_interceptors(self.settings)
         self._executor = futures.ThreadPoolExecutor(max_workers=self.settings.grpc_max_workers)
-        self.server = grpc.aio.server(
-            self._executor,
-            interceptors=interceptors,
-        )
+        self.server = grpc.aio.server(self._executor, interceptors=interceptors)
 
-        # Initialize TimelineStore: PostgreSQL for deployed mode, SQLite for local dev.
-        # This must happen before services are created so they all share the same store.
-        if self.settings.database_url:
-            get_timeline_store(database_url=self.settings.database_url)
-            logger.debug("TimelineStore initialized with PostgreSQL backend")
-        else:
-            effective_timeline_db = self.settings.timeline_db_path or self.settings.gateway_db_path
-            get_timeline_store(db_path=effective_timeline_db)
-            logger.debug(f"TimelineStore initialized with SQLite: {effective_timeline_db}")
+        # Phase 3: storage singletons (timeline, registry, lifecycle).
+        # Registry is a process-wide singleton; the returned handle is not
+        # needed by ``start`` itself but we capture it for parity with
+        # ``lifecycle_store`` and to make the bootstrap read symmetrically.
+        initialize_timeline_store(self.settings, get_timeline_store)
+        self._instance_registry = initialize_instance_registry(self.settings)
+        lifecycle_store = initialize_lifecycle_store(self.settings)
 
-        # Initialize InstanceRegistry with the same gateway DB
-        from almanak.gateway.registry import get_instance_registry
+        # Phase 4: pricing-source log
+        log_pricing_source_configuration(self.settings)
 
-        registry = get_instance_registry(db_path=self.settings.gateway_db_path)
-        logger.debug(f"InstanceRegistry initialized with persistent storage: {self.settings.gateway_db_path}")
-
-        # VIB-1279: Startup reconciliation — mark any leftover RUNNING entries as STALE.
-        # Strategies that are still alive will heartbeat back to RUNNING shortly.
-        stale_count = registry.reconcile_stale_on_startup()
-        if stale_count:
-            logger.warning("Gateway startup: reconciled %d ghost RUNNING instance(s) -> STALE", stale_count)
-
-        # Initialize LifecycleStore (uses same gateway DB or database_url for platform)
-        lifecycle_store = get_lifecycle_store(
-            database_url=self.settings.database_url,
-            sqlite_path=self.settings.gateway_db_path,
-        )
-        logger.debug("LifecycleStore initialized")
-
-        # Log pricing source configuration
-        if not self.settings.coingecko_api_key:
-            logger.info(
-                "No CoinGecko API key -- using on-chain pricing (Chainlink oracles) "
-                "with free CoinGecko as fallback. Set COINGECKO_API_KEY "
-                "for CoinGecko as primary source."
-            )
-
-        # Add health service (standard gRPC health protocol)
+        # Standard gRPC health protocol
         health_pb2_grpc.add_HealthServicer_to_server(self._health_servicer, self.server)
 
-        # ---- Plugin discovery: wallet registry ----
-        # Only activate when ALMANAK_GATEWAY_WALLETS is explicitly set.
-        # Legacy Safe env vars (ALMANAK_SAFE_ADDRESS, ALMANAK_GATEWAY_SAFE_MODE)
-        # use the existing non-registry path and must not be intercepted by the plugin.
-        wallet_registry = None
-        if os.environ.get("ALMANAK_GATEWAY_WALLETS"):
-            wallet_eps = entry_points(group="almanak.wallets")
-            registry_eps = [ep for ep in wallet_eps if ep.name == "registry"]
-            if registry_eps:
-                registry_cls = registry_eps[0].load()
-                wallet_registry = registry_cls.from_env(default_chains=self.settings.chains or None)
-                logger.info("Wallet registry plugin loaded: %s", registry_cls.__name__)
-                if os.environ.get("SAFE_WALLET_ADDRESS"):
-                    logger.warning(
-                        "Both ALMANAK_GATEWAY_WALLETS and SAFE_WALLET_ADDRESS are set. "
-                        "ALMANAK_GATEWAY_WALLETS takes precedence; legacy safe env vars are ignored."
-                    )
-            else:
-                logger.warning(
-                    "ALMANAK_GATEWAY_WALLETS is set but wallet plugin is not installed. "
-                    "Per-chain wallet config will be ignored. Install almanak-platform-plugins."
-                )
-            # Log wallet config at startup
-            if wallet_registry is not None:
-                for chain in wallet_registry.all_chains():
-                    resolved = wallet_registry.resolve(chain)
-                    logger.info(
-                        "Wallet config: chain=%s address=%s type=%s",
-                        chain,
-                        resolved.account_address[:10] + "..."
-                        if len(resolved.account_address) > 10
-                        else resolved.account_address,
-                        resolved.kind,
-                    )
+        # Phase 6: wallet-registry plugin
+        wallet_registry = load_wallet_registry(self.settings)
         self._wallet_registry = wallet_registry
 
-        # Add Phase 2 services (execution first, needed for health servicer)
+        # Phase 7: servicer registration
+        self._register_services(wallet_registry, lifecycle_store)
+
+        # Phase 8: reflection + NOT_SERVING + port bind
+        reflection.enable_server_reflection(build_reflection_service_names(), self.server)
+        # VIB-2413: mark NOT_SERVING BEFORE opening the port so clients cannot
+        # race warmup and hit uninitialized providers.
+        await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+        listen_addr = f"{self.settings.grpc_host}:{self.settings.grpc_port}"
+        self.server.add_insecure_port(listen_addr)
+
+        # Phase 9: optional metrics HTTP server
+        if self.settings.metrics_enabled:
+            self._metrics_server = MetricsServer(port=self.settings.metrics_port)
+            self._metrics_server.start()
+
+        # Phase 10: serve + heartbeat TTL enforcer
+        await self.server.start()
+        logger.info(f"Gateway gRPC server started on {listen_addr}")
+        self._heartbeat_ttl_task = asyncio.create_task(
+            self._heartbeat_ttl_loop(interval_seconds=60, stale_threshold_seconds=300),
+            name="heartbeat-ttl-enforcer",
+        )
+        logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
+
+        # Phase 11-12: warmup
+        await self._warmup_market_service()
+        await self._prewarm_if_chains_known()
+
+        # Phase 13: flip SERVING (VIB-2413)
+        await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+        logger.info("Gateway marked SERVING (warmup complete)")
+
+    # ------------------------------------------------------------------
+    # Phase 7 helper: servicer registration
+    # ------------------------------------------------------------------
+    def _register_services(self, wallet_registry: Any | None, lifecycle_store: Any) -> None:
+        """Build + register every Phase-2/3 servicer on ``self.server``.
+
+        Order matters only where one servicer captures a reference to
+        another: execution needs wallet_registry and market_servicer;
+        RegisterChains needs execution + market. Every other registration
+        is order-independent.
+        """
+        # Phase 2: execution first (needed by RegisterChains custom health)
         self._execution_servicer = ExecutionServiceServicer(self.settings)
         gateway_pb2_grpc.add_ExecutionServiceServicer_to_server(self._execution_servicer, self.server)
-
-        # Assign wallet registry to execution servicer
         self._execution_servicer.wallet_registry = wallet_registry
 
-        # Create market servicer early so RegisterChains can reinitialize it
-        # when chain info arrives (upgrades from CoinGecko-only to full 4-source stack)
+        # Market servicer — created early so RegisterChains can upgrade it
+        # from CoinGecko-only to the full 4-source stack once chain info
+        # arrives.
         self._market_servicer = MarketServiceServicer(self.settings)
         self._market_servicer.wallet_registry = wallet_registry
         gateway_pb2_grpc.add_MarketServiceServicer_to_server(self._market_servicer, self.server)
 
-        # Add custom health servicer with RegisterChains support
+        # Custom Health servicer carrying RegisterChains RPC.
         register_chains_servicer = _RegisterChainsServicer(
             self._health_servicer,
             self._execution_servicer,
@@ -386,47 +331,41 @@ class GatewayServer:
         )
         gateway_pb2_grpc.add_HealthServicer_to_server(register_chains_servicer, self.server)
 
-        # Give execution service access to market service for self-serve price fetching
+        # Cross-reference so execution can self-serve prices through market.
         self._execution_servicer.market_servicer = self._market_servicer
 
+        # Phase 2 state/observe
         state_servicer = StateServiceServicer(self.settings)
         gateway_pb2_grpc.add_StateServiceServicer_to_server(state_servicer, self.server)
 
         self._observe_servicer = ObserveServiceServicer(self.settings)
         gateway_pb2_grpc.add_ObserveServiceServicer_to_server(self._observe_servicer, self.server)
 
-        # Add Phase 3 services
+        # Phase 3 data/integration services
         self._rpc_servicer = RpcServiceServicer(self.settings)
         gateway_pb2_grpc.add_RpcServiceServicer_to_server(self._rpc_servicer, self.server)
 
         self._integration_servicer = IntegrationServiceServicer(self.settings)
         gateway_pb2_grpc.add_IntegrationServiceServicer_to_server(self._integration_servicer, self.server)
 
-        # Add Dashboard service
         dashboard_servicer = DashboardServiceServicer(self.settings)
         gateway_pb2_grpc.add_DashboardServiceServicer_to_server(dashboard_servicer, self.server)
 
-        # Add FundingRate service
         self._funding_rate_servicer = FundingRateServiceServicer(self.settings)
         gateway_pb2_grpc.add_FundingRateServiceServicer_to_server(self._funding_rate_servicer, self.server)
 
-        # Add Simulation service
         self._simulation_servicer = SimulationServiceServicer(self.settings)
         gateway_pb2_grpc.add_SimulationServiceServicer_to_server(self._simulation_servicer, self.server)
 
-        # Add Polymarket service
         self._polymarket_servicer = PolymarketServiceServicer(self.settings)
         gateway_pb2_grpc.add_PolymarketServiceServicer_to_server(self._polymarket_servicer, self.server)
 
-        # Add Enso service
         self._enso_servicer = EnsoServiceServicer(self.settings)
         gateway_pb2_grpc.add_EnsoServiceServicer_to_server(self._enso_servicer, self.server)
 
-        # Add Token service
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)
 
-        # Add Lifecycle service
         self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
         gateway_pb2_grpc.add_LifecycleServiceServicer_to_server(self._lifecycle_servicer, self.server)
 
@@ -434,77 +373,35 @@ class GatewayServer:
         logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
         logger.debug("Registered Dashboard, Token, and Lifecycle services")
 
-        # Enable reflection for debugging and development
-        # Service names must match the proto package (almanak.gateway.proto)
-        service_names = (
-            health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
-            "almanak.gateway.proto.MarketService",
-            "almanak.gateway.proto.StateService",
-            "almanak.gateway.proto.ExecutionService",
-            "almanak.gateway.proto.ObserveService",
-            "almanak.gateway.proto.RpcService",
-            "almanak.gateway.proto.IntegrationService",
-            "almanak.gateway.proto.DashboardService",
-            "almanak.gateway.proto.FundingRateService",
-            "almanak.gateway.proto.SimulationService",
-            "almanak.gateway.proto.PolymarketService",
-            "almanak.gateway.proto.EnsoService",
-            "almanak.gateway.proto.TokenService",
-            "almanak.gateway.proto.LifecycleService",
-            reflection.SERVICE_NAME,
-        )
-        reflection.enable_server_reflection(service_names, self.server)
+    # ------------------------------------------------------------------
+    # Phase 11 helper: market service warmup
+    # ------------------------------------------------------------------
+    async def _warmup_market_service(self) -> None:
+        """Pre-warm MarketServiceServicer HTTP/RPC caches.
 
-        # VIB-2413: Explicitly mark NOT_SERVING before opening the port.
-        # The gRPC HealthServicer defaults to SERVING, so without this
-        # clients could connect during warmup and hit uninitialized providers.
-        await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+        Only runs when chains are already configured; wallet-registry
+        deployments get chains later via ``RegisterChains`` and must
+        lazy-init with the correct chain context (otherwise
+        ``_ensure_initialized`` locks to CoinGecko-only). VIB-2392.
+        """
+        if not (self._market_servicer and self.settings.chains):
+            return
+        wallet_for_warmup = self._resolve_wallet_address()
+        try:
+            await self._market_servicer.warmup(wallet_address=wallet_for_warmup)
+        except Exception as e:
+            logger.warning(f"Market service warmup failed (will lazy-init on first call): {e}")
 
-        # Use grpc_host from settings, default to localhost for security
-        listen_addr = f"{self.settings.grpc_host}:{self.settings.grpc_port}"
-        self.server.add_insecure_port(listen_addr)
-
-        # Start metrics HTTP server if enabled
-        if self.settings.metrics_enabled:
-            self._metrics_server = MetricsServer(port=self.settings.metrics_port)
-            self._metrics_server.start()
-
-        await self.server.start()
-        logger.info(f"Gateway gRPC server started on {listen_addr}")
-
-        # VIB-1280: start background heartbeat TTL enforcer
-        self._heartbeat_ttl_task = asyncio.create_task(
-            self._heartbeat_ttl_loop(interval_seconds=60, stale_threshold_seconds=300),
-            name="heartbeat-ttl-enforcer",
-        )
-        logger.debug("Heartbeat TTL enforcer task started (interval=60s, threshold=300s)")
-
-        # Pre-warm market service: initialize price sources AND fetch a common
-        # price to warm HTTP connections/caches. Also pre-warms the balance
-        # provider for the configured chain/wallet. (VIB-2392)
-        # Only pre-warm when chains are already configured; wallet-registry deployments
-        # get chains later via register_chains() and must lazy-init with the correct
-        # chain context (otherwise _ensure_initialized locks to CoinGecko-only).
-        if self._market_servicer and self.settings.chains:
-            wallet_for_warmup = self._resolve_wallet_address()
-            try:
-                await self._market_servicer.warmup(wallet_address=wallet_for_warmup)
-            except Exception as e:
-                logger.warning(f"Market service warmup failed (will lazy-init on first call): {e}")
-
-        # Pre-warm orchestrators if chains are configured or wallet registry has chains
+    # ------------------------------------------------------------------
+    # Phase 12 helper: orchestrator pre-warm guard
+    # ------------------------------------------------------------------
+    async def _prewarm_if_chains_known(self) -> None:
+        """Pre-warm execution orchestrators when any chain source is known."""
         if self.settings.chains or (self._wallet_registry and self._wallet_registry.all_chains()):
             try:
                 await self._prewarm_chains()
             except Exception as e:
                 logger.warning(f"Chain pre-warm failed (will lazy-init on first call): {e}")
-
-        # VIB-2413: Mark as serving AFTER warmup so clients don't call balance/price
-        # endpoints before providers are initialized. Previously this was set before
-        # warmup, causing the first market.balance() call to DEADLINE_EXCEEDED on
-        # slower RPC connections (e.g., Base mainnet).
-        await self._health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-        logger.info("Gateway marked SERVING (warmup complete)")
 
     def _resolve_wallet_address(self) -> str | None:
         """Resolve the wallet address from registry or legacy config.
