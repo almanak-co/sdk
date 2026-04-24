@@ -164,12 +164,16 @@ class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
 
     def _close(self) -> Intent:
         """CLOSE phase: remove all liquidity from the position."""
-        logger.info(f"LP_CLOSE: pool={self.pool}")
+        logger.info(f"LP_CLOSE: pool={self.pool}, bins={self._position_bin_ids}")
+        extra: dict = {}
+        if self._position_bin_ids:
+            extra["protocol_params"] = {"bin_ids": list(self._position_bin_ids)}
         return Intent.lp_close(
             position_id=self.pool,
             pool=self.pool,
             collect_fees=True,
             protocol="traderjoe_v2",
+            **extra,
         )
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
@@ -178,7 +182,16 @@ class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
             return
 
         if intent.intent_type.value == "LP_OPEN":
-            bin_ids = getattr(result, "bin_ids", None)
+            # ResultEnricher stores protocol-specific fields in extracted_data.
+            # Some adapters also project them onto the result directly, but we
+            # cannot rely on that for TraderJoe V2 bin IDs.
+            bin_ids = None
+            if result is not None:
+                bin_ids = getattr(result, "bin_ids", None)
+                if not bin_ids:
+                    extracted = getattr(result, "extracted_data", None) or {}
+                    bin_ids = extracted.get("bin_ids")
+
             if bin_ids:
                 self._position_bin_ids = list(bin_ids)
                 logger.info(f"LP_OPEN SUCCESS: bin_ids={bin_ids[:3]}...")
@@ -216,6 +229,24 @@ class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
             positions=positions,
         )
 
+    def get_persistent_state(self) -> dict:
+        """Persist bin IDs so teardown can recover after process restarts."""
+        parent_get_state = getattr(super(), "get_persistent_state", None)
+        state = parent_get_state() if callable(parent_get_state) else {}
+        if self._position_bin_ids:
+            state["position_bin_ids"] = list(self._position_bin_ids)
+        return state
+
+    def load_persistent_state(self, state: dict) -> None:
+        """Restore bin IDs saved by get_persistent_state()."""
+        parent_load_state = getattr(super(), "load_persistent_state", None)
+        if callable(parent_load_state):
+            parent_load_state(state)
+        raw_bin_ids = state.get("position_bin_ids", []) if state else []
+        self._position_bin_ids = [int(b) for b in raw_bin_ids]
+        if self._position_bin_ids:
+            logger.info("Restored TraderJoe LP bin_ids from state: %s...", self._position_bin_ids[:3])
+
     def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
         if self._position_bin_ids:
             return [
@@ -224,6 +255,7 @@ class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
                     pool=self.pool,
                     collect_fees=True,
                     protocol="traderjoe_v2",
+                    protocol_params={"bin_ids": list(self._position_bin_ids)},
                 )
             ]
         return []

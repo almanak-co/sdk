@@ -196,8 +196,17 @@ class TraderJoePnLLPStrategy(IntentStrategy):
 
         if self._state == "opening":
             self._state = "active"
-            if result and hasattr(result, "bin_ids"):
-                self._position_bin_ids = result.bin_ids
+            # ResultEnricher stores protocol-specific fields in extracted_data.
+            # Some adapters also project them onto the result directly, but we
+            # cannot rely on that for TraderJoe V2 bin IDs.
+            bin_ids = None
+            if result is not None:
+                bin_ids = getattr(result, "bin_ids", None)
+                if not bin_ids:
+                    extracted = getattr(result, "extracted_data", None) or {}
+                    bin_ids = extracted.get("bin_ids")
+            if bin_ids:
+                self._position_bin_ids = list(bin_ids)
             logger.info(f"LP opened successfully. State -> active")
 
         elif self._state == "closing":

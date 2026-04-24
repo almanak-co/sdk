@@ -344,9 +344,17 @@ class TJWideAccumulatorStrategy(IntentStrategy[TJWideAccumulatorConfig]):
                     },
                 )
             )
-            # Track bin IDs from result if available
-            if hasattr(result, "bin_ids"):
-                self._position_bin_ids = result.bin_ids
+            # ResultEnricher stores protocol-specific fields in extracted_data.
+            # Some adapters also project them onto the result directly, but we
+            # cannot rely on that for TraderJoe V2 bin IDs.
+            bin_ids = None
+            if result is not None:
+                bin_ids = getattr(result, "bin_ids", None)
+                if not bin_ids:
+                    extracted = getattr(result, "extracted_data", None) or {}
+                    bin_ids = extracted.get("bin_ids")
+            if bin_ids:
+                self._position_bin_ids = list(bin_ids)
             else:
                 # Estimate bins based on current price and range
                 center_bin = self._price_to_bin_id(self._position_center_price or Decimal("0.0133"))
