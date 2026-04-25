@@ -417,6 +417,13 @@ class StrategyRunner:
         # Track pause log state to avoid repetitive per-iteration info spam.
         self._logged_paused_strategy_ids: set[str] = set()
 
+        # VIB-3418: FIFO basis store for lending interest attribution.
+        # Lives for the runner's lifetime so BORROW lots are available when REPAY arrives.
+        # Reconstructable from accounting_events if the runner restarts.
+        from ..accounting.basis import FIFOBasisStore
+
+        self._lending_basis_store = FIFOBasisStore()
+
         mode = "multi-chain" if self._is_multi_chain else "single-chain"
         logger.info(
             f"StrategyRunner initialized ({mode} mode) with config: "
@@ -1745,7 +1752,8 @@ class StrategyRunner:
         result: Any | None,
         success: bool,
         error: str = "",
-    ) -> None:
+    ) -> str | None:
+        """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
 
         VIB-3157: in live mode a persistence failure raises
@@ -1863,6 +1871,7 @@ class StrategyRunner:
             # Signal that this iteration executed a trade — forces snapshot
             if success:
                 self._iteration_had_trade = True
+            return entry.id
         except AccountingPersistenceError:
             # Live mode: propagate so run_iteration halts the cycle and alerts.
             # Paper/dry-run: swallow but log ERROR (not debug) so drift is visible.
@@ -1884,6 +1893,82 @@ class StrategyRunner:
                     cause=e,
                 ) from e
             logger.error(f"Failed to write ledger entry (non-live): {e}")
+        return None
+
+    async def _try_write_lending_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        price_oracle: dict | None = None,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write a LendingAccountingEvent after a successful lending intent (VIB-3418).
+
+        Best-effort: any exception is logged at WARNING and swallowed.  In live
+        mode the accounting record is important but secondary to the ledger entry
+        that is already persisted — a write failure here does not halt the loop.
+
+        Reads after-state (HF, collateral, debt) from the chain via the gateway.
+        Before-state is None for now; pre-execution capture is a follow-up item.
+        """
+        try:
+            from ..accounting.lending_accounting import _LENDING_INTENT_TYPES, build_lending_accounting_event
+            from ..accounting.writer import AccountingWriter
+            from ..observability.context import get_cycle_id
+
+            intent_type_str = ""
+            it = getattr(intent, "intent_type", None)
+            if it is not None:
+                intent_type_str = it.value if hasattr(it, "value") else str(it)
+
+            if intent_type_str not in _LENDING_INTENT_TYPES:
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            cycle_id = get_cycle_id() or ""
+            execution_mode = self._derive_execution_mode()
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            wallet_address = getattr(strategy, "wallet_address", "")
+
+            event = build_lending_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                gateway_client=self._get_gateway_client(),
+                basis_store=self._lending_basis_store,
+                price_oracle=price_oracle,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "Lending accounting event written: %s %s (confidence=%s)",
+                    event.event_type,
+                    event.asset,
+                    event.confidence,
+                )
+            else:
+                logger.debug(
+                    "Lending accounting event not persisted (backend unsupported): %s %s", event.event_type, event.asset
+                )
+        except Exception:
+            logger.warning(
+                "Lending accounting write failed (non-blocking)",
+                exc_info=True,
+            )
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
@@ -2627,7 +2712,17 @@ class StrategyRunner:
         # Emit timeline event for successful execution
         self._emit_execution_timeline_event(strategy, intent, success=True, result=state.last_execution_result)
         # Write structured trade record to transaction ledger (VIB-2402)
-        await self._write_ledger_entry(strategy, intent, result=state.last_execution_result, success=True)
+        ledger_entry_id = await self._write_ledger_entry(
+            strategy, intent, result=state.last_execution_result, success=True
+        )
+        # VIB-3418: write lending accounting event (SUPPLY/BORROW/REPAY/WITHDRAW)
+        await self._try_write_lending_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
+            price_oracle=state.price_oracle,
+            ledger_entry_id=ledger_entry_id,
+        )
         if state.record_metrics:
             self._record_success(execution_proved=True)
 

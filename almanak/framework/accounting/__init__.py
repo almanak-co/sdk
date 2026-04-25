@@ -5,6 +5,7 @@ The accounting_events SQLite table is the durable local store.
 Hosted Postgres persistence is added after metrics-database migration (IMPL-3).
 """
 
+from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
 from almanak.framework.accounting.models import (
     AccountingConfidence,
     AccountingIdentity,
@@ -16,6 +17,7 @@ from almanak.framework.accounting.models import (
 from almanak.framework.accounting.writer import AccountingWriter
 
 __all__ = [
+    "build_lending_accounting_event",
     "AccountingConfidence",
     "AccountingIdentity",
     "AccountingWriter",

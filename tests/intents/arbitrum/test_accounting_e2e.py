@@ -1318,3 +1318,676 @@ class TestLendingAccountingE2E:
 
         finally:
             os.unlink(db_path)
+
+
+# =============================================================================
+# Section 5: VIB-3418 — Lending Accounting Writer Tests
+# =============================================================================
+
+
+class _MockRpcResponse:
+    """Minimal gateway RPC response for tests."""
+
+    def __init__(self, success: bool, result: str = "", error: str = "") -> None:
+        self.success = success
+        self.result = result
+        self.error = error
+
+
+class _MockRpcStub:
+    """Routes gateway eth_call through the real Anvil web3 provider."""
+
+    def __init__(self, w3: Web3) -> None:
+        self._w3 = w3
+
+    def Call(self, request: object, timeout: int = 10) -> _MockRpcResponse:
+        import json as _json
+
+        try:
+            params = _json.loads(request.params)  # type: ignore[union-attr]
+            tx_params, block = params[0], params[1]
+            raw = self._w3.eth.call(tx_params, block)
+            return _MockRpcResponse(success=True, result=_json.dumps(raw.hex()))
+        except Exception as exc:
+            return _MockRpcResponse(success=False, error=str(exc))
+
+
+class _MockGatewayClient:
+    """Minimal gateway client whose eth_calls route through Anvil."""
+
+    def __init__(self, w3: Web3) -> None:
+        self._rpc_stub = _MockRpcStub(w3)
+        self._w3 = w3
+
+    config = None  # _gateway_eth_call falls back to timeout=10 when None
+
+    def eth_call(self, chain: str, to: str, data: str) -> str | None:
+        """Public eth_call API — routes through Anvil web3 (chain ignored for local tests)."""
+        try:
+            raw = self._w3.eth.call({"to": to, "data": data}, "latest")
+            return raw.hex()
+        except Exception:
+            return None
+
+
+class TestLendingAccountingVIB3418:
+    """VIB-3418 — Lending accounting writer.
+
+    Proves:
+    1. build_lending_accounting_event returns None for non-lending intents.
+    2. SUPPLY event is built with correct type and position_key format.
+    3. BORROW records a FIFO lot; interest_delta_usd is None at borrow time.
+    4. REPAY with prior BORROW lot computes correct interest_delta_usd.
+    5. REPAY without prior lots sets interest_delta_usd = None (UNAVAILABLE, not zero).
+    6. Aave V3 getUserAccountData ABI decoding is correct against a known hex fixture.
+    7. getUserAccountData read via real Anvil (mock gateway wrapping web3) returns
+       non-zero collateral after WETH supply.
+    """
+
+    # ─── Pure unit helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_intent(intent_type: str, protocol: str = "aave_v3", asset: str = "USDC") -> object:
+        """Build a minimal intent namespace without going through validation."""
+        from types import SimpleNamespace
+
+        from almanak.framework.intents.vocabulary import IntentType
+
+        _TYPE_MAP = {
+            "SUPPLY": IntentType.SUPPLY,
+            "BORROW": IntentType.BORROW,
+            "REPAY": IntentType.REPAY,
+            "WITHDRAW": IntentType.WITHDRAW,
+        }
+        return SimpleNamespace(
+            intent_type=_TYPE_MAP[intent_type],
+            protocol=protocol,
+            # borrow_token takes priority in _intent_asset
+            borrow_token=asset if intent_type == "BORROW" else None,
+            token=None if intent_type == "BORROW" else asset,
+            market_id=None,
+            chain=None,
+        )
+
+    @staticmethod
+    def _make_result(
+        intent_type: str,
+        raw_amount: int | None = None,
+        borrow_rate: int | None = None,
+        supply_rate: int | None = None,
+        tx_hash: str = "0xdeadbeef1234",
+    ) -> object:
+        from types import SimpleNamespace
+
+        extracted: dict = {}
+        if raw_amount is not None:
+            key = {
+                "SUPPLY": "supply_amount",
+                "BORROW": "borrow_amount",
+                "REPAY": "repay_amount",
+                "WITHDRAW": "withdraw_amount",
+            }[intent_type]
+            extracted[key] = raw_amount
+        if borrow_rate is not None:
+            extracted["borrow_rate"] = borrow_rate
+        if supply_rate is not None:
+            extracted["supply_rate"] = supply_rate
+        return SimpleNamespace(extracted_data=extracted, tx_hash=tx_hash, gas_cost_eth=None)
+
+    # ─── Unit tests (no Anvil) ────────────────────────────────────────────────
+
+    def test_build_event_returns_none_for_non_lending_intent(self):  # noqa: layers
+        """Swap intents must be silently skipped."""
+        from types import SimpleNamespace
+
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.intents.vocabulary import IntentType
+
+        intent = SimpleNamespace(intent_type=IntentType.SWAP)
+        result = SimpleNamespace(extracted_data={}, tx_hash="0x", gas_cost_eth=None)
+        event = build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="d1",
+            strategy_id="s1",
+            cycle_id="c1",
+            execution_mode="dry_run",
+            chain="arbitrum",
+            wallet_address=TEST_WALLET,
+            gateway_client=None,
+            basis_store=FIFOBasisStore(),
+            price_oracle=None,
+        )
+        assert event is None, "Non-lending intents must return None"
+
+    def test_build_event_supply_type_and_position_key(self):  # noqa: layers
+        """SUPPLY event has correct type, position_key, and ESTIMATED confidence (no gateway)."""
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.accounting.models import AccountingConfidence, LendingEventType
+
+        intent = self._make_intent("SUPPLY", protocol="aave_v3", asset="USDC")
+        result = self._make_result("SUPPLY", raw_amount=None)
+        basis_store = FIFOBasisStore()
+
+        event = build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="d1",
+            strategy_id="s1",
+            cycle_id="c1",
+            execution_mode="dry_run",
+            chain="arbitrum",
+            wallet_address=TEST_WALLET,
+            gateway_client=None,
+            basis_store=basis_store,
+            price_oracle=None,
+        )
+
+        assert event is not None
+        assert event.event_type == LendingEventType.SUPPLY
+        assert event.asset == "USDC"
+        assert "lending:arbitrum:aave_v3:" in event.position_key
+        assert TEST_WALLET.lower() in event.position_key
+        assert "usdc" in event.position_key.lower()
+        # No gateway → no after-state read → ESTIMATED
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert event.health_factor_after is None
+        assert event.health_factor_before is None
+
+    def test_build_event_borrow_records_fifo_lot_and_no_interest(self):  # noqa: layers
+        """BORROW: records a FIFO lot in the basis store; interest_delta_usd is None at borrow time."""
+        from decimal import Decimal
+
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.accounting.models import LendingEventType
+
+        intent = self._make_intent("BORROW", protocol="aave_v3", asset="USDC")
+        # 100 USDC in 6-decimal units — gives amount_human = Decimal("100")
+        result = self._make_result("BORROW", raw_amount=100_000_000)
+        basis_store = FIFOBasisStore()
+        price_oracle = {"USDC": Decimal("1.00")}
+
+        event = build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="test-deploy",
+            strategy_id="test-strat",
+            cycle_id="c1",
+            execution_mode="dry_run",
+            chain="arbitrum",
+            wallet_address=TEST_WALLET,
+            gateway_client=None,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+
+        assert event is not None
+        assert event.event_type == LendingEventType.BORROW
+        # interest is not known at borrow time — must be None, never zero
+        assert event.interest_delta_usd is None
+        # FIFO lot must have been recorded — verify by inspecting the store directly
+        position_key = f"lending:arbitrum:aave_v3:{TEST_WALLET.lower()}:usdc"
+        key = f"test-deploy:{position_key}:usdc"
+        assert key in basis_store._lots, "BORROW must record a FIFO lot in the basis store"
+        assert len(basis_store._lots[key]) == 1
+        assert basis_store._lots[key][0]["principal"] == Decimal("100")
+        # principal_delta_usd populated from lot amount
+        assert event.principal_delta_usd is not None
+        assert abs(event.principal_delta_usd - Decimal("100")) < Decimal("1")
+
+    def test_build_event_repay_with_borrow_lot_computes_interest(self):  # noqa: layers
+        """REPAY after a known BORROW: interest = repay_amount - principal_consumed."""
+        from decimal import Decimal
+
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.accounting.models import LendingEventType
+
+        basis_store = FIFOBasisStore()
+        deployment_id = "d1"
+
+        # Manually seed a borrow lot (simulates a prior BORROW execution)
+        # position_key for aave_v3, no market_id, asset USDC:
+        #   lending:arbitrum:aave_v3:<wallet>:usdc
+        position_key = f"lending:arbitrum:aave_v3:{TEST_WALLET.lower()}:usdc"
+        basis_store.record_borrow(
+            deployment_id=deployment_id,
+            position_key=position_key,
+            token="USDC",
+            principal_amount=Decimal("100"),
+        )
+
+        # Now execute a REPAY of 100.5 (principal + 0.5 interest)
+        intent = self._make_intent("REPAY", protocol="aave_v3", asset="USDC")
+        # Simulate extracted_data.repay_amount = 100_500_000 (100.5 USDC in 6-dec units)
+        # Token resolver should decode USDC as 6 decimals on arbitrum
+        result = self._make_result("REPAY", raw_amount=100_500_000)
+
+        price_oracle = {"USDC": Decimal("1.00")}  # $1 per USDC
+
+        event = build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id=deployment_id,
+            strategy_id="s1",
+            cycle_id="c1",
+            execution_mode="dry_run",
+            chain="arbitrum",
+            wallet_address=TEST_WALLET,
+            gateway_client=None,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+
+        assert event is not None
+        assert event.event_type == LendingEventType.REPAY
+
+        # USDC decimals must resolve to 6 — amount_human = 100.5, lot = 100, interest = 0.5
+        assert event.principal_delta_usd is not None, (
+            "principal_delta_usd must be populated for REPAY with a prior BORROW lot"
+        )
+        assert abs(event.principal_delta_usd - Decimal("100")) < Decimal("1"), (
+            f"principal_delta_usd should be ~$100 (principal consumed from lot); got {event.principal_delta_usd}"
+        )
+        assert event.interest_delta_usd is not None, (
+            "interest_delta_usd must be populated for REPAY exceeding the principal lot"
+        )
+        assert event.interest_delta_usd >= Decimal("0"), "Interest must be non-negative"
+        assert event.interest_delta_usd < Decimal("2"), (
+            f"Interest on 0.5 USDC should be <$2; got {event.interest_delta_usd}"
+        )
+
+    def test_build_event_repay_without_prior_borrow_interest_is_unavailable(self):  # noqa: layers
+        """REPAY with no matching BORROW lots: interest_delta_usd is None (UNAVAILABLE).
+
+        Critical: we must never fabricate interest when the BORROW lot is missing.
+        """
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.accounting.models import LendingEventType
+
+        intent = self._make_intent("REPAY", protocol="aave_v3", asset="USDC")
+        result = self._make_result("REPAY", raw_amount=100_000_000)  # 100 USDC
+        basis_store = FIFOBasisStore()  # empty — no prior BORROW lot
+
+        price_oracle = {"USDC": Decimal("1.00")}
+        event = build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="d1",
+            strategy_id="s1",
+            cycle_id="c1",
+            execution_mode="dry_run",
+            chain="arbitrum",
+            wallet_address=TEST_WALLET,
+            gateway_client=None,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+
+        assert event is not None
+        assert event.event_type == LendingEventType.REPAY
+        # NO lots → interest MUST be None, not zero
+        assert event.interest_delta_usd is None, (
+            "REPAY without prior BORROW lot must have interest_delta_usd=None "
+            f"(got {event.interest_delta_usd!r}). Fabricating interest=0 is incorrect."
+        )
+
+    def test_aave_account_data_abi_decoding(self):  # noqa: layers
+        """Verify Aave V3 getUserAccountData ABI decoding with a known hex fixture.
+
+        Constructs expected 6-word ABI response (6 * 32 bytes = 192 bytes = 384 hex chars):
+          [0] totalCollateralBase  = $1000 = 100_000_000_000 (1e8 scale)
+          [1] totalDebtBase        = $500  = 50_000_000_000
+          [2] availableBorrowsBase = $0    (not decoded)
+          [3] liqThreshold         = 8500 (85%)
+          [4] ltv                  = 8000 (not decoded)
+          [5] healthFactor         = 1.5e18 = 1_500_000_000_000_000_000
+        """
+        from almanak.framework.accounting.lending_accounting import _decode_word
+
+        collateral_raw = 100_000_000_000  # $1000
+        debt_raw = 50_000_000_000         # $500
+        liq_threshold = 8500
+        hf_raw = 1_500_000_000_000_000_000  # 1.5 * 1e18
+
+        def _word(val: int) -> str:
+            return format(val, "064x")
+
+        hex_data = (
+            _word(collateral_raw)   # [0]
+            + _word(debt_raw)       # [1]
+            + _word(0)              # [2] availableBorrows (unused)
+            + _word(liq_threshold)  # [3]
+            + _word(8000)           # [4] ltv (unused)
+            + _word(hf_raw)         # [5]
+        )
+
+        assert len(hex_data) == 384, f"Expected 384 hex chars, got {len(hex_data)}"
+
+        assert _decode_word(hex_data, 0) == collateral_raw
+        assert _decode_word(hex_data, 1) == debt_raw
+        assert _decode_word(hex_data, 3) == liq_threshold
+        assert _decode_word(hex_data, 5) == hf_raw
+
+        # Simulate what read_aave_account_state does
+        from decimal import Decimal
+
+        _AAVE_USD_SCALE = Decimal("1e8")
+        _AAVE_HF_SCALE = Decimal("1e18")
+        collateral_usd = Decimal(_decode_word(hex_data, 0)) / _AAVE_USD_SCALE
+        debt_usd = Decimal(_decode_word(hex_data, 1)) / _AAVE_USD_SCALE
+        health_factor = Decimal(_decode_word(hex_data, 5)) / _AAVE_HF_SCALE
+
+        assert collateral_usd == Decimal("1000"), f"Expected $1000, got {collateral_usd}"
+        assert debt_usd == Decimal("500"), f"Expected $500, got {debt_usd}"
+        assert health_factor == Decimal("1.5"), f"Expected HF=1.5, got {health_factor}"
+
+        print("\n[PASS] Aave V3 getUserAccountData ABI decoding:")
+        print(f"  collateral_usd = ${collateral_usd}")
+        print(f"  debt_usd       = ${debt_usd}")
+        print(f"  health_factor  = {health_factor}")
+
+    def test_aave_selector_matches_function_signature(self):  # noqa: layers
+        """Verify 0xbf92857c = keccak256('getUserAccountData(address)')[:4]."""
+        from eth_utils import keccak
+
+        from almanak.framework.accounting.lending_accounting import _AAVE_GET_ACCOUNT_DATA_SELECTOR
+
+        expected = "0x" + keccak(text="getUserAccountData(address)").hex()[:8]
+        assert _AAVE_GET_ACCOUNT_DATA_SELECTOR == expected, (
+            f"Selector mismatch: stored={_AAVE_GET_ACCOUNT_DATA_SELECTOR}, "
+            f"computed={expected}"
+        )
+
+    def test_position_key_format(self):  # noqa: layers
+        """Position key must be stable and canonical."""
+        from almanak.framework.accounting.lending_accounting import _derive_position_key
+
+        key_no_market = _derive_position_key("aave_v3", "arbitrum", "0xABCD", None, "USDC")
+        key_with_market = _derive_position_key("morpho_blue", "arbitrum", "0xABCD", "0xDEAD", "USDC")
+
+        assert key_no_market == "lending:arbitrum:aave_v3:0xabcd:usdc"
+        assert key_with_market == "lending:arbitrum:morpho_blue:0xabcd:0xdead:usdc"
+        assert "ABCD" not in key_no_market, "Keys must be lowercased"
+        assert "USDC" not in key_no_market, "Asset must be lowercased"
+
+    # ─── Anvil integration tests ──────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    @pytest.mark.accounting_e2e
+    async def test_aave_account_state_read_via_mock_gateway_after_supply(  # noqa: layers
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """Supply USDC to Aave V3 on Anvil; verify getUserAccountData via mock gateway.
+
+        Closes GAP-1 from the original lending gap report:
+          'Health factor after BORROW/REPAY is NOT persisted.'
+
+        Uses USDC (not WETH — WETH reserve is frozen on current fork, see #1696).
+
+        After a successful SUPPLY:
+          - collateral_usd > 0 (USDC is priced ~$1 in the oracle)
+          - health_factor = capped max (no debt → infinite)
+          - liquidation_threshold_bps in [6000, 9500] (Aave V3 range for stablecoins)
+        """
+        from almanak.framework.accounting.lending_accounting import read_aave_account_state
+        from almanak.framework.intents import IntentCompiler, SupplyIntent
+
+        USDC = CHAIN_CONFIG["tokens"]["USDC"]
+
+        supply_amount = Decimal("1000")  # 1000 USDC — stablecoin, always priced
+        intent = SupplyIntent(
+            protocol="aave_v3",
+            token="USDC",
+            amount=supply_amount,
+            chain=CHAIN_NAME,
+        )
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+        )
+        compilation = compiler.compile(intent)
+        assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
+
+        usdc_before = get_token_balance(web3, USDC, funded_wallet)
+        result = await orchestrator.execute(compilation.action_bundle)
+        assert result.success, f"Aave V3 USDC supply failed: {result.error}"
+        usdc_after = get_token_balance(web3, USDC, funded_wallet)
+
+        # Layer 4: USDC balance must decrease by exactly the supply amount
+        usdc_spent = usdc_before - usdc_after
+        expected_usdc_spent = int(supply_amount * Decimal(10**6))  # 1000 USDC in 6-decimal units
+        assert usdc_spent == expected_usdc_spent, (
+            f"USDC spent must exactly equal supply amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+        )
+
+        # Read Aave account state through our reader (via mock gateway wrapping Anvil web3)
+        mock_gateway = _MockGatewayClient(web3)
+        state = read_aave_account_state(mock_gateway, CHAIN_NAME, funded_wallet)
+
+        assert state is not None, (
+            "read_aave_account_state must return a non-None AaveAccountState after USDC supply. "
+            "If None, the gateway eth_call or ABI decoding failed."
+        )
+
+        assert state.collateral_usd > Decimal("0"), (
+            f"collateral_usd must be >$0 after supplying 1000 USDC. "
+            f"Got: {state.collateral_usd}"
+        )
+        assert state.debt_usd == Decimal("0"), (
+            f"debt_usd must be $0 (no borrows yet). Got: {state.debt_usd}"
+        )
+        assert state.health_factor >= Decimal("999"), (
+            f"health_factor must be capped at max (no debt). Got: {state.health_factor}"
+        )
+        assert 6000 <= state.liquidation_threshold_bps <= 9500, (
+            f"USDC liquidation threshold must be in Aave V3 range [60%,95%]. "
+            f"Got: {state.liquidation_threshold_bps} bps"
+        )
+
+        # USDC is ~$1 — collateral should be close to $1000
+        assert state.collateral_usd >= Decimal("900"), (
+            f"collateral_usd ({state.collateral_usd}) must be >= $900 for 1000 USDC supply"
+        )
+
+        print("\n[PASS] GAP-1 CLOSED — Aave V3 getUserAccountData read works:")
+        print(f"  collateral_usd           = ${state.collateral_usd:.4f}")
+        print(f"  debt_usd                 = ${state.debt_usd:.4f}")
+        print(f"  health_factor            = {state.health_factor:.2f}")
+        print(f"  liquidation_threshold    = {state.liquidation_threshold_bps} bps")
+        print(f"  1000 USDC supply cost    = {usdc_spent / 1e6:.2f} USDC")
+
+    @pytest.mark.asyncio
+    @pytest.mark.accounting_e2e
+    async def test_build_lending_event_full_pipeline_borrow_repay(  # noqa: layers
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """BORROW → REPAY accounting pipeline with real Aave V3 HF read (mock gateway).
+
+        Proves GAP-1, GAP-2, GAP-3 using:
+          - Real Aave V3 chain state (via USDC supply) for the HF read (GAP-1)
+          - Mock BORROW/REPAY intent results for FIFO interest attribution (GAP-2)
+          - Simulated borrow_rate in extracted_data for APR capture (GAP-3)
+
+        Note: Aave V3 Arbitrum BORROW is frozen on the current fork block (#1696).
+        The accounting BUILDER is tested end-to-end; the on-chain execution layer
+        is covered by the existing morpho_supply_borrow_repay_ledger_traceability test.
+        """
+        import os
+        import tempfile
+
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import (
+            build_lending_accounting_event,
+            read_aave_account_state,
+        )
+        from almanak.framework.accounting.models import LendingEventType
+        from almanak.framework.accounting.writer import AccountingWriter
+        from almanak.framework.intents import IntentCompiler, SupplyIntent
+        from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+        USDC = CHAIN_CONFIG["tokens"]["USDC"]
+        borrow_principal = Decimal("200")    # 200 USDC principal
+        repay_total = Decimal("200.5")       # 200.5 USDC = principal + 0.5 interest
+
+        # ── USDC supply to create real Aave V3 state ──────────────────────────
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME, wallet_address=funded_wallet, price_oracle=price_oracle
+        )
+        supply_intent = SupplyIntent(
+            protocol="aave_v3", token="USDC", amount=Decimal("500"), chain=CHAIN_NAME
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS"
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle)
+        assert supply_exec.success, f"USDC supply failed: {supply_exec.error}"
+        print(f"\n[SUPPLY] USDC supplied: tx={supply_exec.transaction_results[0].tx_hash[:20]}...")
+
+        # ── GAP-1: Read Aave HF via mock gateway against real chain state ──────
+        mock_gateway = _MockGatewayClient(web3)
+        state = read_aave_account_state(mock_gateway, CHAIN_NAME, funded_wallet)
+        assert state is not None, "Aave V3 account state read must succeed after USDC supply"
+        assert state.collateral_usd >= Decimal("400"), (
+            f"collateral_usd must be ≥$400 after 500 USDC supply. Got: {state.collateral_usd}"
+        )
+        print(f"[GAP-1] HF capture via getUserAccountData: collateral=${state.collateral_usd:.2f}")
+
+        # ── Mock BORROW intent + result (Aave V3 borrow frozen on this fork) ──
+        borrow_intent = self._make_intent("BORROW", protocol="aave_v3", asset="USDC")
+        # 200 USDC in 6-decimal units = 200_000_000; add synthetic borrow_rate in ray
+        # 5% APY in ray = 0.05 * 1e27 = 50_000_000_000_000_000_000_000_000
+        SYNTHETIC_BORROW_RATE_RAY = 50_000_000_000_000_000_000_000_000
+        borrow_result = self._make_result(
+            "BORROW",
+            raw_amount=200_000_000,       # 200 USDC in 6-decimal units
+            borrow_rate=SYNTHETIC_BORROW_RATE_RAY,
+            tx_hash="0xsimulated_borrow_" + "0" * 24,
+        )
+
+        basis_store = FIFOBasisStore()
+
+        borrow_event = build_lending_accounting_event(
+            intent=borrow_intent,
+            result=borrow_result,
+            deployment_id="test-deploy-vib3418",
+            strategy_id="test-strat",
+            cycle_id="c1",
+            execution_mode="dry_run",
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            gateway_client=mock_gateway,  # real chain state
+            basis_store=basis_store,
+            price_oracle={"USDC": Decimal("1.0")},
+        )
+
+        assert borrow_event is not None
+        assert borrow_event.event_type == LendingEventType.BORROW
+        assert borrow_event.interest_delta_usd is None, "No interest at borrow time"
+        # GAP-1: HF captured from real Aave V3 state (USDC supply makes HF = max)
+        assert borrow_event.health_factor_after is not None, (
+            "GAP-1: health_factor_after must be populated from getUserAccountData after BORROW"
+        )
+        assert borrow_event.health_factor_after >= Decimal("999"), (
+            "HF must be max (no debt on chain, only USDC collateral)"
+        )
+        print(f"[GAP-1 CLOSED] HF after simulated BORROW = {borrow_event.health_factor_after}")
+        # GAP-3: borrow_apr_bps captured from synthetic borrow_rate (5% = 500 bps)
+        assert borrow_event.borrow_apr_bps is not None, (
+            "GAP-3: borrow_apr_bps must be populated from extracted_data borrow_rate"
+        )
+        assert 400 <= borrow_event.borrow_apr_bps <= 600, (
+            f"Expected ~500 bps for 5% APY. Got: {borrow_event.borrow_apr_bps}"
+        )
+        print(f"[GAP-3 CLOSED] borrow_apr_bps = {borrow_event.borrow_apr_bps}")
+        # principal_delta_usd should be ~$200 (200 USDC at $1)
+        assert borrow_event.principal_delta_usd is not None, (
+            "principal_delta_usd must be populated for BORROW"
+        )
+        assert abs(borrow_event.principal_delta_usd - Decimal("200")) < Decimal("1"), (
+            f"principal_delta_usd should be ~$200. Got: {borrow_event.principal_delta_usd}"
+        )
+
+        # ── Mock REPAY 200.5 USDC (principal + 0.5 interest) ──────────────────
+        repay_intent = self._make_intent("REPAY", protocol="aave_v3", asset="USDC")
+        repay_result = self._make_result(
+            "REPAY",
+            raw_amount=200_500_000,       # 200.5 USDC in 6-decimal units
+            tx_hash="0xsimulated_repay_" + "0" * 24,
+        )
+
+        repay_event = build_lending_accounting_event(
+            intent=repay_intent,
+            result=repay_result,
+            deployment_id="test-deploy-vib3418",
+            strategy_id="test-strat",
+            cycle_id="c2",
+            execution_mode="dry_run",
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            gateway_client=mock_gateway,
+            basis_store=basis_store,  # same store — has the BORROW lot
+            price_oracle={"USDC": Decimal("1.0")},
+        )
+
+        assert repay_event is not None
+        assert repay_event.event_type == LendingEventType.REPAY
+        # GAP-2: FIFO interest attribution — both fields must be populated
+        assert repay_event.principal_delta_usd is not None, (
+            "GAP-2: principal_delta_usd must be populated for REPAY with a prior BORROW lot"
+        )
+        assert abs(repay_event.principal_delta_usd - Decimal("200")) < Decimal("1"), (
+            f"principal_delta_usd should be ~$200. Got: {repay_event.principal_delta_usd}"
+        )
+        print(f"[GAP-2 CLOSED] principal_delta_usd = ${repay_event.principal_delta_usd:.4f}")
+        assert repay_event.interest_delta_usd is not None, (
+            "GAP-2: interest_delta_usd must be populated for REPAY exceeding principal lot"
+        )
+        assert Decimal("0") <= repay_event.interest_delta_usd < Decimal("2"), (
+            f"interest_delta_usd should be ~$0.50. Got: {repay_event.interest_delta_usd}"
+        )
+        print(f"[GAP-2 CLOSED] interest_delta_usd  = ${repay_event.interest_delta_usd:.4f}")
+
+        # ── Persist both events to SQLite ──────────────────────────────────────
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        f.close()
+        db_path = f.name
+        try:
+            store = SQLiteStore(SQLiteConfig(db_path=db_path))
+            await store.initialize()
+            writer = AccountingWriter(store)
+
+            ok_borrow = await writer.write(borrow_event)
+            ok_repay = await writer.write(repay_event)
+            assert ok_borrow and ok_repay, "Both events must persist to SQLite"
+
+            rows = await store.get_accounting_events("test-deploy-vib3418")
+            assert len(rows) == 2, f"Expected 2 accounting events, got {len(rows)}"
+
+            event_types = {r["event_type"] for r in rows}
+            assert "BORROW" in event_types, "BORROW event must be persisted"
+            assert "REPAY" in event_types, "REPAY event must be persisted"
+
+            print("\n[PASS] VIB-3418 accounting pipeline verified:")
+            print(f"  {len(rows)} events persisted to SQLite")
+            print(f"  Event types: {sorted(event_types)}")
+            print("  GAP-1 (HF persistence): CLOSED")
+            print("  GAP-2 (FIFO interest): CLOSED")
+            print("  GAP-3 (APR capture): CLOSED")
+        finally:
+            os.unlink(db_path)

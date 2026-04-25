@@ -1787,6 +1787,32 @@ class StateManager:
             logger.error(f"Failed to save position event: {e}")
             return False
 
+    async def save_accounting_event(self, event: Any) -> bool:
+        """Persist a typed accounting event (LendingAccountingEvent, etc.) to the warm backend.
+
+        Delegates to the backend's save_accounting_event when supported (SQLiteStore).
+        Returns False when the backend does not yet support accounting events
+        (e.g. GatewayStateManager before the metrics-database migration).
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "save_accounting_event"):
+            return False
+        start = time.perf_counter()
+        try:
+            result = await self._warm.save_accounting_event(event)
+            latency = (time.perf_counter() - start) * 1000
+            ok = bool(result)
+            self._record_metrics(
+                StateTier.WARM, "save_accounting_event", latency, ok, None if ok else "backend_returned_false"
+            )
+            return ok
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_accounting_event", latency, False, str(e))
+            logger.error("Failed to save accounting event: %s", e)
+            raise
+
     async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
         """Partial update of attribution_json + attribution_version on a PositionEvent."""
         if not self._initialized:
