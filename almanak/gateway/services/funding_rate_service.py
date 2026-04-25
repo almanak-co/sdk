@@ -23,6 +23,7 @@ from web3 import AsyncHTTPProvider, AsyncWeb3
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils import get_rpc_url
+from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +208,11 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0))
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10.0),
+                connector=connector,
+            )
         return self._http_session
 
     async def _get_web3(self, chain: str) -> AsyncWeb3 | None:
@@ -218,8 +223,6 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         try:
             network = self.settings.network
             rpc_url = get_rpc_url(chain, network=network)
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
             web3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
             self._web3_cache[chain] = web3
             return web3

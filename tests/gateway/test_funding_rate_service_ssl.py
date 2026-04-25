@@ -22,7 +22,7 @@ async def test_get_web3_uses_ssl_context(settings):
     service = FundingRateServiceServicer(settings=settings)
 
     with patch(
-        "almanak.gateway.utils.ssl_context.build_ssl_context",
+        "almanak.gateway.services.funding_rate_service.build_ssl_context",
         return_value=fake_ctx,
     ) as mock_build:
         with patch(

@@ -25,6 +25,8 @@ from typing import Any
 
 import aiohttp
 
+from almanak.gateway.utils.ssl_context import build_ssl_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -321,7 +323,8 @@ class BaseIntegration(ABC):
         """Get or create HTTP session."""
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self._session
 
     async def close(self) -> None:

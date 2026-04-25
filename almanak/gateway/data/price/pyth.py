@@ -31,6 +31,7 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,10 @@ class PythPriceSource(BasePriceSource):
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the HTTP session."""
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._request_timeout),
+                connector=connector,
             )
         return self._session
 

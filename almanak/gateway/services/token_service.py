@@ -1330,8 +1330,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         try:
             import aiohttp
 
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             url = COINGECKO_SEARCH_URL.format(symbol=_url_quote(symbol, safe=""))
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=build_ssl_context())) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         logger.debug("CoinGecko search HTTP %d for symbol=%s", resp.status, symbol)
@@ -1366,8 +1368,10 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         try:
             import aiohttp
 
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false"
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=build_ssl_context())) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         return None

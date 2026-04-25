@@ -258,6 +258,8 @@ async def _fetch_pairs(
     """
     import aiohttp  # local import keeps module import cheap when unused
 
+    from almanak.gateway.utils.ssl_context import build_ssl_context
+
     url = f"{DEXSCREENER_BASE_URL}{DEXSCREENER_SEARCH_PATH}"
     params = {"q": symbol}
     timeout = aiohttp.ClientTimeout(total=http_timeout_s)
@@ -307,7 +309,7 @@ async def _fetch_pairs(
     if session is not None:
         return await _do_request(session)
 
-    async with aiohttp.ClientSession() as owned_session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=build_ssl_context())) as owned_session:
         return await _do_request(owned_session)
 
 

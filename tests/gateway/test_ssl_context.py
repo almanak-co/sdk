@@ -3,13 +3,12 @@
 import ssl
 from unittest.mock import patch
 
-import almanak.gateway.utils.ssl_context as ssl_context_module
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 
 def setup_function():
-    """Reset the module-level singleton before each test."""
-    ssl_context_module._ssl_context = None
+    """Reset the lru_cache before each test."""
+    build_ssl_context.cache_clear()
 
 
 def test_build_ssl_context_returns_ssl_context():

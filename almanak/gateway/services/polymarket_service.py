@@ -38,6 +38,7 @@ from almanak.framework.connectors.polymarket import (
 )
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0))
+            connector = aiohttp.TCPConnector(ssl=build_ssl_context())
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30.0),
+                connector=connector,
+            )
         return self._http_session
 
     async def close(self) -> None:

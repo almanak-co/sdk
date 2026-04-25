@@ -124,8 +124,10 @@ class PendleMarketLookup(ProtocolTokenLookup):
         try:
             import aiohttp  # lazy import — gateway dep
 
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             logger.info("Fetching Pendle assets from %s", PENDLE_ASSETS_URL)
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=build_ssl_context())) as session:
                 async with session.get(PENDLE_ASSETS_URL, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
                         logger.warning(

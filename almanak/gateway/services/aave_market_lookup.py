@@ -145,12 +145,14 @@ class AaveMarketLookup(ProtocolTokenLookup):
         try:
             import aiohttp  # lazy import — gateway dep
 
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             payload = {
                 "query": _AAVE_MARKETS_QUERY,
                 "variables": {"chainIds": list(AAVE_CHAIN_IDS.values())},
             }
             logger.info("Fetching Aave markets from %s", AAVE_GRAPHQL_URL)
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=build_ssl_context())) as session:
                 async with session.post(
                     AAVE_GRAPHQL_URL,
                     json=payload,

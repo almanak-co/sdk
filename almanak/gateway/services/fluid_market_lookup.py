@@ -110,6 +110,8 @@ class FluidMarketLookup(ProtocolTokenLookup):
         try:
             import aiohttp  # lazy import — gateway dep
 
+            from almanak.gateway.utils.ssl_context import build_ssl_context
+
             async def fetch_chain(
                 session: "aiohttp.ClientSession", chain: str, chain_id: int
             ) -> tuple[str, list[dict[str, Any]]]:
@@ -139,7 +141,7 @@ class FluidMarketLookup(ProtocolTokenLookup):
                 "Fetching Fluid markets (%d chains in parallel)",
                 len(FLUID_CHAIN_IDS),
             )
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=build_ssl_context())) as session:
                 tasks = [fetch_chain(session, chain, cid) for chain, cid in FLUID_CHAIN_IDS.items()]
                 results = await asyncio.gather(*tasks)
 
