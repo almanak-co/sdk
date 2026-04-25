@@ -30,6 +30,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import logging
+import re
 from abc import abstractmethod
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -124,6 +125,11 @@ from .strategy_models import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+# Strips "Data source '<name>' unavailable: " boilerplate from str(DataSourceUnavailable)
+# before hint-matching so the word "unavailable" in the wrapper doesn't trigger a
+# false transient hit on a purely permanent failure (e.g. "Unknown token for Binance").
+_DSU_BOILERPLATE_RE = re.compile(r"data source '[^']*' unavailable:\s*")
 
 
 def _price_oracle_supports_chain_arg(price_oracle: PriceOracle) -> bool:
@@ -1210,9 +1216,17 @@ class MarketSnapshot:
             "rate limit",
             "429",
             "connection",
+            "connection reset",
             "unavailable",
             "resource exhausted",
             "service unavailable",
+            # gRPC status codes that indicate transient upstream failures.
+            # StatusCode.INTERNAL is included because the gateway emits it for
+            # transient GeckoTerminal API blips, not for local bugs.
+            "statuscode.internal",
+            "statuscode.unavailable",
+            "statuscode.resource_exhausted",
+            "statuscode.deadline_exceeded",
         )
         permanent_hints = (
             "cannot resolve token",
@@ -1230,15 +1244,22 @@ class MarketSnapshot:
         has_permanent = False
         for detail in self._critical_data_failures.values():
             lowered = detail.lower()
-            if any(hint in lowered for hint in permanent_hints):
+            # Strip "Data source '...' unavailable: " boilerplate so the word
+            # "unavailable" in the wrapper doesn't cause a false transient hit on
+            # permanent failures.  Check both hint sets independently: a combined
+            # error string (e.g. "primary: gRPC INTERNAL; last: unknown token for
+            # Binance") can match both, which should yield "mixed" — not "permanent".
+            stripped = _DSU_BOILERPLATE_RE.sub("", lowered)
+            found_permanent = any(hint in stripped for hint in permanent_hints)
+            found_transient = any(hint in stripped for hint in transient_hints)
+            if found_permanent:
                 has_permanent = True
-                continue
-            if any(hint in lowered for hint in transient_hints):
+            if found_transient:
                 has_transient = True
-                continue
-            # Unknown failure class: be conservative and treat as transient so
-            # the runner can retry/escalate through the existing error pipeline.
-            has_transient = True
+            elif not found_permanent:
+                # Unknown failure class: be conservative and treat as transient
+                # so the runner can retry/escalate through the error pipeline.
+                has_transient = True
 
         if has_transient and has_permanent:
             return "mixed"

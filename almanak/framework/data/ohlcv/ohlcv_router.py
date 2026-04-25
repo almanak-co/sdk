@@ -39,6 +39,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -60,6 +61,80 @@ from almanak.framework.data.models import (
 from almanak.framework.data.routing.config import DataProvider
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Retry policy (VIB-3447)
+# ---------------------------------------------------------------------------
+
+# Max additional attempts beyond the first for the primary DEX provider.
+# Total attempts = 1 + _MAX_PRIMARY_RETRIES.
+_MAX_PRIMARY_RETRIES = 2
+_RETRY_BASE_DELAY = 0.25  # seconds
+_RETRY_MAX_DELAY = 2.0  # seconds cap
+
+# Substrings (lowercased) in exception messages that indicate a transient
+# failure worth retrying.  gRPC INTERNAL is included because, in practice,
+# it is emitted by the gateway for upstream Gecko API blips, not for bugs.
+_TRANSIENT_ERROR_HINTS: frozenset[str] = frozenset(
+    [
+        "statuscode.internal",
+        "statuscode.unavailable",
+        "statuscode.resource_exhausted",
+        "statuscode.deadline_exceeded",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "rate limit",
+        "429",
+        "resource exhausted",
+        "service unavailable",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+    ]
+)
+
+
+def _is_transient_exc(exc: Exception) -> bool:
+    """Return True if *exc* looks like a recoverable, transient failure.
+
+    For DataSourceUnavailable we check *reason* directly to avoid false
+    positives from the class's own boilerplate ("Data source '...' unavailable:
+    ..."), which would make every DataSourceUnavailable look transient.
+    """
+    if isinstance(exc, DataSourceUnavailable):
+        s = exc.reason.lower()
+    else:
+        s = str(exc).lower()
+    return any(hint in s for hint in _TRANSIENT_ERROR_HINTS)
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Full-jitter exponential backoff delay.  *attempt* is 1-based."""
+    cap = min(_RETRY_BASE_DELAY * (2**attempt), _RETRY_MAX_DELAY)
+    return random.uniform(0, cap)
+
+
+# DEX-side providers that get bounded retries on transient failures.
+# CEX providers (binance, coingecko) are excluded: their failures are almost
+# always deterministic ("unknown token"), so retrying wastes latency budget.
+_RETRYABLE_PROVIDERS: frozenset[str] = frozenset(["geckoterminal", "defillama", "coingecko_dex"])
+
+
+def _error_text(exc: Exception | None) -> str:
+    """Return the informative portion of an exception for error reason strings.
+
+    For DataSourceUnavailable, uses exc.reason directly to avoid embedding the
+    "Data source '...' unavailable: " boilerplate into composed reason strings,
+    which would otherwise re-introduce the word "unavailable" and confuse
+    downstream transient/permanent hint matching.
+    """
+    if exc is None:
+        return "no registered OHLCV provider available"
+    if isinstance(exc, DataSourceUnavailable):
+        return exc.reason
+    return str(exc)
+
 
 # ---------------------------------------------------------------------------
 # CEX/DEX classification
@@ -316,91 +391,157 @@ class OHLCVRouter:
                 classification=DataClassification.INFORMATIONAL,
             )
 
-        # Try each provider in chain
+        # Try each provider in chain.
+        # - primary_provider_name / primary_error: tracks the terminal (most recent)
+        #   failure of the first retryable DEX provider attempted. Updated on every
+        #   failure of that same provider so the final error reflects its actual last
+        #   known state rather than a stale transient from an early retry.
+        # - last_error: most recent failure across all providers (often the futile
+        #   CEX "unknown token" fallback). Both are used to compose the raised DSU.
+        primary_provider_name: str | None = None
+        primary_error: Exception | None = None
         last_error: Exception | None = None
+
         for provider_name in provider_chain:
             provider = self._providers.get(provider_name)
             if provider is None:
+                if last_error is None:
+                    # Record a sentinel so that if every provider is unregistered
+                    # the final error message is informative rather than "None".
+                    last_error = DataSourceUnavailable(
+                        source=provider_name,
+                        reason=f"{provider_name} provider is not registered",
+                    )
                 logger.debug("ohlcv_provider_not_registered provider=%s", provider_name)
                 continue
 
-            start = time.monotonic()
-            try:
-                envelope = provider.fetch(
-                    token=instrument.base,
-                    quote=instrument.quote,
-                    chain=target_chain,
-                    timeframe=timeframe,
-                    limit=limit,
-                    pool_address=pool_address or "",
-                )
-                latency_ms = int((time.monotonic() - start) * 1000)
-                candles: list[OHLCVCandle] = envelope.value
+            # Give DEX providers bounded retries; CEX paths get one attempt only
+            # because their failures are almost always deterministic (no symbol).
+            max_attempts = (1 + _MAX_PRIMARY_RETRIES) if provider_name in _RETRYABLE_PROVIDERS else 1
 
-                if not candles:
-                    logger.debug("ohlcv_empty_result provider=%s", provider_name)
-                    continue
-
-                # Determine if this is a CEX/DEX basis mismatch
-                is_cex_source = provider_name in ("binance", "coingecko")
-                classification = classify_instrument(instrument)
-                has_basis_risk = is_cex_source and classification == "defi_primary"
-
-                confidence = envelope.meta.confidence
-                if has_basis_risk:
-                    confidence = min(confidence, 0.7)
-                    logger.warning(
-                        "cex_dex_basis_warning instrument=%s provider=%s confidence=%.2f "
-                        "reason='CEX source used for DeFi-native pair, basis risk'",
-                        instrument.pair,
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    delay = _backoff_delay(attempt)
+                    logger.info(
+                        "ohlcv_retry provider=%s instrument=%s attempt=%d/%d delay_s=%.2f",
                         provider_name,
-                        confidence,
+                        instrument.pair,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                    )
+                    time.sleep(delay)
+
+                start = time.monotonic()
+                try:
+                    envelope = provider.fetch(
+                        token=instrument.base,
+                        quote=instrument.quote,
+                        chain=target_chain,
+                        timeframe=timeframe,
+                        limit=limit,
+                        pool_address=pool_address or "",
+                    )
+                    latency_ms = int((time.monotonic() - start) * 1000)
+                    candles: list[OHLCVCandle] = envelope.value
+
+                    if not candles:
+                        miss = DataSourceUnavailable(
+                            source=provider_name,
+                            reason=f"{provider_name} returned no OHLCV candles for {instrument.pair} on {target_chain}",
+                        )
+                        last_error = miss
+                        if provider_name in _RETRYABLE_PROVIDERS and (
+                            primary_provider_name is None or primary_provider_name == provider_name
+                        ):
+                            primary_provider_name = provider_name
+                            primary_error = miss
+                        logger.debug("ohlcv_empty_result provider=%s", provider_name)
+                        break  # treat empty result as a provider miss, skip to next
+
+                    # Determine if this is a CEX/DEX basis mismatch
+                    is_cex_source = provider_name in ("binance", "coingecko")
+                    classification = classify_instrument(instrument)
+                    has_basis_risk = is_cex_source and classification == "defi_primary"
+
+                    confidence = envelope.meta.confidence
+                    if has_basis_risk:
+                        confidence = min(confidence, 0.7)
+                        logger.warning(
+                            "cex_dex_basis_warning instrument=%s provider=%s confidence=%.2f "
+                            "reason='CEX source used for DeFi-native pair, basis risk'",
+                            instrument.pair,
+                            provider_name,
+                            confidence,
+                        )
+
+                    # Split candles into finalized and provisional
+                    now = datetime.now(UTC)
+                    finalized, provisional = _split_by_finality(candles, now)
+
+                    # Cache finalized candles to disk
+                    if finalized:
+                        self._disk_cache.put(disk_key, finalized)
+
+                    meta = DataMeta(
+                        source=provider_name,
+                        observed_at=now,
+                        finality="off_chain",
+                        staleness_ms=0,
+                        latency_ms=latency_ms,
+                        confidence=confidence,
+                        cache_hit=False,
                     )
 
-                # Split candles into finalized and provisional
-                now = datetime.now(UTC)
-                finalized, provisional = _split_by_finality(candles, now)
+                    logger.info(
+                        "ohlcv_fetched provider=%s instrument=%s attempt=%d candles=%d finalized=%d provisional=%d",
+                        provider_name,
+                        instrument.pair,
+                        attempt + 1,
+                        len(candles),
+                        len(finalized),
+                        len(provisional),
+                    )
 
-                # Cache finalized candles to disk
-                if finalized:
-                    self._disk_cache.put(disk_key, finalized)
+                    return DataEnvelope(
+                        value=candles,
+                        meta=meta,
+                        classification=DataClassification.INFORMATIONAL,
+                    )
 
-                meta = DataMeta(
-                    source=provider_name,
-                    observed_at=now,
-                    finality="off_chain",
-                    staleness_ms=0,
-                    latency_ms=latency_ms,
-                    confidence=confidence,
-                    cache_hit=False,
-                )
+                except Exception as exc:
+                    last_error = exc
+                    if provider_name in _RETRYABLE_PROVIDERS and (
+                        primary_provider_name is None or primary_provider_name == provider_name
+                    ):
+                        primary_provider_name = provider_name
+                        primary_error = exc
 
-                logger.info(
-                    "ohlcv_fetched provider=%s instrument=%s candles=%d finalized=%d provisional=%d",
-                    provider_name,
-                    instrument.pair,
-                    len(candles),
-                    len(finalized),
-                    len(provisional),
-                )
+                    elapsed = int((time.monotonic() - start) * 1000)
 
-                return DataEnvelope(
-                    value=candles,
-                    meta=meta,
-                    classification=DataClassification.INFORMATIONAL,
-                )
+                    # Retry on transient errors if we have attempts left
+                    if attempt < max_attempts - 1 and _is_transient_exc(exc):
+                        logger.warning(
+                            "ohlcv_retry_scheduled provider=%s instrument=%s attempt=%d/%d error=%s elapsed_ms=%d",
+                            provider_name,
+                            instrument.pair,
+                            attempt + 1,
+                            max_attempts,
+                            exc,
+                            elapsed,
+                        )
+                        continue  # retry this provider
 
-            except Exception as exc:
-                last_error = exc
-                elapsed = int((time.monotonic() - start) * 1000)
-                logger.warning(
-                    "ohlcv_provider_failed provider=%s instrument=%s error=%s elapsed_ms=%d",
-                    provider_name,
-                    instrument.pair,
-                    exc,
-                    elapsed,
-                )
-                continue
+                    logger.warning(
+                        "ohlcv_provider_failed provider=%s instrument=%s attempt=%d/%d error=%s elapsed_ms=%d",
+                        provider_name,
+                        instrument.pair,
+                        attempt + 1,
+                        max_attempts,
+                        exc,
+                        elapsed,
+                    )
+                    break  # move to next provider
 
         # ---------------------------------------------------------------
         # Wrapped token proxy fallback: if all providers failed and the
@@ -453,10 +594,19 @@ class OHLCVRouter:
                     classification=proxy_envelope.classification,
                 )
 
-        raise DataSourceUnavailable(
-            source="ohlcv_router",
-            reason=f"All providers failed for {instrument.pair} on {target_chain}: {last_error}",
-        )
+        # Lead with the primary (DEX) error so logs point at the actionable
+        # cause, not the trailing CEX "unknown token" from a known-futile path.
+        # Use _error_text() to extract raw reason text instead of str(exc) so
+        # DSU boilerplate ("Data source '...' unavailable:") is never re-embedded
+        # into the composed reason, which would confuse downstream hint matching.
+        if primary_error is not None and primary_error is not last_error:
+            reason = (
+                f"All providers failed for {instrument.pair} on {target_chain}"
+                f" — primary: {_error_text(primary_error)}; last: {_error_text(last_error)}"
+            )
+        else:
+            reason = f"All providers failed for {instrument.pair} on {target_chain}: {_error_text(last_error)}"
+        raise DataSourceUnavailable(source="ohlcv_router", reason=reason)
 
 
 def _split_by_finality(

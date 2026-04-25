@@ -10,6 +10,7 @@ remain importable from almanak.framework.strategies.intent_strategy.
 
 import concurrent.futures
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,6 +21,8 @@ from typing import Any, Literal
 from .strategy_models import PriceData, TokenBalance
 
 logger = logging.getLogger(__name__)
+
+_DSU_BOILERPLATE_RE = re.compile(r"data source '[^']*' unavailable:\s*")
 
 
 class ChainNotConfiguredError(Exception):
@@ -1392,10 +1395,14 @@ class MultiChainMarketSnapshot:
             "temporarily unavailable",
             "rate limit",
             "429",
-            "connection",
+            "connection reset",
             "unavailable",
             "resource exhausted",
             "service unavailable",
+            "statuscode.internal",
+            "statuscode.unavailable",
+            "statuscode.resource_exhausted",
+            "statuscode.deadline_exceeded",
         )
         permanent_hints = (
             "cannot resolve token",
@@ -1413,14 +1420,16 @@ class MultiChainMarketSnapshot:
         has_permanent = False
         for detail in self._critical_data_failures.values():
             lowered = detail.lower()
-            if any(hint in lowered for hint in permanent_hints):
+            stripped = _DSU_BOILERPLATE_RE.sub("", lowered)
+            found_permanent = any(hint in stripped for hint in permanent_hints)
+            found_transient = any(hint in stripped for hint in transient_hints)
+            if found_permanent:
                 has_permanent = True
-                continue
-            if any(hint in lowered for hint in transient_hints):
+            if found_transient:
                 has_transient = True
-                continue
-            # Unknown class: be conservative and treat as transient.
-            has_transient = True
+            elif not found_permanent:
+                # Unknown class: be conservative and treat as transient.
+                has_transient = True
 
         if has_transient and has_permanent:
             return "mixed"

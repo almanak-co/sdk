@@ -525,8 +525,12 @@ def create_routing_ohlcv_provider(
     gecko_adapter = GeckoTerminalGatewayDataProvider(gecko_provider)
 
     router = OHLCVRouter(default_chain=chain)
-    router.register_provider(binance_adapter)
+    # VIB-3448: OHLCVRouter._PROVIDER_CHAINS["defi_primary"] lists a "defillama"
+    # middle tier between Gecko and Binance, but no gateway-backed DeFi Llama
+    # OHLCV provider exists yet.  Until one is available, Gecko blips fall straight
+    # through to the known-futile CEX path.  Track on VIB-3448 / gateway roadmap.
     router.register_provider(gecko_adapter)
+    router.register_provider(binance_adapter)
 
     pool_address = strategy_config.get("pool_address")
     return RoutingOHLCVProvider(
