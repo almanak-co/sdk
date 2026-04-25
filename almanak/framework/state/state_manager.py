@@ -1813,6 +1813,29 @@ class StateManager:
             logger.error("Failed to save accounting event: %s", e)
             raise
 
+    def get_accounting_events_sync(
+        self,
+        deployment_id: str,
+        position_key: str | None = None,
+    ) -> list[dict]:
+        """Synchronous accounting event query — delegates to the warm backend.
+
+        Used by PortfolioValuer (synchronous) to enrich PositionValue with
+        cost_basis_usd / unrealized_pnl_usd / realized_pnl_usd at snapshot time.
+        Returns [] when no warm backend or the backend predates this method.
+        No LIMIT is applied: accurate cost basis requires the full event history.
+        """
+        if not self._warm or not hasattr(self._warm, "get_accounting_events_sync"):
+            return []
+        try:
+            return self._warm.get_accounting_events_sync(
+                deployment_id=deployment_id,
+                position_key=position_key,
+            )
+        except Exception:
+            logger.debug("get_accounting_events_sync failed", exc_info=True)
+            return []
+
     async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
         """Partial update of attribution_json + attribution_version on a PositionEvent."""
         if not self._initialized:

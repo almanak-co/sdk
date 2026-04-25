@@ -14,6 +14,7 @@ from almanak.framework.accounting.models import (
     PendleAccountingEvent,
     PendleEventType,
 )
+from almanak.framework.accounting.position_pnl import PositionPnLSummary, compute_position_pnl
 from almanak.framework.accounting.writer import AccountingWriter
 
 __all__ = [
@@ -25,4 +26,6 @@ __all__ = [
     "LendingEventType",
     "PendleAccountingEvent",
     "PendleEventType",
+    "PositionPnLSummary",
+    "compute_position_pnl",
 ]

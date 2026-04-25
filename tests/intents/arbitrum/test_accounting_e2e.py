@@ -1991,3 +1991,643 @@ class TestLendingAccountingVIB3418:
             print("  GAP-3 (APR capture): CLOSED")
         finally:
             os.unlink(db_path)
+
+
+# =============================================================================
+# Section 5: VIB-3424 — PortfolioValuer PnL field enrichment
+# =============================================================================
+
+
+class TestPositionPnLVIB3424:
+    """VIB-3424 — cost_basis_usd, unrealized_pnl_usd, realized_pnl_usd,
+    entry_timestamp, and ledger_entry_id populated from accounting_events.
+
+    Proves:
+    1. compute_position_pnl with empty events returns None.
+    2. SUPPLY events build correct cost_basis; WITHDRAW reduces it.
+    3. BORROW + REPAY with interest computes realized_pnl = -interest.
+    4. REPAY with None interest_delta_usd is skipped (UNAVAILABLE discipline).
+    5. cost_basis never goes negative (clamped to 0).
+    6. entry_timestamp = earliest event; latest_ledger_entry_id = most recent.
+    7. _try_derive_lending_position_key derives key matching lending_accounting format.
+    8. PortfolioValuer.set_accounting_context wires store; PositionValue gets PnL fields.
+    9. SQLiteStore.get_accounting_events_sync returns saved events synchronously.
+    """
+
+    # ─── Helpers ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _event_row(
+        event_type: str,
+        principal_usd: str | None = None,
+        interest_usd: str | None = None,
+        ts: str = "2026-01-01T00:00:00+00:00",
+        ledger_id: str = "led-001",
+        position_key: str = "lending:arbitrum:aave_v3:0xwallet:usdc",
+        deployment_id: str = "dep-test",
+    ) -> dict:
+        payload: dict = {
+            "event_type": event_type,
+            "confidence": "HIGH",
+        }
+        if principal_usd is not None:
+            payload["principal_delta_usd"] = principal_usd
+        if interest_usd is not None:
+            payload["interest_delta_usd"] = interest_usd
+        return {
+            "id": str(uuid.uuid4()),
+            "deployment_id": deployment_id,
+            "event_type": event_type,
+            "position_key": position_key,
+            "timestamp": ts,
+            "ledger_entry_id": ledger_id,
+            "payload_json": json.dumps(payload),
+        }
+
+    # ─── Unit tests: compute_position_pnl ────────────────────────────────────
+
+    def test_empty_events_returns_none(self):  # noqa: layers
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        result = compute_position_pnl([])
+        assert result is None
+
+    def test_supply_cost_basis(self):  # noqa: layers
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            self._event_row("SUPPLY", principal_usd="1000.00", ts="2026-01-01T00:00:00+00:00", ledger_id="led-1"),
+            self._event_row("SUPPLY", principal_usd="500.00", ts="2026-01-02T00:00:00+00:00", ledger_id="led-2"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        assert pnl.cost_basis_usd == Decimal("1500.00")
+        assert pnl.realized_pnl_usd == Decimal("0")
+        assert pnl.entry_timestamp == "2026-01-01T00:00:00+00:00"
+        assert pnl.latest_ledger_entry_id == "led-2"
+
+    def test_withdraw_reduces_cost_basis(self):  # noqa: layers
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            self._event_row("SUPPLY", principal_usd="1000.00", ts="2026-01-01T00:00:00+00:00"),
+            self._event_row("WITHDRAW", principal_usd="400.00", ts="2026-01-02T00:00:00+00:00"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        assert pnl.cost_basis_usd == Decimal("600.00")
+
+    def test_cost_basis_clamped_to_zero(self):  # noqa: layers
+        """Full withdrawal: cost_basis must not go negative."""
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            self._event_row("SUPPLY", principal_usd="1000.00", ts="2026-01-01T00:00:00+00:00"),
+            self._event_row("WITHDRAW", principal_usd="1200.00", ts="2026-01-02T00:00:00+00:00"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        assert pnl.cost_basis_usd == Decimal("0")
+
+    def test_borrow_repay_realized_pnl(self):  # noqa: layers
+        """REPAY with interest_delta_usd → realized_pnl = -interest_paid."""
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            self._event_row("BORROW", principal_usd="200.00", ts="2026-01-01T00:00:00+00:00", ledger_id="led-b"),
+            self._event_row("REPAY", principal_usd="200.00", interest_usd="0.75", ts="2026-01-02T00:00:00+00:00", ledger_id="led-r"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        # BORROW +200, REPAY -200 → cost_basis = 0
+        assert pnl.cost_basis_usd == Decimal("0")
+        # realized_pnl = -0.75 (interest paid is a cost)
+        assert pnl.realized_pnl_usd == Decimal("-0.75")
+        assert pnl.entry_timestamp == "2026-01-01T00:00:00+00:00"
+        assert pnl.latest_ledger_entry_id == "led-r"
+
+    def test_repay_without_interest_skipped(self):  # noqa: layers
+        """None interest_delta_usd must not contribute zero to realized_pnl."""
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            self._event_row("BORROW", principal_usd="100.00", ts="2026-01-01T00:00:00+00:00"),
+            # REPAY with no interest field (UNAVAILABLE)
+            self._event_row("REPAY", principal_usd="100.00", interest_usd=None, ts="2026-01-02T00:00:00+00:00"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        assert pnl.realized_pnl_usd == Decimal("0"), (
+            "realized_pnl must stay 0 when interest_delta_usd is UNAVAILABLE"
+        )
+
+    def test_repay_positive_magnitude_reduces_cost_basis(self):  # noqa: layers
+        """Contract: principal_delta_usd is always a non-negative magnitude.
+        REPAY with a positive principal must REDUCE cost_basis, not increase it.
+        """
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            self._event_row("BORROW", principal_usd="200.00", ts="2026-01-01T00:00:00+00:00"),
+            self._event_row("REPAY", principal_usd="200.00", ts="2026-01-02T00:00:00+00:00"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        assert pnl.cost_basis_usd == Decimal("0"), (
+            "REPAY positive magnitude must reduce cost_basis to 0 (not increase to 400)"
+        )
+
+    def test_bad_payload_json_skipped(self):  # noqa: layers
+        """Malformed payload_json must not crash compute_position_pnl."""
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+
+        events = [
+            {"id": "x", "event_type": "SUPPLY", "timestamp": "2026-01-01T00:00:00+00:00",
+             "ledger_entry_id": "led-1", "payload_json": "{bad json"},
+            self._event_row("SUPPLY", principal_usd="500.00", ts="2026-01-02T00:00:00+00:00"),
+        ]
+        pnl = compute_position_pnl(events)
+        assert pnl is not None
+        assert pnl.cost_basis_usd == Decimal("500.00")
+
+    # ─── Unit test: position key derivation ──────────────────────────────────
+
+    def test_try_derive_lending_position_key_supply(self):  # noqa: layers
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        p = PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="aave_v3_supply_0x1234_0xwallet",
+            chain="arbitrum",
+            protocol="aave_v3",
+            value_usd=Decimal("1000"),
+            details={
+                "wallet": "0xWallet",
+                "asset": "USDC",
+            },
+        )
+        key = PortfolioValuer._try_derive_lending_position_key(p, "arbitrum")
+        assert key == "lending:arbitrum:aave_v3:0xwallet:usdc"
+
+    def test_try_derive_lending_position_key_with_market_id(self):  # noqa: layers
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        p = PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="morpho_supply_xyz",
+            chain="arbitrum",
+            protocol="morpho_blue",
+            value_usd=Decimal("500"),
+            details={
+                "wallet": "0xWallet",
+                "asset": "WETH",
+                "market_id": "0xMarketABC",
+            },
+        )
+        key = PortfolioValuer._try_derive_lending_position_key(p, "arbitrum")
+        assert key == "lending:arbitrum:morpho_blue:0xwallet:0xmarketabc:weth"
+
+    def test_try_derive_lending_position_key_lp_returns_none(self):  # noqa: layers
+        """LP position type must return None — only lending types are supported."""
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        p = PositionInfo(
+            position_type=PositionType.LP,
+            position_id="12345",
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            value_usd=Decimal("1000"),
+            details={"wallet": "0xwallet", "asset": "WETH"},
+        )
+        assert PortfolioValuer._try_derive_lending_position_key(p, "arbitrum") is None
+
+    def test_try_derive_lending_position_key_missing_asset_returns_none(self):  # noqa: layers
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        p = PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="xyz",
+            chain="arbitrum",
+            protocol="aave_v3",
+            value_usd=Decimal("0"),
+            details={"wallet": "0xwallet"},  # no "asset"
+        )
+        assert PortfolioValuer._try_derive_lending_position_key(p, "arbitrum") is None
+
+    # ─── Integration: SQLiteStore.get_accounting_events_sync ─────────────────
+
+    @pytest.mark.asyncio
+    async def test_sqlite_get_accounting_events_sync(self):  # noqa: layers
+        """get_accounting_events_sync returns saved events without async overhead."""
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        f.close()
+        db_path = f.name
+
+        try:
+            store = SQLiteStore(SQLiteConfig(db_path=db_path))
+            await store.initialize()
+
+            basis_store = FIFOBasisStore()
+            deploy_id = "dep-vib3424"
+
+            # Build and save a SUPPLY event
+            from types import SimpleNamespace
+
+            from almanak.framework.intents.vocabulary import IntentType
+
+            intent = SimpleNamespace(
+                intent_type=IntentType.SUPPLY,
+                protocol="aave_v3",
+                token="USDC",
+                borrow_token=None,
+                market_id=None,
+            )
+            result = SimpleNamespace(
+                extracted_data={"supply_amount": 1000_000_000},  # 1000 USDC (6 dec)
+                tx_hash="0xsupply1234",
+                gas_cost_eth=None,
+            )
+            event = build_lending_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deploy_id,
+                strategy_id="strat-1",
+                cycle_id="cyc-1",
+                execution_mode="live",
+                chain="arbitrum",
+                wallet_address=TEST_WALLET,
+                gateway_client=None,
+                basis_store=basis_store,
+                price_oracle={"USDC": Decimal("1.0")},
+            )
+            assert event is not None
+            writer = AccountingWriter(store)
+            await writer.write(event)
+
+            # Sync query must find the event
+            rows = store.get_accounting_events_sync(deploy_id)
+            assert len(rows) == 1
+            assert rows[0]["event_type"] == "SUPPLY"
+
+            # Sync query with position_key filter
+            pk = event.position_key
+            rows_filtered = store.get_accounting_events_sync(deploy_id, position_key=pk)
+            assert len(rows_filtered) == 1
+
+            # Wrong position_key returns nothing
+            rows_empty = store.get_accounting_events_sync(deploy_id, position_key="lending:wrong:key")
+            assert rows_empty == []
+
+            print("\n[PASS] VIB-3424: SQLiteStore.get_accounting_events_sync works")
+            print(f"  position_key = {pk}")
+        finally:
+            os.unlink(db_path)
+
+    # ─── Integration: PortfolioValuer.set_accounting_context ─────────────────
+
+    @pytest.mark.asyncio
+    async def test_portfolio_valuer_enrich_pnl_from_accounting_events(self):  # noqa: layers
+        """VIB-3424 end-to-end: accounting event → PositionValue.cost_basis_usd populated.
+
+        Uses a real SQLiteStore with saved SUPPLY accounting events, then creates
+        a PortfolioValuer with a mock accounting store and verifies the PnL fields
+        are populated on the PositionValue built by _enrich_position_pnl.
+        """
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.portfolio.models import PositionValue
+        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        f.close()
+        db_path = f.name
+
+        try:
+            store = SQLiteStore(SQLiteConfig(db_path=db_path))
+            await store.initialize()
+
+            deploy_id = "dep-vib3424-enrich"
+            wallet = TEST_WALLET.lower()
+            asset = "USDC"
+            chain = "arbitrum"
+            protocol = "aave_v3"
+
+            # Write two SUPPLY events
+            basis_store = FIFOBasisStore()
+            from types import SimpleNamespace
+
+            from almanak.framework.intents.vocabulary import IntentType
+
+            for raw_amount in [500_000_000, 250_000_000]:  # 500 + 250 USDC (6 dec)
+                intent = SimpleNamespace(
+                    intent_type=IntentType.SUPPLY,
+                    protocol=protocol,
+                    token=asset,
+                    borrow_token=None,
+                    market_id=None,
+                )
+                result = SimpleNamespace(
+                    extracted_data={"supply_amount": raw_amount},
+                    tx_hash=f"0xsupply{raw_amount}",
+                    gas_cost_eth=None,
+                )
+                ev = build_lending_accounting_event(
+                    intent=intent,
+                    result=result,
+                    deployment_id=deploy_id,
+                    strategy_id="strat-1",
+                    cycle_id="cyc-1",
+                    execution_mode="live",
+                    chain=chain,
+                    wallet_address=wallet,
+                    gateway_client=None,
+                    basis_store=basis_store,
+                    price_oracle={"USDC": Decimal("1.0")},
+                )
+                assert ev is not None
+                writer = AccountingWriter(store)
+                await writer.write(ev)
+
+            # Verify two events are saved
+            all_rows = store.get_accounting_events_sync(deploy_id)
+            assert len(all_rows) == 2
+
+            # Build a mock PositionInfo matching the accounting position_key
+            from almanak.framework.teardown.models import PositionInfo
+
+            position_key = f"lending:{chain}:{protocol}:{wallet}:{asset.lower()}"
+            p_info = PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id=f"{protocol}_supply_0xasset_{wallet}",
+                chain=chain,
+                protocol=protocol,
+                value_usd=Decimal("760"),  # slightly above cost basis (interest accrued)
+                details={
+                    "wallet": wallet,
+                    "asset": asset,
+                },
+            )
+
+            # Build PositionValue and enrich via valuer
+            from almanak.framework.teardown.models import PositionType as PT
+
+            p_value = PositionValue(
+                position_type=PT.SUPPLY,
+                protocol=protocol,
+                chain=chain,
+                value_usd=Decimal("760"),
+                label="aave_v3 SUPPLY",
+            )
+
+            valuer = PortfolioValuer()
+            valuer.set_accounting_context(store, deploy_id)
+            valuer._enrich_position_pnl(p_value, p_info, chain)
+
+            # Assertions: cost_basis and pnl must be populated
+            assert p_value.cost_basis_usd == Decimal("750"), (
+                f"cost_basis_usd must be 500+250=$750. Got: {p_value.cost_basis_usd}"
+            )
+            assert p_value.unrealized_pnl_usd == Decimal("10"), (
+                f"unrealized_pnl_usd = value($760) - cost_basis($750) = $10. Got: {p_value.unrealized_pnl_usd}"
+            )
+            assert p_value.realized_pnl_usd == Decimal("0"), (
+                "No REPAY events → realized_pnl must be 0"
+            )
+            assert p_value.entry_timestamp != "", "entry_timestamp must be populated"
+            assert p_value.last_update_timestamp != "", "last_update_timestamp must be populated"
+
+            print("\n[PASS] VIB-3424: PortfolioValuer PnL enrichment end-to-end")
+            print(f"  cost_basis_usd      = ${p_value.cost_basis_usd}")
+            print(f"  unrealized_pnl_usd  = ${p_value.unrealized_pnl_usd}")
+            print(f"  realized_pnl_usd    = ${p_value.realized_pnl_usd}")
+            print(f"  entry_timestamp     = {p_value.entry_timestamp}")
+        finally:
+            os.unlink(db_path)
+
+    def test_enrich_position_pnl_no_store_is_noop(self):  # noqa: layers
+        """_enrich_position_pnl must silently skip when no accounting store is set."""
+        from almanak.framework.teardown.models import PositionType
+        from almanak.framework.portfolio.models import PositionValue
+        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        p_info = PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="aave_supply_xyz",
+            chain="arbitrum",
+            protocol="aave_v3",
+            value_usd=Decimal("1000"),
+            details={"wallet": "0xwallet", "asset": "USDC"},
+        )
+        from almanak.framework.teardown.models import PositionType as PT
+
+        p_value = PositionValue(
+            position_type=PT.SUPPLY,
+            protocol="aave_v3",
+            chain="arbitrum",
+            value_usd=Decimal("1000"),
+            label="aave_v3 SUPPLY",
+        )
+
+        valuer = PortfolioValuer()  # no accounting context set
+        valuer._enrich_position_pnl(p_value, p_info, "arbitrum")
+
+        # All economic fields must remain at their defaults
+        assert p_value.cost_basis_usd == Decimal("0")
+        assert p_value.unrealized_pnl_usd == Decimal("0")
+        assert p_value.realized_pnl_usd == Decimal("0")
+        assert p_value.entry_timestamp == ""
+        assert p_value.ledger_entry_id == ""
+
+    # ─── Regression tests for Codex P1 + P2 bugs ─────────────────────────────
+
+    def test_borrow_unrealized_pnl_uses_liability_semantics(self):  # noqa: layers
+        """P1 regression: borrow unrealized_pnl must use value_usd + cost_basis, not value_usd - cost_basis.
+
+        Scenario: borrowed $100 USDC, current debt is $104 (interest accrued).
+          value_usd      = -104  (negative: debt reduces portfolio)
+          cost_basis_usd = 100   (principal borrowed)
+          correct:   unrealized_pnl = -104 + 100 = -4   (the $4 accrued interest cost)
+          wrong (old): unrealized_pnl = -104 - 100 = -204  (double-counts principal)
+        """
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+        from almanak.framework.portfolio.models import PositionValue
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        # Build a minimal in-memory store with one BORROW event
+        class _SyncStore:
+            def get_accounting_events_sync(self, deployment_id, position_key=None):
+                return [
+                    {
+                        "id": "ev-borrow",
+                        "deployment_id": deployment_id,
+                        "event_type": "BORROW",
+                        "position_key": position_key or "key",
+                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "ledger_entry_id": "led-b",
+                        "payload_json": json.dumps({"principal_delta_usd": "100.00"}),
+                    }
+                ]
+
+        p_info = PositionInfo(
+            position_type=PositionType.BORROW,
+            position_id="aave_v3_borrow_usdc",
+            chain="arbitrum",
+            protocol="aave_v3",
+            value_usd=Decimal("-104"),
+            details={"wallet": "0xwallet", "asset": "USDC"},
+        )
+        p_value = PositionValue(
+            position_type=PositionType.BORROW,
+            protocol="aave_v3",
+            chain="arbitrum",
+            value_usd=Decimal("-104"),  # current debt (negative liability)
+            label="aave_v3 BORROW",
+        )
+
+        valuer = PortfolioValuer()
+        valuer.set_accounting_context(_SyncStore(), "dep-test")
+        valuer._enrich_position_pnl(p_value, p_info, "arbitrum")
+
+        assert p_value.cost_basis_usd == Decimal("100"), (
+            f"cost_basis should be $100 (principal borrowed). Got: {p_value.cost_basis_usd}"
+        )
+        assert p_value.unrealized_pnl_usd == Decimal("-4"), (
+            f"P1 regression: unrealized_pnl should be -$4 (accrued interest). Got: {p_value.unrealized_pnl_usd}"
+        )
+        print(f"\n[PASS] P1 fix: borrow unrealized_pnl = ${p_value.unrealized_pnl_usd} (correct: -$4)")
+
+    @pytest.mark.asyncio
+    async def test_supply_borrow_same_asset_no_cross_contamination(self):  # noqa: layers
+        """P2 regression: SUPPLY and BORROW events for the same wallet/protocol/asset
+        must not cross-contaminate each other's cost_basis and PnL fields.
+
+        Both positions share the same accounting position_key. The fix filters events
+        by relevant event types before computing the summary for each side.
+        """
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.portfolio.models import PositionValue
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+        from types import SimpleNamespace
+        from almanak.framework.intents.vocabulary import IntentType
+
+        f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        f.close()
+        db_path = f.name
+
+        try:
+            store = SQLiteStore(SQLiteConfig(db_path=db_path))
+            await store.initialize()
+
+            deploy_id = "dep-p2-regression"
+            wallet = TEST_WALLET.lower()
+            asset = "USDC"
+            chain = "arbitrum"
+            protocol = "aave_v3"
+            basis_store = FIFOBasisStore()
+
+            # Write a SUPPLY event (500 USDC supplied)
+            supply_intent = SimpleNamespace(
+                intent_type=IntentType.SUPPLY, protocol=protocol,
+                token=asset, borrow_token=None, market_id=None,
+            )
+            supply_result = SimpleNamespace(
+                extracted_data={"supply_amount": 500_000_000},
+                tx_hash="0xsupply", gas_cost_eth=None,
+            )
+            supply_ev = build_lending_accounting_event(
+                intent=supply_intent, result=supply_result,
+                deployment_id=deploy_id, strategy_id="s", cycle_id="c",
+                execution_mode="live", chain=chain, wallet_address=wallet,
+                gateway_client=None, basis_store=basis_store,
+                price_oracle={"USDC": Decimal("1.0")},
+            )
+            assert supply_ev is not None
+            await AccountingWriter(store).write(supply_ev)
+
+            # Write a BORROW event (200 USDC borrowed — same asset, same key)
+            borrow_intent = SimpleNamespace(
+                intent_type=IntentType.BORROW, protocol=protocol,
+                token=None, borrow_token=asset, market_id=None,
+            )
+            borrow_result = SimpleNamespace(
+                extracted_data={"borrow_amount": 200_000_000},
+                tx_hash="0xborrow", gas_cost_eth=None,
+            )
+            borrow_ev = build_lending_accounting_event(
+                intent=borrow_intent, result=borrow_result,
+                deployment_id=deploy_id, strategy_id="s", cycle_id="c",
+                execution_mode="live", chain=chain, wallet_address=wallet,
+                gateway_client=None, basis_store=basis_store,
+                price_oracle={"USDC": Decimal("1.0")},
+            )
+            assert borrow_ev is not None
+            await AccountingWriter(store).write(borrow_ev)
+
+            # Both events share the same position_key
+            assert supply_ev.position_key == borrow_ev.position_key, (
+                f"Expected same position_key for same wallet/protocol/asset. "
+                f"supply={supply_ev.position_key} borrow={borrow_ev.position_key}"
+            )
+
+            # Now enrich a SUPPLY PositionValue — should only see SUPPLY events ($500)
+            supply_p_info = PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="supply_xyz",
+                chain=chain, protocol=protocol,
+                value_usd=Decimal("505"),
+                details={"wallet": wallet, "asset": asset},
+            )
+            supply_p_value = PositionValue(
+                position_type=PositionType.SUPPLY,
+                protocol=protocol, chain=chain,
+                value_usd=Decimal("505"), label="supply",
+            )
+            valuer = PortfolioValuer()
+            valuer.set_accounting_context(store, deploy_id)
+            valuer._enrich_position_pnl(supply_p_value, supply_p_info, chain)
+
+            assert supply_p_value.cost_basis_usd == Decimal("500"), (
+                f"P2: SUPPLY cost_basis must be $500 (not contaminated by $200 BORROW). Got: {supply_p_value.cost_basis_usd}"
+            )
+
+            # Now enrich a BORROW PositionValue — should only see BORROW events ($200)
+            borrow_p_info = PositionInfo(
+                position_type=PositionType.BORROW,
+                position_id="borrow_xyz",
+                chain=chain, protocol=protocol,
+                value_usd=Decimal("-202"),  # current debt (slight interest)
+                details={"wallet": wallet, "asset": asset},
+            )
+            borrow_p_value = PositionValue(
+                position_type=PositionType.BORROW,
+                protocol=protocol, chain=chain,
+                value_usd=Decimal("-202"), label="borrow",
+            )
+            valuer._enrich_position_pnl(borrow_p_value, borrow_p_info, chain)
+
+            assert borrow_p_value.cost_basis_usd == Decimal("200"), (
+                f"P2: BORROW cost_basis must be $200 (not contaminated by $500 SUPPLY). Got: {borrow_p_value.cost_basis_usd}"
+            )
+            assert borrow_p_value.unrealized_pnl_usd == Decimal("-2"), (
+                f"P1+P2: BORROW unrealized_pnl = -202 + 200 = -$2. Got: {borrow_p_value.unrealized_pnl_usd}"
+            )
+
+            print(f"\n[PASS] P2 fix: SUPPLY cost_basis=${supply_p_value.cost_basis_usd}, "
+                  f"BORROW cost_basis=${borrow_p_value.cost_basis_usd} (no cross-contamination)")
+            print(f"[PASS] P1 fix: BORROW unrealized_pnl=${borrow_p_value.unrealized_pnl_usd}")
+        finally:
+            os.unlink(db_path)

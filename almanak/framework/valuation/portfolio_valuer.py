@@ -101,6 +101,9 @@ class PortfolioValuer:
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._vault_reader = VaultPositionReader(gateway_client)
         self._discovery = PositionDiscoveryService(gateway_client)
+        # VIB-3424: per-position PnL enrichment from accounting_events store.
+        self._accounting_store: Any = None
+        self._deployment_id: str = ""
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client for on-chain queries.
@@ -113,6 +116,20 @@ class PortfolioValuer:
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._vault_reader.set_gateway_client(gateway_client)
         self._discovery.set_gateway_client(gateway_client)
+
+    def set_accounting_context(self, store: Any, deployment_id: str) -> None:
+        """Set the accounting store for per-position PnL enrichment (VIB-3424).
+
+        Called by runner_state._value_via_portfolio_valuer before value() so each
+        PositionValue gets cost_basis_usd / unrealized_pnl_usd / realized_pnl_usd
+        populated from the local accounting_events SQLite table.
+
+        Args:
+            store: Object with get_accounting_events_sync(deployment_id, position_key).
+            deployment_id: Canonical deployment key (wallet+chain hash or --id flag).
+        """
+        self._accounting_store = store
+        self._deployment_id = deployment_id
 
     def value(
         self,
@@ -599,17 +616,18 @@ class PortfolioValuer:
             # Merge enriched valuer details into position details
             merged_details = {**p.details, **enriched_details}
 
-            positions.append(
-                PositionValue(
-                    position_type=p.position_type,
-                    protocol=p.protocol,
-                    chain=p.chain,
-                    value_usd=value_usd,
-                    label=f"{p.protocol} {p.position_type.value}",
-                    tokens=p.details.get("tokens", []),
-                    details=merged_details,
-                )
+            pos = PositionValue(
+                position_type=p.position_type,
+                protocol=p.protocol,
+                chain=p.chain,
+                value_usd=value_usd,
+                label=f"{p.protocol} {p.position_type.value}",
+                tokens=p.details.get("tokens", []),
+                details=merged_details,
             )
+            # VIB-3424: populate cost_basis / pnl fields from accounting events
+            self._enrich_position_pnl(pos, p, strategy.chain)
+            positions.append(pos)
 
         position_value = sum((p.value_usd for p in positions), Decimal("0"))
         # Signal incomplete if strategy failed OR discovery had errors.
@@ -1659,6 +1677,97 @@ class PortfolioValuer:
             return resolver.get_decimals(chain, symbol)
         except Exception:
             return None
+
+    def _enrich_position_pnl(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+        chain: str,
+    ) -> None:
+        """Populate cost_basis_usd, unrealized_pnl_usd, realized_pnl_usd, and timestamps
+        from stored accounting events. Best-effort: silently skips on any failure.
+
+        Only enriches position types that have accounting events (lending for now).
+        LP / perps / vault positions remain at their default-zero values until their
+        accounting writers are implemented.
+        """
+        if not self._accounting_store or not self._deployment_id:
+            return
+        try:
+            from almanak.framework.accounting.position_pnl import compute_position_pnl
+            from almanak.framework.teardown.models import PositionType
+
+            position_key = self._try_derive_lending_position_key(position_info, chain)
+            if not position_key:
+                return
+
+            events = self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+            if not events:
+                return
+
+            # P2 fix: filter events to those relevant for this position side so that a
+            # SUPPLY and BORROW for the same wallet/protocol/asset do not cross-contaminate.
+            # The accounting position_key omits the lending side, so both sides share a key.
+            if position_info.position_type == PositionType.BORROW:
+                relevant_event_types = {"BORROW", "REPAY"}
+            else:
+                relevant_event_types = {"SUPPLY", "WITHDRAW"}
+            events = [e for e in events if e.get("event_type") in relevant_event_types]
+            if not events:
+                return
+
+            pnl = compute_position_pnl(events)
+            if pnl is None:
+                return
+
+            position_value.cost_basis_usd = pnl.cost_basis_usd
+            # P1 fix: BORROW positions carry a negative value_usd (liability semantics).
+            # unrealized_pnl = value_usd + cost_basis_usd
+            #                = (-current_debt) + outstanding_principal
+            #                = -(accrued_interest)   [negative when interest has accrued]
+            # SUPPLY positions use the standard asset formula: value - cost_basis.
+            if position_info.position_type == PositionType.BORROW:
+                position_value.unrealized_pnl_usd = position_value.value_usd + pnl.cost_basis_usd
+            else:
+                # Always compute for SUPPLY even when cost_basis is zero: a position
+                # that has fully recovered principal still has unrealized PnL = value_usd.
+                position_value.unrealized_pnl_usd = position_value.value_usd - pnl.cost_basis_usd
+            position_value.realized_pnl_usd = pnl.realized_pnl_usd
+            position_value.entry_timestamp = pnl.entry_timestamp
+            position_value.last_update_timestamp = pnl.latest_timestamp
+            position_value.ledger_entry_id = pnl.latest_ledger_entry_id
+        except Exception:
+            logger.debug("_enrich_position_pnl failed for %s", position_info.position_id, exc_info=True)
+
+    @staticmethod
+    def _try_derive_lending_position_key(position: "PositionInfo", chain: str) -> str | None:
+        """Derive the accounting position_key from a PositionInfo for lending positions.
+
+        Mirrors the logic in lending_accounting._derive_position_key so that
+        accounting events written during execution can be matched at snapshot time.
+        Returns None for non-lending position types or when required details are absent.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        if position.position_type not in (PositionType.SUPPLY, PositionType.BORROW):
+            return None
+        if not chain:
+            return None
+        wallet = (
+            position.details.get("wallet")
+            or position.details.get("wallet_address")
+            or position.details.get("owner")
+            or ""
+        )
+        asset = position.details.get("asset") or ""
+        if not wallet or not asset:
+            return None
+        market_id = position.details.get("market_id")
+        parts = ["lending", chain.lower(), position.protocol.lower(), wallet.lower()]
+        if market_id:
+            parts.append(str(market_id).lower())
+        parts.append(asset.lower())
+        return ":".join(parts)
 
     @staticmethod
     def _price_ratio_to_tick(

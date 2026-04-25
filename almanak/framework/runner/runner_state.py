@@ -191,6 +191,15 @@ def _value_via_portfolio_valuer(
         if gw is not None:
             runner._portfolio_valuer.set_gateway_client(gw)
 
+        # VIB-3424: wire accounting context so PositionValue gets PnL fields
+        # Prefer runner's deployment_id (authoritative) over strategy's, then fall back to strategy_id.
+        deployment_id = (
+            getattr(runner, "deployment_id", "") or getattr(strategy, "deployment_id", "") or strategy.strategy_id
+        )
+        state_manager = getattr(runner, "state_manager", None)
+        if state_manager is not None and deployment_id:
+            runner._portfolio_valuer.set_accounting_context(state_manager, deployment_id)
+
         market = strategy.create_market_snapshot()
         snapshot = runner._portfolio_valuer.value(
             strategy=strategy,

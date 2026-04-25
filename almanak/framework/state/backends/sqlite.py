@@ -2531,6 +2531,38 @@ class SQLiteStore:
         loop2 = asyncio.get_event_loop()
         return await loop2.run_in_executor(None, _sync_get)
 
+    def get_accounting_events_sync(
+        self,
+        deployment_id: str,
+        position_key: str | None = None,
+    ) -> list[dict]:
+        """Synchronous accounting event query for use from non-async callers.
+
+        Bypasses the async executor wrapper so PortfolioValuer (synchronous)
+        can enrich PositionValue objects without spawning a new event loop.
+        Returns [] when the store is not yet initialized.
+
+        No LIMIT is applied: cost_basis computation requires the full event
+        history from the opening event forward. Truncating early events would
+        produce an incorrect (context-free) cost basis.
+        """
+        if not self._initialized or not self._conn:
+            return []
+        params: list[Any] = [deployment_id]
+        where = ["deployment_id = ?"]
+        if position_key is not None:
+            where.append("position_key = ?")
+            params.append(position_key)
+        sql = f"""
+            SELECT * FROM accounting_events
+            WHERE {" AND ".join(where)}
+            ORDER BY timestamp ASC
+        """
+        with self._db_lock:
+            cursor = self._conn.execute(sql, params)
+            rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def get_accounting_history(
         self,
         deployment_id: str,
