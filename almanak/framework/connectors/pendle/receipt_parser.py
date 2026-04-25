@@ -348,6 +348,7 @@ class PendleReceiptParser:
             "lp_open_data",
             "lp_close_data",
             "position_id",
+            "redemption_amounts",
         }
     )
 

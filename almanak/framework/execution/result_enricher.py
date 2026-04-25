@@ -146,7 +146,7 @@ class ResultEnricher:
         "BORROW": ["borrow_amount", "borrow_amounts", "borrow_rate", "debt_token", "protocol_fees"],
         "REPAY": ["repay_amount", "repay_amounts", "remaining_debt", "protocol_fees"],
         "SUPPLY": ["supply_amount", "supply_amounts", "a_token_received", "supply_rate", "protocol_fees"],
-        "WITHDRAW": ["withdraw_amount", "withdraw_amounts", "a_token_burned", "protocol_fees"],
+        "WITHDRAW": ["withdraw_amount", "withdraw_amounts", "a_token_burned", "protocol_fees", "redemption_amounts"],
         # === Perpetuals ===
         "PERP_OPEN": [
             "position_id",

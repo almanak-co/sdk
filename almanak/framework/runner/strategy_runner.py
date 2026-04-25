@@ -2041,13 +2041,17 @@ class StrategyRunner:
         result: Any,
         ledger_entry_id: str | None = None,
     ) -> None:
-        """Write a PendleAccountingEvent(PT_BUY) after a successful Pendle PT swap (VIB-3422).
+        """Write a PendleAccountingEvent(PT_BUY) + record FIFO lot after a Pendle PT swap (VIB-3422/3423).
 
         Best-effort: any exception is logged at WARNING and swallowed.
         Detects PT buys from the intent's to_token symbol and writes the
         locked implied APR computed from the PT price and days to maturity.
+        Also records a FIFO lot in _lending_basis_store so PT_REDEEM can match
+        the original cost basis and compute realized yield.
         """
         try:
+            from datetime import UTC, datetime
+
             from ..accounting.pendle_pt_accounting import build_pendle_pt_buy_accounting_event
             from ..accounting.writer import AccountingWriter
             from ..observability.context import get_cycle_id
@@ -2083,6 +2087,26 @@ class StrategyRunner:
             if event is None:
                 return
 
+            # VIB-3423: record FIFO PT lot so PT_REDEEM can compute realized yield.
+            # sy_amount and pt_amount are stored as raw Decimal (int units).
+            # Use 18-decimal assumption for both SY and PT (standard for Pendle tokens).
+            if event.sy_amount is not None and event.pt_amount is not None:
+                from decimal import Decimal as _D
+
+                _DECIMALS = 18
+                _scale = _D(10**_DECIMALS)
+                sy_human = event.sy_amount / _scale
+                pt_human = event.pt_amount / _scale
+                if pt_human > 0:
+                    self._lending_basis_store.record_pt_buy(
+                        deployment_id=deployment_id,
+                        position_key=event.position_key,
+                        pt_token=event.pt_token or "PT",
+                        pt_amount=pt_human,
+                        sy_cost=sy_human,
+                        timestamp=datetime.now(UTC),
+                    )
+
             writer = AccountingWriter(self.state_manager)
             ok = await writer.write(event)
             if ok:
@@ -2093,6 +2117,69 @@ class StrategyRunner:
                 )
         except Exception:
             logger.warning("Pendle PT buy accounting write failed (non-blocking)", exc_info=True)
+
+    async def _try_write_pendle_pt_redeem_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        price_oracle: dict | None = None,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write a PendleAccountingEvent(PT_REDEEM) after a Pendle PT redemption (VIB-3423).
+
+        Best-effort: any exception is logged at WARNING and swallowed.
+        Only fires when a RedeemPY event is present in the execution result.
+        Uses the FIFO basis store to compute realized yield vs original cost basis.
+        """
+        try:
+            from ..accounting.pendle_redeem_accounting import build_pendle_pt_redeem_accounting_event
+            from ..accounting.writer import AccountingWriter
+            from ..observability.context import get_cycle_id
+
+            intent_type_str = ""
+            it = getattr(intent, "intent_type", None)
+            if it is not None:
+                intent_type_str = it.value if hasattr(it, "value") else str(it)
+
+            if intent_type_str != "WITHDRAW":
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            cycle_id = get_cycle_id() or ""
+            execution_mode = self._derive_execution_mode()
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            wallet_address = getattr(strategy, "wallet_address", "")
+
+            event = build_pendle_pt_redeem_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                basis_store=self._lending_basis_store,
+                price_oracle=price_oracle,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "Pendle PT redeem accounting event written: market=%s yield_usd=%s",
+                    event.market_id,
+                    event.realized_yield_usd,
+                )
+        except Exception:
+            logger.warning("Pendle PT redeem accounting write failed (non-blocking)", exc_info=True)
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
@@ -2859,6 +2946,14 @@ class StrategyRunner:
             strategy,
             intent,
             state.last_execution_result,
+            ledger_entry_id=ledger_entry_id,
+        )
+        # VIB-3423: write Pendle PT redeem accounting event (WITHDRAW → PT_REDEEM)
+        await self._try_write_pendle_pt_redeem_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
+            price_oracle=state.price_oracle,
             ledger_entry_id=ledger_entry_id,
         )
         if state.record_metrics:
