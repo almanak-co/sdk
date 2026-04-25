@@ -1,5 +1,8 @@
 {
     "chain": "zerog",
     "min_stake_amount": "5",
-    "force_action": ""
+    "force_action": "",
+    "anvil_funding": {
+        "A0GI": 50
+    }
 }

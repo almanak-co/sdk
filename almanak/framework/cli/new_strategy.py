@@ -69,6 +69,7 @@ _CHAIN_NATIVE_FUNDING: dict[str, dict[str, object]] = {
     "polygon": {"MATIC": 1000, "WMATIC": 100, "WETH": 5, "USDC": 10000},
     "sonic": {"S": 100, "WETH": 5, "USDC": 10000},
     "monad": {"MON": 100, "WETH": 5, "USDC": 10000},
+    "zerog": {"A0GI": 50, "W0G": 20, "USDC.E": 100},
 }
 
 _DEFAULT_ANVIL_FUNDING: dict[str, object] = {"ETH": 10, "WETH": 5, "USDC": 10000}

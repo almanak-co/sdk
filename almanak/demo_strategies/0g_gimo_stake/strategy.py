@@ -103,9 +103,11 @@ class ZeroGGimoStakeStrategy(IntentStrategy):
         except (ValueError, KeyError) as e:
             logger.debug(f"Could not get A0GI balance: {e}")
 
-        if a0gi_balance_value >= self.min_stake_amount:
-            logger.info(f"A0GI balance ({a0gi_balance_value}) >= min_stake ({self.min_stake_amount}), staking")
-            return self._create_stake_intent(a0gi_balance_value)
+        # Reserve 2 A0GI for gas — A0GI is both the staking asset and the gas token
+        stake_amount = a0gi_balance_value - Decimal("2")
+        if stake_amount >= self.min_stake_amount:
+            logger.info(f"A0GI balance ({a0gi_balance_value}) sufficient, staking {stake_amount} A0GI")
+            return self._create_stake_intent(stake_amount)
 
         return Intent.hold(reason=f"Insufficient A0GI balance: {a0gi_balance_value} < {self.min_stake_amount}")
 

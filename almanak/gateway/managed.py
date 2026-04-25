@@ -340,7 +340,9 @@ class ManagedGateway:
             raise
 
     # Native gas tokens that are funded via anvil_setBalance (not ERC-20 transfer)
-    NATIVE_TOKEN_SYMBOLS = frozenset({"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL"})
+    NATIVE_TOKEN_SYMBOLS = frozenset(
+        {"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL", "A0GI"}
+    )
     CHAIN_NATIVE_SYMBOL: dict[str, str] = {
         "ethereum": "ETH",
         "arbitrum": "ETH",

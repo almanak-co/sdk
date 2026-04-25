@@ -205,7 +205,7 @@ _BUILTIN_CHAINS: dict[str, dict] = {
     },
     "zerog": {
         "chain_id": 16661,
-        "public_rpc": "https://0g-rpc.publicnode.com",
+        "public_rpc": "https://rpc.ankr.com/0g_mainnet_evm",
         "anvil_port": 8558,
         "poa": False,
     },
