@@ -405,6 +405,43 @@ ON position_events (deployment_id, event_type);
 -- Index for position_id lookups
 CREATE INDEX IF NOT EXISTS idx_position_events_position
 ON position_events (position_id, timestamp);
+
+-- Typed accounting events — unified store for LendingAccountingEvent,
+-- PendleAccountingEvent, and future position types (VIB-3417).
+-- Local SQLite only; hosted Postgres requires metrics-database migration (IMPL-3).
+CREATE TABLE IF NOT EXISTS accounting_events (
+    id TEXT PRIMARY KEY,
+    deployment_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    cycle_id TEXT NOT NULL,
+    execution_mode TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    chain TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    wallet_address TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    position_key TEXT NOT NULL,
+    ledger_entry_id TEXT,
+    tx_hash TEXT,
+    confidence TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_ae_deployment_ts
+ON accounting_events (deployment_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ae_position
+ON accounting_events (deployment_id, position_key, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ae_event_type
+ON accounting_events (deployment_id, event_type, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ae_cycle
+ON accounting_events (cycle_id);
+
+CREATE INDEX IF NOT EXISTS idx_ae_ledger
+ON accounting_events (ledger_entry_id);
 """
 
 
@@ -664,21 +701,24 @@ class SQLiteStore:
                         )
                         total += cursor.rowcount
 
-                    # position_events uses deployment_id instead of strategy_id
-                    pe_exists = conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='position_events'",
-                    ).fetchone()
-                    if pe_exists:
-                        pe_old = conn.execute(
-                            "SELECT COUNT(*) FROM position_events WHERE deployment_id = ?",
+                    # position_events and accounting_events use deployment_id instead of strategy_id
+                    for dep_id_table in ("position_events", "accounting_events"):
+                        tbl_exists = conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                            (dep_id_table,),
+                        ).fetchone()
+                        if not tbl_exists:
+                            continue
+                        old_rows = conn.execute(
+                            f"SELECT COUNT(*) FROM {dep_id_table} WHERE deployment_id = ?",
                             (old_strategy_id,),
                         ).fetchone()[0]
-                        if pe_old > 0:
-                            pe_cursor = conn.execute(
-                                "UPDATE position_events SET deployment_id = ? WHERE deployment_id = ?",
+                        if old_rows > 0:
+                            cursor = conn.execute(
+                                f"UPDATE {dep_id_table} SET deployment_id = ? WHERE deployment_id = ?",
                                 (new_deployment_id, old_strategy_id),
                             )
-                            total += pe_cursor.rowcount
+                            total += cursor.rowcount
 
                     conn.execute("COMMIT")
                     if total > 0:
@@ -2409,3 +2449,108 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
+
+    # -------------------------------------------------------------------------
+    # Typed accounting events (VIB-3417)
+    # -------------------------------------------------------------------------
+
+    async def save_accounting_event(self, event: Any) -> bool:
+        """Persist a typed accounting event (LendingAccountingEvent, PendleAccountingEvent, etc.)."""
+        if not self._initialized:
+            await self.initialize()
+
+        identity = event.identity
+
+        def _sync_save() -> bool:
+            with self._db_lock:
+                self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    INSERT OR REPLACE INTO accounting_events
+                    (id, deployment_id, strategy_id, cycle_id, execution_mode,
+                     timestamp, chain, protocol, wallet_address, event_type, position_key,
+                     ledger_entry_id, tx_hash, confidence, payload_json, schema_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        identity.id,
+                        identity.deployment_id,
+                        identity.strategy_id,
+                        identity.cycle_id,
+                        identity.execution_mode,
+                        identity.timestamp.isoformat(),
+                        identity.chain,
+                        identity.protocol,
+                        identity.wallet_address,
+                        str(getattr(event, "event_type", "UNKNOWN")),
+                        getattr(event, "position_key", ""),
+                        identity.ledger_entry_id,
+                        identity.tx_hash,
+                        str(event.confidence),
+                        event.to_payload_json(),
+                        event.schema_version,
+                    ),
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+            return True
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_save)
+
+    async def get_accounting_events(
+        self,
+        deployment_id: str,
+        event_type: str | None = None,
+        position_key: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Query typed accounting events as raw dicts (caller deserializes payload_json)."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list[dict]:
+            params: list[Any] = [deployment_id]
+            where = ["deployment_id = ?"]
+            if event_type:
+                where.append("event_type = ?")
+                params.append(event_type)
+            if position_key:
+                where.append("position_key = ?")
+                params.append(position_key)
+            params.append(limit)
+            sql = f"""
+                SELECT * FROM accounting_events
+                WHERE {" AND ".join(where)}
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """
+            with self._db_lock:
+                cursor = self._conn.execute(sql, params)  # type: ignore[union-attr]
+                rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+        loop2 = asyncio.get_event_loop()
+        return await loop2.run_in_executor(None, _sync_get)
+
+    async def get_accounting_history(
+        self,
+        deployment_id: str,
+        position_key: str,
+    ) -> list[dict]:
+        """Full chronological history for a position_key."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get_hist() -> list[dict]:
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT * FROM accounting_events
+                    WHERE deployment_id = ? AND position_key = ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (deployment_id, position_key),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+
+        loop3 = asyncio.get_event_loop()
+        return await loop3.run_in_executor(None, _sync_get_hist)

@@ -505,30 +505,70 @@ def build_entry_state(
     }
 
 
-async def _fetch_latest_token_prices(store: Any, deployment_id: str) -> dict[str, Any] | None:
-    """Read the most recent ``PortfolioSnapshot.token_prices`` for a deployment.
+async def _fetch_latest_token_prices(
+    store: Any,
+    deployment_id: str,
+    token0: str = "",
+    token1: str = "",
+    chain: str = "",
+    price_oracle: Any = None,
+) -> dict[str, Any] | None:
+    """Read per-token prices for IL attribution.
 
-    Returns ``None`` if the store has no snapshot yet (first-iteration OPEN
-    before the first snapshot is written) or if fetching fails. Attribution
-    downstream must tolerate ``None`` and emit ``il_usd=None`` rather than a
-    misleading zero.
+    Primary source: latest PortfolioSnapshot.token_prices (already archived).
+    Fallback (VIB-3420): when no snapshot exists yet (first-iteration OPEN
+    before the first snapshot is written), query the price oracle directly so
+    that entry_state prices are never silently null.
+
+    Returns None only when both sources are unavailable. Callers must treat
+    None as UNAVAILABLE and emit il_usd=None rather than a misleading zero.
     """
-    if not hasattr(store, "get_latest_snapshot"):
+    if hasattr(store, "get_latest_snapshot"):
+        try:
+            snapshot = await store.get_latest_snapshot(deployment_id)
+            if snapshot is not None:
+                snapshot_prices = getattr(snapshot, "token_prices", None)
+                if isinstance(snapshot_prices, dict) and snapshot_prices:
+                    return snapshot_prices
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to fetch latest snapshot for %s", deployment_id, exc_info=True)
+
+    # Fallback: use the price oracle when no snapshot exists yet.
+    # This covers the common case where a strategy opens its first position on
+    # the very first iteration before the portfolio valuer has run.
+    #
+    # Two oracle shapes are supported:
+    #   1. Plain dict (StrategyRunner.price_oracle): {symbol: Decimal | str}
+    #      _price_for_token handles flat dicts directly; returned as-is so the
+    #      caller can look up token0/token1 in the same format.
+    #   2. Async protocol (PriceOracle with get_aggregated_price): per-token
+    #      async calls are made and results are collected into a dict.
+    if price_oracle is None or not (token0 or token1):
         return None
-    try:
-        snapshot = await store.get_latest_snapshot(deployment_id)
-    except Exception:  # noqa: BLE001
-        logger.debug("Failed to fetch latest snapshot for %s", deployment_id, exc_info=True)
-        return None
-    if snapshot is None:
-        return None
-    prices = getattr(snapshot, "token_prices", None)
-    if not isinstance(prices, dict) or not prices:
-        return None
-    return prices
+
+    if isinstance(price_oracle, dict):
+        # Plain dict oracle — return as-is if non-empty so _price_for_token
+        # can do its symbol/address matching. If the dict uses symbol keys but
+        # the event uses address tokens, _price_for_token will return None for
+        # those tokens, which is honest (UNAVAILABLE) rather than wrong.
+        return price_oracle if price_oracle else None
+
+    prices: dict[str, Any] = {}
+    for token in filter(None, [token0, token1]):
+        try:
+            result = await price_oracle.get_aggregated_price(token, chain=chain or None)
+            if result is not None and getattr(result, "price", None) is not None:
+                prices[token.lower()] = str(result.price)
+        except Exception:  # noqa: BLE001
+            logger.debug("Price oracle fallback failed for token %s", token, exc_info=True)
+    return prices if prices else None
 
 
-async def stamp_entry_state_on_open(store: Any, open_event: Any) -> None:
+async def stamp_entry_state_on_open(
+    store: Any,
+    open_event: Any,
+    price_oracle: Any = None,
+) -> None:
     """Persist entry_state on the OPEN event's attribution_json (VIB-3205).
 
     Called by StrategyRunner after ``save_position_event`` for OPEN events so
@@ -536,10 +576,11 @@ async def stamp_entry_state_on_open(store: Any, open_event: Any) -> None:
     value. entry_state captures the initial token amounts + per-token prices
     read from the latest ``PortfolioSnapshot.token_prices``.
 
-    This is best-effort: if no prices are available (first iteration before
-    the first snapshot is written, or the snapshot lacks prices for these
-    tokens), we still stamp amounts. ``compute_impermanent_loss`` will treat
-    None prices as "unknown" and return ``None``.
+    price_oracle is used as a fallback when no snapshot exists yet (VIB-3420).
+    This covers the common case where a strategy opens its first LP position on
+    the first iteration before the portfolio valuer has produced a snapshot.
+    Without this fallback, impermanent_loss_usd is permanently null for these
+    positions.
     """
     try:
         token0 = getattr(open_event, "token0", "") or ""
@@ -547,7 +588,14 @@ async def stamp_entry_state_on_open(store: Any, open_event: Any) -> None:
         amount0 = getattr(open_event, "amount0", "") or "0"
         amount1 = getattr(open_event, "amount1", "") or "0"
 
-        prices = await _fetch_latest_token_prices(store, open_event.deployment_id)
+        prices = await _fetch_latest_token_prices(
+            store,
+            open_event.deployment_id,
+            token0=token0,
+            token1=token1,
+            chain=getattr(open_event, "chain", "") or "",
+            price_oracle=price_oracle,
+        )
         price0 = _price_for_token(prices, token0) if prices else None
         price1 = _price_for_token(prices, token1) if prices else None
 
@@ -635,7 +683,11 @@ async def run_attribution_on_close(
         # attribution_json sidecar so compute_impermanent_loss can evaluate
         # HODL value. Best-effort — if no snapshot exists yet, IL silently
         # falls back to None rather than mis-reporting zero.
-        prices = await _fetch_latest_token_prices(store, close_event.deployment_id)
+        prices = await _fetch_latest_token_prices(
+            store,
+            close_event.deployment_id,
+            chain=getattr(close_event, "chain", "") or "",
+        )
         if prices:
             close_attr = close_dict.get("attribution_json") or "{}"
             try:

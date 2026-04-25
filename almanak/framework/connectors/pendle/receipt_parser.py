@@ -34,16 +34,23 @@ logger = logging.getLogger(__name__)
 
 # Pendle-specific event signatures (keccak256 hashes)
 EVENT_TOPICS: dict[str, str] = {
-    # Pendle Market events
+    # Pendle Market events (verified against Pendle V2 contracts on Arbitrum — VIB-3419)
+    # Swap(address,address,int256,int256,uint256,uint256) — caller,receiver,ptToAccount,syToAccount,syFee,syToReserve
     "Swap": "0x829000a5bc6a12d46e30cdcecd7c56b1efd88f6d7d059da6734a04f3764557c4",
+    # Mint(address,uint256,uint256,uint256) — IPMarketV2 4-param: receiver,netLpMinted,netSyUsed,netPtUsed
     "Mint": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
+    # Burn(address,uint256,uint256,uint256) — IPMarketV2 4-param: receiver,netLpBurned,netSyOut,netPtOut
     "Burn": "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",
-    # PY Redemption events
-    "RedeemPY": "0x99d3da4d3e0b3c4d2f147b1f2d6e1b9fe5e12c8b5c4a3d2e1f0a9b8c7d6e5f4a3",
-    "MintPY": "0x88a3d4e3f2c1b0a9d8c7b6a5e4f3d2c1b0a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5",
-    # SY events
-    "MintSY": "0x7a1d9b8c0e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b",
-    "RedeemSY": "0x8b2e0c9d1f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9",
+    # PY events — corrected from placeholder values (VIB-3419)
+    # RedeemPY(address,address,uint256,uint256) — caller,receiver,netPYRedeemed,netSYRedeemed
+    "RedeemPY": "0x35ba0cff8a710db439ca6681204f5befe6e7868ab194cfebb108de45bcf0588b",
+    # MintPY(address,address,uint256,uint256) — caller,receiver,netPYOut,netSyIn
+    "MintPY": "0xee1779d47412b4ece8f96b61f5b2406c32c43ca08ed99cf2af83323cf3900008",
+    # SY events from IStandardizedYield — corrected from placeholder values (VIB-3419)
+    # Deposit(address,address,address,uint256,uint256) — caller,receiver,tokenIn,amountDeposited,amountSyOut
+    "MintSY": "0x5fe47ed6d4225326d3303476197d782ded5a4e9c14f479dc9ec4992af4e85d59",
+    # Redeem(address,address,address,uint256,uint256) — caller,receiver,tokenOut,amountSyIn,amountTokenOut
+    "RedeemSY": "0xaee47cdf925cf525fdae94f9777ee5a06cac37e1c41220d0a8a89ed154f62d1c",
     # Standard ERC20 events
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",

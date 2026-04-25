@@ -1833,7 +1833,11 @@ class StrategyRunner:
                             try:
                                 from ..observability.pnl_attributor import stamp_entry_state_on_open
 
-                                await stamp_entry_state_on_open(self.state_manager, pos_event)
+                                await stamp_entry_state_on_open(
+                                    self.state_manager,
+                                    pos_event,
+                                    price_oracle=self.price_oracle,
+                                )
                             except Exception:  # noqa: BLE001
                                 # Entry-state stamping is best-effort but NOT trivial: if it
                                 # silently drops, close-time IL attribution later short-circuits
