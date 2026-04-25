@@ -11,11 +11,18 @@ This SDK provides a single entry point for all Polymarket operations:
 
 Example:
     from almanak.framework.connectors.polymarket import PolymarketSDK, PolymarketConfig
+    from almanak.framework.gateway_client import GatewayClient
+    from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
     from web3 import Web3
 
-    # Initialize SDK
+    # Connect to the gateway sidecar first
+    gateway_client = GatewayClient()
+    gateway_client.connect()
+
+    # Initialize SDK (production: use GatewayWeb3Provider so RPC calls go
+    # through the gateway sidecar, not directly to the chain)
     config = PolymarketConfig.from_env()
-    web3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+    web3 = Web3(GatewayWeb3Provider(gateway_client, chain="polygon"))
     sdk = PolymarketSDK(config, web3)
 
     # Fetch market by slug
@@ -74,7 +81,7 @@ class PolymarketSDK:
 
     Example:
         >>> config = PolymarketConfig.from_env()
-        >>> web3 = Web3(Web3.HTTPProvider(rpc_url))
+        >>> web3 = Web3(GatewayWeb3Provider(gateway_client, chain="polygon"))
         >>> sdk = PolymarketSDK(config, web3)
         >>>
         >>> # Get market data

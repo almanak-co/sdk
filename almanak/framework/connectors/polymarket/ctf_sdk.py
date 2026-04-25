@@ -16,9 +16,17 @@ Key Contract Addresses (Polygon Mainnet):
 
 Example:
     from almanak.framework.connectors.polymarket import CtfSDK
+    from almanak.framework.gateway_client import GatewayClient
+    from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
     from web3 import Web3
 
-    web3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+    # Connect to the gateway sidecar first
+    gateway_client = GatewayClient()
+    gateway_client.connect()
+
+    # Production: web3 must use GatewayWeb3Provider so RPC calls go
+    # through the gateway sidecar, not directly to the chain.
+    web3 = Web3(GatewayWeb3Provider(gateway_client, chain="polygon"))
     sdk = CtfSDK()
 
     # Check allowances
@@ -201,8 +209,14 @@ class CtfSDK:
     can be signed and submitted using a signer.
 
     Example:
+        from almanak.framework.gateway_client import GatewayClient
+        gateway_client = GatewayClient()
+        gateway_client.connect()
+
         sdk = CtfSDK()
-        web3 = Web3(Web3.HTTPProvider(rpc_url))
+        # Production: use GatewayWeb3Provider so RPC calls go through
+        # the gateway sidecar, not directly to the chain.
+        web3 = Web3(GatewayWeb3Provider(gateway_client, chain="polygon"))
 
         # Check if wallet needs approvals
         status = sdk.check_allowances("0x...", web3)
