@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any
 
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
-from almanak.framework.execution.extracted_data import SwapAmounts
+from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +341,15 @@ class PendleReceiptParser:
             swap = result.swap_events[0]
             print(f"Swapped {swap.sy_amount} SY for {swap.pt_amount} PT")
     """
+
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            "swap_amounts",
+            "lp_open_data",
+            "lp_close_data",
+            "position_id",
+        }
+    )
 
     def __init__(
         self,
@@ -945,6 +954,72 @@ class PendleReceiptParser:
             return None
         except Exception as e:
             logger.warning(f"Failed to extract LP burned: {e}")
+            return None
+
+    def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
+        """Extract the Pendle LP market address as the position_id.
+
+        Returns the market address as a lowercase hex string (e.g. "0xabcd...").
+        This is the stable position identifier for Pendle's fungible LP: there is
+        no NFT tokenId, so the market address itself is the unique position key.
+        Checks mint_events first (LP_OPEN), falls back to burn_events (LP_CLOSE).
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            if result.mint_events:
+                return result.mint_events[0].market_address.lower()
+            if result.burn_events:
+                return result.burn_events[0].market_address.lower()
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract position_id from Pendle receipt: {e}")
+            return None
+
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:
+        """Extract LPOpenData from a Pendle LP Mint receipt (LP_OPEN enrichment).
+
+        Maps MintEventData to the standard LPOpenData structure:
+          amount0     = net_sy_used  (raw SY tokens deposited)
+          amount1     = net_pt_used  (raw PT tokens deposited)
+          liquidity   = net_lp_minted (raw LP tokens minted)
+          position_id = 0 (Pendle has no NFT tokenId; canonical position_id is
+                          the market address hex string from extract_position_id)
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            if not result.mint_events:
+                return None
+            mint = result.mint_events[0]
+            return LPOpenData(
+                position_id=0,
+                liquidity=mint.net_lp_minted,
+                amount0=mint.net_sy_used,
+                amount1=mint.net_pt_used,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract lp_open_data: {e}")
+            return None
+
+    def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
+        """Extract LPCloseData from a Pendle LP Burn receipt (LP_CLOSE enrichment).
+
+        Maps BurnEventData to the standard LPCloseData structure:
+          amount0_collected = net_sy_out   (raw SY tokens received)
+          amount1_collected = net_pt_out   (raw PT tokens received)
+          liquidity_removed = net_lp_burned (raw LP tokens burned)
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            if not result.burn_events:
+                return None
+            burn = result.burn_events[0]
+            return LPCloseData(
+                amount0_collected=burn.net_sy_out,
+                amount1_collected=burn.net_pt_out,
+                liquidity_removed=burn.net_lp_burned,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
 
     def extract_redemption_amounts(self, receipt: dict[str, Any]) -> dict[str, int] | None:

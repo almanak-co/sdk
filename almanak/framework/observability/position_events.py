@@ -264,7 +264,11 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     if not (lp_open and hasattr(lp_open, "position_id")):
         return
 
-    event.position_id = str(lp_open.position_id)
+    # Only override when non-zero: protocols without an NFT tokenId (e.g. Pendle)
+    # set position_id=0 so that extract_position_id() (which returns the canonical
+    # hex market address) remains authoritative via _seed_event.
+    if lp_open.position_id:
+        event.position_id = str(lp_open.position_id)
     event.liquidity = str(getattr(lp_open, "liquidity", "") or "")
     event.tick_lower = getattr(lp_open, "tick_lower", None)
     event.tick_upper = getattr(lp_open, "tick_upper", None)
@@ -315,8 +319,14 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
     # measured zero ("0" / 0) is a legitimate value that must reach
     # persistence. Truthiness coercion would drop it. Use `is not None`
     # instead so only genuinely missing values fall through.
+    # Accept both naming conventions: amount0_received (legacy) and
+    # amount0_collected (LPCloseData standard used by Uniswap V3, Pendle, etc.)
     amount0_received = getattr(lp_close, "amount0_received", None)
+    if amount0_received is None:
+        amount0_received = getattr(lp_close, "amount0_collected", None)
     amount1_received = getattr(lp_close, "amount1_received", None)
+    if amount1_received is None:
+        amount1_received = getattr(lp_close, "amount1_collected", None)
 
     # Mutual-exclusivity check — log whenever BOTH payloads coexist on the
     # same intent, regardless of whether lp_open already wrote amount0/

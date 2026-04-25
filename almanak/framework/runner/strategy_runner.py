@@ -1970,6 +1970,70 @@ class StrategyRunner:
                 exc_info=True,
             )
 
+    async def _try_write_pendle_lp_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write a PendleAccountingEvent after a successful Pendle LP_OPEN or LP_CLOSE (VIB-3421).
+
+        Best-effort: any exception is logged at WARNING and swallowed.
+        """
+        try:
+            from ..accounting.pendle_accounting import _PENDLE_LP_INTENT_TYPES, build_pendle_lp_accounting_event
+            from ..accounting.writer import AccountingWriter
+            from ..observability.context import get_cycle_id
+
+            intent_type_str = ""
+            it = getattr(intent, "intent_type", None)
+            if it is not None:
+                intent_type_str = it.value if hasattr(it, "value") else str(it)
+
+            if intent_type_str not in _PENDLE_LP_INTENT_TYPES:
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            cycle_id = get_cycle_id() or ""
+            execution_mode = self._derive_execution_mode()
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            wallet_address = getattr(strategy, "wallet_address", "")
+
+            event = build_pendle_lp_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "Pendle LP accounting event written: %s market=%s",
+                    event.event_type,
+                    event.market_id,
+                )
+            else:
+                logger.debug(
+                    "Pendle LP accounting event not persisted (backend unsupported): %s market=%s",
+                    event.event_type,
+                    event.market_id,
+                )
+        except Exception:
+            logger.warning("Pendle LP accounting write failed (non-blocking)", exc_info=True)
+
     async def _try_write_pendle_pt_buy_accounting(
         self,
         strategy: "StrategyProtocol",
@@ -2781,6 +2845,13 @@ class StrategyRunner:
             intent,
             state.last_execution_result,
             price_oracle=state.price_oracle,
+            ledger_entry_id=ledger_entry_id,
+        )
+        # VIB-3421: write Pendle LP accounting event (LP_OPEN/LP_CLOSE)
+        await self._try_write_pendle_lp_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
             ledger_entry_id=ledger_entry_id,
         )
         # VIB-3422: write Pendle PT buy accounting event (SWAP → PT_BUY)

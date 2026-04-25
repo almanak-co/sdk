@@ -129,7 +129,7 @@ class ResultEnricher:
         # === DEX / AMM ===
         "SWAP": ["swap_amounts", "protocol_fees"],
         # === Liquidity Providing ===
-        "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "bin_ids", "protocol_fees"],
+        "LP_OPEN": ["position_id", "tick_lower", "tick_upper", "liquidity", "bin_ids", "protocol_fees", "lp_open_data"],
         "LP_CLOSE": [
             "lp_close_data",
             "amount0_collected",
