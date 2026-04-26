@@ -1,8 +1,9 @@
-"""Tests for _emit_iteration_summary structured log emission (VIB-524)."""
+"""Tests for _emit_iteration_summary structured log emission (VIB-524, VIB-3451)."""
 
-import logging
 from dataclasses import dataclass
 from unittest.mock import MagicMock
+
+import structlog.testing
 
 from almanak.framework.runner.strategy_runner import (
     IterationResult,
@@ -10,9 +11,6 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
-
-# Logger used by strategy_runner module
-_RUNNER_LOGGER = "almanak.framework.runner.strategy_runner"
 
 
 def _make_runner(**config_overrides) -> StrategyRunner:
@@ -35,28 +33,13 @@ def _make_runner(**config_overrides) -> StrategyRunner:
 
 
 def _capture_summary(runner, result, chain=None):
-    """Run _emit_iteration_summary and return the captured LogRecord."""
-    records = []
-
-    class Collector(logging.Handler):
-        def emit(self, record):
-            if record.getMessage() == "iteration_summary":
-                records.append(record)
-
-    target_logger = logging.getLogger(_RUNNER_LOGGER)
-    original_level = target_logger.level
-    target_logger.setLevel(logging.DEBUG)
-    handler = Collector()
-    handler.setLevel(logging.DEBUG)
-    target_logger.addHandler(handler)
-    try:
+    """Run _emit_iteration_summary and return the captured structlog event dict."""
+    with structlog.testing.capture_logs() as cap:
         runner._emit_iteration_summary(result, chain=chain)
-    finally:
-        target_logger.removeHandler(handler)
-        target_logger.setLevel(original_level)
 
-    assert len(records) == 1, f"Expected 1 iteration_summary record, got {len(records)}"
-    return records[0]
+    summaries = [e for e in cap if e.get("event") == "iteration_summary"]
+    assert len(summaries) == 1, f"Expected 1 iteration_summary record, got {len(summaries)}"
+    return summaries[0]
 
 
 def test_emit_iteration_summary_hold():
@@ -75,18 +58,18 @@ def test_emit_iteration_summary_hold():
 
     record = _capture_summary(runner, result, chain="arbitrum")
 
-    assert record.event_type == "iteration_summary"
-    assert record.strategy_id == "test-strat"
-    assert record.chain == "arbitrum"
-    assert record.iteration == 1
-    assert record.decision == "HOLD"
-    assert record.status == "HOLD"
-    assert record.duration_ms == 42.5
-    assert record.dry_run is False
-    assert record.txs_planned == 0
-    assert record.txs_sent == 0
-    assert record.tx_hashes == []
-    assert record.error is None
+    assert record["event_type"] == "iteration_summary"
+    assert record["strategy_id"] == "test-strat"
+    assert record["chain"] == "arbitrum"
+    assert record["iteration"] == 1
+    assert record["decision"] == "HOLD"
+    assert record["status"] == "HOLD"
+    assert record["duration_ms"] == 42.5
+    assert record["dry_run"] is False
+    assert record["txs_planned"] == 0
+    assert record["txs_sent"] == 0
+    assert record["tx_hashes"] == []
+    assert record["error"] is None
 
 
 def test_emit_iteration_summary_success_with_execution():
@@ -120,18 +103,18 @@ def test_emit_iteration_summary_success_with_execution():
 
     record = _capture_summary(runner, result, chain="base")
 
-    assert record.event_type == "iteration_summary"
-    assert record.strategy_id == "swap-strat"
-    assert record.chain == "base"
-    assert record.iteration == 3
-    assert record.decision == "SWAP"
-    assert record.intents == [{"intent_type": "SWAP", "token_in": "USDC"}]
-    assert record.txs_sent == 2
-    assert record.txs_planned == 2
-    assert record.tx_hashes == ["0xabc123", "0xdef456"]
-    assert record.status == "SUCCESS"
-    assert record.duration_ms == 1234.0
-    assert record.error is None
+    assert record["event_type"] == "iteration_summary"
+    assert record["strategy_id"] == "swap-strat"
+    assert record["chain"] == "base"
+    assert record["iteration"] == 3
+    assert record["decision"] == "SWAP"
+    assert record["intents"] == [{"intent_type": "SWAP", "token_in": "USDC"}]
+    assert record["txs_sent"] == 2
+    assert record["txs_planned"] == 2
+    assert record["tx_hashes"] == ["0xabc123", "0xdef456"]
+    assert record["status"] == "SUCCESS"
+    assert record["duration_ms"] == 1234.0
+    assert record["error"] is None
 
 
 def test_emit_iteration_summary_dry_run_flag():
@@ -147,8 +130,8 @@ def test_emit_iteration_summary_dry_run_flag():
 
     record = _capture_summary(runner, result)
 
-    assert record.dry_run is True
-    assert record.chain is None
+    assert record["dry_run"] is True
+    assert record["chain"] is None
 
 
 def test_emit_iteration_summary_error():
@@ -165,10 +148,10 @@ def test_emit_iteration_summary_error():
 
     record = _capture_summary(runner, result, chain="ethereum")
 
-    assert record.status == "EXECUTION_FAILED"
-    assert record.error == "Transaction reverted: insufficient balance"
-    assert record.strategy_id == "err-strat"
-    assert record.iteration == 5
+    assert record["status"] == "EXECUTION_FAILED"
+    assert record["error"] == "Transaction reverted: insufficient balance"
+    assert record["strategy_id"] == "err-strat"
+    assert record["iteration"] == 5
 
 
 def test_emit_iteration_summary_gateway_execution_result():
@@ -195,6 +178,6 @@ def test_emit_iteration_summary_gateway_execution_result():
 
     record = _capture_summary(runner, result, chain="arbitrum")
 
-    assert record.tx_hashes == ["0x111", "0x222", "0x333"]
-    assert record.txs_sent == 3
-    assert record.txs_planned == 3
+    assert record["tx_hashes"] == ["0x111", "0x222", "0x333"]
+    assert record["txs_sent"] == 3
+    assert record["txs_planned"] == 3

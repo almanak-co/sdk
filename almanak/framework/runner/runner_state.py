@@ -7,10 +7,11 @@ via a thin delegation stub in StrategyRunner.
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from ..intents.vocabulary import AnyIntent, HoldIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
@@ -22,9 +23,11 @@ if TYPE_CHECKING:
     from ..execution.orchestrator import ExecutionResult
     from .runner_models import IterationResult, StatefulActivityProviderProtocol, StrategyProtocol
 
-# Use the original strategy_runner logger so existing log-capture tests and
-# log-filtering rules continue to work after the extraction.
-logger = logging.getLogger("almanak.framework.runner.strategy_runner")
+# Use a structlog logger so that keyword arguments in structured log calls
+# (e.g. emit_iteration_summary) are preserved in the event dict and emitted
+# in JSONL output.  The logger name is kept identical to the original so that
+# existing log-capture tests and log-filtering rules continue to work.
+logger = structlog.get_logger("almanak.framework.runner.strategy_runner")
 
 
 # -------------------------------------------------------------------------
@@ -989,23 +992,21 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
 
     logger.info(
         "iteration_summary",
-        extra={
-            "event_type": "iteration_summary",
-            "strategy_id": result.strategy_id,
-            "chain": chain,
-            "iteration": runner._total_iterations,
-            "decision": intent_type,
-            "intents": intents_serialized,
-            "dry_run": runner.config.dry_run,
-            "txs_planned": txs_planned,
-            "txs_sent": txs_sent,
-            "tx_hashes": tx_hashes,
-            "gas_used": gas_used,
-            "status": result.status.value,
-            "duration_ms": round(result.duration_ms, 1),
-            "hold_reason": hold_reason,
-            "hold_reason_code": hold_reason_code,
-            "reconciliation_ok": reconciliation_ok,
-            "error": result.error,
-        },
+        event_type="iteration_summary",
+        strategy_id=result.strategy_id,
+        chain=chain,
+        iteration=runner._total_iterations,
+        decision=intent_type,
+        intents=intents_serialized,
+        dry_run=runner.config.dry_run,
+        txs_planned=txs_planned,
+        txs_sent=txs_sent,
+        tx_hashes=tx_hashes,
+        gas_used=gas_used,
+        status=result.status.value,
+        duration_ms=round(result.duration_ms, 1),
+        hold_reason=hold_reason,
+        hold_reason_code=hold_reason_code,
+        reconciliation_ok=reconciliation_ok,
+        error=result.error,
     )
