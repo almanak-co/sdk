@@ -167,9 +167,11 @@ class TestHappyPathsPerIntentType:
         assert entry.success is True
 
     def test_lp_open_happy_path(self):
-        """LP_OPEN intent with no swap_amounts — pair tokens come from
-        intent.from_token/to_token (the LP intent exposes the pair as the two
-        swap sides). Amounts come from intent.amount (fallback chain).
+        """LP_OPEN with LPOpenData in extracted_data -- VIB-3450.
+
+        Amounts must come from LPOpenData.amount0/amount1 (on-chain actuals,
+        raw integers). Tokens come from from_token/to_token on the intent
+        (the LP intent exposes the pair via those attrs when present).
         """
         result = SimpleNamespace(
             swap_amounts=None,
@@ -205,8 +207,9 @@ class TestHappyPathsPerIntentType:
         assert entry.protocol == "uniswap_v3"
         assert entry.token_in == "WETH"
         assert entry.token_out == "USDC"
-        # amount_in from the intent.amount fallback (no swap_amounts).
-        assert entry.amount_in == "100"
+        # VIB-3450: amount_in/amount_out now come from LPOpenData on-chain actuals.
+        assert entry.amount_in == "10000"
+        assert entry.amount_out == "20000"
         assert entry.tx_hash == "0xlpo"
         assert entry.gas_used == 300_000
         assert entry.gas_usd == "1.25"
@@ -355,6 +358,194 @@ class TestHappyPathsPerIntentType:
         assert entry.intent_type == "REPAY"
         assert entry.token_in == "USDC"
         assert entry.amount_in == "500"
+
+
+# ---------------------------------------------------------------------------
+# VIB-3450 -- LP_OPEN token/amount extraction (dedicated coverage).
+# ---------------------------------------------------------------------------
+
+
+class TestLPOpenExtraction:
+    """LP_OPEN intents carry amounts in ``LPOpenData.amount0/amount1``
+    (raw on-chain integers) stored under ``result.extracted_data["lp_open_data"]``.
+    ``LPOpenIntent`` has no ``from_token``/``to_token`` in its formal model;
+    tokens fall back to ``intent.token0/token1`` then ``from_token/to_token``.
+
+    Before VIB-3450, the LP_OPEN path fell through to
+    ``_extract_from_intent_fallback``, which found no matching attrs on the
+    intent and left all token/amount fields as empty strings.
+    """
+
+    def test_amounts_from_lp_open_data(self):
+        """On-chain LPOpenData.amount0/amount1 populate amount_in/amount_out."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[_make_tx_result("0xlpo")],
+            total_gas_used=200_000,
+            gas_cost_usd=Decimal("1.00"),
+            extracted_data={
+                "lp_open_data": LPOpenData(
+                    position_id=999,
+                    liquidity=500_000,
+                    amount0=1_000_000,  # raw token0 deposited
+                    amount1=2_500_000,  # raw token1 deposited
+                )
+            },
+        )
+        intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.amount_in == "1000000"
+        assert entry.amount_out == "2500000"
+
+    def test_tokens_from_intent_token0_token1(self):
+        """intent.token0/token1 populate token_in/token_out."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={
+                "lp_open_data": LPOpenData(
+                    position_id=1,
+                    amount0=100,
+                    amount1=200,
+                )
+            },
+        )
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            token0="0xWETH",
+            token1="0xUSDC",
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.token_in == "0xWETH"
+        assert entry.token_out == "0xUSDC"
+
+    def test_tokens_fallback_to_from_token_to_token(self):
+        """When intent.token0/token1 are absent, from_token/to_token are used."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={
+                "lp_open_data": LPOpenData(
+                    position_id=2,
+                    amount0=50,
+                    amount1=75,
+                )
+            },
+        )
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            from_token="WETH",
+            to_token="USDC",
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.token_in == "WETH"
+        assert entry.token_out == "USDC"
+
+    def test_amounts_fall_back_to_intent_amounts_when_no_lp_open_data(self):
+        """Without LPOpenData, intent.amount0/amount1 are used as fallback."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            amount0=Decimal("0.5"),
+            amount1=Decimal("1000"),
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.amount_in == "0.5"
+        assert entry.amount_out == "1000"
+
+    def test_amounts_empty_when_no_lp_open_data_and_no_intent_amounts(self):
+        """No LPOpenData and no intent amounts -> both amount fields are ''."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.amount_in == ""
+        assert entry.amount_out == ""
+
+    def test_lp_open_zero_amounts_record_as_zero_not_empty(self):
+        """LPOpenData.amount0 = 0 is a measured zero and must record as '0'."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={
+                "lp_open_data": LPOpenData(
+                    position_id=3,
+                    amount0=0,
+                    amount1=500,
+                )
+            },
+        )
+        intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.amount_in == "0"
+        assert entry.amount_out == "500"
+
+    def test_lp_open_no_result_falls_through_cleanly(self):
+        """result=None: no crash, tokens/amounts from intent if present."""
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=None)
+        assert entry.token_in == "WETH"
+        assert entry.token_out == "USDC"
+        assert entry.amount_in == "1"
+        assert entry.amount_out == "2000"
+
+    def test_partial_lp_open_data_per_side_fallback(self):
+        """LPOpenData with amount0=None falls back per-side to intent.amount0.
+
+        Covers the per-side fallback path: amount0 missing in LPOpenData but
+        present on the intent; amount1 present in LPOpenData and takes priority.
+        """
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={
+                "lp_open_data": LPOpenData(
+                    position_id=42,
+                    amount0=None,  # missing on-chain actual for token0
+                    amount1=250,   # on-chain actual for token1 present
+                )
+            },
+        )
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            amount0=Decimal("3.5"),   # fallback for the missing side
+            amount1=Decimal("999"),   # should NOT win; lp_open_data.amount1 = 250
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        # token0 side: lp_open_data.amount0 is None → fallback to intent.amount0
+        assert entry.amount_in == "3.5"
+        # token1 side: lp_open_data.amount1 is 250 → on-chain value wins
+        assert entry.amount_out == "250"
 
 
 # ---------------------------------------------------------------------------

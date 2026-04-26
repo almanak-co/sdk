@@ -15,9 +15,11 @@ order; ordering is NOT load-bearing (unlike the position-events pipeline)
 because none of the helpers depend on output of earlier phases:
 
     alpha  _extract_intent_type          : enum-or-string dispatch
-    beta   _extract_tokens_and_amounts   : dispatch between two sub-helpers:
+    beta   _extract_tokens_and_amounts   : dispatch between three sub-helpers:
              _extract_from_swap_amounts       (SwapAmounts + intent fallback
                                                for empty token sides)
+             _extract_from_lp_open           (LP_OPEN: LPOpenData amounts +
+                                               intent token0/token1 lookup)
              _extract_from_intent_fallback    (intent-attr precedence chain
                                                from_token > borrow_token >
                                                supply_token > token;
@@ -214,16 +216,67 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
     return (token_in, token_out, amount_in, "", "", None)
 
 
+def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
+    """Phase beta-lp-open -- LP_OPEN has no swap_amounts; pull amounts from
+    ``LPOpenData`` in ``result.extracted_data`` and tokens from the intent.
+
+    Field mapping:
+    - ``token_in``  : ``intent.token0`` -> ``intent.from_token`` -> ``""``
+    - ``token_out`` : ``intent.token1`` -> ``intent.to_token``  -> ``""``
+    - ``amount_in`` : ``LPOpenData.amount0`` (raw int) is the on-chain actual
+                      deposit for token0; falls back to ``intent.amount0``
+                      (Decimal from the intent, the user-requested amount).
+    - ``amount_out``: same logic for ``amount1``.
+
+    ``LPOpenData.amount0`` / ``amount1`` are raw integer values (smallest
+    unit).  We store them as strings directly so that accounting consumers
+    see the on-chain amount.  When only the intent amounts are available the
+    human-readable Decimal string is more useful.
+    """
+    # Token resolution: LP intents don't have from_token/to_token in the
+    # formal model but some test/legacy callers set them, so respect that.
+    token_in = getattr(intent, "token0", "") or getattr(intent, "from_token", "") or ""
+    token_out = getattr(intent, "token1", "") or getattr(intent, "to_token", "") or ""
+
+    # Prefer on-chain actuals from LPOpenData; fall back to intent amounts.
+    extracted_data = getattr(result, "extracted_data", None) or {} if result else {}
+    lp_open_data = extracted_data.get("lp_open_data") if isinstance(extracted_data, dict) else None
+
+    if lp_open_data is not None:
+        # Per-side fallback: if one side is missing from LPOpenData, fall back
+        # to the corresponding intent amount rather than leaving it empty.
+        raw0 = getattr(lp_open_data, "amount0", None)
+        raw1 = getattr(lp_open_data, "amount1", None)
+        if raw0 is None:
+            raw0 = getattr(intent, "amount0", None)
+        if raw1 is None:
+            raw1 = getattr(intent, "amount1", None)
+        amount_in = str(raw0) if raw0 is not None else ""
+        amount_out = str(raw1) if raw1 is not None else ""
+    else:
+        intent_amt0 = getattr(intent, "amount0", None)
+        intent_amt1 = getattr(intent, "amount1", None)
+        amount_in = str(intent_amt0) if intent_amt0 is not None else ""
+        amount_out = str(intent_amt1) if intent_amt1 is not None else ""
+
+    return (token_in, token_out, amount_in, amount_out, "", None)
+
+
 def _extract_tokens_and_amounts(intent: Any, result: Any) -> _TokensAndAmounts:
-    """Phase beta -- dispatch between SwapAmounts and intent-attr fallback.
+    """Phase beta -- dispatch between SwapAmounts, LP_OPEN, and intent-attr fallback.
 
     A truthy ``result.swap_amounts`` drives every field (used by SWAP,
-    LP_CLOSE, and anything whose receipt parser emits SwapAmounts). Falsy
-    or absent swap_amounts walks the intent-attr precedence chain.
+    LP_CLOSE, and anything whose receipt parser emits SwapAmounts). LP_OPEN
+    intents carry amounts in ``LPOpenData`` (``result.extracted_data
+    ["lp_open_data"]``) and have no ``from_token`` / ``to_token``, so they
+    get a dedicated extraction path.  Everything else walks the intent-attr
+    precedence chain.
     """
     swap_amounts = getattr(result, "swap_amounts", None) if result else None
     if swap_amounts:
         return _extract_from_swap_amounts(swap_amounts, intent)
+    if _extract_intent_type(intent) == "LP_OPEN":
+        return _extract_from_lp_open(intent, result)
     return _extract_from_intent_fallback(intent)
 
 
