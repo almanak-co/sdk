@@ -490,8 +490,7 @@ class TestPolymarketEvents:
 class TestPendleReceiptParserEvents:
     """Validate Pendle receipt parser event topics.
 
-    Pendle Mint/Burn share Uniswap V2-style signatures.
-    Pendle Swap uses the PendleMarket event.
+    PendleMarketV3 events verified on-chain 2026-04-26 (VIB-3419).
     """
 
     def test_pendle_swap(self):
@@ -501,16 +500,16 @@ class TestPendleReceiptParserEvents:
         assert EVENT_TOPICS["Swap"] == _topic("Swap(address,address,int256,int256,uint256,uint256)")
 
     def test_pendle_mint(self):
-        """Uniswap V2-style Mint(address,uint256,uint256)."""
+        """PendleMarketV3.Mint(address,uint256,uint256,uint256) — receiver(indexed),netLpToAccount,netSyUsed,netPtUsed."""
         from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS
 
-        assert EVENT_TOPICS["Mint"] == _topic("Mint(address,uint256,uint256)")
+        assert EVENT_TOPICS["Mint"] == _topic("Mint(address,uint256,uint256,uint256)")
 
     def test_pendle_burn(self):
-        """Uniswap V2-style Burn(address,uint256,uint256,address)."""
+        """PendleMarketV3.Burn(address,address,uint256,uint256,uint256) — receiverSy(indexed),receiverPt(indexed),netLpToBurn,netSyOut,netPtOut."""
         from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS
 
-        assert EVENT_TOPICS["Burn"] == _topic("Burn(address,uint256,uint256,address)")
+        assert EVENT_TOPICS["Burn"] == _topic("Burn(address,address,uint256,uint256,uint256)")
 
 
 # =============================================================================

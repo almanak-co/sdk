@@ -205,7 +205,8 @@ class TestPendleReceiptParserLPExtraction:
 
         parser = PendleReceiptParser(chain="arbitrum")
         burn = BurnEventData(
-            receiver="0xwallet",
+            receiver_sy="0xwallet",
+            receiver_pt="0xwallet",
             net_lp_burned=1_000_000_000_000_000_000,
             net_sy_out=520_000_000_000_000_000,
             net_pt_out=260_000_000_000_000_000,

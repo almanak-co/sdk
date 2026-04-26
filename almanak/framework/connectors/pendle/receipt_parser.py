@@ -7,10 +7,10 @@ extracting relevant event data for:
 - Liquidity operations (add/remove)
 - PT/YT redemptions
 
-Event Signatures (from Pendle contracts):
-- Swap: Swap(address indexed caller, address indexed receiver, int256 ptToAccount, int256 syToAccount)
-- Mint: Mint(address indexed receiver, uint256 netLpMinted, uint256 netSyUsed, uint256 netPtUsed)
-- Burn: Burn(address indexed receiver, uint256 netLpBurned, uint256 netSyOut, uint256 netPtOut)
+Event Signatures (PendleMarketV3, verified on-chain 2026-04-26 via VIB-3419):
+- Swap: Swap(address indexed caller, address indexed receiver, int256 ptToAccount, int256 syToAccount, uint256 syFee, uint256 syToReserve)
+- Mint: Mint(address indexed receiver, uint256 netLpToAccount, uint256 netSyUsed, uint256 netPtUsed)
+- Burn: Burn(address indexed receiverSy, address indexed receiverPt, uint256 netLpToBurn, uint256 netSyOut, uint256 netPtOut)
 - RedeemPY: RedeemPY(address indexed caller, address indexed receiver, uint256 netPYRedeemed, uint256 netSYRedeemed)
 - Transfer (ERC20): Transfer(address indexed from, address indexed to, uint256 value)
 """
@@ -37,10 +37,12 @@ EVENT_TOPICS: dict[str, str] = {
     # Pendle Market events (verified against Pendle V2 contracts on Arbitrum — VIB-3419)
     # Swap(address,address,int256,int256,uint256,uint256) — caller,receiver,ptToAccount,syToAccount,syFee,syToReserve
     "Swap": "0x829000a5bc6a12d46e30cdcecd7c56b1efd88f6d7d059da6734a04f3764557c4",
-    # Mint(address,uint256,uint256,uint256) — IPMarketV2 4-param: receiver,netLpMinted,netSyUsed,netPtUsed
-    "Mint": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
-    # Burn(address,uint256,uint256,uint256) — IPMarketV2 4-param: receiver,netLpBurned,netSyOut,netPtOut
-    "Burn": "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",
+    # Mint(address,uint256,uint256,uint256) — PendleMarketV3: receiver(indexed),netLpToAccount,netSyUsed,netPtUsed
+    # keccak256("Mint(address,uint256,uint256,uint256)") — verified on-chain 2026-04-26
+    "Mint": "0xb4c03061fb5b7fed76389d5af8f2e0ddb09f8c70d1333abbb62582835e10accb",
+    # Burn(address,address,uint256,uint256,uint256) — PendleMarketV3: receiverSy(indexed),receiverPt(indexed),netLpToBurn,netSyOut,netPtOut
+    # keccak256("Burn(address,address,uint256,uint256,uint256)") — verified on-chain 2026-04-26
+    "Burn": "0x4cf25bc1d991c17529c25213d3cc0cda295eeaad5f13f361969b12ea48015f90",
     # PY events — corrected from placeholder values (VIB-3419)
     # RedeemPY(address,address,uint256,uint256) — caller,receiver,netPYRedeemed,netSYRedeemed
     "RedeemPY": "0x35ba0cff8a710db439ca6681204f5befe6e7868ab194cfebb108de45bcf0588b",
@@ -196,9 +198,14 @@ class MintEventData:
 
 @dataclass
 class BurnEventData:
-    """Parsed data from Pendle Burn (LP removal) event."""
+    """Parsed data from Pendle Burn (LP removal) event.
 
-    receiver: str
+    V3 Burn emits two indexed receivers: receiverSy (gets SY) and receiverPt (gets PT).
+    Both are exposed here; in normal LP close they are the same address.
+    """
+
+    receiver_sy: str
+    receiver_pt: str
     net_lp_burned: int
     net_sy_out: int
     net_pt_out: int
@@ -207,7 +214,8 @@ class BurnEventData:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
-            "receiver": self.receiver,
+            "receiver_sy": self.receiver_sy,
+            "receiver_pt": self.receiver_pt,
             "net_lp_burned": str(self.net_lp_burned),
             "net_sy_out": str(self.net_sy_out),
             "net_pt_out": str(self.net_pt_out),
@@ -656,10 +664,12 @@ class PendleReceiptParser:
         """
         Decode Pendle Burn (LP removal) event.
 
-        Burn(address indexed receiver, uint256 netLpBurned, uint256 netSyOut, uint256 netPtOut)
+        Burn(address indexed receiverSy, address indexed receiverPt, uint256 netLpToBurn, uint256 netSyOut, uint256 netPtOut)
+        Topics: [hash, receiverSy, receiverPt]   Data: [netLpToBurn, netSyOut, netPtOut]
         """
         try:
-            receiver = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+            receiver_sy = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+            receiver_pt = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else receiver_sy
 
             net_lp_burned = HexDecoder.decode_uint256(data, 0)
             net_sy_out = HexDecoder.decode_uint256(data, 32)
@@ -668,7 +678,8 @@ class PendleReceiptParser:
             market_address = address.lower() if isinstance(address, str) else ""
 
             return {
-                "receiver": receiver,
+                "receiver_sy": receiver_sy,
+                "receiver_pt": receiver_pt,
                 "net_lp_burned": net_lp_burned,
                 "net_sy_out": net_sy_out,
                 "net_pt_out": net_pt_out,
@@ -773,7 +784,8 @@ class PendleReceiptParser:
         try:
             data = event.data
             return BurnEventData(
-                receiver=data.get("receiver", ""),
+                receiver_sy=data.get("receiver_sy", ""),
+                receiver_pt=data.get("receiver_pt", ""),
                 net_lp_burned=data.get("net_lp_burned", 0),
                 net_sy_out=data.get("net_sy_out", 0),
                 net_pt_out=data.get("net_pt_out", 0),

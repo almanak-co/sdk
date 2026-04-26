@@ -78,11 +78,6 @@ class TestPendleSwapIntent:
     NOTE: PT -> token (sell PT) path is blocked on Arbitrum (VIB-568).
     """
 
-    @pytest.mark.xfail(
-        reason="Pre-submit balance check blocks multi-step bundles: WSTETH balance is 0 before "
-        "the WETH->WSTETH pre-swap runs. Needs framework fix to skip intermediate token checks.",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_swap_weth_to_pt_wsteth_using_intent(
         self,
@@ -170,7 +165,7 @@ class TestPendleSwapIntent:
             if tx_result.receipt:
                 parser = PendleReceiptParser(
                     chain=CHAIN_NAME,
-                    token_in_decimals=weth_decimals,
+                    token_in_decimals=18,  # wstETH (SY underlying after WETH->wstETH pre-swap)
                     token_out_decimals=18,  # PT decimals
                 )
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
@@ -207,11 +202,6 @@ class TestPendleSwapIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.xfail(
-        reason="Pre-submit balance check blocks multi-step bundles: WSTETH balance is 0 before "
-        "the USDC->WSTETH pre-swap runs. Needs framework fix to skip intermediate token checks.",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_swap_usdc_to_pt_wsteth_using_intent(
         self,
@@ -299,7 +289,7 @@ class TestPendleSwapIntent:
             if tx_result.receipt:
                 parser = PendleReceiptParser(
                     chain=CHAIN_NAME,
-                    token_in_decimals=usdc_decimals,
+                    token_in_decimals=18,  # wstETH (the actual Pendle swap input after pre-swap)
                     token_out_decimals=18,  # PT decimals
                 )
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())

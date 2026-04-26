@@ -765,8 +765,16 @@ def compile_pendle_lp_close(compiler, intent: LPCloseIntent) -> CompilationResul
                 intent_id=intent.intent_id,
             )
 
-        # Resolve output token (LPCloseIntent has no dedicated token field)
-        out_token_name: str = getattr(intent, "token_a", None) or getattr(intent, "token", None) or ""
+        # Resolve output token from protocol_params (the canonical path) or legacy
+        # getattr fallback for any subclass that carries the field directly.
+        params = getattr(intent, "protocol_params", None) or {}
+        out_token_name: str = (
+            params.get("token")
+            or params.get("token_out")
+            or getattr(intent, "token_a", None)
+            or getattr(intent, "token", None)
+            or ""
+        )
         if not out_token_name:
             return CompilationResult(
                 status=CompilationStatus.FAILED,

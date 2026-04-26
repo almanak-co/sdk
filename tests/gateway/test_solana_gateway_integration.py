@@ -51,6 +51,11 @@ class TestSolanaBalanceProviderLive:
         finally:
             await provider.close()
 
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Hits public Solana mainnet RPC (api.mainnet-beta.solana.com) which is "
+        "rate-limited and unreliable from CI runners. Use a dedicated RPC URL to stabilise.",
+    )
     @pytest.mark.asyncio
     async def test_spl_token_balance_real_rpc(self):
         """PROOF: SolanaBalanceProvider can query real USDC balance from mainnet."""

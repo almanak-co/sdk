@@ -154,9 +154,15 @@ def create_burn_log(
     net_pt_out: int,
     market_address: str,
     log_index: int = 0,
+    receiver_pt: str | None = None,
 ) -> dict:
-    """Create a mock Burn (LP removal) event log."""
-    receiver_padded = "0x" + receiver.lower().replace("0x", "").zfill(64)
+    """Create a mock Burn (LP removal) event log matching PendleMarketV3 layout.
+
+    Burn(address indexed receiverSy, address indexed receiverPt, uint256 netLpToBurn, uint256 netSyOut, uint256 netPtOut)
+    Topics: [hash, receiverSy, receiverPt]   Data: [netLpToBurn, netSyOut, netPtOut]
+    """
+    receiver_sy_padded = "0x" + receiver.lower().replace("0x", "").zfill(64)
+    receiver_pt_padded = "0x" + (receiver_pt or receiver).lower().replace("0x", "").zfill(64)
 
     lp_hex = hex(net_lp_burned)[2:].zfill(64)
     sy_hex = hex(net_sy_out)[2:].zfill(64)
@@ -166,7 +172,8 @@ def create_burn_log(
     return {
         "topics": [
             EVENT_TOPICS["Burn"],
-            receiver_padded,
+            receiver_sy_padded,
+            receiver_pt_padded,
         ],
         "data": data,
         "logIndex": log_index,
@@ -395,15 +402,16 @@ class TestBurnEventParsing:
     """Test Burn (LP remove) event parsing."""
 
     def test_parse_burn_event(self, parser):
-        """Parser should parse Burn event."""
-        receiver = "0x1234567890123456789012345678901234567890"
+        """Parser should parse Burn event with both V3 indexed receivers."""
+        receiver_sy = "0x1234567890123456789012345678901234567890"
+        receiver_pt = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         market = "0x08a152834de126d2ef83D612ff36e4523FD0017F"
 
         net_lp = 10**18
         net_sy = 5 * 10**17
         net_pt = 5 * 10**17
 
-        log = create_burn_log(receiver, net_lp, net_sy, net_pt, market)
+        log = create_burn_log(receiver_sy, net_lp, net_sy, net_pt, market, receiver_pt=receiver_pt)
         receipt = create_mock_receipt(logs=[log])
 
         result = parser.parse_receipt(receipt)
@@ -412,6 +420,8 @@ class TestBurnEventParsing:
         assert len(result.burn_events) == 1
 
         burn = result.burn_events[0]
+        assert burn.receiver_sy.lower() == receiver_sy.lower()
+        assert burn.receiver_pt.lower() == receiver_pt.lower()
         assert burn.net_lp_burned == net_lp
         assert burn.net_sy_out == net_sy
         assert burn.net_pt_out == net_pt
