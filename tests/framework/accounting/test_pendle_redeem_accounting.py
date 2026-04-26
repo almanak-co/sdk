@@ -167,6 +167,15 @@ class TestBuildPendlePtRedeemAccountingEvent:
         ev = self._call(bs, result=result)
         assert ev is None
 
+    def test_identity_id_is_deterministic(self):
+        """Same inputs produce the same identity.id on repeated calls (uuid5, not uuid4)."""
+        bs = _make_basis_store()
+        ev1 = self._call(bs)
+        bs2 = _make_basis_store()
+        ev2 = self._call(bs2)
+        assert ev1 is not None and ev2 is not None
+        assert ev1.identity.id == ev2.identity.id
+
     def test_identity_fields(self):
         bs = _make_basis_store()
         ev = self._call(bs)

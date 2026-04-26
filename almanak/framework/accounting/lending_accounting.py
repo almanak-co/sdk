@@ -20,10 +20,14 @@ FIFO interest attribution:
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+
+# Fixed namespace for deterministic AccountingIdentity.id (uuid5 → same inputs → same UUID).
+_ACCOUNTING_EVENT_NAMESPACE = uuid.UUID("5c4da812-3b0f-4e47-9a32-1b8c6d0f2e5a")
 
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
@@ -365,8 +369,14 @@ def build_lending_accounting_event(
     confidence = AccountingConfidence.HIGH if after_state is not None else AccountingConfidence.ESTIMATED
     unavailable_reason = "" if after_state is not None else "post-execution on-chain read unavailable"
 
+    _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
-        id=f"lending_{deployment_id}_{cycle_id}_{intent_type_str}_{tx_hash[-8:] if tx_hash else 'unknown'}",
+        id=str(
+            uuid.uuid5(
+                _ACCOUNTING_EVENT_NAMESPACE,
+                f"lending:{deployment_id}:{cycle_id}:{intent_type_str}:{_id_seed}",
+            )
+        ),
         deployment_id=deployment_id,
         strategy_id=strategy_id,
         cycle_id=cycle_id,

@@ -134,6 +134,20 @@ class TestBuildPendleLpAccountingEvent:
         assert "pendle_lp" in k1
         assert "arbitrum" in k1
 
+    def test_identity_id_is_deterministic(self):
+        """Same inputs produce the same identity.id on repeated calls (uuid5, not uuid4)."""
+        ev1 = self._call("LP_OPEN")
+        ev2 = self._call("LP_OPEN")
+        assert ev1 is not None and ev2 is not None
+        assert ev1.identity.id == ev2.identity.id
+
+    def test_identity_id_differs_by_intent_type(self):
+        """LP_OPEN and LP_CLOSE produce different identity IDs even with the same tx_hash."""
+        ev_open = self._call("LP_OPEN")
+        ev_close = self._call("LP_CLOSE")
+        assert ev_open is not None and ev_close is not None
+        assert ev_open.identity.id != ev_close.identity.id
+
     def test_missing_extracted_data_yields_estimated(self):
         from almanak.framework.accounting.models import AccountingConfidence
         from almanak.framework.accounting.pendle_accounting import build_pendle_lp_accounting_event

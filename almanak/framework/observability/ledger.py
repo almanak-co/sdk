@@ -233,10 +233,18 @@ def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
     see the on-chain amount.  When only the intent amounts are available the
     human-readable Decimal string is more useful.
     """
-    # Token resolution: LP intents don't have from_token/to_token in the
-    # formal model but some test/legacy callers set them, so respect that.
+    # Token resolution: prefer explicit token0/token1 attrs (test/legacy callers),
+    # then parse symbols from the pool string (e.g. "WETH/USDC"), then fallback.
     token_in = getattr(intent, "token0", "") or getattr(intent, "from_token", "") or ""
     token_out = getattr(intent, "token1", "") or getattr(intent, "to_token", "") or ""
+    if not token_in or not token_out:
+        pool_str = (getattr(intent, "pool", "") or "").strip()
+        if "/" in pool_str:
+            pool_parts = [p.strip() for p in pool_str.split("/")]
+            if not token_in and pool_parts:
+                token_in = pool_parts[0]
+            if not token_out and len(pool_parts) > 1:
+                token_out = pool_parts[1]
 
     # Prefer on-chain actuals from LPOpenData; fall back to intent amounts.
     extracted_data = getattr(result, "extracted_data", None) or {} if result else {}
