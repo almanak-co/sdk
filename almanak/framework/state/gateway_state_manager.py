@@ -22,7 +22,9 @@ from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
+    from almanak.framework.accounting.models import LendingAccountingEvent, PendleAccountingEvent
     from almanak.framework.observability.ledger import LedgerEntry
+    from almanak.framework.observability.position_events import PositionEvent
     from almanak.framework.portfolio.models import PortfolioMetrics
     from almanak.framework.state.portfolio import PortfolioSnapshot
 
@@ -490,3 +492,148 @@ class GatewayStateManager:
         }
 
         return PortfolioSnapshot.from_dict(snapshot_dict)
+
+    async def save_accounting_event(self, event: "LendingAccountingEvent | PendleAccountingEvent") -> bool:
+        """Save a typed accounting event via gateway gRPC → SQLite / PostgreSQL.
+
+        Mirrors :meth:`save_ledger_entry` in error handling: non-blocking in
+        non-live modes (logs warning, returns False); raises in live mode so the
+        runner halts with ACCOUNTING_FAILED rather than silently dropping records.
+
+        Args:
+            event: A typed accounting event (LendingAccountingEvent or PendleAccountingEvent).
+
+        Returns:
+            True if the event was persisted successfully.
+        """
+        identity = event.identity
+        is_live = getattr(identity, "execution_mode", "") == "live"
+        try:
+            payload_bytes = event.to_payload_json().encode("utf-8")
+            request = gateway_pb2.SaveAccountingEventRequest(
+                id=identity.id,
+                deployment_id=identity.deployment_id,
+                strategy_id=identity.strategy_id,
+                cycle_id=identity.cycle_id,
+                execution_mode=identity.execution_mode,
+                timestamp=int(identity.timestamp.timestamp()),
+                chain=identity.chain,
+                protocol=identity.protocol,
+                wallet_address=identity.wallet_address,
+                tx_hash=identity.tx_hash,
+                ledger_entry_id=identity.ledger_entry_id,
+                event_type=str(getattr(event, "event_type", "UNKNOWN")),
+                position_key=getattr(event, "position_key", ""),
+                confidence=str(event.confidence),
+                payload_json=payload_bytes,
+                schema_version=event.schema_version,
+            )
+            response = self._client.state.SaveAccountingEvent(request, timeout=self._timeout)
+            if not response.success:
+                logger.warning(
+                    "SaveAccountingEvent failed: strategy=%s, id=%s, error=%s",
+                    identity.strategy_id,
+                    identity.id,
+                    response.error,
+                )
+                if is_live:
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.LEDGER,
+                        strategy_id=identity.strategy_id,
+                        message=f"SaveAccountingEvent failed: {response.error}",
+                    )
+                return False
+            logger.debug(
+                "Accounting event saved via gateway: strategy=%s, id=%s, type=%s",
+                identity.strategy_id,
+                identity.id,
+                getattr(event, "event_type", ""),
+            )
+            return True
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to save accounting event via gateway: %s", e)
+            if is_live:
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.LEDGER,
+                    strategy_id=getattr(identity, "strategy_id", ""),
+                    cause=e,
+                ) from e
+            return False
+
+    async def save_position_event(self, event: "PositionEvent") -> bool:
+        """Save a position lifecycle event via gateway gRPC → SQLite / PostgreSQL.
+
+        Non-blocking write: logs a warning on failure and returns False rather
+        than raising, since position events are observability data and should
+        not halt the strategy loop on transient errors.
+
+        Args:
+            event: PositionEvent to persist.
+
+        Returns:
+            True if the event was persisted successfully.
+        """
+        try:
+            request = gateway_pb2.SavePositionEventRequest(
+                id=event.id,
+                deployment_id=event.deployment_id,
+                cycle_id=getattr(event, "cycle_id", "") or "",
+                execution_mode=getattr(event, "execution_mode", "") or "",
+                position_id=event.position_id,
+                position_type=event.position_type,
+                event_type=event.event_type,
+                timestamp=int(event.timestamp.timestamp()),
+                protocol=event.protocol,
+                chain=event.chain,
+                token0=event.token0,
+                token1=event.token1,
+                amount0=event.amount0,
+                amount1=event.amount1,
+                value_usd=event.value_usd,
+                liquidity=event.liquidity,
+                fees_token0=event.fees_token0,
+                fees_token1=event.fees_token1,
+                leverage=event.leverage,
+                entry_price=event.entry_price,
+                mark_price=event.mark_price,
+                unrealized_pnl=event.unrealized_pnl,
+                tx_hash=event.tx_hash,
+                gas_usd=event.gas_usd,
+                ledger_entry_id=event.ledger_entry_id,
+                protocol_fees_usd=(
+                    "" if getattr(event, "protocol_fees_usd", None) is None else event.protocol_fees_usd
+                ),
+                attribution_json=event.attribution_json or "{}",
+                attribution_version=event.attribution_version,
+            )
+            # Set optional proto fields only when the source has them set (None = absent on wire)
+            if event.tick_lower is not None:
+                request.tick_lower = event.tick_lower
+            if event.tick_upper is not None:
+                request.tick_upper = event.tick_upper
+            if event.in_range is not None:
+                request.in_range = event.in_range
+            if event.is_long is not None:
+                request.is_long = event.is_long
+
+            response = self._client.state.SavePositionEvent(request, timeout=self._timeout)
+            if not response.success:
+                logger.warning(
+                    "SavePositionEvent failed: id=%s, position=%s, error=%s",
+                    event.id,
+                    event.position_id,
+                    response.error,
+                )
+                return False
+            logger.debug(
+                "Position event saved via gateway: id=%s, type=%s, position=%s",
+                event.id,
+                event.event_type,
+                event.position_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning("Failed to save position event via gateway: %s", e)
+            return False

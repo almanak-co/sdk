@@ -165,6 +165,16 @@ service StateService {
   // is expected to raise AccountingPersistenceError so the runner halts the
   // iteration with ACCOUNTING_FAILED (see VIB-3157).
   rpc SaveLedgerEntry(SaveLedgerEntryRequest) returns (SaveLedgerEntryResponse);
+
+  // Save a typed accounting event (VIB-3449).
+  // Persists a lending / Pendle accounting event to the accounting_events table.
+  // Non-blocking in non-live modes; raises AccountingPersistenceError in live.
+  rpc SaveAccountingEvent(SaveAccountingEventRequest) returns (SaveAccountingEventResponse);
+
+  // Save a position lifecycle event (VIB-3449).
+  // Persists LP / perp position events to the position_events table.
+  // Non-blocking writes; logs warnings on failure.
+  rpc SavePositionEvent(SavePositionEventRequest) returns (SavePositionEventResponse);
 }
 
 message LoadStateRequest {
@@ -318,6 +328,85 @@ message SaveLedgerEntryRequest {
 }
 
 message SaveLedgerEntryResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Accounting event messages (VIB-3449) -- mirrors the AccountingIdentity +
+// event payload in almanak/framework/accounting/models.py. The typed payload
+// is serialised as JSON (payload_json) so the proto is stable across schema
+// versions; schema_version lets readers know which formula produced the row.
+message SaveAccountingEventRequest {
+  // AccountingIdentity fields
+  string id = 1;                    // UUID primary key (idempotent ON CONFLICT target)
+  string deployment_id = 2;
+  string strategy_id = 3;
+  string cycle_id = 4;
+  string execution_mode = 5;        // "live" | "paper" | "dry_run"
+  int64 timestamp = 6;              // Unix epoch seconds
+  string chain = 7;
+  string protocol = 8;
+  string wallet_address = 9;
+  string tx_hash = 10;
+  string ledger_entry_id = 11;      // FK to transaction_ledger
+  // Discriminator + payload
+  string event_type = 12;           // e.g. "SUPPLY", "BORROW", "PT_BUY"
+  string position_key = 13;         // Strategy-scoped position identifier
+  string confidence = 14;           // "HIGH" | "ESTIMATED" | "STALE" | "UNAVAILABLE"
+  bytes payload_json = 15;          // JSON-serialised typed payload (LendingAccountingEvent, etc.)
+  int32 schema_version = 16;
+}
+
+message SaveAccountingEventResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Position event messages (VIB-3449) -- mirrors the PositionEvent dataclass in
+// almanak/framework/observability/position_events.py.  Field order matches the
+// dataclass so drift between the two is easy to spot in review.
+message SavePositionEventRequest {
+  string id = 1;                    // UUID primary key (idempotent ON CONFLICT / INSERT OR IGNORE)
+  string deployment_id = 2;
+  string cycle_id = 3;
+  string execution_mode = 4;        // "live" | "paper" | "dry_run"
+  string position_id = 5;
+  string position_type = 6;         // "LP" | "PERP"
+  string event_type = 7;            // "OPEN" | "CLOSE" | "COLLECT_FEES" | "SNAPSHOT"
+  int64 timestamp = 8;              // Unix epoch seconds
+  string protocol = 9;
+  string chain = 10;
+  // Token amounts
+  string token0 = 11;
+  string token1 = 12;
+  string amount0 = 13;
+  string amount1 = 14;
+  string value_usd = 15;
+  // LP-specific
+  optional int64 tick_lower = 16;
+  optional int64 tick_upper = 17;
+  string liquidity = 18;
+  optional bool in_range = 19;
+  string fees_token0 = 20;
+  string fees_token1 = 21;
+  // Perp-specific
+  string leverage = 22;
+  string entry_price = 23;
+  string mark_price = 24;
+  string unrealized_pnl = 25;
+  optional bool is_long = 26;
+  // Execution details
+  string tx_hash = 27;
+  string gas_usd = 28;
+  string ledger_entry_id = 29;
+  // Protocol fees (VIB-3205): empty string = unknown, "0" = measured zero
+  string protocol_fees_usd = 30;
+  // Attribution
+  string attribution_json = 31;
+  int32 attribution_version = 32;
+}
+
+message SavePositionEventResponse {
   bool success = 1;
   string error = 2;
 }

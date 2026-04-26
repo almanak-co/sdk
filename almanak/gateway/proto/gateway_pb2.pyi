@@ -986,6 +986,266 @@ class SaveLedgerEntryResponse(_message.Message):
 Global___SaveLedgerEntryResponse: _TypeAlias = SaveLedgerEntryResponse  # noqa: Y015
 
 @_typing.final
+class SaveAccountingEventRequest(_message.Message):
+    """Accounting event messages (VIB-3449) -- mirrors the AccountingIdentity +
+    event payload in almanak/framework/accounting/models.py. The typed payload
+    is serialised as JSON (payload_json) so the proto is stable across schema
+    versions; schema_version lets readers know which formula produced the row.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    POSITION_KEY_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_FIELD_NUMBER: _builtins.int
+    PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """AccountingIdentity fields
+    UUID primary key (idempotent ON CONFLICT target)
+    """
+    deployment_id: _builtins.str
+    strategy_id: _builtins.str
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
+    """"live" | "paper" | "dry_run" """
+    timestamp: _builtins.int
+    """Unix epoch seconds"""
+    chain: _builtins.str
+    protocol: _builtins.str
+    wallet_address: _builtins.str
+    tx_hash: _builtins.str
+    ledger_entry_id: _builtins.str
+    """FK to transaction_ledger"""
+    event_type: _builtins.str
+    """Discriminator + payload
+    e.g. "SUPPLY", "BORROW", "PT_BUY"
+    """
+    position_key: _builtins.str
+    """Strategy-scoped position identifier"""
+    confidence: _builtins.str
+    """"HIGH" | "ESTIMATED" | "STALE" | "UNAVAILABLE" """
+    payload_json: _builtins.bytes
+    """JSON-serialised typed payload (LendingAccountingEvent, etc.)"""
+    schema_version: _builtins.int
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        ledger_entry_id: _builtins.str = ...,
+        event_type: _builtins.str = ...,
+        position_key: _builtins.str = ...,
+        confidence: _builtins.str = ...,
+        payload_json: _builtins.bytes = ...,
+        schema_version: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveAccountingEventRequest: _TypeAlias = SaveAccountingEventRequest  # noqa: Y015
+
+@_typing.final
+class SaveAccountingEventResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveAccountingEventResponse: _TypeAlias = SaveAccountingEventResponse  # noqa: Y015
+
+@_typing.final
+class SavePositionEventRequest(_message.Message):
+    """Position event messages (VIB-3449) -- mirrors the PositionEvent dataclass in
+    almanak/framework/observability/position_events.py.  Field order matches the
+    dataclass so drift between the two is easy to spot in review.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    POSITION_ID_FIELD_NUMBER: _builtins.int
+    POSITION_TYPE_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN0_FIELD_NUMBER: _builtins.int
+    TOKEN1_FIELD_NUMBER: _builtins.int
+    AMOUNT0_FIELD_NUMBER: _builtins.int
+    AMOUNT1_FIELD_NUMBER: _builtins.int
+    VALUE_USD_FIELD_NUMBER: _builtins.int
+    TICK_LOWER_FIELD_NUMBER: _builtins.int
+    TICK_UPPER_FIELD_NUMBER: _builtins.int
+    LIQUIDITY_FIELD_NUMBER: _builtins.int
+    IN_RANGE_FIELD_NUMBER: _builtins.int
+    FEES_TOKEN0_FIELD_NUMBER: _builtins.int
+    FEES_TOKEN1_FIELD_NUMBER: _builtins.int
+    LEVERAGE_FIELD_NUMBER: _builtins.int
+    ENTRY_PRICE_FIELD_NUMBER: _builtins.int
+    MARK_PRICE_FIELD_NUMBER: _builtins.int
+    UNREALIZED_PNL_FIELD_NUMBER: _builtins.int
+    IS_LONG_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    GAS_USD_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FEES_USD_FIELD_NUMBER: _builtins.int
+    ATTRIBUTION_JSON_FIELD_NUMBER: _builtins.int
+    ATTRIBUTION_VERSION_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """UUID primary key (idempotent ON CONFLICT / INSERT OR IGNORE)"""
+    deployment_id: _builtins.str
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
+    """"live" | "paper" | "dry_run" """
+    position_id: _builtins.str
+    position_type: _builtins.str
+    """"LP" | "PERP" """
+    event_type: _builtins.str
+    """"OPEN" | "CLOSE" | "COLLECT_FEES" | "SNAPSHOT" """
+    timestamp: _builtins.int
+    """Unix epoch seconds"""
+    protocol: _builtins.str
+    chain: _builtins.str
+    token0: _builtins.str
+    """Token amounts"""
+    token1: _builtins.str
+    amount0: _builtins.str
+    amount1: _builtins.str
+    value_usd: _builtins.str
+    tick_lower: _builtins.int
+    """LP-specific"""
+    tick_upper: _builtins.int
+    liquidity: _builtins.str
+    in_range: _builtins.bool
+    fees_token0: _builtins.str
+    fees_token1: _builtins.str
+    leverage: _builtins.str
+    """Perp-specific"""
+    entry_price: _builtins.str
+    mark_price: _builtins.str
+    unrealized_pnl: _builtins.str
+    is_long: _builtins.bool
+    tx_hash: _builtins.str
+    """Execution details"""
+    gas_usd: _builtins.str
+    ledger_entry_id: _builtins.str
+    protocol_fees_usd: _builtins.str
+    """Protocol fees (VIB-3205): empty string = unknown, "0" = measured zero"""
+    attribution_json: _builtins.str
+    """Attribution"""
+    attribution_version: _builtins.int
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        position_id: _builtins.str = ...,
+        position_type: _builtins.str = ...,
+        event_type: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        token0: _builtins.str = ...,
+        token1: _builtins.str = ...,
+        amount0: _builtins.str = ...,
+        amount1: _builtins.str = ...,
+        value_usd: _builtins.str = ...,
+        tick_lower: _builtins.int | None = ...,
+        tick_upper: _builtins.int | None = ...,
+        liquidity: _builtins.str = ...,
+        in_range: _builtins.bool | None = ...,
+        fees_token0: _builtins.str = ...,
+        fees_token1: _builtins.str = ...,
+        leverage: _builtins.str = ...,
+        entry_price: _builtins.str = ...,
+        mark_price: _builtins.str = ...,
+        unrealized_pnl: _builtins.str = ...,
+        is_long: _builtins.bool | None = ...,
+        tx_hash: _builtins.str = ...,
+        gas_usd: _builtins.str = ...,
+        ledger_entry_id: _builtins.str = ...,
+        protocol_fees_usd: _builtins.str = ...,
+        attribution_json: _builtins.str = ...,
+        attribution_version: _builtins.int = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_in_range", b"_in_range", "_is_long", b"_is_long", "_tick_lower", b"_tick_lower", "_tick_upper", b"_tick_upper", "in_range", b"in_range", "is_long", b"is_long", "tick_lower", b"tick_lower", "tick_upper", b"tick_upper"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_in_range", b"_in_range", "_is_long", b"_is_long", "_tick_lower", b"_tick_lower", "_tick_upper", b"_tick_upper", "amount0", b"amount0", "amount1", b"amount1", "attribution_json", b"attribution_json", "attribution_version", b"attribution_version", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "entry_price", b"entry_price", "event_type", b"event_type", "execution_mode", b"execution_mode", "fees_token0", b"fees_token0", "fees_token1", b"fees_token1", "gas_usd", b"gas_usd", "id", b"id", "in_range", b"in_range", "is_long", b"is_long", "ledger_entry_id", b"ledger_entry_id", "leverage", b"leverage", "liquidity", b"liquidity", "mark_price", b"mark_price", "position_id", b"position_id", "position_type", b"position_type", "protocol", b"protocol", "protocol_fees_usd", b"protocol_fees_usd", "tick_lower", b"tick_lower", "tick_upper", b"tick_upper", "timestamp", b"timestamp", "token0", b"token0", "token1", b"token1", "tx_hash", b"tx_hash", "unrealized_pnl", b"unrealized_pnl", "value_usd", b"value_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__in_range: _TypeAlias = _typing.Literal["in_range"]  # noqa: Y015
+    _WhichOneofArgType__in_range: _TypeAlias = _typing.Literal["_in_range", b"_in_range"]  # noqa: Y015
+    _WhichOneofReturnType__is_long: _TypeAlias = _typing.Literal["is_long"]  # noqa: Y015
+    _WhichOneofArgType__is_long: _TypeAlias = _typing.Literal["_is_long", b"_is_long"]  # noqa: Y015
+    _WhichOneofReturnType__tick_lower: _TypeAlias = _typing.Literal["tick_lower"]  # noqa: Y015
+    _WhichOneofArgType__tick_lower: _TypeAlias = _typing.Literal["_tick_lower", b"_tick_lower"]  # noqa: Y015
+    _WhichOneofReturnType__tick_upper: _TypeAlias = _typing.Literal["tick_upper"]  # noqa: Y015
+    _WhichOneofArgType__tick_upper: _TypeAlias = _typing.Literal["_tick_upper", b"_tick_upper"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__in_range) -> _WhichOneofReturnType__in_range | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__is_long) -> _WhichOneofReturnType__is_long | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__tick_lower) -> _WhichOneofReturnType__tick_lower | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__tick_upper) -> _WhichOneofReturnType__tick_upper | None: ...
+
+Global___SavePositionEventRequest: _TypeAlias = SavePositionEventRequest  # noqa: Y015
+
+@_typing.final
+class SavePositionEventResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SavePositionEventResponse: _TypeAlias = SavePositionEventResponse  # noqa: Y015
+
+@_typing.final
 class CompileIntentRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

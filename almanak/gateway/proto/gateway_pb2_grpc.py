@@ -479,6 +479,16 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.SaveLedgerEntryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.SaveLedgerEntryResponse.FromString,
                 _registered_method=True)
+        self.SaveAccountingEvent = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SaveAccountingEvent',
+                request_serializer=gateway__pb2.SaveAccountingEventRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveAccountingEventResponse.FromString,
+                _registered_method=True)
+        self.SavePositionEvent = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SavePositionEvent',
+                request_serializer=gateway__pb2.SavePositionEventRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SavePositionEventResponse.FromString,
+                _registered_method=True)
 
 
 class StateServiceServicer(object):
@@ -555,6 +565,24 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SaveAccountingEvent(self, request, context):
+        """Save a typed accounting event (VIB-3449).
+        Persists a lending / Pendle accounting event to the accounting_events table.
+        Non-blocking in non-live modes; raises AccountingPersistenceError in live.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SavePositionEvent(self, request, context):
+        """Save a position lifecycle event (VIB-3449).
+        Persists LP / perp position events to the position_events table.
+        Non-blocking writes; logs warnings on failure.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -602,6 +630,16 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.SaveLedgerEntry,
                     request_deserializer=gateway__pb2.SaveLedgerEntryRequest.FromString,
                     response_serializer=gateway__pb2.SaveLedgerEntryResponse.SerializeToString,
+            ),
+            'SaveAccountingEvent': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveAccountingEvent,
+                    request_deserializer=gateway__pb2.SaveAccountingEventRequest.FromString,
+                    response_serializer=gateway__pb2.SaveAccountingEventResponse.SerializeToString,
+            ),
+            'SavePositionEvent': grpc.unary_unary_rpc_method_handler(
+                    servicer.SavePositionEvent,
+                    request_deserializer=gateway__pb2.SavePositionEventRequest.FromString,
+                    response_serializer=gateway__pb2.SavePositionEventResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -851,6 +889,60 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/SaveLedgerEntry',
             gateway__pb2.SaveLedgerEntryRequest.SerializeToString,
             gateway__pb2.SaveLedgerEntryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveAccountingEvent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SaveAccountingEvent',
+            gateway__pb2.SaveAccountingEventRequest.SerializeToString,
+            gateway__pb2.SaveAccountingEventResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SavePositionEvent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SavePositionEvent',
+            gateway__pb2.SavePositionEventRequest.SerializeToString,
+            gateway__pb2.SavePositionEventResponse.FromString,
             options,
             channel_credentials,
             insecure,

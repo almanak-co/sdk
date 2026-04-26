@@ -43,6 +43,22 @@ logger = logging.getLogger(__name__)
 MAX_SNAPSHOTS = 1000
 
 
+# Module-level constants for accounting event type dispatch — avoids
+# rebuilding these sets on every RPC call under high-frequency accounting load.
+def _build_accounting_type_sets() -> tuple[frozenset[str], frozenset[str]]:
+    from almanak.framework.accounting.models import LendingEventType, PendleEventType
+
+    return frozenset(e.value for e in LendingEventType), frozenset(e.value for e in PendleEventType)
+
+
+try:
+    _LENDING_EVENT_TYPES, _PENDLE_EVENT_TYPES = _build_accounting_type_sets()
+except Exception as _e:  # pragma: no cover — graceful fallback if models not importable at load time
+    logger.error("Failed to build accounting type sets; SaveAccountingEvent will reject all event_types: %s", _e)
+    _LENDING_EVENT_TYPES = frozenset()
+    _PENDLE_EVENT_TYPES = frozenset()
+
+
 class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     """Implements StateService gRPC interface.
 
@@ -1019,3 +1035,264 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("internal server error")
                 return gateway_pb2.SaveLedgerEntryResponse(success=False, error="internal server error")
+
+    # =========================================================================
+    # Accounting Events RPC (VIB-3449)
+    # =========================================================================
+
+    async def SaveAccountingEvent(
+        self,
+        request: gateway_pb2.SaveAccountingEventRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveAccountingEventResponse:
+        """Persist a typed accounting event (VIB-3449).
+
+        Routes to the warm backend's ``save_accounting_event`` method, which
+        writes to the ``accounting_events`` table (SQLite in local dev,
+        PostgreSQL in deployed mode once the metrics-database migration lands).
+        Non-blocking in non-live modes: on DB failure returns success=false.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error=str(e))
+
+        event_id = (request.id or "").strip()
+        if not event_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("id is required")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="id is required")
+
+        try:
+            uuid.UUID(event_id)
+        except ValueError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("id must be a valid UUID")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="id must be a valid UUID")
+
+        if request.timestamp <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp must be positive")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="timestamp must be positive")
+
+        # Validate event_type against known accounting schemas before any
+        # deserialization attempt — unknown types get INVALID_ARGUMENT, not INTERNAL.
+        if request.event_type not in _LENDING_EVENT_TYPES and request.event_type not in _PENDLE_EVENT_TYPES:
+            err = f"unknown event_type: {request.event_type!r}"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error=err)
+
+        if not request.payload_json:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("payload_json is required")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="payload_json is required")
+
+        try:
+            payload_str = request.payload_json.decode("utf-8")
+        except UnicodeDecodeError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("payload_json must be valid UTF-8")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="payload_json must be valid UTF-8")
+
+        try:
+            json.loads(payload_str)
+        except json.JSONDecodeError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("payload_json must be valid JSON")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="payload_json must be valid JSON")
+
+        strategy_id = resolve_agent_id(strategy_id)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "save_accounting_event"):
+                error = "warm backend does not support save_accounting_event"
+                logger.error("SaveAccountingEvent unsupported for id=%s: %s", event_id, error)
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.SaveAccountingEventResponse(success=False, error=error)
+
+            try:
+                ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
+            except (ValueError, OSError, OverflowError):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("timestamp out of range")
+                return gateway_pb2.SaveAccountingEventResponse(success=False, error="timestamp out of range")
+
+            from almanak.framework.accounting.models import (
+                AccountingIdentity,
+                LendingAccountingEvent,
+                PendleAccountingEvent,
+            )
+
+            identity = AccountingIdentity(
+                id=event_id,
+                deployment_id=request.deployment_id,
+                strategy_id=strategy_id,
+                cycle_id=request.cycle_id,
+                execution_mode=request.execution_mode,
+                timestamp=ts,
+                chain=request.chain,
+                protocol=request.protocol,
+                wallet_address=request.wallet_address,
+                tx_hash=request.tx_hash,
+                ledger_entry_id=request.ledger_entry_id,
+            )
+
+            # Reconstruct the typed event from payload_json so the SQLite
+            # store receives the correct dataclass (with to_payload_json(),
+            # event_type, confidence, schema_version attributes).
+            # event_type has already been validated against the known type sets above.
+            try:
+                accounting_event: LendingAccountingEvent | PendleAccountingEvent
+                if request.event_type in _LENDING_EVENT_TYPES:
+                    accounting_event = LendingAccountingEvent.from_payload_json(identity, payload_str)
+                else:
+                    accounting_event = PendleAccountingEvent.from_payload_json(identity, payload_str)
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                err = f"invalid payload_json for event_type {request.event_type!r}: {exc}"
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(err)
+                return gateway_pb2.SaveAccountingEventResponse(success=False, error=err)
+
+            result = await warm.save_accounting_event(accounting_event)
+            if result:
+                logger.debug(
+                    "Accounting event saved (SQLite) id=%s, type=%s, strategy=%s",
+                    event_id,
+                    request.event_type,
+                    strategy_id,
+                )
+            return gateway_pb2.SaveAccountingEventResponse(success=bool(result))
+        except Exception as e:
+            logger.error("SaveAccountingEvent failed for id=%s: %s", event_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="internal server error")
+
+    # =========================================================================
+    # Position Events RPC (VIB-3449)
+    # =========================================================================
+
+    async def SavePositionEvent(
+        self,
+        request: gateway_pb2.SavePositionEventRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SavePositionEventResponse:
+        """Persist a position lifecycle event (VIB-3449).
+
+        Routes to the warm backend's ``save_position_event`` method, which
+        writes to the ``position_events`` table. Non-blocking: on DB failure
+        logs a warning and returns success=false rather than raising.
+        """
+        event_id = (request.id or "").strip()
+        if not event_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("id is required")
+            return gateway_pb2.SavePositionEventResponse(success=False, error="id is required")
+
+        try:
+            uuid.UUID(event_id)
+        except ValueError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("id must be a valid UUID")
+            return gateway_pb2.SavePositionEventResponse(success=False, error="id must be a valid UUID")
+
+        if request.timestamp <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp must be positive")
+            return gateway_pb2.SavePositionEventResponse(success=False, error="timestamp must be positive")
+
+        # Validate position_type and event_type against known enum values to
+        # reject typos at the gateway boundary rather than persisting corrupt records.
+        from almanak.framework.observability.position_events import PositionEventType, PositionType
+
+        valid_position_types = frozenset(e.value for e in PositionType)
+        valid_event_types = frozenset(e.value for e in PositionEventType)
+
+        if request.position_type not in valid_position_types:
+            err = f"unknown position_type: {request.position_type!r}"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.SavePositionEventResponse(success=False, error=err)
+
+        if request.event_type not in valid_event_types:
+            err = f"unknown event_type: {request.event_type!r}"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.SavePositionEventResponse(success=False, error=err)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "save_position_event"):
+                error = "warm backend does not support save_position_event"
+                logger.error("SavePositionEvent unsupported for id=%s: %s", event_id, error)
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.SavePositionEventResponse(success=False, error=error)
+
+            try:
+                ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
+            except (ValueError, OSError, OverflowError):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("timestamp out of range")
+                return gateway_pb2.SavePositionEventResponse(success=False, error="timestamp out of range")
+
+            from almanak.framework.observability.position_events import PositionEvent
+
+            event = PositionEvent(
+                id=event_id,
+                deployment_id=request.deployment_id,
+                cycle_id=request.cycle_id,
+                execution_mode=request.execution_mode,
+                position_id=request.position_id,
+                position_type=request.position_type,
+                event_type=request.event_type,
+                timestamp=ts,
+                protocol=request.protocol,
+                chain=request.chain,
+                token0=request.token0,
+                token1=request.token1,
+                amount0=request.amount0,
+                amount1=request.amount1,
+                value_usd=request.value_usd,
+                tick_lower=request.tick_lower if request.HasField("tick_lower") else None,
+                tick_upper=request.tick_upper if request.HasField("tick_upper") else None,
+                liquidity=request.liquidity,
+                in_range=request.in_range if request.HasField("in_range") else None,
+                fees_token0=request.fees_token0,
+                fees_token1=request.fees_token1,
+                leverage=request.leverage,
+                entry_price=request.entry_price,
+                mark_price=request.mark_price,
+                unrealized_pnl=request.unrealized_pnl,
+                is_long=request.is_long if request.HasField("is_long") else None,
+                tx_hash=request.tx_hash,
+                gas_usd=request.gas_usd,
+                ledger_entry_id=request.ledger_entry_id,
+                protocol_fees_usd=request.protocol_fees_usd,
+                attribution_json=request.attribution_json or "{}",
+                attribution_version=request.attribution_version,
+            )
+
+            result = await warm.save_position_event(event)
+            if result:
+                logger.debug(
+                    "Position event saved (SQLite) id=%s, type=%s, position=%s",
+                    event_id,
+                    request.event_type,
+                    request.position_id,
+                )
+            return gateway_pb2.SavePositionEventResponse(success=bool(result))
+        except Exception as e:
+            logger.error("SavePositionEvent failed for id=%s: %s", event_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SavePositionEventResponse(success=False, error="internal server error")
