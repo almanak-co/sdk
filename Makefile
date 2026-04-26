@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
 
 # Load .env file if it exists
 -include .env
@@ -309,6 +309,11 @@ test-demo-single:
 # List available gateway-compatible demo strategies
 list-demo-strategies:
 	uv run python scripts/test_demo_strategies_gateway.py --list
+
+# Check Pendle market expiry dates in demo and incubating strategy configs.
+# Fails if any demo strategy references a market expiring within 30 days.
+check-pendle-expiry:
+	uv run python scripts/ci/check_pendle_expiry.py --days 30 --verbose
 
 build-upload-pypi: build-platform-wheels
 	@echo "Publishing platform wheels to PyPI..."
