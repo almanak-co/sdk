@@ -1,11 +1,14 @@
-"""Tests for resolve_strategy_chain() — VIB-3058 regression guard.
+"""Tests for resolve_strategy_chain() — VIB-3058 regression guard + VIB-3453 fix.
 
-Reproduces the failure mode where running `uniswap_lp` on Optimism via the
-multi-chain demo smoke harness silently used Arbitrum's chain context (and
-therefore Arbitrum's USDC address) because config.json's `chain` field always
-won over `ALMANAK_CHAIN` env. The fix in run.py promotes env over config.json
-for single-chain runs while validating against the strategy's
-supported_chains so a typo can't fall through to a half-broken run.
+VIB-3058: Running `uniswap_lp` on Optimism via the multi-chain demo smoke
+harness silently used Arbitrum's chain context because config.json's `chain`
+field always won over `ALMANAK_CHAIN` env. The fix promotes env over config.json
+for multi-supported-chain strategies while validating against supported_chains.
+
+VIB-3453: When a strategy declares exactly one supported chain, ALMANAK_CHAIN
+from the environment is ignored (the strategy already knows its own chain). This
+prevents confusing failures when the user has e.g. ALMANAK_CHAIN=arbitrum in
+their .env file and tries to run a Base-only strategy without an explicit prefix.
 """
 
 from types import SimpleNamespace
@@ -24,8 +27,9 @@ def _strategy(supported: list[str], default: str | None = None) -> type:
 
 
 class TestResolveStrategyChain:
-    def test_env_overrides_config(self):
-        """ALMANAK_CHAIN=optimism wins over config.json chain=arbitrum (root cause of VIB-3058)."""
+    def test_env_overrides_config_multi_supported(self):
+        """ALMANAK_CHAIN=optimism wins over config.json chain=arbitrum when the
+        strategy supports multiple chains (root cause of VIB-3058)."""
         cls = _strategy(supported=["arbitrum", "optimism", "base"])
         chain = resolve_strategy_chain(
             cls,
@@ -52,17 +56,109 @@ class TestResolveStrategyChain:
         chain = resolve_strategy_chain(cls, {}, env_chain=None, multi_chain=False)
         assert chain == "arbitrum"
 
-    def test_unsupported_env_chain_raises(self):
-        """ALMANAK_CHAIN pointing at a chain the strategy doesn't declare must fail loudly,
-        not silently fall back to config.json — that hid VIB-3058 for the smoke runs."""
+    # -------------------------------------------------------------------------
+    # VIB-3453: single-chain strategy ignores ALMANAK_CHAIN from env
+    # -------------------------------------------------------------------------
+
+    def test_single_chain_strategy_ignores_conflicting_env(self):
+        """VIB-3453: strategy with one supported chain (e.g. base) must not fail
+        when ALMANAK_CHAIN=arbitrum is in the environment — the strategy's declared
+        chain takes precedence and no exception is raised."""
+        cls = _strategy(supported=["base"], default="base")
+        chain = resolve_strategy_chain(
+            cls,
+            {"chain": "base"},
+            env_chain="arbitrum",
+            multi_chain=False,
+        )
+        assert chain == "base"
+
+    def test_single_chain_strategy_env_matching_declared_chain_is_fine(self):
+        """VIB-3453: when env matches the strategy's single declared chain, the
+        strategy's chain is still returned (env is redundant but harmless)."""
         cls = _strategy(supported=["arbitrum"], default="arbitrum")
-        with pytest.raises(click.ClickException, match="not in this strategy's supported_chains"):
+        chain = resolve_strategy_chain(
+            cls,
+            {"chain": "arbitrum"},
+            env_chain="arbitrum",
+            multi_chain=False,
+        )
+        assert chain == "arbitrum"
+
+    def test_single_chain_strategy_declared_wins_over_both_env_and_config(self):
+        """VIB-3453: single-chain strategy always returns its declared chain, even
+        when both ALMANAK_CHAIN and config.json chain conflict with it."""
+        cls = _strategy(supported=["base"], default="base")
+        # Both env and config disagree with the declared chain — declared must win.
+        chain = resolve_strategy_chain(
+            cls,
+            {"chain": "arbitrum"},
+            env_chain="optimism",
+            multi_chain=False,
+        )
+        assert chain == "base"
+
+    def test_single_chain_strategy_no_config_uses_declared(self):
+        """VIB-3453: single-chain strategy with no config.json chain field uses
+        the declared supported chain even when env provides a different value."""
+        cls = _strategy(supported=["base"], default="base")
+        chain = resolve_strategy_chain(
+            cls,
+            {},
+            env_chain="arbitrum",
+            multi_chain=False,
+        )
+        assert chain == "base"
+
+    def test_single_chain_strategy_ignores_stale_config(self):
+        """VIB-3453: single-chain strategy must ignore a stale config.json chain
+        that points at a different chain, even when env is absent.
+
+        Scenario: strategy declares only 'base'; config.json has chain=arbitrum
+        (left over from a different strategy or copy-paste). The strategy's
+        declared chain must win — returning 'arbitrum' here would be wrong and
+        would run the strategy against the wrong chain context.
+        """
+        cls = _strategy(supported=["base"], default="base")
+        chain = resolve_strategy_chain(
+            cls,
+            {"chain": "arbitrum"},
+            env_chain=None,
+            multi_chain=False,
+        )
+        assert chain == "base"
+
+    # -------------------------------------------------------------------------
+    # Multi-supported-chain validation (VIB-3058 behavior preserved)
+    # -------------------------------------------------------------------------
+
+    def test_unsupported_env_chain_raises_for_multi_supported(self):
+        """ALMANAK_CHAIN pointing at a chain not in the strategy's supported_chains
+        must fail with an actionable error message when the strategy supports multiple
+        chains — the operator needs to pick the right one."""
+        cls = _strategy(supported=["arbitrum", "optimism"], default="arbitrum")
+        with pytest.raises(click.ClickException, match="conflicts with this strategy's supported chains"):
             resolve_strategy_chain(
                 cls,
                 {"chain": "arbitrum"},
-                env_chain="optimism",
+                env_chain="base",
                 multi_chain=False,
             )
+
+    def test_error_message_is_actionable(self):
+        """Error message must include the fix command, not backwards advice."""
+        cls = _strategy(supported=["arbitrum", "optimism"], default="arbitrum")
+        with pytest.raises(click.ClickException) as exc_info:
+            resolve_strategy_chain(
+                cls,
+                {"chain": "arbitrum"},
+                env_chain="base",
+                multi_chain=False,
+            )
+        msg = exc_info.value.format_message()
+        assert "Fix: run with ALMANAK_CHAIN=" in msg
+        # Old backwards advice must not appear
+        assert "Update the strategy decorator" not in msg
 
     def test_empty_env_string_treated_as_unset(self):
         """ALMANAK_CHAIN='' (empty) is treated as unset, not as a chain literal."""

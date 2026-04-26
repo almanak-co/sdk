@@ -314,7 +314,13 @@ def resolve_strategy_chain(
 ) -> str | None:
     """Resolve the runtime chain for a single-chain strategy.
 
-    Priority: ALMANAK_CHAIN env > config.json "chain" > decorator default.
+    Priority (single-chain strategies):
+      1. If the strategy declares exactly one supported chain, use that chain —
+         ALMANAK_CHAIN and config.json "chain" are both ignored (the strategy
+         already knows its only valid chain). ALMANAK_CHAIN emits an INFO log
+         when it conflicts so the operator can clean up their .env.
+      2. If the strategy supports multiple chains, ALMANAK_CHAIN selects which
+         one to run on (env > config.json "chain" > decorator default).
 
     The env override exists so the same strategy can be retargeted at a
     different supported chain (e.g. by the multi-chain demo smoke harness)
@@ -335,18 +341,35 @@ def resolve_strategy_chain(
 
     Raises:
         click.ClickException: If env override is set but the chain isn't in the
-            strategy's declared supported_chains.
+            strategy's declared supported_chains (only when strategy supports
+            multiple chains).
     """
     env = (env_chain or "").strip().lower() or None
     cfg_raw = strategy_config.get("chain")
     cfg_chain = cfg_raw.strip().lower() if isinstance(cfg_raw, str) and cfg_raw.strip() else None
 
-    if env and not multi_chain:
+    if not multi_chain:
         supported = [c.lower() for c in get_strategy_chains(strategy_class)]
-        if supported and env not in supported:
+
+        if len(supported) == 1:
+            # Strategy declares exactly one chain — it knows its own chain.
+            # Both ALMANAK_CHAIN and config.json chain are ignored (they have no
+            # role when there is exactly one valid chain). Inform the operator
+            # if the env var conflicts so they can clean up their .env.
+            declared = supported[0]
+            if env and env != declared:
+                logger.info(
+                    "Strategy declares chain=%s; ignoring ALMANAK_CHAIN=%s from environment",
+                    declared,
+                    env,
+                )
+            return declared
+
+        if env and supported and env not in supported:
             raise click.ClickException(
-                f"ALMANAK_CHAIN={env} is not in this strategy's supported_chains "
-                f"({', '.join(supported)}). Update the strategy decorator or unset the env var."
+                f"ALMANAK_CHAIN={env} conflicts with this strategy's supported chains "
+                f"({', '.join(supported)}).\n"
+                f"Fix: run with ALMANAK_CHAIN={supported[0]} or unset ALMANAK_CHAIN in your .env"
             )
 
     resolved = env or cfg_chain
@@ -1401,7 +1424,8 @@ def run(
     # For now, stash the cli_id for the resolver.
     _cli_id_override = provided_instance_id
 
-    # See resolve_strategy_chain(): env > config.json > decorator default.
+    # See resolve_strategy_chain(): single-chain strategies always use their
+    # declared chain; multi-supported strategies use env > config.json > default.
     env_chain = (os.environ.get("ALMANAK_CHAIN") or "").strip().lower() or None
     config_chain = resolve_strategy_chain(
         strategy_class,
@@ -1411,7 +1435,11 @@ def run(
     )
     _cfg_chain_raw = strategy_config.get("chain")
     _cfg_chain_norm = _cfg_chain_raw.strip().lower() if isinstance(_cfg_chain_raw, str) else ""
-    if env_chain and env_chain != _cfg_chain_norm:
+    # Only echo the override message when env was actually used to select the
+    # chain (i.e. the resolved chain matches env). For single-chain strategies
+    # the env is silently ignored and resolve_strategy_chain() returns the
+    # strategy's declared chain — no override message should appear in that case.
+    if env_chain and config_chain == env_chain and env_chain != _cfg_chain_norm:
         click.echo(f"Chain override: ALMANAK_CHAIN={env_chain} (config.json: {_cfg_chain_raw or 'unset'})")
 
     # Determine network: CLI flag > config.json > default "mainnet"
