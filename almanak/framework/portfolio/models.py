@@ -161,6 +161,14 @@ class PortfolioSnapshot:
     # key: "chain:address", value: {"price_usd": str, "symbol": str, "decimals": int|None}
     token_prices: dict[str, dict] = field(default_factory=dict)
 
+    # Deployed capital: sum of cost_basis_usd across all positions.
+    # Populated by PortfolioValuer after _enrich_position_pnl() enriches each
+    # PositionValue.  Distinct from total_value_usd (full wallet) so callers can
+    # compute strategy-level PnL without conflating uninvested wallet funds.
+    # Defaults to Decimal("0") when no accounting events exist (e.g. dry-run or
+    # a strategy with no open positions).
+    deployed_capital_usd: Decimal = Decimal("0")
+
     # Metadata
     chain: str = ""
     iteration_number: int = 0
@@ -172,6 +180,8 @@ class PortfolioSnapshot:
             self.total_value_usd = Decimal(str(self.total_value_usd))
         if isinstance(self.available_cash_usd, int | float | str):
             self.available_cash_usd = Decimal(str(self.available_cash_usd))
+        if isinstance(self.deployed_capital_usd, int | float | str):
+            self.deployed_capital_usd = Decimal(str(self.deployed_capital_usd))
 
     @property
     def position_value_usd(self) -> Decimal:
@@ -190,6 +200,7 @@ class PortfolioSnapshot:
             "strategy_id": self.strategy_id,
             "total_value_usd": str(self.total_value_usd),
             "available_cash_usd": str(self.available_cash_usd),
+            "deployed_capital_usd": str(self.deployed_capital_usd),
             "value_confidence": self.value_confidence.value,
             "error": self.error,
             "positions": [_position_to_dict(p) for p in self.positions],
@@ -268,6 +279,7 @@ class PortfolioSnapshot:
             strategy_id=data["strategy_id"],
             total_value_usd=Decimal(data["total_value_usd"]),
             available_cash_usd=Decimal(data["available_cash_usd"]),
+            deployed_capital_usd=Decimal(data.get("deployed_capital_usd", "0")),
             value_confidence=ValueConfidence(data.get("value_confidence", "HIGH")),
             error=data.get("error"),
             positions=positions,

@@ -1097,6 +1097,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("payload_json must be valid UTF-8")
             return gateway_pb2.SaveAccountingEventResponse(success=False, error="payload_json must be valid UTF-8")
 
+        strategy_id = resolve_agent_id(strategy_id)
+
         try:
             json.loads(payload_str)
         except json.JSONDecodeError:

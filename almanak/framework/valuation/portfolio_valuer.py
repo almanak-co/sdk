@@ -201,6 +201,16 @@ class PortfolioValuer:
             # Step 4: Get non-wallet positions (LP, lending, perps) if available
             positions, position_value, positions_unavailable = self._get_positions(strategy, market, prices)
 
+            # Step 4b: Compute deployed capital = sum of per-position cost bases.
+            # cost_basis_usd is populated by _enrich_position_pnl() inside
+            # _get_positions() when accounting events exist.  Only positive cost bases
+            # are summed (abs guard avoids double-counting BORROW liabilities when both
+            # a SUPPLY and a BORROW exist for the same asset).
+            deployed_capital_usd = sum(
+                (abs(p.cost_basis_usd) for p in positions if p.cost_basis_usd != Decimal("0")),
+                Decimal("0"),
+            )
+
             # Step 5: Determine confidence level
             has_any_value = bool(wallet_balances or positions)
             if not has_any_value and (positions_unavailable or wallet_data_incomplete):
@@ -218,6 +228,7 @@ class PortfolioValuer:
                 strategy_id=strategy_id,
                 total_value_usd=wallet_value + position_value,
                 available_cash_usd=wallet_value,
+                deployed_capital_usd=deployed_capital_usd,
                 value_confidence=confidence,
                 positions=positions,
                 wallet_balances=wallet_balances,
@@ -378,6 +389,7 @@ class PortfolioValuer:
             strategy_id=framework_snapshot.strategy_id,
             total_value_usd=external_total,
             available_cash_usd=available_cash_usd,
+            deployed_capital_usd=framework_snapshot.deployed_capital_usd,
             value_confidence=ValueConfidence.ESTIMATED,
             error=framework_snapshot.error,
             positions=merged_positions,

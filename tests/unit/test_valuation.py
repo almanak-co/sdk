@@ -720,3 +720,265 @@ class TestPortfolioValuerEdgeCases:
 
         snapshot = valuer.value(strategy, market)
         assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# VIB-3452: deployed_capital_usd — separate from full-wallet total_value_usd
+# ---------------------------------------------------------------------------
+
+
+class TestDeployedCapitalUsd:
+    """Verify that deployed_capital_usd tracks per-position cost bases, not the
+    full wallet total.  This is the root-cause fix for VIB-3452 where a strategy
+    that deployed $1,000 into Aave V3 was reporting $33,089 as the PnL
+    denominator because total_value_usd (all wallet funds) was being used.
+    """
+
+    def test_defaults_to_zero_when_no_accounting_context(self):
+        """Without an accounting store wired in, deployed_capital_usd is 0."""
+        valuer = PortfolioValuer()
+        strategy = _make_strategy(
+            tracked_tokens=["ETH", "USDC"],
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id="aave-usdc-supply",
+                    chain="arbitrum",
+                    protocol="aave_v3",
+                    value_usd=Decimal("1000"),
+                    details={
+                        "asset": "USDC",
+                        "wallet": "0x1234567890123456789012345678901234567890",
+                        "wallet_address": "0x1234567890123456789012345678901234567890",
+                    },
+                )
+            ],
+        )
+        market = _make_market(
+            prices={"ETH": Decimal("3300"), "USDC": Decimal("1")},
+            balances={"ETH": Decimal("10"), "USDC": Decimal("0")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        # deployed_capital_usd must be 0 — no accounting events means no cost basis
+        assert snapshot.deployed_capital_usd == Decimal("0")
+        # total_value_usd still reflects full wallet (ETH + supply position)
+        assert snapshot.total_value_usd > Decimal("1000")
+
+    def test_deployed_capital_populated_from_position_cost_basis(self):
+        """When positions have cost_basis_usd set, deployed_capital_usd sums them.
+
+        Simulates the post-VIB-3424 flow: _enrich_position_pnl() writes
+        cost_basis_usd onto each PositionValue; the valuer must then aggregate
+        that into snapshot.deployed_capital_usd so callers never need to
+        read total_value_usd as the deployment denominator.
+        """
+        from almanak.framework.portfolio.models import PositionValue
+
+        valuer = PortfolioValuer()
+
+        # Wire up a fake accounting store that returns one SUPPLY event for the position
+        mock_store = MagicMock()
+        mock_store.get_accounting_events_sync.return_value = [
+            {
+                "timestamp": "2026-04-26T10:00:00",
+                "event_type": "SUPPLY",
+                "position_key": "lending:arbitrum:aave_v3:0x1234...:usdc",
+                "deployment_id": "test-deployment",
+                "ledger_entry_id": "ledger-001",
+                "payload_json": '{"principal_delta_usd": "1000", "interest_delta_usd": null}',
+            }
+        ]
+        valuer.set_accounting_context(mock_store, "test-deployment")
+
+        strategy = _make_strategy(
+            tracked_tokens=["ETH", "USDC"],
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id="aave-usdc-supply",
+                    chain="arbitrum",
+                    protocol="aave_v3",
+                    value_usd=Decimal("1000"),
+                    details={
+                        "asset": "USDC",
+                        "wallet": "0x1234567890123456789012345678901234567890",
+                        "wallet_address": "0x1234567890123456789012345678901234567890",
+                    },
+                )
+            ],
+        )
+        # Wallet holds 10 ETH @ $3300 + the $1000 USDC supply position
+        # Without the fix total_value_usd ($34,000) would be wrongly used as the
+        # PnL denominator.  With the fix deployed_capital_usd == $1,000.
+        market = _make_market(
+            prices={"ETH": Decimal("3300"), "USDC": Decimal("1")},
+            balances={"ETH": Decimal("10"), "USDC": Decimal("0")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        # total_value_usd is the full wallet value — unchanged semantics.
+        # 10 ETH @ $3300 = $33,000 wallet + $1,000 USDC supply position = $34,000.
+        # (Supply position passes through as strategy-reported value_usd when on-chain
+        # re-pricing cannot resolve it without a real gateway connection.)
+        assert snapshot.total_value_usd == Decimal("34000"), (
+            f"expected $34000 total_value_usd but got ${snapshot.total_value_usd}"
+        )
+
+        # deployed_capital_usd must reflect only the $1,000 that was deployed,
+        # NOT the $34,000 total wallet.  This is the VIB-3452 fix.
+        assert snapshot.deployed_capital_usd == Decimal("1000"), (
+            f"expected $1000 deployed_capital_usd but got ${snapshot.deployed_capital_usd}; "
+            "VIB-3452 regression: full wallet value is being used as PnL denominator"
+        )
+
+    def test_deployed_capital_sums_multiple_positions(self):
+        """Multiple positions with different cost bases are summed correctly."""
+        valuer = PortfolioValuer()
+
+        # Inject pre-populated cost bases directly by replacing the instance method so
+        # we test the summation logic in isolation without needing the full
+        # accounting event pipeline.
+        def patched_enrich(position_value, position_info, chain):
+            # Assign fixed cost bases per position so we can assert the sum
+            if position_info.position_id == "pos-a":
+                position_value.cost_basis_usd = Decimal("500")
+            elif position_info.position_id == "pos-b":
+                position_value.cost_basis_usd = Decimal("750")
+
+        valuer._enrich_position_pnl = patched_enrich
+
+        strategy = _make_strategy(
+            tracked_tokens=["ETH"],
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id="pos-a",
+                    chain="arbitrum",
+                    protocol="aave_v3",
+                    value_usd=Decimal("510"),
+                    details={},
+                ),
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id="pos-b",
+                    chain="arbitrum",
+                    protocol="compound_v3",
+                    value_usd=Decimal("760"),
+                    details={},
+                ),
+            ],
+        )
+        market = _make_market(
+            prices={"ETH": Decimal("3000")},
+            balances={"ETH": Decimal("1")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        # 500 + 750 = 1250 total deployed capital across both positions
+        assert snapshot.deployed_capital_usd == Decimal("1250")
+
+    def test_deployed_capital_zero_positions_no_cost_basis(self):
+        """Positions present but no cost basis returns Decimal('0')."""
+        valuer = PortfolioValuer()
+
+        strategy = _make_strategy(
+            tracked_tokens=["ETH"],
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.LP,
+                    position_id="lp-xyz",
+                    chain="arbitrum",
+                    protocol="uniswap_v3",
+                    value_usd=Decimal("2000"),
+                    details={"tokens": ["WETH", "USDC"]},
+                )
+            ],
+        )
+        market = _make_market(
+            prices={"ETH": Decimal("3000")},
+            balances={"ETH": Decimal("0")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        # LP has no accounting events -> cost_basis_usd stays 0 -> deployed == 0
+        assert snapshot.deployed_capital_usd == Decimal("0")
+
+    def test_deployed_capital_survives_serialization_roundtrip(self):
+        """deployed_capital_usd is preserved through to_dict / from_dict."""
+        snapshot = PortfolioSnapshot(
+            timestamp=datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC),
+            strategy_id="test-strat",
+            total_value_usd=Decimal("33000"),
+            available_cash_usd=Decimal("33000"),
+            deployed_capital_usd=Decimal("1000"),
+        )
+        data = snapshot.to_dict()
+        assert data["deployed_capital_usd"] == "1000"
+
+        restored = PortfolioSnapshot.from_dict(data)
+        assert restored.deployed_capital_usd == Decimal("1000")
+
+    def test_deployed_capital_defaults_to_zero_on_legacy_snapshots(self):
+        """Snapshots without deployed_capital_usd key deserialize with 0."""
+        data = {
+            "timestamp": datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC).isoformat(),
+            "strategy_id": "old-strat",
+            "total_value_usd": "5000",
+            "available_cash_usd": "5000",
+            "value_confidence": "HIGH",
+            "positions": [],
+            "wallet_balances": [],
+            "token_prices": {},
+            # deliberately absent: deployed_capital_usd
+        }
+        restored = PortfolioSnapshot.from_dict(data)
+        assert restored.deployed_capital_usd == Decimal("0")
+
+    def test_deployed_capital_preserved_through_external_reconciliation(self):
+        """deployed_capital_usd must survive _build_external_reconciled_snapshot.
+
+        When framework_total is 0 and external wins, the reconciled snapshot is
+        rebuilt from scratch. Without an explicit forward of deployed_capital_usd,
+        the field silently resets to 0 — breaking the VIB-3452 fix in the
+        zero-framework-value edge case (CodeRabbit MAJOR finding).
+        """
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer()
+
+        # Build a framework snapshot with non-zero deployed_capital_usd but
+        # zero total_value_usd (simulates a gateway-side balance query failure).
+        framework_snapshot = PortfolioSnapshot(
+            timestamp=datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC),
+            strategy_id="test-strat",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            deployed_capital_usd=Decimal("1000"),
+            value_confidence=ValueConfidence.UNAVAILABLE,
+        )
+
+        # Simulate an external portfolio with a positive total so it wins.
+        external = {
+            "total_value_usd": Decimal("1050"),
+            "provider": "debank",
+            "cache_hit": False,
+            "timestamp": datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC),
+            "positions": [],
+        }
+
+        reconciled = valuer._build_external_reconciled_snapshot(
+            framework_snapshot, external, {"reconciliation_status": "external_won_zero_framework"}
+        )
+
+        # deployed_capital_usd must be forwarded from framework_snapshot, not reset to 0.
+        assert reconciled.deployed_capital_usd == Decimal("1000"), (
+            f"expected deployed_capital_usd=$1000 but got ${reconciled.deployed_capital_usd}; "
+            "deployed_capital_usd was not forwarded through _build_external_reconciled_snapshot"
+        )
+        # Sanity: total_value_usd comes from external
+        assert reconciled.total_value_usd == Decimal("1050")
