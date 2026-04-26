@@ -211,3 +211,51 @@ class TestBuildPendlePtRedeemAccountingEvent:
         # yield = 1.03 SY received - 1.0 SY cost = 0.03 SY * $1000 = $30
         assert ev.realized_yield_usd is not None
         assert abs(ev.realized_yield_usd - Decimal("30")) < Decimal("2")
+
+    def test_realized_apr_computed_from_lot_timestamp(self):
+        """implied_apr_bps is set to realized APR when lot timestamp is available."""
+        from datetime import timedelta
+
+        bs = _make_basis_store()
+        # PT bought 90 days ago: paid 0.95 SY for 1.0 PT
+        buy_ts = datetime.now(UTC) - timedelta(days=90)
+        bs.record_pt_buy(
+            deployment_id=self._DEPLOY_ID,
+            position_key=self._position_key(),
+            pt_token="PT-wstETH-25JUN2026",
+            pt_amount=Decimal("1.0"),
+            sy_cost=Decimal("0.95"),
+            timestamp=buy_ts,
+        )
+        # Redeem 1.0 PT → receive 1.0 SY (1:1 at maturity)
+        # interest = 1.0 - 0.95 = 0.05 SY
+        # APR = (0.05 / 0.95) / (90 / 365) * 10000 ≈ 2136 bps
+        result = _make_redeem_result(
+            sy_received_raw=1_000_000_000_000_000_000,
+            py_redeemed_raw=1_000_000_000_000_000_000,
+        )
+        ev = self._call(bs, result=result)
+
+        assert ev is not None
+        assert ev.implied_apr_bps is not None
+        # (0.05/0.95)/(90/365)*10000 ≈ 2136; allow ±100 bps for rounding
+        assert 2000 < ev.implied_apr_bps < 2300
+
+    def test_no_lot_timestamp_yields_no_apr(self):
+        """implied_apr_bps is None when matched lot has no timestamp."""
+        bs = _make_basis_store()
+        bs.record_pt_buy(
+            deployment_id=self._DEPLOY_ID,
+            position_key=self._position_key(),
+            pt_token="PT-wstETH-25JUN2026",
+            pt_amount=Decimal("1.0"),
+            sy_cost=Decimal("0.95"),
+            timestamp=None,  # no timestamp recorded
+        )
+        result = _make_redeem_result(
+            sy_received_raw=1_000_000_000_000_000_000,
+            py_redeemed_raw=1_000_000_000_000_000_000,
+        )
+        ev = self._call(bs, result=result)
+        assert ev is not None
+        assert ev.implied_apr_bps is None

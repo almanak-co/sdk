@@ -123,14 +123,15 @@ def build_pendle_lp_accounting_event(
             sy_amount_raw = getattr(lp_close, "amount0_collected", None)  # net_sy_out
             pt_amount_raw = getattr(lp_close, "amount1_collected", None)  # net_pt_out
 
-    # Store as Decimal raw units; human-decimal conversion added in VIB-3422
-    sy_amount = Decimal(str(sy_amount_raw)) if sy_amount_raw is not None else None
-    pt_amount = Decimal(str(pt_amount_raw)) if pt_amount_raw is not None else None
+    # Human-decimal amounts: all Pendle SY/PT tokens use 18 decimals.
+    _SCALE = Decimal(10**18)
+    sy_amount = Decimal(str(sy_amount_raw)) / _SCALE if sy_amount_raw is not None else None
+    pt_amount = Decimal(str(pt_amount_raw)) / _SCALE if pt_amount_raw is not None else None
 
-    # Always ESTIMATED: amounts are raw on-chain integers, not human-decimal.
-    # pt_token and price data are also absent until VIB-3422.
+    # ESTIMATED: 18-decimal assumption is correct for all current Pendle SY/PT
+    # tokens but is not dynamically verified. pt_token and USD price are absent.
     confidence = AccountingConfidence.ESTIMATED
-    unavailable_reason = "SY/PT decimal conversion pending (VIB-3422)"
+    unavailable_reason = "SY/PT scaled by assumed 18-decimal precision; pt_token and USD price absent"
 
     identity = AccountingIdentity(
         id=f"pendle_lp_{deployment_id}_{cycle_id}_{intent_type_str}_{tx_hash[-8:] if tx_hash else 'unknown'}",

@@ -91,13 +91,13 @@ class TestBuildPendleLpAccountingEvent:
 
     def test_lp_open_amounts_populated(self):
         ev = self._call("LP_OPEN")
-        assert ev.sy_amount == Decimal("500000000000000000")
-        assert ev.pt_amount == Decimal("250000000000000000")
+        assert ev.sy_amount == Decimal("0.5")    # 5e17 raw / 1e18
+        assert ev.pt_amount == Decimal("0.25")   # 25e16 raw / 1e18
 
     def test_lp_close_amounts_populated(self):
         ev = self._call("LP_CLOSE")
-        assert ev.sy_amount == Decimal("520000000000000000")
-        assert ev.pt_amount == Decimal("260000000000000000")
+        assert ev.sy_amount == Decimal("0.52")   # 52e16 raw / 1e18
+        assert ev.pt_amount == Decimal("0.26")   # 26e16 raw / 1e18
 
     def test_non_pendle_protocol_returns_none(self):
         ev = self._call("LP_OPEN", protocol="uniswap_v3")

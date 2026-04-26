@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..models.reproduction_bundle import ActionBundle
 from . import compiler_constants
@@ -21,6 +21,31 @@ if TYPE_CHECKING:
     from .vocabulary import LPCloseIntent, LPOpenIntent, SwapIntent, WithdrawIntent
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
+
+
+def _resolve_pt_from_yt(adapter: Any, yt_address: str) -> str | None:
+    """Return the PT address for a given YT contract via the on-chain YT.PT() call.
+
+    Uses the adapter's existing web3 instance so no additional RPC connection is
+    opened. Returns None on failure (approval is then skipped and execution will
+    revert with a clearer error from the router).
+    """
+    from web3 import Web3
+
+    try:
+        w3 = adapter.sdk.web3
+        selector = w3.keccak(text="PT()")[:4]
+        result = w3.eth.call(
+            {
+                "to": Web3.to_checksum_address(yt_address),
+                "data": "0x" + selector.hex(),
+            }
+        )
+        # ABI-encoded address: rightmost 20 bytes of the 32-byte return value
+        return Web3.to_checksum_address("0x" + result[-20:].hex())
+    except Exception as e:
+        logger.warning(f"_resolve_pt_from_yt({yt_address}): {e}")
+        return None
 
 
 def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
@@ -955,6 +980,52 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
             wallet_address=compiler.wallet_address,
             gateway_client=compiler._gateway_client,
         )
+
+        # Approve PT tokens for the Pendle router (required before redeemPyToToken).
+        # Primary: static YT_TOKEN_INFO reverse-lookup (fast, reliable);
+        # fallback: on-chain YT.PT() call for markets not in config.
+        from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO as _PT_TOKEN_INFO
+        from almanak.framework.connectors.pendle.sdk import YT_TOKEN_INFO as _YT_TOKEN_INFO
+
+        from .compiler_constants import MAX_UINT256
+
+        pt_address: str | None = None
+        yt_addr_lower = yt_address.lower()
+        for _pt_name, (_pt_addr, _) in _PT_TOKEN_INFO.get(compiler.chain, {}).items():
+            _yt_name = _pt_name.replace("PT-", "YT-", 1)
+            _yt_entry = _YT_TOKEN_INFO.get(compiler.chain, {}).get(_yt_name)
+            if _yt_entry and _yt_entry[0].lower() == yt_addr_lower:
+                pt_address = _pt_addr
+                logger.debug(
+                    "compile_pendle_redeem: resolved PT %s via static config for YT %s", pt_address, yt_address
+                )
+                break
+        if not pt_address:
+            pt_address = _resolve_pt_from_yt(adapter, yt_address)
+        if pt_address:
+            router_address = adapter.get_router_address()
+            # Unconditional infinite approve — _build_approve_tx skips txs when the
+            # simulated allowance already seems sufficient, but Anvil simulates each
+            # tx in isolation (without prior txs' state changes), which can cause it
+            # to see allowance=0 for the redeem and flag it as broken.  Building the
+            # approve calldata directly avoids this ordering sensitivity.
+            from web3 import Web3
+
+            approve_data = (
+                "0x095ea7b3"
+                + Web3.to_checksum_address(router_address)[2:].lower().zfill(64)
+                + hex(MAX_UINT256)[2:].zfill(64)
+            )
+            transactions.append(
+                TransactionData(
+                    to=pt_address,
+                    value=0,
+                    data=approve_data,
+                    gas_estimate=60_000,
+                    description=f"Approve PT ({pt_address[:10]}…) for Pendle Router",
+                    tx_type="approve",
+                )
+            )
 
         # Build redeem TX
         redeem_params = PendleRedeemParams(

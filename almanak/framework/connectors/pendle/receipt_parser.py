@@ -245,6 +245,35 @@ class RedeemPYEventData:
 
 
 @dataclass
+class RedeemSYEventData:
+    """Parsed data from Pendle SY Redeem event (post-maturity PT redemption path).
+
+    Redeem(address indexed caller, address indexed receiver, address indexed tokenOut,
+           uint256 amountSyToRedeem, uint256 amountTokenOut)
+    Emitted by the SY contract when SY is redeemed for the underlying token.
+    Used by redeemPyToToken after PT maturity (no RedeemPY is emitted in this path).
+    """
+
+    caller: str
+    receiver: str
+    token_out: str
+    amount_sy_to_redeem: int
+    amount_token_out: int
+    sy_address: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "caller": self.caller,
+            "receiver": self.receiver,
+            "token_out": self.token_out,
+            "amount_sy_to_redeem": str(self.amount_sy_to_redeem),
+            "amount_token_out": str(self.amount_token_out),
+            "sy_address": self.sy_address,
+        }
+
+
+@dataclass
 class TransferEventData:
     """Parsed data from ERC20 Transfer event."""
 
@@ -304,6 +333,7 @@ class ParseResult:
     mint_events: list[MintEventData] = field(default_factory=list)
     burn_events: list[BurnEventData] = field(default_factory=list)
     redeem_events: list[RedeemPYEventData] = field(default_factory=list)
+    redeem_sy_events: list[RedeemSYEventData] = field(default_factory=list)
     transfer_events: list[TransferEventData] = field(default_factory=list)
     swap_result: ParsedSwapResult | None = None
     error: str | None = None
@@ -320,6 +350,7 @@ class ParseResult:
             "mint_events": [m.to_dict() for m in self.mint_events],
             "burn_events": [b.to_dict() for b in self.burn_events],
             "redeem_events": [r.to_dict() for r in self.redeem_events],
+            "redeem_sy_events": [r.to_dict() for r in self.redeem_sy_events],
             "transfer_events": [t.to_dict() for t in self.transfer_events],
             "swap_result": self.swap_result.to_dict() if self.swap_result else None,
             "error": self.error,
@@ -434,6 +465,7 @@ class PendleReceiptParser:
             mint_events: list[MintEventData] = []
             burn_events: list[BurnEventData] = []
             redeem_events: list[RedeemPYEventData] = []
+            redeem_sy_events: list[RedeemSYEventData] = []
             transfer_events: list[TransferEventData] = []
 
             for log in logs:
@@ -462,6 +494,11 @@ class PendleReceiptParser:
                         if redeem_data:
                             redeem_events.append(redeem_data)
 
+                    elif parsed_event.event_type == PendleEventType.REDEEM_SY:
+                        redeem_sy_data = self._parse_redeem_sy_event(parsed_event)
+                        if redeem_sy_data:
+                            redeem_sy_events.append(redeem_sy_data)
+
                     elif parsed_event.event_type == PendleEventType.TRANSFER:
                         transfer_data = self._parse_transfer_event(parsed_event)
                         if transfer_data:
@@ -480,7 +517,8 @@ class PendleReceiptParser:
             logger.info(
                 f"Parsed Pendle receipt: tx={tx_hash[:10]}..., "
                 f"swaps={len(swap_events)}, mints={len(mint_events)}, "
-                f"burns={len(burn_events)}, redeems={len(redeem_events)}"
+                f"burns={len(burn_events)}, redeems={len(redeem_events)}, "
+                f"redeem_sy={len(redeem_sy_events)}"
             )
 
             return ParseResult(
@@ -490,6 +528,7 @@ class PendleReceiptParser:
                 mint_events=mint_events,
                 burn_events=burn_events,
                 redeem_events=redeem_events,
+                redeem_sy_events=redeem_sy_events,
                 transfer_events=transfer_events,
                 swap_result=swap_result,
                 transaction_hash=tx_hash,
@@ -582,6 +621,8 @@ class PendleReceiptParser:
             return self._decode_burn_data(topics, data, address)
         elif event_name == "RedeemPY":
             return self._decode_redeem_data(topics, data, address)
+        elif event_name == "RedeemSY":
+            return self._decode_redeem_sy_data(topics, data, address)
         elif event_name == "Transfer":
             return self._decode_transfer_data(topics, data, address)
         else:
@@ -722,6 +763,42 @@ class PendleReceiptParser:
             logger.warning(f"Failed to decode RedeemPY data: {e}")
             return {"raw_data": data}
 
+    def _decode_redeem_sy_data(
+        self,
+        topics: list[Any],
+        data: str,
+        address: str,
+    ) -> dict[str, Any]:
+        """
+        Decode Pendle SY Redeem event (post-maturity PT redemption path).
+
+        Redeem(address indexed caller, address indexed receiver, address indexed tokenOut,
+               uint256 amountSyToRedeem, uint256 amountTokenOut)
+        Topics: [hash, caller, receiver, tokenOut]   Data: [amountSyToRedeem, amountTokenOut]
+        """
+        try:
+            caller = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+            receiver = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
+            token_out = HexDecoder.topic_to_address(topics[3]) if len(topics) > 3 else ""
+
+            amount_sy_to_redeem = HexDecoder.decode_uint256(data, 0)
+            amount_token_out = HexDecoder.decode_uint256(data, 32)
+
+            sy_address = address.lower() if isinstance(address, str) else ""
+
+            return {
+                "caller": caller,
+                "receiver": receiver,
+                "token_out": token_out,
+                "amount_sy_to_redeem": amount_sy_to_redeem,
+                "amount_token_out": amount_token_out,
+                "sy_address": sy_address,
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to decode RedeemSY data: {e}")
+            return {"raw_data": data}
+
     def _decode_transfer_data(
         self,
         topics: list[Any],
@@ -808,6 +885,22 @@ class PendleReceiptParser:
             )
         except Exception as e:
             logger.warning(f"Failed to parse RedeemPYEventData: {e}")
+            return None
+
+    def _parse_redeem_sy_event(self, event: PendleEvent) -> RedeemSYEventData | None:
+        """Parse RedeemSY event into typed data."""
+        try:
+            data = event.data
+            return RedeemSYEventData(
+                caller=data.get("caller", ""),
+                receiver=data.get("receiver", ""),
+                token_out=data.get("token_out", ""),
+                amount_sy_to_redeem=data.get("amount_sy_to_redeem", 0),
+                amount_token_out=data.get("amount_token_out", 0),
+                sy_address=data.get("sy_address", event.contract_address),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to parse RedeemSYEventData: {e}")
             return None
 
     def _parse_transfer_event(self, event: PendleEvent) -> TransferEventData | None:
@@ -1044,10 +1137,18 @@ class PendleReceiptParser:
         try:
             result = self.parse_receipt(receipt)
             if result.redeem_events:
+                # Pre-maturity path: RedeemPY event from YT contract
                 redeem = result.redeem_events[0]
                 return {
                     "py_redeemed": redeem.net_py_redeemed,
                     "sy_received": redeem.net_sy_redeemed,
+                }
+            if result.redeem_sy_events:
+                # Post-maturity path: SY Redeem event (PT → SY → token, no YT involvement)
+                r = result.redeem_sy_events[0]
+                return {
+                    "py_redeemed": r.amount_sy_to_redeem,  # SY burned ≈ PT redeemed (1:1 at maturity)
+                    "sy_received": r.amount_sy_to_redeem,  # SY component (before token conversion)
                 }
             return None
         except Exception as e:
@@ -1062,6 +1163,7 @@ __all__ = [
     "SwapEventData",
     "MintEventData",
     "BurnEventData",
+    "RedeemSYEventData",
     "RedeemPYEventData",
     "TransferEventData",
     "ParsedSwapResult",

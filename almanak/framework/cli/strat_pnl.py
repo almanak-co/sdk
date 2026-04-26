@@ -1,12 +1,16 @@
-"""CLI command for strategy PnL breakdown (VIB-3206).
+"""CLI command for strategy PnL breakdown (VIB-3206, VIB-3427).
 
-Provides ``almanak strat pnl -s <deployment_id>`` — a dedicated PnL view that
-reads persisted accounting data (PortfolioMetrics, LedgerEntry rows,
-PositionEvent rows, PortfolioSnapshot.positions_json) from the local SQLite
-state store and prints a per-strategy PnL breakdown.
+Provides ``almanak strat pnl -s <deployment_id>`` — a strategy-class-aware PnL
+view that reads persisted accounting data (PortfolioMetrics, LedgerEntry rows,
+PositionEvent rows, typed AccountingEvents, PortfolioSnapshot) from the local
+SQLite state store and prints a breakdown.
+
+Detects strategy class from event store and renders only relevant sections
+(LP economics, lending carry, Pendle yield). Includes a Data Quality section
+surfacing any UNAVAILABLE confidence records.
 
 No gateway call is made — this is a read-only report against the state DB
-written by the strategy runner (VIB-2763 epic).
+written by the strategy runner.
 
 Usage:
     almanak strat pnl -s <deployment_id>
@@ -26,6 +30,26 @@ from pathlib import Path
 from typing import Any
 
 import click
+
+from almanak.framework.accounting.reporting import (
+    build_data_quality,
+    build_lending_report,
+    build_lp_report,
+    build_pendle_report,
+    load_accounting_data,
+)
+from almanak.framework.accounting.reporting.render_json import (
+    data_quality_to_dict,
+    lending_section_to_dict,
+    lp_section_to_dict,
+    pendle_section_to_dict,
+)
+from almanak.framework.accounting.reporting.render_text import (
+    render_data_quality_section,
+    render_lending_section,
+    render_lp_section,
+    render_pendle_section,
+)
 
 # Stablecoin symbols used to convert amount_in/amount_out -> USD notional
 # when explicit USD fields are absent from LedgerEntry (pre-VIB-3204).
@@ -58,38 +82,6 @@ _MISSING = "—"  # em dash: signals "not yet available"
 
 def _default_db_path() -> str:
     return os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db"
-
-
-async def _load_accounting_data(
-    db_path: str,
-    deployment_id: str,
-    ledger_limit: int,
-    position_limit: int,
-) -> dict[str, Any]:
-    """Load all persisted accounting rows for a strategy.
-
-    Returns a dict with keys: ``metrics``, ``ledger_entries``, ``position_events``,
-    ``snapshot``. Values are ``None`` / ``[]`` when the strategy has no rows yet.
-    """
-    from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
-
-    store = SQLiteStore(SQLiteConfig(db_path=db_path))
-    await store.initialize()
-    try:
-        metrics = await store.get_portfolio_metrics(deployment_id)
-        # Ledger is indexed by strategy_id (which equals deployment_id post VIB-2835).
-        ledger_entries = await store.get_ledger_entries(deployment_id, limit=ledger_limit)
-        position_events = await store.get_position_events(deployment_id, limit=position_limit)
-        snapshot = await store.get_latest_snapshot(deployment_id)
-    finally:
-        await store.close()
-
-    return {
-        "metrics": metrics,
-        "ledger_entries": ledger_entries,
-        "position_events": position_events,
-        "snapshot": snapshot,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -562,11 +554,12 @@ def strat_pnl(
     position_limit: int,
     as_json: bool,
 ) -> None:
-    """Per-strategy PnL breakdown from persisted accounting data (VIB-3206).
+    """Per-strategy PnL breakdown from persisted accounting data (VIB-3206/3427).
 
-    Reads ``PortfolioMetrics``, ``LedgerEntry``, ``PositionEvent``, and the
-    latest ``PortfolioSnapshot.positions_json`` from the local SQLite state
-    DB and prints a breakdown. Does not call the gateway.
+    Reads ``PortfolioMetrics``, ``LedgerEntry``, ``PositionEvent``,
+    ``AccountingEvent``, and the latest ``PortfolioSnapshot`` from the local
+    SQLite state DB. Detects strategy class (LP / lending / Pendle / swap) and
+    renders only relevant sections. Does not call the gateway.
 
     Examples:
 
@@ -575,9 +568,6 @@ def strat_pnl(
         almanak strat pnl -s uniswap_rsi:ab12cd34ef56 --json
         almanak strat pnl -s uniswap_rsi:ab12cd34ef56 --db ./state.db
     """
-    # CodeRabbit audit fix: ledger_limit <= 0 passed through to
-    # _load_accounting_data could silently trigger an unbounded query or
-    # produce a degenerate result. Reject early with a clear error.
     if ledger_limit <= 0:
         click.secho("--ledger-limit must be a positive integer.", fg="red", err=True)
         sys.exit(1)
@@ -595,18 +585,32 @@ def strat_pnl(
         sys.exit(1)
 
     try:
-        data = asyncio.run(_load_accounting_data(resolved_db, strategy_id, ledger_limit, position_limit))
+        acct_data = asyncio.run(
+            load_accounting_data(
+                resolved_db,
+                strategy_id,
+                ledger_limit=ledger_limit,
+                position_limit=position_limit,
+            )
+        )
     except Exception as exc:
         click.secho(f"Failed to read state DB: {exc}", fg="red", err=True)
         sys.exit(1)
 
-    metrics = data["metrics"]
-    ledger_entries = data["ledger_entries"] or []
-    position_events = data["position_events"] or []
-    snapshot = data["snapshot"]
+    metrics = acct_data.metrics
+    ledger_entries = acct_data.ledger_entries
+    position_events = acct_data.position_events
+    snapshot = acct_data.snapshot
 
-    # A strategy with no metrics, no ledger, and no events = not found.
-    if metrics is None and not ledger_entries and not position_events and snapshot is None:
+    # A strategy with no data at all = not found.
+    if (
+        metrics is None
+        and not ledger_entries
+        and not position_events
+        and snapshot is None
+        and not acct_data.lending_events
+        and not acct_data.pendle_events
+    ):
         click.secho(
             f"No persisted data found for strategy '{strategy_id}' in {resolved_db}.",
             fg="red",
@@ -614,6 +618,7 @@ def strat_pnl(
         )
         sys.exit(1)
 
+    # Generic portfolio summary (unchanged from VIB-3206)
     breakdown = compute_pnl_breakdown(
         deployment_id=strategy_id,
         metrics=metrics,
@@ -622,8 +627,42 @@ def strat_pnl(
         snapshot=snapshot,
     )
 
+    # Strategy-class-specific sections
+    lp_section = build_lp_report(acct_data)
+    lending_section = build_lending_report(acct_data)
+    pendle_section = build_pendle_report(acct_data)
+    dq_section = build_data_quality(acct_data)
+
     if as_json:
-        click.echo(json.dumps(breakdown.to_json_dict(), indent=2))
+        out: dict[str, Any] = breakdown.to_json_dict()
+        out["strategy_classes"] = sorted(str(c) for c in acct_data.strategy_classes)
+        if not lp_section.is_empty:
+            out["lp"] = lp_section_to_dict(lp_section)
+        if not lending_section.is_empty:
+            out["lending"] = lending_section_to_dict(lending_section)
+        if not pendle_section.is_empty:
+            out["pendle"] = pendle_section_to_dict(pendle_section)
+        if not dq_section.is_empty:
+            out["data_quality"] = data_quality_to_dict(dq_section)
+        click.echo(json.dumps(out, indent=2))
         return
 
+    # Text output
+    classes_label = ", ".join(sorted(str(c) for c in acct_data.strategy_classes))
     click.echo(render_text(breakdown))
+    if classes_label and classes_label != "unknown":
+        click.echo(f"\nStrategy class: {classes_label}")
+
+    extra = "".join(
+        filter(
+            None,
+            [
+                render_lp_section(lp_section),
+                render_lending_section(lending_section),
+                render_pendle_section(pendle_section),
+                render_data_quality_section(dq_section),
+            ],
+        )
+    )
+    if extra:
+        click.echo(extra)

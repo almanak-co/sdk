@@ -145,8 +145,26 @@ def build_pendle_pt_redeem_accounting_event(
 
     # ── Yield APR computation ─────────────────────────────────────────────────
     # yield_apr_bps = (interest / principal) / (hold_days / 365) * 10_000
-    # hold_days not available here without the PT_BUY timestamp from the lot.
-    # Deferring APR at redemption to a follow-up (VIB-3423 scope extension).
+    # hold_days comes from earliest_lot_timestamp returned by match_pt_redeem.
+    yield_apr_bps: int | None = None
+    if (
+        has_lots
+        and match_result.earliest_lot_timestamp is not None
+        and interest_human is not None
+        and match_result.repaid_principal > 0
+    ):
+        hold_days = (now.date() - match_result.earliest_lot_timestamp.date()).days
+        if hold_days > 0:
+            try:
+                apr = (
+                    interest_human
+                    / match_result.repaid_principal
+                    / (Decimal(str(hold_days)) / Decimal("365"))
+                    * Decimal("10000")
+                )
+                yield_apr_bps = int(apr.to_integral_value())
+            except (InvalidOperation, ZeroDivisionError):
+                pass
 
     # ── Confidence ───────────────────────────────────────────────────────────
     if realized_yield_usd is not None and has_lots:
@@ -188,7 +206,7 @@ def build_pendle_pt_redeem_accounting_event(
         pt_amount=py_redeemed_human,
         sy_amount=sy_received_human,
         pt_price=None,  # not meaningful at redemption (PT=1:1 SY at maturity)
-        implied_apr_bps=None,  # entry APR was recorded at PT_BUY time
+        implied_apr_bps=yield_apr_bps,  # realized APR over hold period (None when lot timestamp unavailable)
         days_to_maturity=0,
         realized_yield_usd=realized_yield_usd,
         confidence=confidence,

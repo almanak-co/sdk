@@ -30,6 +30,7 @@ class MatchResult:
     matched_lot_ids: list[str]
     unmatched_amount: Decimal
     matching_policy_version: int = MATCHING_POLICY_VERSION
+    earliest_lot_timestamp: datetime | None = None
 
 
 class FIFOBasisStore:
@@ -163,6 +164,7 @@ class FIFOBasisStore:
         remaining = pt_redeemed
         original_cost = Decimal("0")
         matched_lot_ids: list[str] = []
+        earliest_ts: datetime | None = None
 
         for lot in lots:
             if remaining <= 0:
@@ -176,6 +178,14 @@ class FIFOBasisStore:
             original_cost += cost_share
             remaining -= consume
             matched_lot_ids.append(lot["lot_id"])
+            ts_str = lot.get("timestamp")
+            if ts_str:
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                    if earliest_ts is None or ts < earliest_ts:
+                        earliest_ts = ts
+                except (ValueError, TypeError):
+                    pass
 
         realized_yield = sy_received - original_cost
         return MatchResult(
@@ -183,4 +193,5 @@ class FIFOBasisStore:
             interest_or_yield=realized_yield,
             matched_lot_ids=matched_lot_ids,
             unmatched_amount=max(Decimal("0"), remaining),
+            earliest_lot_timestamp=earliest_ts,
         )
