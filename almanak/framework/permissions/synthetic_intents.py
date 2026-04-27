@@ -179,20 +179,27 @@ def build_synthetic_intents(
 def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
     if protocol not in _SWAP_PROTOCOLS:
         return []
+    # Curve is pool-specific: a single ``synthetic_swap_pair`` only authorises
+    # one of the curated pools per chain (e.g. 3pool USDC/USDT on ethereum),
+    # leaving every other registered pool — notably tricrypto2 — unauthorised
+    # on the Safe (issue #1903). Iterate the curated registry instead so the
+    # manifest covers the full surface a strategy author can route through.
+    if protocol == "curve":
+        return _build_curve_swap_intents(chain)
     # Check that this protocol has a router on this chain.
-    # Protocols with dedicated swap compile paths (enso, curve, pendle,
+    # Protocols with dedicated swap compile paths (enso, pendle,
     # traderjoe_v2) are exempt because their router address is not stored in
     # PROTOCOL_ROUTERS -- the compiler resolves it from protocol-specific
     # registries (LP_POSITION_MANAGERS for TJv2's LBRouter, the connector's
-    # own module for Enso/Curve/Pendle). Their dedicated compile path
+    # own module for Enso/Pendle). Their dedicated compile path
     # returns FAILED with "not supported" for unsupported chains, which
     # discover_permissions() treats as a non-fatal skip.
-    if protocol not in ("enso", "curve", "pendle", "traderjoe_v2"):
+    if protocol not in ("enso", "pendle", "traderjoe_v2"):
         routers = PROTOCOL_ROUTERS.get(chain, {})
         if protocol not in routers:
             return []
-    # Some protocols need specific token pairs (e.g., Curve stablecoin pools,
-    # Pendle PT tokens). Use hints override when available.
+    # Some protocols need specific token pairs (e.g., Pendle PT tokens).
+    # Use hints override when available.
     hints = get_permission_hints(protocol)
     from_token, to_token = usdc, weth
     if hints.synthetic_swap_pair:
@@ -208,6 +215,59 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
             chain=chain,
         )
     ]
+
+
+def _build_curve_swap_intents(chain: str) -> list[AnyIntent]:
+    """Emit one synthetic ``SwapIntent`` per curated curve pool on ``chain``.
+
+    Curve pools are pair-specific (StableSwap, CryptoSwap, Tricrypto), so a
+    single token pair only resolves to one pool. The compiler's
+    ``compile_swap_curve`` walks ``CURVE_POOLS[chain]`` to match pool by
+    coin pair; emitting one intent per registered pool — using the first
+    two coin addresses of each — guarantees every pool's address lands on
+    the manifest.
+
+    The price-oracle gate in ``compile_swap_curve`` (price_ratio for
+    CryptoSwap/Tricrypto pools) does NOT fire during permission discovery
+    because ``IntentCompiler`` is created with ``allow_placeholder_prices=True``
+    and ``_require_token_price`` returns the placeholder map (USDT=$1,
+    WETH=$2000, WBTC=$45000, …) — every pool's coin pair resolves to a
+    finite, positive price_ratio.
+
+    For polygon's am3pool which sets ``use_underlying=True``, the compiler
+    routes to ``exchange_underlying`` automatically based on the pool's
+    pool_type; no special-casing is needed here.
+    """
+    try:
+        from ..connectors.curve.adapter import CURVE_POOLS
+    except ImportError:
+        logger.debug("Curve adapter not importable; skipping synthetic swap discovery")
+        return []
+
+    chain_pools = CURVE_POOLS.get(chain, {})
+    if not chain_pools:
+        return []
+
+    intents: list[AnyIntent] = []
+    for pool_name, pool_data in chain_pools.items():
+        coins = pool_data.get("coin_addresses") or []
+        if len(coins) < 2:
+            logger.warning(
+                "Curve pool %s on %s has fewer than 2 coins; skipping synthetic discovery",
+                pool_name,
+                chain,
+            )
+            continue
+        intents.append(
+            SwapIntent(
+                from_token=coins[0],
+                to_token=coins[1],
+                amount=Decimal("1"),
+                protocol="curve",
+                chain=chain,
+            )
+        )
+    return intents
 
 
 def _build_lp_open_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:

@@ -1,26 +1,16 @@
-"""Curve Finance permission hints for permission discovery."""
+"""Curve Finance permission hints for permission discovery.
+
+Curve does NOT use the generic ``synthetic_swap_pair`` mechanism. Its pools
+are pair-specific (StableSwap, CryptoSwap, Tricrypto), so a single pair only
+resolves to one curated pool per chain — leaving every other registered pool
+unauthorised on the Safe (#1903). The synthetic discovery path for curve is
+handled directly in
+``almanak.framework.permissions.synthetic_intents._build_curve_swap_intents``,
+which iterates ``CURVE_POOLS[chain]`` and emits one synthetic ``SwapIntent``
+per registered pool. The manifest then authorises the entire curated curve
+pool surface for every supported chain.
+"""
 
 from almanak.framework.permissions.hints import PermissionHints
 
-# Curve pools are pair-specific (stableswap, tricrypto).
-# The default USDC/WETH pair doesn't match any pool, so we override
-# with token pairs that exist in known Curve pools per chain.
-PERMISSION_HINTS = PermissionHints(
-    synthetic_swap_pair={
-        # ethereum: 3pool has DAI/USDC/USDT
-        "ethereum": (
-            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC
-            "0xdAC17F958D2ee523a2206206994597C13D831ec7",  # USDT
-        ),
-        # arbitrum: 2pool has USDC.e/USDT
-        "arbitrum": (
-            "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # USDC.e
-            "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",  # USDT
-        ),
-        # base: weth_cbeth pool is the only Curve pool on Base
-        "base": (
-            "0x4200000000000000000000000000000000000006",  # WETH on Base
-            "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",  # cbETH on Base
-        ),
-    },
-)
+PERMISSION_HINTS = PermissionHints()

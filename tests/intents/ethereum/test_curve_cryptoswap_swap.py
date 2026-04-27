@@ -240,10 +240,6 @@ class TestCurveCryptoSwapExecution:
     - Layer 4: Exact balance delta verification
     """
 
-    @pytest.mark.xfail(
-        reason="Tracked in #1903 — Zodiac manifest gap on curve TriCrypto2 SWAP ethereum (cases pin 3pool USDC/USDT, test exercises tricrypto USDT/WETH)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     @pytest.mark.uses_zodiac(
         protocols=["curve"],
@@ -421,10 +417,6 @@ class TestCurveCryptoSwapExecution:
             weth_received / 10**18,
         )
 
-    @pytest.mark.xfail(
-        reason="Tracked in #1903 — Zodiac manifest gap on curve TriCrypto2 SWAP ethereum (cases pin 3pool USDC/USDT, test exercises tricrypto USDT/WETH)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     @pytest.mark.uses_zodiac(
         protocols=["curve"],
