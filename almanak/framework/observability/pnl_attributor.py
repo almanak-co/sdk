@@ -48,8 +48,14 @@ Perp v2 formula::
     funding_pnl_usd  = -funding_fee_usd from close_event.attribution_json
                        (stamped by _apply_perp from extract_funding_fee_usd;
                         None until GMX V2 EventUtils decoder lands — VIB-3497)
+    funding_fee_usd  = raw funding cost preserved in attribution dict
+                       so recompute_attribution() cycles do not lose the value
+                       (VIB-3519)
     net_pnl_usd      = price_pnl_usd + (fee_pnl_usd or 0)
                        + (funding_pnl_usd or 0) - total_gas
+
+**v3 (VIB-3519)** — ``attribute_perp()`` persists ``funding_fee_usd`` raw
+value in attribution dict to survive ``recompute_attribution()`` cycles.
 
 Missing-data semantics (critical)
 ---------------------------------
@@ -72,8 +78,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# v2 bumps the formula: real IL and fee_pnl replace v1 placeholders.
-CURRENT_VERSION = 2
+# v3 bumps the formula: attribute_perp persists funding_fee_usd raw value in
+# attribution dict to survive recompute_attribution() cycles (VIB-3519).
+CURRENT_VERSION = 3
 
 
 def _dec(value: Any) -> Decimal:
@@ -589,6 +596,12 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
         "price_pnl_usd": str(price_pnl),
         "fee_pnl_usd": None if fee_pnl is None else str(fee_pnl),
         "funding_pnl_usd": None if funding_pnl is None else str(funding_pnl),
+        # VIB-3519: persist the raw funding_fee_usd alongside funding_pnl_usd so
+        # that _funding_fee_from_close() can read it back on a subsequent
+        # recompute_attribution() call. Without this, the first write stores only
+        # the computed attribution dict (which lacks funding_fee_usd), and the
+        # second recompute silently drops funding_pnl_usd.
+        "funding_fee_usd": None if raw_funding is None else str(raw_funding),
         "gas_usd": str(total_gas),
         "net_pnl_usd": str(net_pnl),
     }

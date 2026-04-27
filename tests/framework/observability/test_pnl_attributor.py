@@ -530,6 +530,123 @@ class TestPerpFundingAttribution:
         assert result["net_pnl_usd"] == "100"  # 100 + 0 + 0 - 0
 
 
+class TestVIB3519FundingFeePreservation:
+    """VIB-3519: funding_fee_usd raw value is persisted in the attribution dict
+    so that recompute_attribution() cycles do not silently drop funding_pnl_usd.
+    """
+
+    def test_attribute_perp_includes_funding_fee_usd_in_output(self):
+        """attribute_perp() must include funding_fee_usd in the returned dict."""
+        open_evt = {"entry_price": "2000", "is_long": True, "gas_usd": "1.00"}
+        close_evt = {
+            "mark_price": "2200",
+            "unrealized_pnl": "500",
+            "gas_usd": "1.00",
+            "attribution_json": json.dumps({"funding_fee_usd": "12.50"}),
+        }
+        result = attribute_perp(open_evt, close_evt)
+
+        assert "funding_fee_usd" in result, (
+            "VIB-3519: funding_fee_usd must be stored in the attribution dict "
+            "so that _funding_fee_from_close() can read it back on recompute"
+        )
+        assert result["funding_fee_usd"] == "12.50", (
+            "funding_fee_usd must be the raw cost value (not negated)"
+        )
+        # funding_pnl_usd is still the derived/signed field
+        assert result["funding_pnl_usd"] == "-12.50"
+
+    def test_attribute_perp_funding_fee_usd_none_when_unavailable(self):
+        """When no funding_fee_usd in close attribution_json, both fields are None."""
+        open_evt = {"entry_price": "2000", "is_long": True, "gas_usd": "0"}
+        close_evt = {"mark_price": "2200", "unrealized_pnl": "100", "gas_usd": "0"}
+        result = attribute_perp(open_evt, close_evt)
+
+        assert result["funding_fee_usd"] is None
+        assert result["funding_pnl_usd"] is None
+
+    def test_recompute_preserves_funding_pnl_after_first_write(self, store):
+        """VIB-3519 regression test: after the first attribution write, a
+        subsequent recompute_attribution() must NOT lose funding_pnl_usd.
+
+        Before the fix: the first write stored the computed attribution dict
+        (which contained funding_pnl_usd but not funding_fee_usd). The second
+        recompute called _funding_fee_from_close on the stored dict, found no
+        funding_fee_usd key, and silently set funding_pnl_usd = None.
+
+        After the fix: attribute_perp() persists funding_fee_usd in the dict,
+        so _funding_fee_from_close can always recover it.
+        """
+        # Save OPEN event
+        open_evt = PositionEvent(
+            id="open-vib3519",
+            deployment_id="strat:vib3519",
+            position_id="pos-3519",
+            position_type="PERP",
+            event_type="OPEN",
+            value_usd="10000",
+            gas_usd="1.00",
+        )
+        asyncio.get_event_loop().run_until_complete(store.save_position_event(open_evt))
+
+        # Save CLOSE event with funding_fee_usd stamped in attribution_json
+        close_evt = PositionEvent(
+            id="close-vib3519",
+            deployment_id="strat:vib3519",
+            position_id="pos-3519",
+            position_type="PERP",
+            event_type="CLOSE",
+            value_usd="10500",
+            gas_usd="1.00",
+            unrealized_pnl="500",
+            attribution_json=json.dumps({"funding_fee_usd": "25.00"}),
+        )
+        asyncio.get_event_loop().run_until_complete(store.save_position_event(close_evt))
+
+        # First attribution run
+        first_attribution = asyncio.get_event_loop().run_until_complete(
+            run_attribution_on_close(store, close_evt)
+        )
+        first_data = json.loads(first_attribution)
+        assert first_data["funding_pnl_usd"] == "-25.00", (
+            "First attribution must capture funding_pnl_usd"
+        )
+        assert first_data["funding_fee_usd"] == "25.00", (
+            "VIB-3519: first attribution must persist funding_fee_usd raw value"
+        )
+
+        # Now simulate a recompute (version bump: set stored version to 0 so
+        # recompute_attribution picks it up).
+        stored_events = asyncio.get_event_loop().run_until_complete(
+            store.get_position_events("strat:vib3519", position_id="pos-3519", event_type="CLOSE")
+        )
+        assert len(stored_events) == 1
+        # Force attribution_version to 0 so recompute treats it as stale
+        asyncio.get_event_loop().run_until_complete(
+            store.update_position_attribution(stored_events[0]["id"], first_attribution, 0)
+        )
+
+        # Run batch recompute targeting CURRENT_VERSION
+        count = asyncio.get_event_loop().run_until_complete(
+            recompute_attribution(store, "strat:vib3519", version=CURRENT_VERSION)
+        )
+        assert count == 1, "recompute should have processed one CLOSE event"
+
+        # Verify the recomputed attribution still carries funding_pnl_usd
+        events_after = asyncio.get_event_loop().run_until_complete(
+            store.get_position_events("strat:vib3519", position_id="pos-3519", event_type="CLOSE")
+        )
+        recomputed = json.loads(events_after[0]["attribution_json"])
+        assert recomputed.get("funding_pnl_usd") == "-25.00", (
+            "VIB-3519 regression: recompute_attribution() must not drop "
+            "funding_pnl_usd. Before the fix this returned None because "
+            "funding_fee_usd was not persisted in the attribution dict."
+        )
+        assert recomputed.get("funding_fee_usd") == "25.00", (
+            "VIB-3519: recomputed dict must still carry the raw funding_fee_usd"
+        )
+
+
 class TestGMXv2FundingFeeExtraction:
     """VIB-3497: GMX V2 receipt parser funding fee extraction."""
 
