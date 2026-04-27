@@ -274,6 +274,9 @@ class PerpData:
         leverage: Position leverage
         realized_pnl: Realized PnL (for closes)
         fees_paid: Total fees paid
+        funding_fee_usd: Accumulated funding fees in USD at close (VIB-3497).
+            None = unavailable (parser has not yet implemented extraction).
+            Decimal("0") = measured zero funding (position held for <1 funding period).
     """
 
     position_id: str | int | None = None
@@ -284,6 +287,7 @@ class PerpData:
     leverage: Decimal | None = None
     realized_pnl: Decimal | None = None
     fees_paid: int | None = None
+    funding_fee_usd: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -296,6 +300,7 @@ class PerpData:
             "leverage": str(self.leverage) if self.leverage else None,
             "realized_pnl": str(self.realized_pnl) if self.realized_pnl else None,
             "fees_paid": str(self.fees_paid) if self.fees_paid else None,
+            "funding_fee_usd": str(self.funding_fee_usd) if self.funding_fee_usd is not None else None,
         }
 
 

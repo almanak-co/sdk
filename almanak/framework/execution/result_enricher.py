@@ -162,6 +162,10 @@ class ResultEnricher:
             "fees_paid",
             "collateral_returned",
             "protocol_fees",
+            # VIB-3497: funding fee USD at close. Parsers that implement
+            # extract_funding_fee_usd return a Decimal; those that don't
+            # (or return None) propagate as "unavailable" in attribution.
+            "funding_fee_usd",
         ],
         # === Staking ===
         "STAKE": ["stake_amount", "shares_received", "wsteth_received", "stake_token", "protocol_fees"],

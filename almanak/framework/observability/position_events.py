@@ -38,6 +38,7 @@ Constraint (critical): γ → δ → ε → ζ → η ordering. Re-ordering ε b
 γ silently regresses the invariant called out above.
 """
 
+import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -393,6 +394,10 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase ζ — enrich with perp_data.
 
     Copies leverage, entry/mark price, unrealized PnL and direction.
+    For CLOSE events, also writes ``funding_fee_usd`` into the event's
+    ``attribution_json`` sidecar when available (VIB-3497). This lets
+    ``attribute_perp()`` incorporate the funding cost into ``funding_pnl_usd``
+    and ``net_pnl_usd`` without needing a new DB column.
 
     Position-id precedence (fix #1709): a ``perp.position_id`` that
     disagrees with the already-seeded ``event.position_id`` is now logged
@@ -404,6 +409,30 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     ids), but the mismatch itself is no longer invisible.
     """
     perp = ctx.extracted.get("perp_data")
+
+    # VIB-3497: ``funding_fee_usd`` arrives as a top-level extracted_data
+    # key for PERP_CLOSE (from the ResultEnricher PERP_CLOSE spec), not
+    # inside a ``perp_data`` struct. Read it separately so it works even
+    # when ``perp_data`` is absent (the common case for GMX V2 where each
+    # field is extracted individually, not wrapped in a PerpData object).
+    raw_funding = ctx.extracted.get("funding_fee_usd")
+    if raw_funding is None and perp is not None:
+        raw_funding = getattr(perp, "funding_fee_usd", None)
+
+    # Persist funding_fee_usd in attribution_json sidecar so
+    # run_attribution_on_close / attribute_perp can read it without a DB
+    # schema change. Only write when a value (including measured zero) is
+    # present — None means "unknown" and must not be silently promoted to 0.
+    if raw_funding is not None and event.event_type == "CLOSE":
+        try:
+            existing = json.loads(event.attribution_json or "{}")
+            if not isinstance(existing, dict):
+                existing = {}
+            existing["funding_fee_usd"] = str(raw_funding)
+            event.attribution_json = json.dumps(existing)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to stamp funding_fee_usd into attribution_json", exc_info=True)
+
     if not perp:
         return
 

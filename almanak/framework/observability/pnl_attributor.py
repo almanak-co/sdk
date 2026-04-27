@@ -45,8 +45,11 @@ Perp v2 formula::
     protocol_fees_usd= open.protocol_fees_usd + close.protocol_fees_usd
                        (perp_fee_usd component; gmx_v2 currently None)
     fee_pnl_usd      = -protocol_fees_usd when known, else None
-    funding_pnl_usd  = None (VIB-3205 follow-up)
-    net_pnl_usd      = price_pnl_usd + (fee_pnl_usd or 0) - total_gas
+    funding_pnl_usd  = -funding_fee_usd from close_event.attribution_json
+                       (stamped by _apply_perp from extract_funding_fee_usd;
+                        None until GMX V2 EventUtils decoder lands — VIB-3497)
+    net_pnl_usd      = price_pnl_usd + (fee_pnl_usd or 0)
+                       + (funding_pnl_usd or 0) - total_gas
 
 Missing-data semantics (critical)
 ---------------------------------
@@ -392,6 +395,37 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
     }
 
 
+def _funding_fee_from_close(close_event: dict) -> Decimal | None:
+    """Read ``funding_fee_usd`` stamped in the CLOSE event's ``attribution_json``.
+
+    ``_apply_perp`` (position_events.py) writes this value from the
+    ``funding_fee_usd`` key in ``result.extracted_data`` (VIB-3497). The
+    value is the accumulated funding cost in USD for the position lifecycle,
+    sourced from the receipt parser's ``extract_funding_fee_usd`` method.
+
+    Returns ``None`` when the key is absent (parser did not extract funding)
+    or when the value cannot be parsed — preserving the "unknown" semantic
+    rather than silently emitting zero.
+    """
+    raw = close_event.get("attribution_json")
+    if not raw or raw == "{}":
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    val = data.get("funding_fee_usd")
+    if val is None:
+        return None
+    try:
+        return Decimal(str(val))
+    except (InvalidOperation, ValueError, TypeError):
+        logger.warning("PnL attribution: malformed funding_fee_usd=%r in attribution_json, treating as unknown", val)
+        return None
+
+
 def attribute_perp(open_event: dict, close_event: dict) -> dict:
     """Compute perp PnL attribution from OPEN and CLOSE events.
 
@@ -401,6 +435,15 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
 
     Returns:
         Attribution dict with versioned breakdown.
+
+    Funding PnL (VIB-3497):
+        ``funding_pnl_usd`` is populated from the ``funding_fee_usd`` field
+        stamped in ``close_event["attribution_json"]`` by ``_apply_perp``
+        (position_events.py) when the receipt parser extracts it.
+        ``None`` means the parser did not yet emit a funding value (the
+        GMX V2 EventUtils decoder is prerequisite work). ``Decimal("0")``
+        means a measured zero (e.g. position held for <1 funding period).
+        ``net_pnl_usd`` includes ``funding_pnl_usd`` when known.
     """
     entry_price = _dec(open_event.get("entry_price") or close_event.get("entry_price"))
     mark_price = _dec(close_event.get("mark_price"))
@@ -423,13 +466,17 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
     fees_paid = _sum_protocol_fees(open_event, close_event)
     fee_pnl: Decimal | None = None if fees_paid is None else -fees_paid
 
-    # Funding PnL (VIB-3205): not populated from receipt data — funding
-    # accumulates continuously between open and close. Populating requires a
-    # time-series integrator that reads funding rate snapshots. Tracked as
-    # VIB-3214 ("Perp funding PnL tracking, VIB-3205 follow-up").
-    funding_pnl: Decimal | None = None
+    # Funding PnL (VIB-3497): accumulated funding cost for the position
+    # lifecycle. Sourced from the close event's attribution_json sidecar
+    # where _apply_perp stamps the receipt parser's funding_fee_usd.
+    # Negative convention: funding is a cost paid by the position holder,
+    # so funding_pnl_usd = -funding_fee_usd (deducted from net).
+    raw_funding = _funding_fee_from_close(close_event)
+    funding_pnl: Decimal | None = None if raw_funding is None else -raw_funding
 
-    net_pnl = price_pnl + (fee_pnl or Decimal("0")) - total_gas
+    # net_pnl includes funding when known. Using (x or 0) keeps the formula
+    # consistent: None (unknown) contributes 0 to net rather than crashing.
+    net_pnl = price_pnl + (fee_pnl or Decimal("0")) + (funding_pnl or Decimal("0")) - total_gas
 
     return {
         "version": CURRENT_VERSION,

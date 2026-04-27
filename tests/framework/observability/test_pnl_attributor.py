@@ -438,10 +438,156 @@ class TestFeePnlFromProtocolFees:
         }
         result = attribute_perp(open_evt, close_evt)
         assert result["fee_pnl_usd"] == "-8.50"
-        # funding_pnl_usd remains a declared follow-up placeholder
+        # funding_pnl_usd is None when no funding_fee_usd in attribution_json
         assert result["funding_pnl_usd"] is None
-        # net = 500 + (-8.50) - 2.00 = 489.50
+        # net = 500 + (-8.50) + 0 - 2.00 = 489.50
         assert result["net_pnl_usd"] == "489.50"
+
+
+# --- VIB-3497: funding PnL attribution tests ---
+
+
+class TestPerpFundingAttribution:
+    """VIB-3497: funding_pnl_usd wired from close_event attribution_json."""
+
+    def test_attribute_perp_with_funding_from_close_receipt(self):
+        """CLOSE event with funding_fee_usd in attribution_json — funding_pnl_usd
+        is populated and deducted from net_pnl_usd.
+
+        Simulates the case where the receipt parser has extracted a funding cost
+        and _apply_perp has stamped it into attribution_json. The attributor must:
+        - Set funding_pnl_usd = -funding_fee_usd (cost to position holder)
+        - Include it in net_pnl_usd
+        """
+        open_evt = {
+            "entry_price": "2000",
+            "is_long": True,
+            "gas_usd": "1.00",
+        }
+        # attribution_json carries funding_fee_usd = 12.50 (12.50 USD paid in funding)
+        close_evt = {
+            "mark_price": "2200",
+            "unrealized_pnl": "500",
+            "gas_usd": "1.00",
+            "attribution_json": json.dumps({"funding_fee_usd": "12.50"}),
+        }
+        result = attribute_perp(open_evt, close_evt)
+
+        assert result["funding_pnl_usd"] == "-12.50", (
+            "funding_pnl_usd must be -funding_fee_usd (cost is negative)"
+        )
+        # net = 500 + 0 (fee unknown) + (-12.50) - 2.00 = 485.50
+        assert result["net_pnl_usd"] == "485.50", (
+            "net_pnl_usd must include funding cost"
+        )
+        assert result["price_pnl_usd"] == "500"
+
+    def test_attribute_perp_funding_none_when_unavailable(self):
+        """No funding_fee_usd in attribution_json → funding_pnl_usd = None (not 0).
+
+        None means «parser did not extract funding» — distinct from Decimal('0')
+        which would mean «verified zero funding». Dashboards must surface this
+        as unknown rather than mis-reporting a zero cost.
+        """
+        open_evt = {
+            "entry_price": "2000",
+            "is_long": True,
+            "gas_usd": "1.00",
+        }
+        close_evt = {
+            "mark_price": "2200",
+            "unrealized_pnl": "500",
+            "gas_usd": "1.00",
+            # No attribution_json at all — parser did not extract funding
+        }
+        result = attribute_perp(open_evt, close_evt)
+
+        assert result["funding_pnl_usd"] is None, (
+            "Missing funding data must propagate as None, not 0. "
+            "None = unavailable; Decimal('0') = measured zero."
+        )
+        # net excludes the unknown funding term
+        assert result["net_pnl_usd"] == "498.00"  # 500 - 2.00
+
+    def test_attribute_perp_funding_zero_distinct_from_unknown(self):
+        """Measured zero funding (e.g. short hold) yields funding_pnl_usd = '0'.
+
+        When the parser emits Decimal('0') for funding_fee_usd (position held
+        for less than one funding period), funding_pnl_usd must be '0' (str),
+        not None. None vs '0' must not be conflated.
+        """
+        open_evt = {"entry_price": "2000", "is_long": True, "gas_usd": "0"}
+        close_evt = {
+            "mark_price": "2200",
+            "unrealized_pnl": "100",
+            "gas_usd": "0",
+            "attribution_json": json.dumps({"funding_fee_usd": "0"}),
+        }
+        result = attribute_perp(open_evt, close_evt)
+
+        assert result["funding_pnl_usd"] is not None, "Measured zero must not become None"
+        assert result["funding_pnl_usd"] == "0", "Measured zero funding_pnl_usd = '0'"
+        assert result["net_pnl_usd"] == "100"  # 100 + 0 + 0 - 0
+
+
+class TestGMXv2FundingFeeExtraction:
+    """VIB-3497: GMX V2 receipt parser funding fee extraction."""
+
+    def test_gmx_v2_extract_funding_fee_usd_returns_none_pending_decoder(self):
+        """GMX V2 extract_funding_fee_usd returns None until EventUtils decoder.
+
+        The GMX V2 PositionFeesCollected event encodes fundingFeeAmount via the
+        GMX EventUtils ABI library (dynamic key-value arrays). Implementing the
+        full EventUtils decoder is prerequisite work. Until it lands, the method
+        correctly returns None (unavailable) rather than 0 (measured zero).
+        """
+        from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+
+        parser = GMXv2ReceiptParser()
+
+        # Any receipt — including one with PositionDecrease logs — should
+        # return None from the current stub implementation.
+        receipt_with_decrease = {
+            "transactionHash": "0xabc",
+            "blockNumber": 12345678,
+            "logs": [
+                {
+                    "topics": [
+                        "0x07d51b51b408d7c62dcc47cc558da5ce6a6e0fd129a427ebce150f52b0e5171a",
+                    ],
+                    "data": "0x" + "00" * 512,
+                    "address": "0x" + "ab" * 20,
+                    "logIndex": 0,
+                }
+            ],
+        }
+        result = parser.extract_funding_fee_usd(receipt_with_decrease)
+
+        assert result is None, (
+            "extract_funding_fee_usd must return None (not 0) when EventUtils "
+            "decoder is not yet implemented. None = unavailable."
+        )
+
+    def test_gmx_v2_extract_funding_fee_usd_result_returns_extract_missing(self):
+        """extract_funding_fee_usd_result returns ExtractMissing (not ExtractError).
+
+        The fail-closed variant must propagate the stub's None as ExtractMissing
+        (benign «data not in receipt») rather than ExtractError (parse failure).
+        ExtractMissing allows the enricher to continue without raising
+        CriticalAccountingError in live mode.
+        """
+        from almanak.framework.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+        from almanak.framework.execution.extract_result import ExtractMissing
+
+        parser = GMXv2ReceiptParser()
+        receipt = {"transactionHash": "0xdef", "blockNumber": 1, "logs": []}
+
+        result = parser.extract_funding_fee_usd_result(receipt)
+
+        assert isinstance(result, ExtractMissing), (
+            "A None return from the stub must surface as ExtractMissing so the "
+            "enricher treats it as benign missing data, not an accounting error."
+        )
 
 
 class TestImpermanentLoss:

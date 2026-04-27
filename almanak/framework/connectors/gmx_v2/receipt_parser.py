@@ -567,6 +567,12 @@ class GMXv2ReceiptParser:
             # VIB-3204 — placeholder extract_protocol_fees returning None;
             # real perp-fee extraction lives in follow-up VIB-3211.
             "protocol_fees",
+            # VIB-3497 — funding fee USD at close. Returns None until the
+            # GMX V2 EventUtils ABI decoder is implemented (prerequisite work
+            # to decode PositionFeesCollected log). The pipeline is wired so
+            # that once the decoder lands, funding_fee_usd flows to
+            # PerpData.funding_fee_usd -> attribution_json -> funding_pnl_usd.
+            "funding_fee_usd",
         }
     )
 
@@ -1396,6 +1402,37 @@ class GMXv2ReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract fees paid: {e}")
             return None
+
+    def extract_funding_fee_usd_result(self, receipt: dict[str, Any]) -> "ExtractResult[Decimal]":
+        """Fail-closed variant of :meth:`extract_funding_fee_usd` — see VIB-3159."""
+        return self._wrap_extract(
+            self.extract_funding_fee_usd,
+            receipt,
+            "PositionFeesCollected EventUtils decoder not yet implemented",
+        )
+
+    def extract_funding_fee_usd(self, receipt: dict[str, Any]) -> Decimal | None:
+        """Extract accumulated funding fee in USD from a CLOSE receipt (VIB-3497).
+
+        GMX V2 emits a ``PositionFeesCollected`` event alongside every
+        ``PositionDecrease``. The ``fundingFeeAmount`` field (collateral token
+        units) lives inside that event's ``EventUtils.EventLogData`` payload,
+        which requires a full ABI decoder for the GMX V2 ``EventUtils`` library
+        (dynamic arrays of key-value pairs, not a simple flat ABI tuple).
+
+        Implementing that decoder is prerequisite work tracked separately.
+        Until it lands this method returns ``None`` — "funding cost unknown" —
+        which propagates honestly to ``funding_pnl_usd = None`` in attribution
+        instead of silently reporting ``0`` (measured zero).
+
+        The method is intentionally wired into the extraction pipeline so that
+        adding the EventUtils decoder in a follow-up ticket automatically
+        activates end-to-end funding attribution without further plumbing work.
+
+        Returns:
+            None — pending EventUtils decoder implementation.
+        """
+        return None
 
     # =============================================================================
     # Protocol Fee Extraction (VIB-3204)
