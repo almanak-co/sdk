@@ -526,19 +526,39 @@ class ProtocolFees:
         - ``perp_fee_usd``: perps open/close fee (not funding — that is
           tracked separately).
         - ``total_usd``: sum of all populated components. Callers should
-          use this when attributing net PnL.
+          use this when attributing net PnL. When ``unavailable_reason``
+          is set, ``total_usd`` is ``None`` (the fee exists but cannot be
+          measured from the on-chain receipt).
+
+    VIB-3495 — unavailability semantics:
+        - ``total_usd = None`` + ``unavailable_reason`` set: the parser
+          detected that fees exist but the on-chain data does not carry
+          the USD amount (e.g. Aerodrome pool-fee rate is off-chain).
+          Attribution must treat this as "unknown", not "zero". This is
+          DISTINCT from returning ``None`` from the parser entirely (which
+          means "this parser does not implement protocol-fee extraction at
+          all"). An explicit ProtocolFees with unavailable_reason signals
+          "we checked; the data isn't available in the receipt".
+        - ``total_usd = Decimal(0)`` with all components None: the
+          protocol verified zero fees were charged (e.g. Aave V3 supply).
+        - ``total_usd = Decimal(X > 0)``: measured fee amount.
 
     All amounts are *USD*. Raw token-denominated fees belong in
     ``extracted_data`` under protocol-specific keys; this struct is for
     attributing PnL impact.
     """
 
-    total_usd: Decimal
+    total_usd: Decimal | None
     swap_fee_usd: Decimal | None = None
     lp_fee_usd: Decimal | None = None
     lending_origination_fee_usd: Decimal | None = None
     vault_fee_usd: Decimal | None = None
     perp_fee_usd: Decimal | None = None
+    # VIB-3495: set when the fee is known to exist but cannot be measured
+    # from the on-chain receipt (e.g. "protocol_fee_not_emitted_in_receipt").
+    # When set, total_usd MUST be None.  Attribution preserves the
+    # "unknown" semantic instead of defaulting to zero.
+    unavailable_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the ``total_usd`` == sum-of-populated-components invariant.
@@ -554,7 +574,44 @@ class ProtocolFees:
         fields. If no components are populated, ``total_usd`` must be 0
         (vacuously true — the struct represents "nothing measured yet,
         but nothing detected either" = no fee).
+
+        VIB-3495: when ``unavailable_reason`` is set, ``total_usd`` must
+        be ``None`` and no component fields may be populated. This is the
+        "known-unknown" case.
         """
+        # VIB-3495: unavailable path — total_usd must be None, no components.
+        if self.unavailable_reason is not None:
+            if self.total_usd is not None:
+                raise ValueError(
+                    "ProtocolFees: when unavailable_reason is set, total_usd must be None. "
+                    f"Got total_usd={self.total_usd}"
+                )
+            components_with_values = [
+                name
+                for name, val in (
+                    ("swap_fee_usd", self.swap_fee_usd),
+                    ("lp_fee_usd", self.lp_fee_usd),
+                    ("lending_origination_fee_usd", self.lending_origination_fee_usd),
+                    ("vault_fee_usd", self.vault_fee_usd),
+                    ("perp_fee_usd", self.perp_fee_usd),
+                )
+                if val is not None
+            ]
+            if components_with_values:
+                raise ValueError(
+                    "ProtocolFees: when unavailable_reason is set, no component fields "
+                    f"may be populated. Got: {components_with_values}"
+                )
+            return
+
+        # Normal path — total_usd must be a non-negative Decimal.
+        if self.total_usd is None:
+            raise ValueError(
+                "ProtocolFees.total_usd must be a non-negative Decimal when "
+                "unavailable_reason is not set. Use unavailable_reason= for "
+                "the known-unknown case."
+            )
+
         components = (
             ("swap_fee_usd", self.swap_fee_usd),
             ("lp_fee_usd", self.lp_fee_usd),
@@ -585,10 +642,15 @@ class ProtocolFees:
                 f"vault_fee_usd={self.vault_fee_usd}, perp_fee_usd={self.perp_fee_usd}."
             )
 
+    @property
+    def is_unavailable(self) -> bool:
+        """True when the fee is known to exist but cannot be measured from receipt data."""
+        return self.unavailable_reason is not None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "total_usd": str(self.total_usd),
+            "total_usd": str(self.total_usd) if self.total_usd is not None else None,
             "swap_fee_usd": str(self.swap_fee_usd) if self.swap_fee_usd is not None else None,
             "lp_fee_usd": str(self.lp_fee_usd) if self.lp_fee_usd is not None else None,
             "lending_origination_fee_usd": (
@@ -596,6 +658,7 @@ class ProtocolFees:
             ),
             "vault_fee_usd": str(self.vault_fee_usd) if self.vault_fee_usd is not None else None,
             "perp_fee_usd": str(self.perp_fee_usd) if self.perp_fee_usd is not None else None,
+            "unavailable_reason": self.unavailable_reason,
         }
 
 

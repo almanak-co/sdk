@@ -18,6 +18,12 @@ The phase ordering is LOAD-BEARING and must not change:
                               liquidity, ticks, deposit amounts)
     δ  _apply_lp_close      : lp_close_data enrichment (received amounts,
                               fee coalescing)
+    δ- _apply_collect_fees  : VIB-3494 COLLECT_FEES-specific enrichment.
+                              Reads fee amounts from lp_close_data when
+                              the intent type is LP_COLLECT_FEES. MUST run
+                              after δ so the collect-only data path doesn't
+                              conflict with a close that already populated
+                              the same slots.
     ε  _apply_swap_fallback : swap_amounts fills ONLY empty token/amount
                               slots — MUST run AFTER γ so an LP_OPEN with
                               a co-occurring swap leg keeps its real pair
@@ -32,10 +38,13 @@ The phase ordering is LOAD-BEARING and must not change:
     η  _apply_protocol_fees : VIB-3205 protocol fee USD capture. Empty
                               string ("unknown") is DISTINCT from "0"
                               ("measured zero") — preserve that invariant.
+                              VIB-3495: explicit ProtocolFees with
+                              unavailable_reason also leaves the field as
+                              "" (known-unknown, not mis-reported as zero).
     θ                         final guard: no position_id → drop the event.
 
-Constraint (critical): γ → δ → ε → ζ → η ordering. Re-ordering ε before
-γ silently regresses the invariant called out above.
+Constraint (critical): γ → δ → δ- → ε → ζ → η ordering. Re-ordering ε
+before γ silently regresses the invariant called out above.
 """
 
 import json
@@ -302,7 +311,8 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase δ — enrich with lp_close_data.
 
     Reads received amounts and coalesces the parser-variant fee attribute
-    names (fees_token0 preferred, fee0 fallback) for both token sides.
+    names (fees0/fees1 canonical, fees_token0/fees_token1 legacy, fee0/fee1
+    older aliases) for both token sides.
 
     Fix #1710: an lp_open that already wrote amount0/amount1 (Phase γ) is
     never clobbered. If an extracted payload somehow carries BOTH
@@ -352,12 +362,15 @@ def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.amount0 = str(amount0_received)
     if not event.amount1 and amount1_received is not None:
         event.amount1 = str(amount1_received)
-    for fee_attr in ("fees_token0", "fee0"):
+    # Attribute name priority: fees0/fees1 (LPCloseData canonical, e.g. Curve),
+    # fees_token0/fees_token1 (legacy), fee0/fee1 (older aliases).
+    # ``is not None`` guard preserves measured-zero (fees0=0 is meaningful).
+    for fee_attr in ("fees0", "fees_token0", "fee0"):
         fee = getattr(lp_close, fee_attr, None)
         if fee is not None:
             event.fees_token0 = str(fee)
             break
-    for fee_attr in ("fees_token1", "fee1"):
+    for fee_attr in ("fees1", "fees_token1", "fee1"):
         fee = getattr(lp_close, fee_attr, None)
         if fee is not None:
             event.fees_token1 = str(fee)
@@ -455,6 +468,66 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.position_id = new_pid
 
 
+def _apply_collect_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase δ-alt — enrich COLLECT_FEES events with fee amounts.
+
+    VIB-3494: LP_COLLECT_FEES intents produce COLLECT_FEES position events.
+    Fee amounts are read from ``lp_close_data`` (the same data class used by
+    LP_CLOSE — a fee-collect receipt uses the same Collect/Burn events as a
+    close). The field priority is:
+
+        fees_token0 / fee0 on lp_close_data  →  event.fees_token0
+        fees_token1 / fee1 on lp_close_data  →  event.fees_token1
+        amount0_collected / amount0_received →  event.amount0 (total collected)
+        amount1_collected / amount1_received →  event.amount1
+
+    For protocols where fee collection is always bundled with the close (no
+    standalone collect intent is possible), this phase is still called but
+    amount0/amount1 will already be populated by ``_apply_lp_close``, so the
+    collect amounts won't double-write. The fee-specific fields (fees_token0/
+    fees_token1) are populated unconditionally when present.
+
+    Note: time-weighted fee APY is computed post-hoc by
+    ``compute_fee_apy()`` in ``pnl_attributor.py``, which queries all
+    COLLECT_FEES events for a position and divides total fees_usd by the
+    hold duration and principal.
+    """
+    if event.event_type != "COLLECT_FEES":
+        return
+
+    lp_close = ctx.extracted.get("lp_close_data")
+    if not lp_close:
+        return
+
+    # Received amounts (principal + fees in a collect-only TX)
+    amount0_received = getattr(lp_close, "amount0_received", None)
+    if amount0_received is None:
+        amount0_received = getattr(lp_close, "amount0_collected", None)
+    amount1_received = getattr(lp_close, "amount1_received", None)
+    if amount1_received is None:
+        amount1_received = getattr(lp_close, "amount1_collected", None)
+
+    if not event.amount0 and amount0_received is not None:
+        event.amount0 = str(amount0_received)
+    if not event.amount1 and amount1_received is not None:
+        event.amount1 = str(amount1_received)
+
+    # Fee-specific fields (may be zero when protocol doesn't separate them).
+    # Attribute name priority matches LPCloseData (fees0/fees1), legacy
+    # parser names (fees_token0/fees_token1), and older aliases (fee0/fee1).
+    # ``is not None`` guard preserves measured-zero (fees0=0 is meaningful).
+    for fee_attr in ("fees0", "fees_token0", "fee0"):
+        fee = getattr(lp_close, fee_attr, None)
+        if fee is not None:
+            event.fees_token0 = str(fee)
+            break
+    for fee_attr in ("fees1", "fees_token1", "fee1"):
+        fee = getattr(lp_close, fee_attr, None)
+        if fee is not None:
+            event.fees_token1 = str(fee)
+            break
+
+
 def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase η — VIB-3205 protocol fee capture.
 
@@ -462,9 +535,19 @@ def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
     ``protocol_fees`` leaves the field as "" (unknown); a parser that
     measures and reports a zero fee sets it to "0" (measured zero). The
     two are semantically different to downstream PnL attribution.
+
+    VIB-3495: a parser that emits ``ProtocolFees(unavailable_reason=...)``
+    signals "I checked but the on-chain data does not carry the fee amount".
+    This is distinct from returning ``None`` (parser not implemented).
+    Both leave the field as "" (unknown) so attribution emits fee_pnl=None,
+    but the explicit ProtocolFees form is testable and self-documenting.
     """
     protocol_fees = ctx.extracted.get("protocol_fees")
     if protocol_fees is None or not hasattr(protocol_fees, "total_usd"):
+        return
+    # VIB-3495: explicit "known-unknown" — fee exists but receipt data is
+    # insufficient to measure it. Leave protocol_fees_usd as "" (unknown).
+    if getattr(protocol_fees, "is_unavailable", False):
         return
     total_usd = getattr(protocol_fees, "total_usd", None)
     if total_usd is not None:
@@ -507,9 +590,10 @@ def build_position_event_from_intent(
     if not extracted:
         return event if event.position_id else None
 
-    # γ → δ → ε → ζ → η (ordering load-bearing).
+    # γ → δ → δ-alt → ε → ζ → η (ordering load-bearing).
     _apply_lp_open(event, ctx)
     _apply_lp_close(event, ctx)
+    _apply_collect_fees(event, ctx)  # VIB-3494: COLLECT_FEES enrichment
     _apply_swap_fallback(event, ctx)
     _apply_perp(event, ctx)
     _apply_protocol_fees(event, ctx)

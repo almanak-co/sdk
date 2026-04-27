@@ -20,7 +20,7 @@ from almanak.framework.execution.extract_result import (
 )
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.utils.log_formatters import (
     format_gas_cost,
@@ -1666,20 +1666,30 @@ class AerodromeReceiptParser:
     # Protocol Fee Extraction (VIB-3204)
     # =============================================================================
 
-    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
-        """Placeholder for Aerodrome protocol-fee extraction (VIB-3204).
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> "ProtocolFees":
+        """VIB-3495: Aerodrome LP protocol fee coverage audit.
 
-        Aerodrome uses stable vs volatile pool-level fees (0.05% / 0.3%)
-        that are not exposed in the standard Swap event — they require a
-        second call into the pool metadata. Resolving the pool -> fee
-        mapping at the receipt-parser layer is deferred to a follow-up;
-        this method returns ``None`` so the enricher skips the field
-        cleanly without polluting extraction_warnings.
+        Aerodrome V1 (Solidly fork) charges stable vs volatile pool-level
+        fees (0.05% / 0.3%) on swaps. The fee is charged inside the pool's
+        swap() function and is NOT emitted as a distinct on-chain event —
+        neither the Swap event nor the Transfer events carry the fee amount
+        separately from the net amounts. Resolving the USD fee amount would
+        require (a) reading the pool's fee-rate slot and (b) a price oracle,
+        neither of which is available at the receipt-parser layer.
 
-        Follow-up ticket: "Aerodrome pool-fee resolution in receipt parser
-        — follow-up to VIB-3204".
+        Returns a ProtocolFees with unavailable_reason so downstream
+        attribution records "known-unknown" rather than "parser absent"
+        (which was the old behaviour when this method returned None).
         """
-        return None
+        from almanak.framework.execution.extracted_data import ProtocolFees
+
+        # VIB-3495: Aerodrome V1 fee rate is in pool storage (not the receipt).
+        # The fee amount in token units is implicit in the Swap event's
+        # amount_in vs amount_out gap, but USD conversion is unavailable here.
+        return ProtocolFees(
+            total_usd=None,
+            unavailable_reason="protocol_fee_not_emitted_in_receipt",
+        )
 
     # Backward compatibility methods
     def is_aerodrome_event(self, topic: str | bytes) -> bool:

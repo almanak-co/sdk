@@ -314,6 +314,107 @@ def compute_impermanent_loss(open_event: dict, close_event: dict) -> Decimal | N
     return v_lp - hodl
 
 
+def compute_fee_apy(
+    open_event: dict,
+    collect_events: list[dict],
+    close_event: dict | None = None,
+) -> Decimal | None:
+    """Compute time-weighted fee APY for an LP position.
+
+    VIB-3494: uses COLLECT_FEES events (and optionally a CLOSE event that
+    includes fees) to compute annualised fee yield over the hold period.
+
+    Formula::
+
+        total_fees_usd  = sum of fees_token0_usd + fees_token1_usd across
+                          all collect events.  USD values are derived from
+                          the event's ``value_usd`` field when fee-specific
+                          USD fields are absent (conservative approximation).
+        hold_days       = (last_collect_timestamp - open_timestamp).total_seconds
+                          / 86_400  (clamped to ≥ 1 day to avoid div-by-zero)
+        principal_usd   = open_event["value_usd"]
+        apy             = (total_fees_usd / principal_usd) / hold_days * 365
+
+    Returns:
+        Annualised fee APY as a Decimal (e.g. ``Decimal("0.12")`` = 12 %),
+        or ``None`` when inputs are insufficient (no collect events, zero
+        principal, missing timestamps).
+
+    Note: this is a *realised* APY over the hold period, not a projected APY.
+    Fee amounts are token-denominated on the raw events; USD conversion is
+    approximated from the event's ``value_usd`` when available.
+
+    When ``close_event`` is provided, its ``value_usd`` is added to the fee
+    sum (for protocols that bundle fee collection into the close TX), and its
+    timestamp is used as the end of the hold period when it is later than the
+    last collect event's timestamp.
+    """
+    if not collect_events:
+        return None
+
+    principal_usd = _dec(open_event.get("value_usd"))
+    if principal_usd <= 0:
+        return None
+
+    # Sum fees across all collect events.  value_usd on a COLLECT_FEES event
+    # represents the total USD value of fees collected in that transaction.
+    total_fees_usd = Decimal("0")
+    for evt in collect_events:
+        fee_usd = _dec(evt.get("value_usd"))
+        total_fees_usd += fee_usd
+    # Include close_event fees when the close TX also collects (e.g. Uniswap V3
+    # RemoveLiquidity bundles the accrued fee into the close).
+    if close_event is not None:
+        total_fees_usd += _dec(close_event.get("value_usd"))
+
+    if total_fees_usd <= 0:
+        return None
+
+    # Compute hold duration from open to the latest of the collect events
+    # and the close event (if provided).
+    open_ts_raw = open_event.get("timestamp")
+    if not open_ts_raw:
+        return None
+
+    # Build candidate end timestamps.  Use the latest available.
+    end_ts_candidates: list[object] = [evt.get("timestamp") for evt in collect_events if evt.get("timestamp")]
+    if close_event is not None and close_event.get("timestamp"):
+        end_ts_candidates.append(close_event.get("timestamp"))
+    if not end_ts_candidates:
+        return None
+
+    try:
+        from datetime import datetime
+
+        def _parse_ts(raw: object) -> datetime | None:
+            if isinstance(raw, datetime):
+                return raw
+            if isinstance(raw, str):
+                return datetime.fromisoformat(raw)
+            return None
+
+        open_dt = _parse_ts(open_ts_raw)
+        if open_dt is None:
+            return None
+
+        end_dts = [_parse_ts(ts) for ts in end_ts_candidates]
+        end_dts_valid = [dt for dt in end_dts if dt is not None]
+        if not end_dts_valid:
+            return None
+
+        last_dt = max(end_dts_valid)
+        hold_seconds = (last_dt - open_dt).total_seconds()
+        hold_days = Decimal(str(max(hold_seconds / 86_400, 1.0)))  # floor at 1 day
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    try:
+        apy = (total_fees_usd / principal_usd) / hold_days * Decimal("365")
+        return apy
+    except ZeroDivisionError:
+        return None
+
+
 def attribute_lp(open_event: dict, close_event: dict) -> dict:
     """Compute LP PnL attribution from OPEN and CLOSE events.
 

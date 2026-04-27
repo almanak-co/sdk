@@ -15,7 +15,7 @@ from almanak.framework.connectors.base import EventRegistry, HexDecoder
 from almanak.framework.data.tokens import get_token_resolver
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -819,6 +819,36 @@ class TraderJoeV2ReceiptParser:
         except Exception as e:  # noqa: BLE001  # Defensive: graceful degradation for extraction
             logger.warning(f"Failed to extract collected fees: {e}")
             return None
+
+    def extract_protocol_fees(self, receipt: dict[str, Any]) -> "ProtocolFees":
+        """VIB-3495: TraderJoe V2 LP protocol fee coverage audit.
+
+        TraderJoe V2 (Liquidity Book) charges a swap fee on trades that
+        traverse active bins; this fee accrues to LPs and is claimable via
+        ``collectFees()`` / ``ClaimedFees`` events. The ``ClaimedFees`` event
+        carries bin-level amounts as packed ``bytes32[]`` and ERC-20 Transfer
+        events carry the actual token amounts — but there is no on-chain
+        protocol-level fee (the fee IS the LP reward). Since there is no
+        on-chain USD price for the fee amounts available at the receipt layer,
+        the USD amount is unavailable.
+
+        Returns a ProtocolFees with unavailable_reason so downstream
+        attribution records "known-unknown" rather than silently omitting
+        the field (which would set protocol_fees_usd="" and produce
+        fee_pnl=None in PnL attribution — the correct outcome, but now
+        explicitly flagged by the parser rather than by parser absence).
+        """
+        from almanak.framework.execution.extracted_data import ProtocolFees
+
+        # VIB-3495: TJ V2 fee amounts are available as raw token units in
+        # ClaimedFees + Transfer events, but USD conversion requires a price
+        # oracle that is not available at the receipt-parser layer. The fee
+        # exists (TJ V2 always charges a non-zero LP fee on swaps) but we
+        # cannot report total_usd without a price source.
+        return ProtocolFees(
+            total_usd=None,
+            unavailable_reason="protocol_fee_not_emitted_in_receipt",
+        )
 
     def extract_fees0(self, receipt: dict[str, Any]) -> int | None:
         """Extract fee amount for token X from fee collection receipt.

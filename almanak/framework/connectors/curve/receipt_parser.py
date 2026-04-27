@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -980,6 +980,30 @@ class CurveReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
+
+    def extract_protocol_fees(self, receipt: dict[str, Any]) -> "ProtocolFees":
+        """VIB-3495: Curve Finance LP protocol fee coverage audit.
+
+        Curve NG pools encode ``fees`` arrays in AddLiquidity/RemoveLiquidity
+        events, but these are LP-accrued fee amounts in token units — NOT a
+        USD-denominated protocol fee. Additionally, Curve charges an admin fee
+        (a cut of the LP fee) that is retained by the DAO, but this is not
+        emitted in any receipt event. Converting token amounts to USD requires
+        a price oracle unavailable at the receipt-parser layer.
+
+        Returns a ProtocolFees with unavailable_reason so downstream
+        attribution records "known-unknown" rather than "parser absent"
+        (returning None was the pre-VIB-3495 behaviour).
+        """
+        from almanak.framework.execution.extracted_data import ProtocolFees
+
+        # VIB-3495: Curve fee amounts in token units are available in NG
+        # AddLiquidity/RemoveLiquidity events, but USD conversion requires
+        # a price oracle. Old-style Twocrypto pools don't emit fees at all.
+        return ProtocolFees(
+            total_usd=None,
+            unavailable_reason="protocol_fee_not_emitted_in_receipt",
+        )
 
     # Backward compatibility methods
     def is_curve_event(self, topic: str | bytes) -> bool:

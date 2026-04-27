@@ -95,6 +95,7 @@ class TestProtocolFees:
             "lending_origination_fee_usd": None,
             "vault_fee_usd": None,
             "perp_fee_usd": None,
+            "unavailable_reason": None,  # VIB-3495: new field, None for measured fees
         }
 
     def test_to_dict_distinguishes_zero_from_none(self):
