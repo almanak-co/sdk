@@ -10,6 +10,11 @@ Before-state: None — we capture after-state only via a post-execution gateway 
 After-state (Aave V3): Pool.getUserAccountData — one call gives collateral_usd,
                         debt_usd, health_factor, liquidation_threshold.
 
+After-state (Morpho Blue): position(id, user) + market(id) — two calls give collateral
+                            (raw units), borrow shares, and market totals needed to
+                            convert shares → assets. lltv comes from the market params
+                            stored in the adapter registry.
+
 FIFO interest attribution:
   BORROW → record_borrow() adds a principal lot to FIFOBasisStore.
   REPAY  → match_repay() consumes lots FIFO; interest = repay_amount − principal_consumed.
@@ -38,8 +43,17 @@ _AAVE_GET_ACCOUNT_DATA_SELECTOR = "0xbf92857c"
 _AAVE_USD_SCALE = Decimal("1e8")  # 8-decimal USD base unit
 _AAVE_HF_SCALE = Decimal("1e18")  # 1.0 HF = 1e18
 
+# ─── Morpho Blue position/market selectors (VIB-3483) ─────────────────────────
+# position(bytes32 id, address user) → (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
+_MORPHO_POSITION_SELECTOR = "0x93c52062"
+# market(bytes32 id) → (uint128 totalSupplyAssets, uint128 totalSupplyShares,
+#                        uint128 totalBorrowAssets, uint128 totalBorrowShares,
+#                        uint128 lastUpdate, uint128 fee)
+_MORPHO_MARKET_SELECTOR = "0x5c60e39a"
+_MORPHO_LLTV_SCALE = Decimal("1e18")  # lltv is 1e18-scaled
+
 # ─── Lending intent types ──────────────────────────────────────────────────────
-_LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"})
+_LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DELEVERAGE"})
 
 # ─── Chain native gas token (for gas_usd conversion) ──────────────────────────
 _CHAIN_NATIVE_TOKEN: dict[str, str] = {
@@ -139,6 +153,173 @@ def read_aave_account_state(
         return None
 
 
+@dataclass
+class MorphoBlueAccountState:
+    """Post-execution position summary from Morpho Blue position() + market() calls."""
+
+    collateral_usd: Decimal
+    debt_usd: Decimal
+    health_factor: Decimal  # normalised (1.0 = healthy); None-sentinel if no debt
+    lltv: Decimal  # liquidation LTV as a fraction (e.g. 0.86 for 86%)
+
+
+def _normalize_market_id_hex(market_id: str) -> str:
+    """Return the 32-byte market ID as 64 lowercase hex chars (no 0x prefix)."""
+    raw = market_id.lower().replace("0x", "")
+    return raw.zfill(64)
+
+
+def read_morpho_blue_account_state(
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+    market_id: str,
+    collateral_token: str,
+    loan_token: str,
+    collateral_decimals: int,
+    loan_decimals: int,
+    lltv_raw: int,
+    price_oracle: dict | None,
+) -> MorphoBlueAccountState | None:
+    """Read Morpho Blue position and market state for *wallet_address* via gateway.
+
+    Makes two eth_call reads against the Morpho Blue contract:
+      1. position(bytes32 id, address user) — borrowShares, collateral (raw uint128)
+      2. market(bytes32 id)                 — totalBorrowAssets, totalBorrowShares (uint128)
+
+    Then computes:
+      borrow_assets = borrowShares * totalBorrowAssets / totalBorrowShares
+      collateral_value_usd = collateral_amount_human * collateral_price_usd
+      debt_value_usd = borrow_amount_human * loan_price_usd
+      health_factor  = (collateral_value_usd * lltv) / debt_value_usd
+
+    Returns None (with debug log) if any gateway call fails.
+    Returns None for health_factor (no-debt sentinel) when borrow_shares == 0.
+
+    Args:
+        gateway_client: Gateway client exposing eth_call(chain, to, data).
+        chain: Chain name (e.g. "ethereum", "arbitrum").
+        wallet_address: Position owner address.
+        market_id: Morpho Blue market ID (bytes32 hex, with or without 0x).
+        collateral_token: Collateral token symbol (for price lookup).
+        loan_token: Loan token symbol (for price lookup).
+        collateral_decimals: Decimals for collateral token.
+        loan_decimals: Decimals for loan token.
+        lltv_raw: Raw LLTV from market params (1e18-scaled int, e.g. 860000000000000000 = 86%).
+        price_oracle: Dict mapping token symbol → USD price (Decimal or float).
+
+    Returns:
+        MorphoBlueAccountState or None on failure.
+    """
+    try:
+        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
+
+        morpho_address = MORPHO_BLUE_ADDRESSES.get(chain.lower())
+        if not morpho_address:
+            logger.debug("read_morpho_blue_account_state: no Morpho Blue address for chain=%s", chain)
+            return None
+
+        market_hex = _normalize_market_id_hex(market_id)
+        user_hex = _pad_address(wallet_address)
+
+        # ── Call 1: position(bytes32 id, address user) ──────────────────────
+        position_calldata = _MORPHO_POSITION_SELECTOR + market_hex + user_hex
+        position_raw = _gateway_eth_call(gateway_client, chain, morpho_address, position_calldata)
+        if not position_raw:
+            logger.debug("read_morpho_blue_account_state: position() call failed for market=%s", market_id[:18])
+            return None
+        pos_hex = position_raw.replace("0x", "")
+        if len(pos_hex) < 3 * 64:
+            logger.debug("read_morpho_blue_account_state: position() response too short (%d chars)", len(pos_hex))
+            return None
+
+        # Word layout:
+        #   [0]  supplyShares (uint256) — not used here
+        #   [1]  borrowShares (uint128 padded to 256)
+        #   [2]  collateral   (uint128 padded to 256)
+        borrow_shares = _decode_word(pos_hex, 1)
+        collateral_raw = _decode_word(pos_hex, 2)
+
+        # ── Call 2: market(bytes32 id) ───────────────────────────────────────
+        # market() returns the Market struct as 6 ABI-encoded uint128 values.
+        # Standard Solidity ABI encoding pads each uint128 to a full 32-byte word:
+        #   Word 0 (hex [0:64]):    totalSupplyAssets
+        #   Word 1 (hex [64:128]):  totalSupplyShares
+        #   Word 2 (hex [128:192]): totalBorrowAssets
+        #   Word 3 (hex [192:256]): totalBorrowShares
+        #   Word 4 (hex [256:320]): lastUpdate
+        #   Word 5 (hex [320:384]): fee
+        market_calldata = _MORPHO_MARKET_SELECTOR + market_hex
+        market_raw = _gateway_eth_call(gateway_client, chain, morpho_address, market_calldata)
+        if not market_raw:
+            logger.debug("read_morpho_blue_account_state: market() call failed for market=%s", market_id[:18])
+            return None
+        mkt_hex = market_raw.replace("0x", "")
+        if len(mkt_hex) < 6 * 64:  # 6 words × 64 hex chars each
+            logger.debug("read_morpho_blue_account_state: market() response too short (%d chars)", len(mkt_hex))
+            return None
+
+        # Each uint128 occupies the lower 16 bytes of a 32-byte slot, but ABI-encoded
+        # as a 32-byte word with leading zeros. The market() return is 6 separate
+        # uint128 values packed as 6 full 32-byte (64 hex-char) words.
+        total_borrow_assets = int(mkt_hex[128:192], 16)  # word index 2
+        total_borrow_shares = int(mkt_hex[192:256], 16)  # word index 3
+
+        # ── shares → assets ──────────────────────────────────────────────────
+        if borrow_shares == 0:
+            borrow_assets = 0
+        elif total_borrow_shares == 0:
+            borrow_assets = 0
+        else:
+            # Round up to be conservative — never under-count debt
+            borrow_assets = (borrow_shares * total_borrow_assets + total_borrow_shares - 1) // total_borrow_shares
+
+        # ── Convert raw amounts to human-decimal ─────────────────────────────
+        collateral_amount = Decimal(collateral_raw) / Decimal(10**collateral_decimals)
+        borrow_amount = Decimal(borrow_assets) / Decimal(10**loan_decimals)
+
+        # ── USD values via price oracle ───────────────────────────────────────
+        collateral_price = None
+        loan_price = None
+        if price_oracle is not None:
+            collateral_price = price_oracle.get(collateral_token.upper()) or price_oracle.get(collateral_token.lower())
+            loan_price = price_oracle.get(loan_token.upper()) or price_oracle.get(loan_token.lower())
+
+        if collateral_price is None or loan_price is None:
+            logger.debug(
+                "read_morpho_blue_account_state: price not available for collateral=%s loan=%s",
+                collateral_token,
+                loan_token,
+            )
+            return None
+
+        collateral_value_usd = collateral_amount * Decimal(str(collateral_price))
+        debt_value_usd = borrow_amount * Decimal(str(loan_price))
+
+        # ── LLTV and health factor ─────────────────────────────────────────────
+        lltv = Decimal(lltv_raw) / _MORPHO_LLTV_SCALE
+
+        if borrow_shares == 0 or debt_value_usd == 0:
+            # No debt — health factor is undefined (infinite). Return a sentinel.
+            health_factor = Decimal("999999")
+        else:
+            health_factor = (collateral_value_usd * lltv) / debt_value_usd
+
+        # Cap unrealistically large HF (avoid overflow in serialisation)
+        health_factor = min(health_factor, Decimal("999999"))
+
+        return MorphoBlueAccountState(
+            collateral_usd=collateral_value_usd,
+            debt_usd=debt_value_usd,
+            health_factor=health_factor,
+            lltv=lltv,
+        )
+
+    except Exception:
+        logger.debug("read_morpho_blue_account_state failed", exc_info=True)
+        return None
+
+
 def _derive_position_key(protocol: str, chain: str, wallet: str, market_id: str | None, asset: str) -> str:
     """Canonical position key for a lending position."""
     parts = ["lending", chain.lower(), protocol.lower(), wallet.lower()]
@@ -180,6 +361,7 @@ def _to_lending_event_type(intent_type_str: str):
         "BORROW": LendingEventType.BORROW,
         "REPAY": LendingEventType.REPAY,
         "WITHDRAW": LendingEventType.WITHDRAW,
+        "DELEVERAGE": LendingEventType.DELEVERAGE,
     }
     return _MAP.get(intent_type_str.upper())
 
@@ -324,7 +506,8 @@ def build_lending_accounting_event(
             )
             interest_delta_usd = None  # interest accrues, not known at borrow time
 
-        elif intent_type_str == "REPAY":
+        elif intent_type_str in ("REPAY", "DELEVERAGE"):
+            # DELEVERAGE is structurally a repay: it reduces an open borrow lot.
             match_result = basis_store.match_repay(
                 deployment_id=deployment_id,
                 position_key=position_key,
@@ -334,7 +517,8 @@ def build_lending_accounting_event(
             if match_result.unmatched_amount > 0:
                 # No basis lots → interest is UNAVAILABLE, not zero
                 logger.debug(
-                    "REPAY unmatched for %s: unmatched=%.6f (no BORROW lots recorded)",
+                    "%s unmatched for %s: unmatched=%.6f (no BORROW lots recorded)",
+                    intent_type_str,
                     position_key,
                     match_result.unmatched_amount,
                 )
@@ -347,28 +531,152 @@ def build_lending_accounting_event(
         elif intent_type_str in ("SUPPLY", "WITHDRAW"):
             principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
 
-    # ── After-state: Aave V3 getUserAccountData ───────────────────────────────
-    after_state: AaveAccountState | None = None
+    # ── After-state: protocol-specific on-chain read ─────────────────────────
+    aave_state: AaveAccountState | None = None
+    morpho_state: MorphoBlueAccountState | None = None
+    morpho_unavailable_reason: str = ""
+
     # Only query getUserAccountData for protocols whose pool address resolves via
     # AAVE_V3_POOL_ADDRESSES. Spark and Radiant V2 use different pool contracts;
     # querying the Aave V3 pool for those protocols returns wrong data with HIGH
     # confidence. Add their addresses to a separate registry when ready.
     is_aave = protocol.lower() in ("aave_v3", "aave")
-    if is_aave and gateway_client is not None:
-        after_state = read_aave_account_state(gateway_client, chain, wallet_address)
+    is_morpho = protocol.lower() == "morpho_blue"
 
-    collateral_after = after_state.collateral_usd if after_state else None
-    debt_after = after_state.debt_usd if after_state else None
+    if is_aave and gateway_client is not None:
+        aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
+
+    if is_morpho and gateway_client is not None and intent_type_str in ("BORROW", "REPAY", "DELEVERAGE"):
+        # Morpho Blue HF persistence (VIB-3483): requires market_id, collateral/loan
+        # token symbols and decimals, and lltv from the market registry.
+        if not market_id:
+            morpho_unavailable_reason = "market_id missing from intent — cannot read Morpho Blue position"
+            logger.debug("read_morpho_blue_account_state skipped: %s", morpho_unavailable_reason)
+        else:
+            # Resolve collateral/loan token info from the intent and market registry.
+            collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
+            loan_token_sym: str | None = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+
+            # Try to get market params from adapter registry for decimals + lltv.
+            _collateral_decimals: int | None = None
+            _loan_decimals: int | None = None
+            _lltv_raw: int | None = None
+
+            try:
+                from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+
+                _markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
+                _market_info: dict | None = None
+                for _mid, _info in _markets_for_chain.items():
+                    if _mid.lower().lstrip("0x") == market_id.lower().lstrip("0x"):
+                        _market_info = _info
+                        break
+
+                if _market_info is not None:
+                    if collateral_token_sym is None:
+                        collateral_token_sym = _market_info.get("collateral_token")
+                    if loan_token_sym is None:
+                        loan_token_sym = _market_info.get("loan_token")
+                    _lltv_raw = _market_info.get("lltv")
+
+                    # Resolve decimals via token resolver
+                    try:
+                        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+                        _resolver = get_token_resolver()
+                        if collateral_token_sym:
+                            _ct = _resolver.resolve(collateral_token_sym, chain=chain)
+                            if _ct:
+                                _collateral_decimals = _ct.decimals
+                        if loan_token_sym:
+                            _lt = _resolver.resolve(loan_token_sym, chain=chain)
+                            if _lt:
+                                _loan_decimals = _lt.decimals
+                    except Exception:
+                        logger.debug("token resolver failed for Morpho Blue HF read", exc_info=True)
+
+            except Exception:
+                logger.debug("MORPHO_MARKETS lookup failed for chain=%s", chain, exc_info=True)
+
+            # Only proceed if we have all required inputs
+            if (
+                collateral_token_sym
+                and loan_token_sym
+                and _collateral_decimals is not None
+                and _loan_decimals is not None
+                and _lltv_raw is not None
+            ):
+                morpho_state = read_morpho_blue_account_state(
+                    gateway_client=gateway_client,
+                    chain=chain,
+                    wallet_address=wallet_address,
+                    market_id=market_id,
+                    collateral_token=collateral_token_sym,
+                    loan_token=loan_token_sym,
+                    collateral_decimals=_collateral_decimals,
+                    loan_decimals=_loan_decimals,
+                    lltv_raw=_lltv_raw,
+                    price_oracle=price_oracle,
+                )
+                if morpho_state is None:
+                    morpho_unavailable_reason = "Morpho Blue position/market gateway read failed"
+            else:
+                morpho_unavailable_reason = "Morpho Blue HF read skipped: missing " + (
+                    ", ".join(
+                        x
+                        for x, v in [
+                            ("collateral_token", collateral_token_sym),
+                            ("loan_token", loan_token_sym),
+                            ("collateral_decimals", _collateral_decimals),
+                            ("loan_decimals", _loan_decimals),
+                            ("lltv", _lltv_raw),
+                        ]
+                        if not v
+                    )
+                )
+                logger.debug("read_morpho_blue_account_state skipped: %s", morpho_unavailable_reason)
+
+    # ── Unify after-state fields from whichever protocol provided data ────────
+    # Priority: Aave state > Morpho state > None
+    got_after_state = aave_state is not None or morpho_state is not None
+
+    if aave_state is not None:
+        collateral_after: Decimal | None = aave_state.collateral_usd
+        debt_after: Decimal | None = aave_state.debt_usd
+        hf_after: Decimal | None = aave_state.health_factor
+        lt_bps: int | None = aave_state.liquidation_threshold_bps
+        liquidation_threshold: Decimal | None = Decimal(lt_bps) / Decimal("10000") if lt_bps is not None else None
+        lltv_after: Decimal | None = None
+    elif morpho_state is not None:
+        collateral_after = morpho_state.collateral_usd
+        debt_after = morpho_state.debt_usd
+        # health_factor = 999999 is the no-debt sentinel — store None for "undefined HF" only
+        # when borrow is truly zero (callers must not use HF == 999999 as a trigger).
+        hf_after = morpho_state.health_factor
+        lt_bps = None  # Morpho Blue uses lltv directly, not lt_bps
+        liquidation_threshold = morpho_state.lltv  # LLTV serves as liquidation_threshold
+        lltv_after = morpho_state.lltv
+    else:
+        collateral_after = None
+        debt_after = None
+        hf_after = None
+        lt_bps = None
+        liquidation_threshold = None
+        lltv_after = None
+
     net_equity_after = (
         (collateral_after - debt_after) if (collateral_after is not None and debt_after is not None) else None
     )
-    hf_after = after_state.health_factor if after_state else None
-    lt_bps = after_state.liquidation_threshold_bps if after_state else None
-    liquidation_threshold = Decimal(lt_bps) / Decimal("10000") if lt_bps is not None else None
 
     # Confidence: HIGH if we got a live after-state read, ESTIMATED otherwise
-    confidence = AccountingConfidence.HIGH if after_state is not None else AccountingConfidence.ESTIMATED
-    unavailable_reason = "" if after_state is not None else "post-execution on-chain read unavailable"
+    confidence = AccountingConfidence.HIGH if got_after_state else AccountingConfidence.ESTIMATED
+    if not got_after_state:
+        if is_morpho and morpho_unavailable_reason:
+            unavailable_reason = morpho_unavailable_reason
+        else:
+            unavailable_reason = "post-execution on-chain read unavailable"
+    else:
+        unavailable_reason = ""
 
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
@@ -400,7 +708,7 @@ def build_lending_accounting_event(
         health_factor_before=None,
         health_factor_after=hf_after,
         liquidation_threshold=liquidation_threshold,
-        lltv=None,
+        lltv=lltv_after,
         supply_apr_bps=supply_apr_bps,
         borrow_apr_bps=borrow_apr_bps,
         principal_delta_usd=principal_delta_usd,
