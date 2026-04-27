@@ -12,18 +12,23 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.accounting.lp_accounting import LPAccountingEvent
 from almanak.framework.accounting.models import (
     AccountingConfidence,
     LendingAccountingEvent,
     PendleAccountingEvent,
 )
+from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
+from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
 
-AccountingEvent = LendingAccountingEvent | PendleAccountingEvent
+AccountingEvent = (
+    LendingAccountingEvent | PendleAccountingEvent | LPAccountingEvent | PerpAccountingEvent | VaultAccountingEvent
+)
 
 
 class AccountingWriter:

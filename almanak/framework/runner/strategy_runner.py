@@ -2432,6 +2432,190 @@ class StrategyRunner:
         except Exception:
             logger.warning("Pendle PT redeem accounting write failed (non-blocking)", exc_info=True)
 
+    def _accounting_context(self, strategy: "StrategyProtocol") -> tuple[str, str, str, str, str]:
+        """Return (deployment_id, cycle_id, execution_mode, chain, wallet_address) for accounting builders."""
+        from ..observability.context import get_cycle_id
+
+        deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+        cycle_id = get_cycle_id() or ""
+        execution_mode = self._derive_execution_mode()
+        chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+        wallet_address = getattr(strategy, "wallet_address", "")
+        return deployment_id, cycle_id, execution_mode, chain, wallet_address
+
+    async def _try_write_lp_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write an LPAccountingEvent for non-Pendle LP_OPEN / LP_CLOSE intents (VIB-3515).
+
+        Best-effort: any exception is logged at WARNING and swallowed.
+        Pendle LP is handled by _try_write_pendle_lp_accounting; this method skips it.
+        """
+        try:
+            from ..accounting.lp_accounting import _LP_INTENT_TYPES, build_lp_accounting_event
+            from ..accounting.writer import AccountingWriter
+
+            it = getattr(intent, "intent_type", None)
+            intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
+            if intent_type_str not in _LP_INTENT_TYPES:
+                return
+
+            protocol = (getattr(intent, "protocol", "") or "").lower()
+            if "pendle" in protocol:
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id, cycle_id, execution_mode, chain, wallet_address = self._accounting_context(strategy)
+
+            event = build_lp_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "LP accounting event written: %s pool=%s",
+                    event.event_type,
+                    event.pool_address,
+                )
+            else:
+                logger.debug(
+                    "LP accounting event not persisted (backend unsupported): %s pool=%s",
+                    event.event_type,
+                    event.pool_address,
+                )
+        except Exception:
+            logger.warning("LP accounting write failed (non-blocking)", exc_info=True)
+
+    async def _try_write_perp_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write a PerpAccountingEvent for PERP_OPEN / PERP_CLOSE intents (VIB-3516).
+
+        Best-effort: any exception is logged at WARNING and swallowed.
+        """
+        try:
+            from ..accounting.perp_accounting import _PERP_OPEN_CLOSE_TYPES, build_perp_accounting_event
+            from ..accounting.writer import AccountingWriter
+
+            it = getattr(intent, "intent_type", None)
+            intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
+            if intent_type_str not in _PERP_OPEN_CLOSE_TYPES:
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id, cycle_id, execution_mode, chain, wallet_address = self._accounting_context(strategy)
+
+            event = build_perp_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "Perp accounting event written: %s market=%s",
+                    event.event_type,
+                    event.market,
+                )
+            else:
+                logger.debug(
+                    "Perp accounting event not persisted (backend unsupported): %s market=%s",
+                    event.event_type,
+                    event.market,
+                )
+        except Exception:
+            logger.warning("Perp accounting write failed (non-blocking)", exc_info=True)
+
+    async def _try_write_vault_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write a VaultAccountingEvent for VAULT_DEPOSIT / VAULT_REDEEM intents (VIB-3517).
+
+        Best-effort: any exception is logged at WARNING and swallowed.
+        """
+        try:
+            from ..accounting.vault_accounting import _VAULT_INTENT_TYPES, build_vault_accounting_event
+            from ..accounting.writer import AccountingWriter
+
+            it = getattr(intent, "intent_type", None)
+            intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
+            if intent_type_str not in _VAULT_INTENT_TYPES:
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id, cycle_id, execution_mode, chain, wallet_address = self._accounting_context(strategy)
+
+            event = build_vault_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "Vault accounting event written: %s vault=%s",
+                    event.event_type,
+                    event.vault_address,
+                )
+            else:
+                logger.debug(
+                    "Vault accounting event not persisted (backend unsupported): %s vault=%s",
+                    event.event_type,
+                    event.vault_address,
+                )
+        except Exception:
+            logger.warning("Vault accounting write failed (non-blocking)", exc_info=True)
+
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
 
@@ -3231,6 +3415,27 @@ class StrategyRunner:
             intent,
             state.last_execution_result,
             price_oracle=state.price_oracle,
+            ledger_entry_id=ledger_entry_id,
+        )
+        # VIB-3515: write LP accounting event for non-Pendle LP_OPEN / LP_CLOSE
+        await self._try_write_lp_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
+            ledger_entry_id=ledger_entry_id,
+        )
+        # VIB-3516: write perp accounting event (PERP_OPEN / PERP_CLOSE)
+        await self._try_write_perp_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
+            ledger_entry_id=ledger_entry_id,
+        )
+        # VIB-3517: write vault accounting event (VAULT_DEPOSIT / VAULT_REDEEM)
+        await self._try_write_vault_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
             ledger_entry_id=ledger_entry_id,
         )
         # VIB-3467: write outbox row + fire processor task AFTER all legacy writers complete.

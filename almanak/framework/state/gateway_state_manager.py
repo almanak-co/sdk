@@ -725,6 +725,10 @@ class GatewayStateManager:
             so PortfolioValuer's duck-typed access (``e.get("event_type")``,
             ``e.get("payload_json")`` etc.) is unchanged.
         """
+        deployment_id = (deployment_id or "").strip()
+        if not deployment_id:
+            logger.warning("get_accounting_events_sync called with empty deployment_id — returning []")
+            return []
         try:
             request = gateway_pb2.GetAccountingEventsRequest(
                 strategy_id=deployment_id,
@@ -732,7 +736,10 @@ class GatewayStateManager:
                 position_key=position_key or "",
             )
             response = self._client.state.GetAccountingEvents(request, timeout=self._timeout)
-            return [_proto_event_to_dict(e) for e in response.events]
+            rows = [_proto_event_to_dict(e) for e in response.events]
+            # Stable ordering for deterministic FIFO replay; secondary key on id breaks timestamp ties.
+            rows.sort(key=lambda r: (r.get("timestamp") or "", r.get("id") or ""))
+            return rows
         except Exception as e:
             logger.debug("GetAccountingEvents via gateway failed: %s", e)
             return []
