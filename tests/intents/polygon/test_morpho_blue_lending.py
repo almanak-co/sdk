@@ -100,10 +100,6 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 @pytest.mark.borrow
 @pytest.mark.lending
 class TestMorphoBlueBorrowIntent:
-    @pytest.mark.xfail(
-        reason="Tracked in #1904 — Zodiac manifest gap on morpho_blue BORROW (missing collateral-token approve / supplyCollateral path)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     @pytest.mark.uses_zodiac(
         protocols=["morpho_blue"],
@@ -316,10 +312,6 @@ async def _setup_borrow(
 @pytest.mark.repay
 @pytest.mark.lending
 class TestMorphoBlueRepayIntent:
-    @pytest.mark.xfail(
-        reason="Tracked in #1904 — depends on _setup_borrow which fails first on the morpho_blue BORROW manifest gap",
-        strict=False,
-    )
     @pytest.mark.asyncio
     @pytest.mark.uses_zodiac(
         protocols=["morpho_blue"],
@@ -448,10 +440,6 @@ class TestMorphoBlueRepayIntent:
 @pytest.mark.withdraw
 @pytest.mark.lending
 class TestMorphoBlueWithdrawCollateralIntent:
-    @pytest.mark.xfail(
-        reason="Tracked in #1904 — depends on _setup_borrow which fails first on the morpho_blue BORROW manifest gap",
-        strict=False,
-    )
     @pytest.mark.asyncio
     @pytest.mark.uses_zodiac(
         protocols=["morpho_blue"],

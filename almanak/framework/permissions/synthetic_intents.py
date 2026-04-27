@@ -433,6 +433,30 @@ def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
+
+    # Morpho Blue markets are chain-specific in both their pair AND their id
+    # (e.g. polygon's first registered market is WBTC/USDC, arbitrum/base use
+    # wstETH/USDC). Resolving each through its helper aligns the synthetic
+    # BorrowIntent with the same market the supply/withdraw paths discovered,
+    # so the manifest authorises the actual collateral approve + Blue.borrow
+    # selectors. Falling back to the chain-default ``weth`` declared the wrong
+    # collateral, dropping both selectors from the manifest. See #1904.
+    if protocol == "morpho_blue":
+        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
+        loan_token = _morpho_blue_loan_token(chain, usdc)
+        collateral_token = _morpho_blue_collateral_token(chain, weth)
+        return [
+            BorrowIntent(
+                protocol=protocol,
+                collateral_token=collateral_token,
+                collateral_amount=Decimal("1"),
+                borrow_token=loan_token,
+                borrow_amount=Decimal("100"),
+                chain=chain,
+                market_id=market_id,
+            )
+        ]
+
     return [
         BorrowIntent(
             protocol=protocol,
@@ -453,6 +477,24 @@ def _build_repay_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent
     if protocol not in pools and protocol not in ("morpho_blue", "compound_v3"):
         return []
     hints = get_permission_hints(protocol)
+
+    # Morpho Blue: resolve the loan token + market id from the per-chain registry
+    # so the synthetic RepayIntent targets the same market as the borrow path.
+    # Without this, polygon (USDT-quoted first market) would synthesise a USDC
+    # repay against a WBTC/USDC market, mismatching the discovered borrow.
+    if protocol == "morpho_blue":
+        market_id = _morpho_blue_synthetic_market_id(chain, hints.synthetic_market_id)
+        loan_token = _morpho_blue_loan_token(chain, usdc)
+        return [
+            RepayIntent(
+                protocol=protocol,
+                token=loan_token,
+                amount=Decimal("50"),
+                chain=chain,
+                market_id=market_id,
+            )
+        ]
+
     return [
         RepayIntent(
             protocol=protocol,

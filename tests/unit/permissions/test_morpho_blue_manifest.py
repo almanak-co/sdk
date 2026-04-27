@@ -164,3 +164,45 @@ class TestMorphoBlueManifestCoverage:
         assert _SUPPLY_COLLATERAL_SEL in morpho_selectors, (
             f"{chain}: SUPPLY manifest missing supplyCollateral selector"
         )
+
+    @pytest.mark.parametrize(
+        "chain", ["ethereum", "arbitrum", "base", "polygon"]
+    )
+    def test_borrow_manifest_authorises_chain_specific_collateral_approve(
+        self, chain: str
+    ) -> None:
+        """The BORROW manifest must authorise an ERC-20 ``approve`` on the
+        chain's actual market collateral, not on the chain-default WETH.
+
+        Regression for #1904: ``_build_borrow_intents`` previously hardcoded
+        ``collateral_token=weth``, which discovered approve(WETH) on chains
+        where the market collateral is wstETH (arbitrum/base) or WBTC
+        (polygon). The Zodiac role then rejected the test's actual approve
+        call and every BORROW/REPAY/WITHDRAW-collateral test on those chains
+        failed with AuthorizationFailed.
+        """
+        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+
+        chain_markets = MORPHO_MARKETS.get(chain, {})
+        if not chain_markets:
+            pytest.skip(f"{chain}: no morpho_blue markets registered")
+        first_market = next(iter(chain_markets.values()))
+        expected_collateral = first_market["collateral_token_address"].lower()
+
+        manifest = generate_manifest(
+            strategy_name="morpho-blue-borrow-collateral-regression",
+            chain=chain,
+            supported_protocols=["morpho_blue"],
+            intent_types=["BORROW"],
+        )
+        approve_targets = {
+            perm.target.lower()
+            for perm in manifest.permissions
+            for sel in perm.function_selectors
+            if sel.selector.lower() == "0x095ea7b3"  # ERC-20 approve(address,uint256)
+        }
+        assert expected_collateral in approve_targets, (
+            f"{chain}: BORROW manifest missing approve permission for the market "
+            f"collateral token {expected_collateral}. Got approve targets: "
+            f"{sorted(approve_targets)}"
+        )
