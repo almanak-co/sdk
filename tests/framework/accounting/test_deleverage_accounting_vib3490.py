@@ -247,19 +247,14 @@ class TestDeleverageWarningLogged:
     """VIB-3490: WARNING is logged when a DELEVERAGE intent is processed by the runner."""
 
     def test_deleverage_warning_logged(self, caplog):
-        """_try_write_lending_accounting must log WARNING when DELEVERAGE intent is detected."""
-        import asyncio
-
-        # We exercise the WARNING log path by calling the runner's private method
-        # with a DELEVERAGE intent.  We stub out state_manager so the full write
-        # path is short-circuited, but the WARNING is emitted before that check.
+        """_maybe_warn_deleverage must log WARNING when a DELEVERAGE intent is detected."""
+        # VIB-3478: warning moved from _try_write_lending_accounting (removed) to
+        # _maybe_warn_deleverage, called on the success path in _single_chain_handle_success.
 
         from almanak.framework.runner.strategy_runner import StrategyRunner
         from almanak.framework.intents.vocabulary import DeleverageIntent
 
         runner = StrategyRunner.__new__(StrategyRunner)
-        # Minimal attributes needed for the method:
-        runner.state_manager = None  # causes early return after the WARNING
 
         strategy = MagicMock()
         strategy.strategy_id = "test-strat"
@@ -274,12 +269,8 @@ class TestDeleverageWarningLogged:
             target_hf=Decimal("2.0"),
         )
 
-        result = _make_result()
-
         with caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"):
-            asyncio.run(
-                runner._try_write_lending_accounting(strategy, intent, result)
-            )
+            runner._maybe_warn_deleverage(intent, strategy)
 
         warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         deleverage_warnings = [m for m in warning_messages if "DELEVERAGE" in m]

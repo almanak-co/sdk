@@ -250,10 +250,6 @@ class SingleChainExecutionState:
     compiler: Any = None
     state_machine: Any = None
     pre_snapshot: Any | None = None
-    # VIB-3489: on-chain lending state captured BEFORE the tx is submitted.
-    # Forwarded to build_lending_accounting_event() as pre_execution_state.
-    pre_lending_state: Any | None = None
-
     # --- Running bookkeeping (updated by state-machine loop) ---
     last_execution_result: Any | None = None
     last_execution_context: Any | None = None
@@ -1917,13 +1913,17 @@ class StrategyRunner:
     ) -> None:
         """Write accounting_outbox row and fire asyncio task to drain it (VIB-3467).
 
-        Best-effort: failures are logged and swallowed so the execution hot path
-        is never blocked.  During the dual-write period the legacy _try_write_*
-        methods still run and serve as the primary write path.
+        In live mode: raises AccountingPersistenceError on outbox write failure so
+        run_iteration routes to ACCOUNTING_FAILED and alerts operators.
+        In non-live modes: logs a warning and continues (best-effort).
+        The async drain task is always fire-and-forget — durability is provided by
+        the outbox row, not the task. The processor is the sole accounting write path
+        (VIB-3478 removed the legacy _try_write_* inline writers).
         """
         try:
             from ..accounting.processor import write_outbox_entry
             from ..observability.context import get_cycle_id
+            from ..state.exceptions import AccountingPersistenceError
 
             intent_type_str = ""
             it = getattr(intent, "intent_type", None)
@@ -1964,7 +1964,26 @@ class StrategyRunner:
                 )
                 self._pending_drain_tasks.add(task)
                 task.add_done_callback(self._pending_drain_tasks.discard)
+            else:
+                # outbox_id is None — write_outbox_entry returned without persisting.
+                # In live mode this is a data-loss event; raise AccountingPersistenceError
+                # so run_iteration routes to ACCOUNTING_FAILED and alerts operators.
+                if self._is_live_mode():
+                    raise AccountingPersistenceError(
+                        f"write_outbox_entry returned None for ledger_entry_id={ledger_entry_id!r} "
+                        f"— accounting event will be lost"
+                    )
+                logger.warning(
+                    "_write_outbox_and_fire_processor: outbox write returned None for %s (non-live — continuing)",
+                    ledger_entry_id,
+                )
+        except AccountingPersistenceError:
+            raise
         except Exception:
+            if self._is_live_mode():
+                raise AccountingPersistenceError(
+                    f"_write_outbox_and_fire_processor failed for {ledger_entry_id!r}"
+                ) from None
             logger.warning("_write_outbox_and_fire_processor failed (non-blocking)", exc_info=True)
 
     def _compute_outbox_position_key(
@@ -2024,508 +2043,6 @@ class StrategyRunner:
 
         return "", ""
 
-    async def _try_write_lending_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        price_oracle: dict | None = None,
-        ledger_entry_id: str | None = None,
-        pre_lending_state: Any | None = None,
-    ) -> None:
-        """Write a LendingAccountingEvent after a successful lending intent (VIB-3418).
-
-        Fail-closed in live mode for BORROW and REPAY — those events carry health
-        factor and interest data that must be durable for looping strategies.
-        SUPPLY and WITHDRAW remain best-effort in all modes.
-
-        Reads after-state (HF, collateral, debt) from the chain via the gateway.
-        pre_lending_state is the before-state captured pre-execution (VIB-3489).
-        """
-        # BORROW, REPAY, and DELEVERAGE are mandatory in live mode: they carry HF and
-        # interest data that must be durable for looping strategies.
-        _MANDATORY_LIVE_TYPES = frozenset({"BORROW", "REPAY", "DELEVERAGE"})
-        intent_type_str = ""
-        is_mandatory_live = False
-        try:
-            from ..accounting.lending_accounting import _LENDING_INTENT_TYPES, build_lending_accounting_event
-            from ..accounting.writer import AccountingWriter
-            from ..observability.context import get_cycle_id
-
-            it = getattr(intent, "intent_type", None)
-            if it is not None:
-                intent_type_str = it.value if hasattr(it, "value") else str(it)
-
-            if intent_type_str not in _LENDING_INTENT_TYPES:
-                return
-
-            # DELEVERAGE is a notable risk event — log at WARNING so operators are
-            # alerted even when they are not actively monitoring DEBUG logs.
-            if intent_type_str == "DELEVERAGE":
-                trigger_reason = getattr(intent, "trigger_reason", "") or ""
-                observed_hf = getattr(intent, "observed_hf", None)
-                target_hf = getattr(intent, "target_hf", None)
-                logger.warning(
-                    "DELEVERAGE intent executed for strategy=%s — trigger=%r observed_hf=%s target_hf=%s",
-                    getattr(strategy, "strategy_id", ""),
-                    trigger_reason,
-                    observed_hf,
-                    target_hf,
-                )
-
-            if not self.state_manager:
-                return
-
-            is_mandatory_live = self._is_live_mode() and intent_type_str in _MANDATORY_LIVE_TYPES
-
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
-            cycle_id = get_cycle_id() or ""
-            execution_mode = self._derive_execution_mode()
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-            wallet_address = getattr(strategy, "wallet_address", "")
-
-            event = build_lending_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                gateway_client=self._get_gateway_client(),
-                basis_store=self._lending_basis_store,
-                price_oracle=price_oracle,
-                ledger_entry_id=ledger_entry_id,
-                pre_execution_state=pre_lending_state,
-            )
-            if event is None:
-                return
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Lending accounting event written: %s %s (confidence=%s)",
-                    event.event_type,
-                    event.asset,
-                    event.confidence,
-                )
-            elif is_mandatory_live:
-                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message=f"Mandatory accounting event not persisted — backend unsupported ({intent_type_str})",
-                )
-            else:
-                logger.debug(
-                    "Lending accounting event not persisted (backend unsupported): %s %s", event.event_type, event.asset
-                )
-        except AccountingPersistenceError:
-            raise
-        except Exception as e:
-            if is_mandatory_live:
-                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message=f"Mandatory lending accounting write failed in live mode ({intent_type_str})",
-                    cause=e,
-                ) from e
-            logger.warning("Lending accounting write failed (non-blocking)", exc_info=True)
-
-    async def _try_write_pendle_lp_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        price_oracle: dict | None = None,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write a PendleAccountingEvent after a successful Pendle LP_OPEN or LP_CLOSE (VIB-3421/3488).
-
-        VIB-3488: price_oracle is forwarded to build_pendle_lp_accounting_event so that
-        SY/PT amounts are scaled with verified decimals and USD prices are populated.
-
-        Fail-closed in live mode (VIB-3485): LP_OPEN and LP_CLOSE are mandatory events
-        for Pendle LP strategies — they track position entry and exit and must be durable.
-        In paper/backtest mode the write remains best-effort (log WARNING, continue).
-        """
-        is_mandatory_live = False
-        try:
-            from ..accounting.pendle_accounting import _PENDLE_LP_INTENT_TYPES, build_pendle_lp_accounting_event
-            from ..accounting.writer import AccountingWriter
-            from ..observability.context import get_cycle_id
-
-            intent_type_str = ""
-            it = getattr(intent, "intent_type", None)
-            if it is not None:
-                intent_type_str = it.value if hasattr(it, "value") else str(it)
-
-            if intent_type_str not in _PENDLE_LP_INTENT_TYPES:
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
-            cycle_id = get_cycle_id() or ""
-            execution_mode = self._derive_execution_mode()
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-            wallet_address = getattr(strategy, "wallet_address", "")
-
-            event = build_pendle_lp_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                ledger_entry_id=ledger_entry_id,
-                price_oracle=price_oracle,
-            )
-            if event is None:
-                return
-
-            # Event built — mandatory from this point on in live mode.
-            is_mandatory_live = self._is_live_mode()
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Pendle LP accounting event written: %s market=%s",
-                    event.event_type,
-                    event.market_id,
-                )
-            elif is_mandatory_live:
-                from ..state.exceptions import AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message=f"Mandatory Pendle LP accounting event not persisted — backend unsupported ({intent_type_str})",
-                )
-            else:
-                logger.warning(
-                    "Pendle LP accounting event not persisted (backend unsupported): %s market=%s",
-                    event.event_type,
-                    event.market_id,
-                )
-        except AccountingPersistenceError:
-            raise
-        except Exception as e:
-            if is_mandatory_live:
-                from ..state.exceptions import AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message=f"Mandatory Pendle LP accounting write failed in live mode ({intent_type_str})",
-                    cause=e,
-                ) from e
-            logger.warning("Pendle LP accounting write failed (non-blocking)", exc_info=True)
-
-    async def _try_write_pendle_pt_buy_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write a PendleAccountingEvent(PT_BUY) + record FIFO lot after a Pendle PT swap (VIB-3422/3423).
-
-        Fail-closed in live mode once a PT buy is confirmed: the locked implied APR
-        and FIFO lot must be durable for PT_REDEEM to compute correct realized yield.
-        Detects PT buys from the intent's to_token symbol and writes the
-        locked implied APR computed from the PT price and days to maturity.
-        Also records a FIFO lot in _lending_basis_store so PT_REDEEM can match
-        the original cost basis and compute realized yield.
-        """
-        is_mandatory_live = False
-        try:
-            from datetime import UTC, datetime
-
-            from ..accounting.pendle_pt_accounting import build_pendle_pt_buy_accounting_event
-            from ..accounting.writer import AccountingWriter
-            from ..observability.context import get_cycle_id
-
-            intent_type_str = ""
-            it = getattr(intent, "intent_type", None)
-            if it is not None:
-                intent_type_str = it.value if hasattr(it, "value") else str(it)
-
-            if intent_type_str != "SWAP":
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
-            cycle_id = get_cycle_id() or ""
-            execution_mode = self._derive_execution_mode()
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-            wallet_address = getattr(strategy, "wallet_address", "")
-
-            event = build_pendle_pt_buy_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                ledger_entry_id=ledger_entry_id,
-            )
-            if event is None:
-                return
-
-            # PT buy confirmed — mandatory in live mode from this point on.
-            is_mandatory_live = self._is_live_mode()
-
-            # Persist the accounting event BEFORE updating the in-memory FIFO lot.
-            # Write-ahead: if persistence fails we raise without dirtying the in-memory
-            # store, so a restart reconstructs a consistent view from accounting_events.
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Pendle PT buy accounting event written: pt=%s implied_apr=%s bps",
-                    event.pt_token,
-                    event.implied_apr_bps,
-                )
-                # VIB-3423: record FIFO PT lot AFTER successful persistence so the
-                # in-memory store stays consistent with accounting_events on restart.
-                if event.sy_amount is not None and event.pt_amount is not None:
-                    from decimal import Decimal as _D
-
-                    _scale = _D(10**18)
-                    sy_human = event.sy_amount / _scale
-                    pt_human = event.pt_amount / _scale
-                    if pt_human > 0:
-                        self._lending_basis_store.record_pt_buy(
-                            deployment_id=deployment_id,
-                            position_key=event.position_key,
-                            pt_token=event.pt_token or "PT",
-                            pt_amount=pt_human,
-                            sy_cost=sy_human,
-                            timestamp=datetime.now(UTC),
-                            lot_id=event.identity.id,
-                            source_ledger_entry_id=event.identity.ledger_entry_id,
-                        )
-            elif is_mandatory_live:
-                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message="Mandatory Pendle PT_BUY accounting event not persisted — backend unsupported",
-                )
-        except AccountingPersistenceError:
-            raise
-        except Exception as e:
-            if is_mandatory_live:
-                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message="Mandatory Pendle PT_BUY accounting write failed in live mode",
-                    cause=e,
-                ) from e
-            logger.warning("Pendle PT buy accounting write failed (non-blocking)", exc_info=True)
-
-    async def _try_write_pendle_pt_sell_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write a PendleAccountingEvent(PT_SELL) + reduce FIFO lot after a Pendle PT pre-maturity sale (VIB-3492).
-
-        Fail-closed in live mode (VIB-3485): PT_SELL reduces the open FIFO lot so that a
-        subsequent PT_REDEEM matches only the remaining quantity. A dropped record would
-        leave the basis store inconsistent with accounting_events on restart.
-        In paper/backtest mode the write remains best-effort (log WARNING, continue).
-        Only fires when from_token is a PT token on a SWAP intent.
-        """
-        is_mandatory_live = False
-        intent_type_str = ""
-        try:
-            from ..accounting.pendle_pt_sell_accounting import build_pendle_pt_sell_accounting_event
-            from ..accounting.writer import AccountingWriter
-            from ..observability.context import get_cycle_id
-
-            it = getattr(intent, "intent_type", None)
-            if it is not None:
-                intent_type_str = it.value if hasattr(it, "value") else str(it)
-
-            if intent_type_str != "SWAP":
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
-            cycle_id = get_cycle_id() or ""
-            execution_mode = self._derive_execution_mode()
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-            wallet_address = getattr(strategy, "wallet_address", "")
-
-            event = build_pendle_pt_sell_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                basis_store=self._lending_basis_store,
-                ledger_entry_id=ledger_entry_id,
-            )
-            if event is None:
-                return
-
-            # Event built — mandatory from this point on in live mode.
-            is_mandatory_live = self._is_live_mode()
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Pendle PT sell accounting event written: pt=%s pt_price=%s",
-                    event.pt_token,
-                    event.pt_price,
-                )
-            elif is_mandatory_live:
-                from ..state.exceptions import AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message="Mandatory Pendle PT_SELL accounting event not persisted — backend unsupported",
-                )
-            else:
-                logger.warning(
-                    "Pendle PT_SELL accounting event not persisted (backend unsupported): %s market=%s",
-                    event.event_type,
-                    event.market_id,
-                )
-        except AccountingPersistenceError:
-            raise
-        except Exception as e:
-            if is_mandatory_live:
-                from ..state.exceptions import AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message="Mandatory Pendle PT_SELL accounting write failed in live mode",
-                    cause=e,
-                ) from e
-            logger.warning("Pendle PT sell accounting write failed (non-blocking)", exc_info=True)
-
-    async def _try_write_pendle_pt_redeem_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        price_oracle: dict | None = None,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write a PendleAccountingEvent(PT_REDEEM) after a Pendle PT redemption (VIB-3423).
-
-        Fail-closed in live mode (VIB-3485): PT_REDEEM records realized yield computed
-        from the FIFO basis store — a terminal financial event whose loss is unrecoverable.
-        In paper/backtest mode the write remains best-effort (log WARNING, continue).
-        Only fires when a RedeemPY event is present in the execution result.
-        """
-        is_mandatory_live = False
-        try:
-            from ..accounting.pendle_redeem_accounting import build_pendle_pt_redeem_accounting_event
-            from ..accounting.writer import AccountingWriter
-            from ..observability.context import get_cycle_id
-
-            intent_type_str = ""
-            it = getattr(intent, "intent_type", None)
-            if it is not None:
-                intent_type_str = it.value if hasattr(it, "value") else str(it)
-
-            if intent_type_str != "WITHDRAW":
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
-            cycle_id = get_cycle_id() or ""
-            execution_mode = self._derive_execution_mode()
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-            wallet_address = getattr(strategy, "wallet_address", "")
-
-            event = build_pendle_pt_redeem_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                basis_store=self._lending_basis_store,
-                price_oracle=price_oracle,
-                ledger_entry_id=ledger_entry_id,
-            )
-            if event is None:
-                return
-
-            # Event built — mandatory from this point on in live mode.
-            is_mandatory_live = self._is_live_mode()
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Pendle PT redeem accounting event written: market=%s yield_usd=%s",
-                    event.market_id,
-                    event.realized_yield_usd,
-                )
-            elif is_mandatory_live:
-                from ..state.exceptions import AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message="Mandatory Pendle PT_REDEEM accounting event not persisted — backend unsupported",
-                )
-            else:
-                logger.warning(
-                    "Pendle PT_REDEEM accounting event not persisted (backend unsupported): %s market=%s",
-                    event.event_type,
-                    event.market_id,
-                )
-        except AccountingPersistenceError:
-            raise
-        except Exception as e:
-            if is_mandatory_live:
-                from ..state.exceptions import AccountingWriteKind
-
-                raise AccountingPersistenceError(
-                    write_kind=AccountingWriteKind.ACCOUNTING,
-                    strategy_id=getattr(strategy, "strategy_id", ""),
-                    message="Mandatory Pendle PT_REDEEM accounting write failed in live mode",
-                    cause=e,
-                ) from e
-            logger.warning("Pendle PT redeem accounting write failed (non-blocking)", exc_info=True)
-
     def _accounting_context(self, strategy: "StrategyProtocol") -> tuple[str, str, str, str, str]:
         """Return (deployment_id, cycle_id, execution_mode, chain, wallet_address) for accounting builders."""
         from ..observability.context import get_cycle_id
@@ -2537,178 +2054,23 @@ class StrategyRunner:
         wallet_address = getattr(strategy, "wallet_address", "")
         return deployment_id, cycle_id, execution_mode, chain, wallet_address
 
-    async def _try_write_lp_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write an LPAccountingEvent for non-Pendle LP_OPEN / LP_CLOSE intents (VIB-3515).
+    def _maybe_warn_deleverage(self, intent: "AnyIntent", strategy: "StrategyProtocol") -> None:
+        """Log WARNING when a DELEVERAGE intent was successfully executed.
 
-        Best-effort: any exception is logged at WARNING and swallowed.
-        Pendle LP is handled by _try_write_pendle_lp_accounting; this method skips it.
+        DELEVERAGE is a notable risk event — surfaces to operators even when
+        they are not actively monitoring DEBUG logs.
         """
-        try:
-            from ..accounting.lp_accounting import _LP_INTENT_TYPES, build_lp_accounting_event
-            from ..accounting.writer import AccountingWriter
-
-            it = getattr(intent, "intent_type", None)
-            intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
-            if intent_type_str not in _LP_INTENT_TYPES:
-                return
-
-            protocol = (getattr(intent, "protocol", "") or "").lower()
-            if "pendle" in protocol:
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id, cycle_id, execution_mode, chain, wallet_address = self._accounting_context(strategy)
-
-            event = build_lp_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                ledger_entry_id=ledger_entry_id,
-            )
-            if event is None:
-                return
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "LP accounting event written: %s pool=%s",
-                    event.event_type,
-                    event.pool_address,
-                )
-            else:
-                logger.debug(
-                    "LP accounting event not persisted (backend unsupported): %s pool=%s",
-                    event.event_type,
-                    event.pool_address,
-                )
-        except Exception:
-            logger.warning("LP accounting write failed (non-blocking)", exc_info=True)
-
-    async def _try_write_perp_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write a PerpAccountingEvent for PERP_OPEN / PERP_CLOSE intents (VIB-3516).
-
-        Best-effort: any exception is logged at WARNING and swallowed.
-        """
-        try:
-            from ..accounting.perp_accounting import _PERP_OPEN_CLOSE_TYPES, build_perp_accounting_event
-            from ..accounting.writer import AccountingWriter
-
-            it = getattr(intent, "intent_type", None)
-            intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
-            if intent_type_str not in _PERP_OPEN_CLOSE_TYPES:
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id, cycle_id, execution_mode, chain, wallet_address = self._accounting_context(strategy)
-
-            event = build_perp_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                ledger_entry_id=ledger_entry_id,
-            )
-            if event is None:
-                return
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Perp accounting event written: %s market=%s",
-                    event.event_type,
-                    event.market,
-                )
-            else:
-                logger.debug(
-                    "Perp accounting event not persisted (backend unsupported): %s market=%s",
-                    event.event_type,
-                    event.market,
-                )
-        except Exception:
-            logger.warning("Perp accounting write failed (non-blocking)", exc_info=True)
-
-    async def _try_write_vault_accounting(
-        self,
-        strategy: "StrategyProtocol",
-        intent: "AnyIntent",
-        result: Any,
-        ledger_entry_id: str | None = None,
-    ) -> None:
-        """Write a VaultAccountingEvent for VAULT_DEPOSIT / VAULT_REDEEM intents (VIB-3517).
-
-        Best-effort: any exception is logged at WARNING and swallowed.
-        """
-        try:
-            from ..accounting.vault_accounting import _VAULT_INTENT_TYPES, build_vault_accounting_event
-            from ..accounting.writer import AccountingWriter
-
-            it = getattr(intent, "intent_type", None)
-            intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
-            if intent_type_str not in _VAULT_INTENT_TYPES:
-                return
-
-            if not self.state_manager:
-                return
-
-            deployment_id, cycle_id, execution_mode, chain, wallet_address = self._accounting_context(strategy)
-
-            event = build_vault_accounting_event(
-                intent=intent,
-                result=result,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                execution_mode=execution_mode,
-                chain=chain,
-                wallet_address=wallet_address,
-                ledger_entry_id=ledger_entry_id,
-            )
-            if event is None:
-                return
-
-            writer = AccountingWriter(self.state_manager)
-            ok = await writer.write(event)
-            if ok:
-                logger.debug(
-                    "Vault accounting event written: %s vault=%s",
-                    event.event_type,
-                    event.vault_address,
-                )
-            else:
-                logger.debug(
-                    "Vault accounting event not persisted (backend unsupported): %s vault=%s",
-                    event.event_type,
-                    event.vault_address,
-                )
-        except Exception:
-            logger.warning("Vault accounting write failed (non-blocking)", exc_info=True)
+        it = getattr(intent, "intent_type", None)
+        intent_type_str = (it.value if hasattr(it, "value") else str(it)) if it is not None else ""
+        if intent_type_str != "DELEVERAGE":
+            return
+        logger.warning(
+            "DELEVERAGE intent executed for strategy=%s — trigger=%r observed_hf=%s target_hf=%s",
+            getattr(strategy, "strategy_id", ""),
+            getattr(intent, "trigger_reason", "") or "",
+            getattr(intent, "observed_hf", None),
+            getattr(intent, "target_hf", None),
+        )
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the run loop.
@@ -2981,22 +2343,6 @@ class StrategyRunner:
         # Capture pre-execution balance snapshot for real reconciliation (VIB-3158).
         # Non-fatal: on failure we fall back to the legacy post-only mode.
         state.pre_snapshot = await self._snapshot_balances_for_intent(intent)
-
-        # Capture pre-execution lending state for before/after delta (VIB-3489).
-        # Non-fatal: None is an honest absence; never substituted with stale data.
-        try:
-            from ..accounting.lending_accounting import capture_lending_pre_state
-
-            state.pre_lending_state = capture_lending_pre_state(
-                intent=intent,
-                chain=strategy.chain,
-                wallet_address=strategy.wallet_address,
-                gateway_client=state.gateway_client,
-                price_oracle=state.price_oracle,
-            )
-        except Exception:
-            logger.debug("Pre-execution lending state capture failed (non-fatal)", exc_info=True)
-            state.pre_lending_state = None
 
     @staticmethod
     def _build_single_chain_price_oracle(market: Any | None, intent: AnyIntent) -> dict | None:
@@ -3467,75 +2813,15 @@ class StrategyRunner:
         # Clean reconciliation (or observation-mode pass-through) -> commit the success path.
         # Emit timeline event for successful execution
         self._emit_execution_timeline_event(strategy, intent, success=True, result=state.last_execution_result)
+        # DELEVERAGE is a notable risk event — log at WARNING so operators are
+        # alerted even when they are not actively monitoring DEBUG logs.
+        self._maybe_warn_deleverage(intent, strategy)
         # Write structured trade record to transaction ledger (VIB-2402)
         ledger_entry_id = await self._write_ledger_entry(
             strategy, intent, result=state.last_execution_result, success=True
         )
-        # VIB-3418: write lending accounting event (SUPPLY/BORROW/REPAY/WITHDRAW)
-        # VIB-3489: pre_lending_state carries before-state captured pre-execution.
-        await self._try_write_lending_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            price_oracle=state.price_oracle,
-            ledger_entry_id=ledger_entry_id,
-            pre_lending_state=state.pre_lending_state,
-        )
-        # VIB-3421/3488: write Pendle LP accounting event (LP_OPEN/LP_CLOSE) with USD pricing
-        await self._try_write_pendle_lp_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            price_oracle=state.price_oracle,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3422: write Pendle PT buy accounting event (SWAP → PT_BUY)
-        await self._try_write_pendle_pt_buy_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3492: write Pendle PT sell accounting event (SWAP from PT → PT_SELL)
-        await self._try_write_pendle_pt_sell_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3423: write Pendle PT redeem accounting event (WITHDRAW → PT_REDEEM)
-        await self._try_write_pendle_pt_redeem_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            price_oracle=state.price_oracle,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3515: write LP accounting event for non-Pendle LP_OPEN / LP_CLOSE
-        await self._try_write_lp_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3516: write perp accounting event (PERP_OPEN / PERP_CLOSE)
-        await self._try_write_perp_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3517: write vault accounting event (VAULT_DEPOSIT / VAULT_REDEEM)
-        await self._try_write_vault_accounting(
-            strategy,
-            intent,
-            state.last_execution_result,
-            ledger_entry_id=ledger_entry_id,
-        )
-        # VIB-3467: write outbox row + fire processor task AFTER all legacy writers complete.
-        # Ordering guarantee: accounting_events rows written by legacy path exist before
-        # drain_one runs, so has_accounting_events_for_ledger returns True and drain_one
-        # marks processed without re-mutating the FIFO basis store (prevents duplicate lots).
+        # VIB-3467/3478: AccountingProcessor is the sole accounting write path (dual-write
+        # period ended with removal of _try_write_* methods in VIB-3478).
         if ledger_entry_id:
             await self._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
         # VIB-3454: append one JSON line to the per-strategy sidecar file so the

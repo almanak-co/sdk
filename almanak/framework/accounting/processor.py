@@ -11,19 +11,18 @@ Architecture:
 Design constraints:
   - No live chain calls inside the processor.  All inputs come from the ledger row
     (extracted_data_json, price_inputs_json, pre_state_json, post_state_json).
-  - Idempotent: drain_one on an already-processed row (or an outbox row whose
-    accounting_events row was already written by the legacy inline writers) is a no-op.
+  - Idempotent: drain_one on an already-processed row is a no-op — the outbox row
+    is marked processed without re-writing the event or modifying the FIFO store.
   - The processor maintains its own FIFOBasisStore, reconstructed at startup via
     reconstruct_from_events() so REPAY / PT_REDEEM interest attribution is correct
     across restarts.
 
-Dual-write period (until legacy _try_write_* methods are removed in VIB-3477):
+Idempotency (VIB-3478: _try_write_* legacy writers removed):
   - drain_one checks for an existing accounting_events row keyed on ledger_entry_id.
     If one exists the outbox row is marked processed without re-writing the event or
-    modifying the FIFO store (the event was already counted during reconstruct_from_events
-    at startup).
+    modifying the FIFO store.
   - This guarantees the processor's FIFO store stays consistent with accounting_events
-    regardless of which path ran first.
+    regardless of restart timing.
 """
 
 from __future__ import annotations
