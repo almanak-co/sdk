@@ -138,6 +138,11 @@ class TestTraderJoeV2LPOpenIntent:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["traderjoe_v2"],
+        intent_types=["LP_OPEN"],
+        config={"token0": "WAVAX", "token1": "USDC"},
+    )
     async def test_lp_open_wavax_usdc(
         self,
         web3: Web3,
@@ -311,7 +316,16 @@ class TestTraderJoeV2LPCloseIntent:
     because removeLiquidity removes and returns tokens in one step.
     """
 
+    @pytest.mark.xfail(
+        reason="Tracked in #1905 — Zodiac manifest gap on traderjoe_v2 LP_CLOSE (LBPair removeLiquidity target/selector missing)",
+        strict=False,
+    )
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["traderjoe_v2"],
+        intent_types=["LP_OPEN", "LP_CLOSE"],
+        config={"token0": "WAVAX", "token1": "USDC"},
+    )
     async def test_lp_close_position_with_liquidity(
         self,
         web3: Web3,

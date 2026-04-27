@@ -109,6 +109,11 @@ class TestTraderJoeV2SwapExecution:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["traderjoe_v2"],
+        intent_types=["SWAP"],
+        config={"base_token": "WAVAX", "quote_token": "USDC"},
+    )
     @pytest.mark.xfail(reason="WAVAX->USDC direction can revert on Anvil fork due to bin liquidity state", strict=False)
     async def test_wavax_to_usdc_full_lifecycle(
         self,
@@ -233,6 +238,11 @@ class TestTraderJoeV2SwapExecution:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["traderjoe_v2"],
+        intent_types=["SWAP"],
+        config={"base_token": "WAVAX", "quote_token": "USDC"},
+    )
     @pytest.mark.xfail(reason="USDC->WAVAX can revert on Anvil fork due to allowance simulation race or bin liquidity state", strict=False)
     async def test_usdc_to_wavax_reverse_direction(
         self,

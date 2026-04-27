@@ -92,6 +92,11 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 @pytest.mark.lending
 class TestMorphoBlueBorrowIntent:
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["morpho_blue"],
+        intent_types=["BORROW"],
+        config={"collateral_token": "wstETH", "borrow_token": "USDC"},
+    )
     async def test_borrow_usdc_with_wsteth_collateral_using_intent(
         self,
         web3: Web3,

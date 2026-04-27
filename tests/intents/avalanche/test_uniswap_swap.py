@@ -55,6 +55,11 @@ class TestUniswapV3SwapIntent:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["uniswap_v3"],
+        intent_types=["SWAP"],
+        config={"base_token": "USDC", "quote_token": "WAVAX"},
+    )
     async def test_swap_usdc_to_wavax_using_intent(
         self,
         web3: Web3,
@@ -172,6 +177,11 @@ class TestUniswapV3SwapIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["uniswap_v3"],
+        intent_types=["SWAP"],
+        config={"base_token": "USDC", "quote_token": "WAVAX"},
+    )
     async def test_swap_wavax_to_usdc_using_intent(
         self,
         web3: Web3,

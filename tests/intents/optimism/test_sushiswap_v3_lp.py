@@ -180,6 +180,11 @@ class TestSushiSwapV3LPOpenIntent:
     """Test SushiSwap V3 LP Open using LPOpenIntent."""
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["sushiswap_v3"],
+        intent_types=["LP_OPEN"],
+        config={"token0": "WETH", "token1": "USDC"},
+    )
     async def test_lp_open_weth_usdc(
         self,
         web3: Web3,
@@ -303,6 +308,11 @@ class TestSushiSwapV3LPCloseIntent:
     """Test SushiSwap V3 LP Close using LPCloseIntent."""
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["sushiswap_v3"],
+        intent_types=["LP_OPEN", "LP_CLOSE"],
+        config={"token0": "WETH", "token1": "USDC"},
+    )
     async def test_lp_close_position_with_liquidity(
         self,
         web3: Web3,

@@ -240,7 +240,16 @@ class TestCurveCryptoSwapExecution:
     - Layer 4: Exact balance delta verification
     """
 
+    @pytest.mark.xfail(
+        reason="Tracked in #1903 — Zodiac manifest gap on curve TriCrypto2 SWAP ethereum (cases pin 3pool USDC/USDT, test exercises tricrypto USDT/WETH)",
+        strict=False,
+    )
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["curve"],
+        intent_types=["SWAP"],
+        config={"base_token": "USDT", "quote_token": "WETH"},
+    )
     async def test_usdt_to_weth_full_lifecycle(
         self,
         web3: Web3,
@@ -412,7 +421,16 @@ class TestCurveCryptoSwapExecution:
             weth_received / 10**18,
         )
 
+    @pytest.mark.xfail(
+        reason="Tracked in #1903 — Zodiac manifest gap on curve TriCrypto2 SWAP ethereum (cases pin 3pool USDC/USDT, test exercises tricrypto USDT/WETH)",
+        strict=False,
+    )
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["curve"],
+        intent_types=["SWAP"],
+        config={"base_token": "USDT", "quote_token": "WETH"},
+    )
     async def test_weth_to_usdt_reverse_direction(
         self,
         web3: Web3,

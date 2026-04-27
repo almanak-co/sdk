@@ -198,7 +198,16 @@ class TestSushiSwapV3LPOpenIntent:
     - Balance changes are correct
     """
 
+    @pytest.mark.xfail(
+        reason="Tracked in #1902 — Zodiac manifest gap on sushiswap_v3 LP_OPEN bnb (NPM target / per-pair address resolution missing)",
+        strict=False,
+    )
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["sushiswap_v3"],
+        intent_types=["LP_OPEN"],
+        config={"token0": "USDT", "token1": "WBNB"},
+    )
     async def test_lp_open_usdt_wbnb(
         self,
         web3: Web3,
@@ -337,7 +346,16 @@ class TestSushiSwapV3LPCloseIntent:
     #3: Position has no liquidity but has owed tokens (decreased but not collected)
     """
 
+    @pytest.mark.xfail(
+        reason="Tracked in #1902 — depends on LP_OPEN setup which fails first on the sushiswap_v3 bnb manifest gap",
+        strict=False,
+    )
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["sushiswap_v3"],
+        intent_types=["LP_OPEN", "LP_CLOSE"],
+        config={"token0": "USDT", "token1": "WBNB"},
+    )
     async def test_lp_close_position_with_liquidity(
         self,
         web3: Web3,

@@ -43,6 +43,8 @@ _TOKEN_CONFIG_FIELDS = frozenset(
         "pt_token",
         "reward_token",
         "stake_token",
+        "token0",
+        "token1",
     }
 )
 

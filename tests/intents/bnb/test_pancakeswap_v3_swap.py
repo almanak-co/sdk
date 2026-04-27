@@ -55,6 +55,11 @@ class TestPancakeSwapV3SwapIntent:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["pancakeswap_v3"],
+        intent_types=["SWAP"],
+        config={"base_token": "USDT", "quote_token": "WBNB"},
+    )
     async def test_swap_usdt_to_wbnb_using_intent(
         self,
         web3: Web3,
@@ -178,6 +183,11 @@ class TestPancakeSwapV3SwapIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["pancakeswap_v3"],
+        intent_types=["SWAP"],
+        config={"base_token": "USDT", "quote_token": "WBNB"},
+    )
     async def test_swap_wbnb_to_usdt_using_intent(
         self,
         web3: Web3,

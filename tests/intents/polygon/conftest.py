@@ -2,6 +2,12 @@
 
 Uses gateway's Anvil fixtures to avoid duplicate fork instances.
 
+Phase G.1 pilot: when a test carries the ``@pytest.mark.uses_zodiac(...)``
+marker, the ``funded_wallet`` and ``orchestrator`` fixtures below substitute
+the Safe address and a ``ZodiacOrchestrator`` respectively, so the same test
+body runs unchanged through Safe + Roles + ``execTransactionWithRole``.
+Unmarked tests see the original EOA behaviour.
+
 Polygon-specific considerations:
 - Gas prices: Polygon mainnet gas prices can be very high (100-1000+ gwei).
   Anvil forks preserve the block's base fee, so the EIP-1559 formula (2x base fee)
@@ -22,6 +28,7 @@ from almanak.framework.execution.signer import LocalKeySigner
 from almanak.framework.execution.simulator import DirectSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.conftest_gateway import AnvilFixture
+from tests.intents._permission_onchain_harness import ZodiacOrchestrator
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     TEST_POLYGON_WEB3_REQUEST_TIMEOUT,
@@ -29,6 +36,7 @@ from tests.intents.conftest import (
     TEST_SUBMITTER_MAX_RETRIES,
     TEST_TX_TIMEOUT_SECONDS,
     TEST_WALLET,
+    ZodiacContext,
     fund_erc20_token,
     fund_native_token,
     get_token_balance,
@@ -149,12 +157,19 @@ def test_private_key() -> str:
 
 
 @pytest.fixture(scope="module")
-def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
-    """Fund the test wallet with native token and common ERC20s.
+def _eoa_funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
+    """Module-scoped EOA funding (original ``funded_wallet`` behaviour).
 
     Polygon-specific: WETH and USDT are PoS-bridged UChildERC20Proxy tokens.
     They cannot be wrapped from native MATIC, so we use storage slot manipulation
     and verify the resulting balance.
+
+    Kept as a private fixture so the function-scoped ``funded_wallet`` below can
+    delegate to it for unmarked tests without duplicating the module-scoped
+    seeding work. For tests with the ``uses_zodiac`` marker, ``funded_wallet``
+    returns the Safe address instead and this fixture's side effect (seeding
+    the EOA) is still useful — the member EOA uses its balance to pay gas
+    when signing ``execTransactionWithRole``.
 
     Reverts the fork to session pristine state first so each test module gets a
     clean slate independent of prior modules on the same chain (VIB-3059).
@@ -169,6 +184,37 @@ def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) 
     )
 
 
+@pytest.fixture
+def funded_wallet(
+    _eoa_funded_wallet: str,
+    zodiac_safe: ZodiacContext | None,
+) -> str:
+    """Return the wallet tests should treat as the token holder.
+
+    When ``@pytest.mark.uses_zodiac(...)`` is set: returns the per-test Safe
+    address from ``zodiac_safe``. The Safe has already been seeded with the
+    same CHAIN_CONFIGS ERC-20 balances the EOA path normally receives, so
+    tests that read ``funded_wallet`` purely as a token holder keep working.
+
+    Without the marker: returns ``TEST_WALLET`` (the EOA), preserving the
+    original module-scoped behaviour.
+
+    Tests that use ``funded_wallet`` as an *EOA signer* outside the
+    orchestrator (raw ``web3.eth.send_transaction({"from": funded_wallet})``)
+    will need to route through the orchestrator when marked with
+    ``uses_zodiac`` — the Safe cannot produce raw signatures on arbitrary
+    calls. The pilot tests already go through ``orchestrator.execute(...)``
+    so this surfaces naturally during G.2 rollout rather than silently.
+    """
+    if zodiac_safe is not None:
+        # The module-scoped EOA fixture has already run (pytest resolves
+        # dependencies in order); we depend on it so EOA funding happens for
+        # gas, but we return the Safe.
+        _ = _eoa_funded_wallet
+        return zodiac_safe.safe_address
+    return _eoa_funded_wallet
+
+
 @pytest.fixture(scope="module")
 def reseed_wallet_state(anvil_instance: AnvilFixture):
     """Return a callable that re-seeds balances on demand (for fork recovery)."""
@@ -181,14 +227,37 @@ def reseed_wallet_state(anvil_instance: AnvilFixture):
 
 
 @pytest.fixture
-def orchestrator(test_private_key: str, anvil_rpc_url: str) -> ExecutionOrchestrator:
-    """Create ExecutionOrchestrator for testing.
+def orchestrator(
+    test_private_key: str,
+    anvil_rpc_url: str,
+    web3: Web3,
+    zodiac_safe: ZodiacContext | None,
+):
+    """Create the execution orchestrator for this test.
 
-    Uses a permissive TransactionRiskConfig because Polygon gas prices on
-    Anvil forks can still spike above chain-specific caps even after
-    lowering the base fee.  The gas price guard is a production safety net,
-    not something intent tests need to exercise.
+    Returns a ``ZodiacOrchestrator`` when ``@pytest.mark.uses_zodiac(...)`` is
+    set — the marker's manifest has been applied on-chain (see
+    ``zodiac_safe``) and each tx in the bundle will be routed through
+    ``Roles.execTransactionWithRole`` signed by the member EOA. The outward
+    contract (``async def execute(action_bundle) -> ExecutionResult``) is
+    identical, so unchanged tests run unchanged.
+
+    Without the marker: returns the standard ``ExecutionOrchestrator`` with a
+    permissive ``TransactionRiskConfig`` because Polygon gas prices on Anvil
+    forks can still spike above chain-specific caps even after lowering the
+    base fee.  The gas price guard is a production safety net, not something
+    intent tests need to exercise.
     """
+    if zodiac_safe is not None:
+        return ZodiacOrchestrator(
+            web3=web3,
+            roles_address=zodiac_safe.roles_address,
+            role_key=zodiac_safe.role_key,
+            member_eoa=zodiac_safe.member_eoa,
+            member_private_key=zodiac_safe.member_private_key,
+            chain=CHAIN_NAME,
+            rpc_url=anvil_rpc_url,
+        )
     signer = LocalKeySigner(private_key=test_private_key)
     submitter = PublicMempoolSubmitter(
         rpc_url=anvil_rpc_url,

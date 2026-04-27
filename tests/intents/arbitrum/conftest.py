@@ -33,7 +33,6 @@ from tests.intents.conftest import (
     make_intent_test_web3,
     reset_fork_to_pristine,
     seed_wallet_state_with_recovery,
-    uses_zodiac_marker,
 )
 
 CHAIN_NAME = "arbitrum"
@@ -120,7 +119,6 @@ def _eoa_funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixt
 
 @pytest.fixture
 def funded_wallet(
-    request: pytest.FixtureRequest,
     _eoa_funded_wallet: str,
     zodiac_safe: ZodiacContext | None,
 ) -> str:
@@ -147,10 +145,6 @@ def funded_wallet(
         # gas, but we return the Safe.
         _ = _eoa_funded_wallet
         return zodiac_safe.safe_address
-    # Keep diagnostic visibility: if the marker is absent but the request
-    # pulled in zodiac_safe for another reason, fall through silently rather
-    # than forcing a behaviour change.
-    _ = uses_zodiac_marker(request)  # no-op; retained for future debug prints
     return _eoa_funded_wallet
 
 
@@ -191,6 +185,7 @@ def orchestrator(
             member_eoa=zodiac_safe.member_eoa,
             member_private_key=zodiac_safe.member_private_key,
             chain=CHAIN_NAME,
+            rpc_url=anvil_rpc_url,
         )
     signer = LocalKeySigner(private_key=test_private_key)
     submitter = PublicMempoolSubmitter(

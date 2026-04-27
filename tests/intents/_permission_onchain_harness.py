@@ -2381,6 +2381,7 @@ class ZodiacOrchestrator:
         member_eoa: str,
         member_private_key: str,
         chain: str,
+        rpc_url: str,
     ) -> None:
         self.web3 = web3
         self.roles_address = Web3.to_checksum_address(roles_address)
@@ -2388,6 +2389,7 @@ class ZodiacOrchestrator:
         self.member_eoa = Web3.to_checksum_address(member_eoa)
         self.member_private_key = member_private_key
         self.chain = chain
+        self.rpc_url = rpc_url
         self._roles_contract = web3.eth.contract(
             address=self.roles_address,
             abi=ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
