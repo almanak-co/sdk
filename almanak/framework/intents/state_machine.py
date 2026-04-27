@@ -99,6 +99,11 @@ class IntentState(Enum):
     VALIDATING_REPAY = auto()
     SADFLOW_REPAY = auto()
 
+    # DELEVERAGE intent states (shares execution path with REPAY; distinct for accounting)
+    PREPARING_DELEVERAGE = auto()
+    VALIDATING_DELEVERAGE = auto()
+    SADFLOW_DELEVERAGE = auto()
+
     # SUPPLY intent states
     PREPARING_SUPPLY = auto()
     VALIDATING_SUPPLY = auto()
@@ -210,6 +215,7 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.LP_CLOSE: IntentState.PREPARING_LP_CLOSE,
         IntentType.BORROW: IntentState.PREPARING_BORROW,
         IntentType.REPAY: IntentState.PREPARING_REPAY,
+        IntentType.DELEVERAGE: IntentState.PREPARING_DELEVERAGE,
         IntentType.SUPPLY: IntentState.PREPARING_SUPPLY,
         IntentType.WITHDRAW: IntentState.PREPARING_WITHDRAW,
         IntentType.PERP_OPEN: IntentState.PREPARING_PERP_OPEN,
@@ -248,6 +254,7 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.LP_CLOSE: IntentState.VALIDATING_LP_CLOSE,
         IntentType.BORROW: IntentState.VALIDATING_BORROW,
         IntentType.REPAY: IntentState.VALIDATING_REPAY,
+        IntentType.DELEVERAGE: IntentState.VALIDATING_DELEVERAGE,
         IntentType.SUPPLY: IntentState.VALIDATING_SUPPLY,
         IntentType.WITHDRAW: IntentState.VALIDATING_WITHDRAW,
         IntentType.PERP_OPEN: IntentState.VALIDATING_PERP_OPEN,
@@ -286,6 +293,7 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.LP_CLOSE: IntentState.SADFLOW_LP_CLOSE,
         IntentType.BORROW: IntentState.SADFLOW_BORROW,
         IntentType.REPAY: IntentState.SADFLOW_REPAY,
+        IntentType.DELEVERAGE: IntentState.SADFLOW_DELEVERAGE,
         IntentType.SUPPLY: IntentState.SADFLOW_SUPPLY,
         IntentType.WITHDRAW: IntentState.SADFLOW_WITHDRAW,
         IntentType.PERP_OPEN: IntentState.SADFLOW_PERP_OPEN,
@@ -317,6 +325,7 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_LP_CLOSE,
         IntentState.PREPARING_BORROW,
         IntentState.PREPARING_REPAY,
+        IntentState.PREPARING_DELEVERAGE,
         IntentState.PREPARING_SUPPLY,
         IntentState.PREPARING_WITHDRAW,
         IntentState.PREPARING_PERP_OPEN,
@@ -347,6 +356,7 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_LP_CLOSE,
         IntentState.VALIDATING_BORROW,
         IntentState.VALIDATING_REPAY,
+        IntentState.VALIDATING_DELEVERAGE,
         IntentState.VALIDATING_SUPPLY,
         IntentState.VALIDATING_WITHDRAW,
         IntentState.VALIDATING_PERP_OPEN,
@@ -377,6 +387,7 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_LP_CLOSE,
         IntentState.SADFLOW_BORROW,
         IntentState.SADFLOW_REPAY,
+        IntentState.SADFLOW_DELEVERAGE,
         IntentState.SADFLOW_SUPPLY,
         IntentState.SADFLOW_WITHDRAW,
         IntentState.SADFLOW_PERP_OPEN,

@@ -443,3 +443,129 @@ class WithdrawIntent(AlmanakImmutableModel):
         if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
             clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
         return cls.model_validate(clean_data)
+
+
+class DeleverageIntent(AlmanakImmutableModel):
+    """Intent to perform an emergency deleverage (forced repay with risk-event context).
+
+    Structurally identical to a RepayIntent at the protocol level — the on-chain
+    action is a full or partial repay. The distinction is that a DeleverageIntent
+    is emitted by risk-management logic (health-factor guards) rather than normal
+    strategy operation. The extra fields make the event distinguishable in accounting
+    and dashboards without requiring protocol-level changes.
+
+    Attributes:
+        protocol: Lending protocol (e.g., "aave_v3", "morpho_blue")
+        token: Token to repay
+        amount: Amount to repay, or "all" to use output from previous step.
+            Defaults to Decimal("0") when repay_full=True (ignored by the protocol).
+        repay_full: If True, repay the full outstanding debt (sends MAX_UINT256).
+        interest_rate_mode: Interest rate mode for protocols that support it.
+        market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
+        chain: Target chain for execution.
+        trigger_reason: Human-readable description of why the deleverage was triggered
+            (e.g., "HF 1.08 < emergency_threshold 1.2: full deleverage").
+        observed_hf: Health factor observed at the time the deleverage was triggered.
+            None if the health factor could not be read before the trigger.
+        target_hf: The desired health factor after the deleverage completes.
+            None if not specified by the calling strategy.
+        intent_id: Unique identifier for this intent.
+        created_at: Timestamp when the intent was created.
+
+    Note:
+        The compiler routes DELEVERAGE to the same on-chain path as REPAY.  The
+        event_type in accounting will be LendingEventType.DELEVERAGE (not REPAY),
+        and the trigger context is preserved in the accounting event's notes field.
+    """
+
+    protocol: str
+    token: str
+    amount: PydanticChainedAmount
+    repay_full: bool = False
+    interest_rate_mode: InterestRateMode | None = None
+    market_id: str | None = None
+    chain: str | None = None
+
+    # Risk-event context — the fields that distinguish a deleverage from a repay.
+    trigger_reason: str = ""
+    observed_hf: Decimal | None = None
+    target_hf: Decimal | None = None
+
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_deleverage_intent(self) -> "DeleverageIntent":
+        """Validate deleverage parameters."""
+        if not self.repay_full:
+            if isinstance(self.amount, Decimal) and self.amount <= 0:
+                raise ValueError("amount must be positive when not repaying full")
+            elif not isinstance(self.amount, Decimal) and self.amount != "all":
+                raise ValueError("amount must be a positive Decimal or 'all' when not repaying full")
+        if self.observed_hf is not None and self.observed_hf < Decimal("0"):
+            raise ValueError("observed_hf must be non-negative")
+        if self.target_hf is not None and self.target_hf <= Decimal("0"):
+            raise ValueError("target_hf must be positive")
+        # Apply the same protocol-param validation as RepayIntent so inputs such
+        # as protocol="morpho_blue" without market_id are rejected early.
+        self._validate_protocol_params()
+        return self
+
+    def _validate_protocol_params(self) -> None:
+        """Validate protocol-specific parameters (mirrors RepayIntent)."""
+        protocol_lower = self.protocol.lower()
+        capabilities = PROTOCOL_CAPABILITIES.get(protocol_lower, {})
+
+        # Validate market_id for protocols that require it
+        if capabilities.get("requires_market_id", False):
+            if not self.market_id:
+                raise InvalidProtocolParameterError(
+                    protocol=self.protocol,
+                    parameter="market_id",
+                    value=self.market_id,
+                    reason=f"Protocol '{self.protocol}' requires market_id for isolated lending markets",
+                )
+
+        # Validate interest_rate_mode if provided
+        if self.interest_rate_mode is not None:
+            if not capabilities.get("supports_interest_rate_mode", False):
+                raise InvalidProtocolParameterError(
+                    protocol=self.protocol,
+                    parameter="interest_rate_mode",
+                    value=self.interest_rate_mode,
+                    reason=f"Protocol '{self.protocol}' does not support interest rate mode selection",
+                )
+            valid_modes = capabilities.get("interest_rate_modes", [])
+            if self.interest_rate_mode not in valid_modes:
+                raise InvalidProtocolParameterError(
+                    protocol=self.protocol,
+                    parameter="interest_rate_mode",
+                    value=self.interest_rate_mode,
+                    reason=f"Valid modes for '{self.protocol}': {', '.join(valid_modes)}",
+                )
+
+    @property
+    def is_chained_amount(self) -> bool:
+        """Check if this intent uses a chained amount from previous step."""
+        return self.amount == "all"
+
+    @property
+    def intent_type(self) -> IntentType:
+        """Return the type of this intent."""
+        return IntentType.DELEVERAGE
+
+    def serialize(self) -> dict[str, Any]:
+        """Serialize the intent to a dictionary."""
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        if self.amount == "all":
+            data["amount"] = "all"
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "DeleverageIntent":
+        """Deserialize a dictionary to a DeleverageIntent."""
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)

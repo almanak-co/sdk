@@ -759,6 +759,7 @@ class _MinimalIntent:
             "lp_close": IntentType.LP_CLOSE,
             "borrow": IntentType.BORROW,
             "repay": IntentType.REPAY,
+            "deleverage": IntentType.DELEVERAGE,
             "supply": IntentType.SUPPLY,
             "withdraw": IntentType.WITHDRAW,
             "hold": IntentType.HOLD,

@@ -702,6 +702,11 @@ class IntentCompiler:
                 return self._compile_borrow(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.REPAY:
                 return self._compile_repay(intent)  # type: ignore[arg-type]
+            elif intent_type == IntentType.DELEVERAGE:
+                # DELEVERAGE is structurally identical to REPAY at the protocol level.
+                # The intent carries extra risk-event context (trigger_reason, observed_hf,
+                # target_hf) but the on-chain transaction is the same repay call.
+                return self._compile_repay(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.SUPPLY:
                 return self._compile_supply(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.WITHDRAW:

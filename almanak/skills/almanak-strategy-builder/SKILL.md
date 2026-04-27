@@ -342,6 +342,27 @@ Intent.repay(
 )
 ```
 
+**Intent.deleverage** - Emergency repay triggered by risk management (e.g. HF below threshold)
+
+```python
+Intent.deleverage(
+    protocol="aave_v3",
+    token="USDC",
+    amount=Decimal("5000"),
+    trigger_reason="health_factor_below_threshold",  # Human-readable reason for the deleverage
+    observed_hf=Decimal("1.05"),   # Health factor at trigger time (persisted as health_factor_before)
+    target_hf=Decimal("1.5"),      # Target HF after deleverage
+    repay_full=False,              # Set True to repay entire debt
+    market_id=None,
+)
+```
+
+Compiles to the same on-chain execution as `Intent.repay`. The `trigger_reason`, `observed_hf`,
+and `target_hf` are stored in the accounting layer so dashboards can surface why the deleverage
+was forced. The `observed_hf` is persisted as `health_factor_before` in the accounting event.
+DELEVERAGE is a mandatory live event type (fail-closed) — the runner will log a WARNING when it
+detects a deleverage.
+
 **Intent.withdraw** - Withdraw from lending protocol
 
 ```python

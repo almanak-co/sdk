@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -829,6 +829,53 @@ def build_lending_accounting_event(
     else:
         unavailable_reason = ""
 
+    # ── DELEVERAGE enrichment (VIB-3490) ─────────────────────────────────────
+    # For DELEVERAGE events, persist the observed HF as health_factor_before
+    # (pre-trigger snapshot) so analytics can reconstruct the risk state at the
+    # moment the deleverage was triggered without needing a separate pre-read.
+    #
+    # Trigger metadata (trigger_reason, observed_hf, target_hf) is appended to
+    # unavailable_reason ONLY when the event is already estimated/degraded (i.e.
+    # got_after_state is False). When confidence is HIGH the deleverage context
+    # is emitted as a debug log only — it must not overwrite an empty
+    # unavailable_reason, as that would incorrectly signal data degradation to
+    # downstream consumers.
+    hf_before_from_intent: Decimal | None = None  # populated below for DELEVERAGE only
+    if intent_type_str == "DELEVERAGE":
+        trigger_reason = getattr(intent, "trigger_reason", "") or ""
+        observed_hf_intent = getattr(intent, "observed_hf", None)
+        target_hf_intent = getattr(intent, "target_hf", None)
+
+        # Persist the observed HF as health_factor_before (pre-trigger snapshot).
+        if observed_hf_intent is not None:
+            try:
+                hf_before_from_intent = Decimal(str(observed_hf_intent))
+            except (ValueError, TypeError, InvalidOperation):
+                pass
+
+        # Build trigger context string for logging / degraded-event annotation.
+        parts: list[str] = []
+        if trigger_reason:
+            parts.append(f"DELEVERAGE: {trigger_reason}")
+        else:
+            parts.append("DELEVERAGE: emergency-triggered")
+        if observed_hf_intent is not None:
+            parts.append(f"observed_hf={observed_hf_intent}")
+        if target_hf_intent is not None:
+            parts.append(f"target_hf={target_hf_intent}")
+        deleverage_context = "; ".join(parts)
+
+        if unavailable_reason:
+            # Event is already degraded/estimated — safe to append trigger context.
+            unavailable_reason = f"{deleverage_context} | {unavailable_reason}"
+
+        logger.debug(
+            "DELEVERAGE accounting event enriched: %s (position=%s, confidence=%s)",
+            deleverage_context,
+            position_key,
+            confidence.value,
+        )
+
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
         id=make_accounting_event_id(deployment_id, cycle_id, intent_type_str, _id_seed, position_key),
@@ -856,7 +903,10 @@ def build_lending_accounting_event(
         debt_value_after_usd=debt_after,
         net_equity_before_usd=net_equity_before,
         net_equity_after_usd=net_equity_after,
-        health_factor_before=hf_before,
+        # For DELEVERAGE intents: prefer the observed_hf from the intent (the exact HF
+        # at the moment the strategy triggered the deleverage) over the pre-execution
+        # gateway read. For all other intent types use the pre-execution state read.
+        health_factor_before=hf_before_from_intent if hf_before_from_intent is not None else hf_before,
         health_factor_after=hf_after,
         liquidation_threshold=liquidation_threshold,
         lltv=lltv_after,

@@ -231,6 +231,10 @@ class IntentType(Enum):
     # Native token wrap/unwrap (ETH<->WETH, MATIC<->WMATIC, etc.)
     WRAP_NATIVE = "WRAP_NATIVE"
     UNWRAP_NATIVE = "UNWRAP_NATIVE"
+    # Emergency deleverage — structurally a repay but carries risk-event context
+    # (trigger_reason, observed_hf, target_hf) so dashboards and accounting can
+    # distinguish forced unwinds from routine repays.
+    DELEVERAGE = "DELEVERAGE"
 
 
 # =============================================================================
@@ -615,6 +619,7 @@ from .advanced_intents import (  # noqa: E402, F401
 )
 from .lending_intents import (  # noqa: E402, F401
     BorrowIntent,
+    DeleverageIntent,
     RepayIntent,
     SupplyIntent,
     WithdrawIntent,
@@ -647,6 +652,7 @@ type AnyIntent = (
     | CollectFeesIntent
     | BorrowIntent
     | RepayIntent
+    | DeleverageIntent
     | SupplyIntent
     | WithdrawIntent
     | PerpOpenIntent
@@ -1087,6 +1093,76 @@ class Intent:
             interest_rate_mode=interest_rate_mode,
             market_id=market_id,
             chain=chain,
+        )
+
+    @staticmethod
+    def deleverage(
+        protocol: str,
+        token: str,
+        amount: ChainedAmount | None = None,
+        repay_full: bool = False,
+        interest_rate_mode: InterestRateMode | None = None,
+        market_id: str | None = None,
+        chain: str | None = None,
+        trigger_reason: str = "",
+        observed_hf: Decimal | None = None,
+        target_hf: Decimal | None = None,
+    ) -> "DeleverageIntent":
+        """Create an emergency deleverage intent.
+
+        Structurally identical to a repay at the protocol level, but carries
+        risk-event context (trigger_reason, observed_hf, target_hf) so accounting
+        and dashboards can distinguish forced unwinds from routine repays.
+
+        Use this instead of ``Intent.repay()`` when the repay is triggered by a
+        health-factor guard or emergency risk manager.
+
+        Args:
+            protocol: Lending protocol (e.g., "aave_v3", "morpho_blue")
+            token: Token to repay
+            amount: Amount to repay, or "all" to use previous step output.
+                Defaults to Decimal("0") when repay_full=True (ignored in that case).
+                Required when repay_full=False.
+            repay_full: If True, repay the full outstanding debt (sends MAX_UINT256).
+                When True, amount is ignored and may be omitted.
+            interest_rate_mode: Interest rate mode for protocols that support it.
+            market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
+            chain: Target chain for execution (defaults to strategy's primary chain)
+            trigger_reason: Human-readable description of why the deleverage was triggered.
+                (e.g., "HF 1.08 < emergency_threshold 1.2: full deleverage")
+            observed_hf: Health factor observed at the time of triggering.
+            target_hf: Desired health factor after the deleverage completes.
+
+        Returns:
+            DeleverageIntent: The created deleverage intent
+
+        Example:
+            # Full emergency deleverage on Aave when HF drops below threshold
+            intent = Intent.deleverage(
+                protocol="aave_v3",
+                token="USDC",
+                repay_full=True,
+                trigger_reason="HF 1.08 below emergency threshold 1.2",
+                observed_hf=Decimal("1.08"),
+                target_hf=Decimal("2.0"),
+            )
+        """
+        if amount is None:
+            if repay_full:
+                amount = Decimal("0")
+            else:
+                raise ValueError("amount is required when repay_full=False")
+        return DeleverageIntent(
+            protocol=protocol,
+            token=token,
+            amount=amount,
+            repay_full=repay_full,
+            interest_rate_mode=interest_rate_mode,
+            market_id=market_id,
+            chain=chain,
+            trigger_reason=trigger_reason,
+            observed_hf=observed_hf,
+            target_hf=target_hf,
         )
 
     @staticmethod
@@ -2070,6 +2146,7 @@ class Intent:
             IntentType.LP_COLLECT_FEES.value: CollectFeesIntent,
             IntentType.BORROW.value: BorrowIntent,
             IntentType.REPAY.value: RepayIntent,
+            IntentType.DELEVERAGE.value: DeleverageIntent,
             IntentType.SUPPLY.value: SupplyIntent,
             IntentType.WITHDRAW.value: WithdrawIntent,
             IntentType.PERP_OPEN.value: PerpOpenIntent,

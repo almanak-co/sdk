@@ -2033,8 +2033,9 @@ class StrategyRunner:
         Reads after-state (HF, collateral, debt) from the chain via the gateway.
         pre_lending_state is the before-state captured pre-execution (VIB-3489).
         """
-        # BORROW and REPAY are mandatory in live mode: they carry HF and interest data.
-        _MANDATORY_LIVE_TYPES = frozenset({"BORROW", "REPAY"})
+        # BORROW, REPAY, and DELEVERAGE are mandatory in live mode: they carry HF and
+        # interest data that must be durable for looping strategies.
+        _MANDATORY_LIVE_TYPES = frozenset({"BORROW", "REPAY", "DELEVERAGE"})
         intent_type_str = ""
         is_mandatory_live = False
         try:
@@ -2048,6 +2049,20 @@ class StrategyRunner:
 
             if intent_type_str not in _LENDING_INTENT_TYPES:
                 return
+
+            # DELEVERAGE is a notable risk event — log at WARNING so operators are
+            # alerted even when they are not actively monitoring DEBUG logs.
+            if intent_type_str == "DELEVERAGE":
+                trigger_reason = getattr(intent, "trigger_reason", "") or ""
+                observed_hf = getattr(intent, "observed_hf", None)
+                target_hf = getattr(intent, "target_hf", None)
+                logger.warning(
+                    "DELEVERAGE intent executed for strategy=%s — trigger=%r observed_hf=%s target_hf=%s",
+                    getattr(strategy, "strategy_id", ""),
+                    trigger_reason,
+                    observed_hf,
+                    target_hf,
+                )
 
             if not self.state_manager:
                 return
