@@ -221,7 +221,7 @@ class AccountingProcessor:
         if category == AccountingCategory.VAULT:
             return handle_vault(outbox_row, ledger_row)
         if category == AccountingCategory.SWAP:
-            return handle_swap(outbox_row, ledger_row)
+            return handle_swap(outbox_row, ledger_row, self._basis_store)
         # NO_ACCOUNTING — no event written
         return None
 

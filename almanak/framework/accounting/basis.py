@@ -253,6 +253,43 @@ class FIFOBasisStore:
                 )
                 replayed += 1
 
+            elif event_type == "SWAP":
+                # Position key for swap lots is stored in the payload (swap:<chain>:<wallet>).
+                # Fall back to row position_key for events written before VIB-3473.
+                swap_position_key = payload.get("swap_position_key") or position_key
+                if not swap_position_key:
+                    continue
+
+                # 1. Replay disposal of token_in to consume any prior acquisition lots,
+                #    keeping the FIFO store consistent with the state before this swap.
+                token_in_r = payload.get("token_in", "")
+                amount_in_r = _parse_decimal(payload.get("amount_in"))
+                if token_in_r and amount_in_r is not None and amount_in_r > 0:
+                    self.match_swap_disposal(
+                        deployment_id=deployment_id,
+                        position_key=swap_position_key,
+                        token=token_in_r,
+                        amount=amount_in_r,
+                    )
+
+                # 2. Replay acquisition lot for token_out so future disposals can match it.
+                token_out = payload.get("token_out", "")
+                if not token_out:
+                    continue
+                amount_out = _parse_decimal(payload.get("amount_out"))
+                if amount_out is None or amount_out <= 0:
+                    continue
+                cost_usd = _parse_decimal(payload.get("amount_out_usd"))
+                self.record_swap_acquisition(
+                    deployment_id=deployment_id,
+                    position_key=swap_position_key,
+                    token=token_out,
+                    amount=amount_out,
+                    cost_usd=cost_usd,
+                    timestamp=ts,
+                )
+                replayed += 1
+
         if replayed:
             _log.info("FIFOBasisStore: reconstructed %d lot operations from accounting_events", replayed)
         if _v1_skipped:
@@ -432,3 +469,91 @@ class FIFOBasisStore:
             unmatched_amount=max(Decimal("0"), remaining),
             earliest_lot_timestamp=earliest_ts,
         )
+
+    def record_swap_acquisition(
+        self,
+        deployment_id: str,
+        position_key: str,
+        token: str,
+        amount: Decimal,
+        cost_usd: Decimal | None = None,
+        timestamp: datetime | None = None,
+        lot_id: str = "",
+    ) -> str:
+        """Record a swap acquisition lot (token_out from a SWAP intent).
+
+        Called after a SWAP executes to record the cost basis of the acquired token.
+        The lot is stored in the FIFO store keyed by (deployment_id, position_key, token)
+        so that future SWAPs spending this token can compute realized PnL.
+
+        lot_id defaults to a deterministic seed from the caller when provided, or a
+        new UUID when empty.  Returns the lot_id used.
+        """
+        effective_lot_id = lot_id or str(uuid.uuid4())
+        key = self._key(deployment_id, position_key, token)
+        if key not in self._lots:
+            self._lots[key] = []
+        self._lots[key].append(
+            {
+                "lot_id": effective_lot_id,
+                "amount": amount,
+                "remaining": amount,
+                "cost_usd": cost_usd,
+                "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
+            }
+        )
+        return effective_lot_id
+
+    def match_swap_disposal(
+        self,
+        deployment_id: str,
+        position_key: str,
+        token: str,
+        amount: Decimal,
+    ) -> tuple[Decimal | None, Decimal]:
+        """FIFO-consume swap acquisition lots for token_in.
+
+        Returns (cost_basis_consumed, unmatched_amount).
+
+        Returns (None, amount) when no lots exist for this token — signals to the
+        caller that realized PnL cannot be computed (no prior acquisition recorded).
+        Returns (Decimal, Decimal("0")) on a full FIFO match.
+        Returns (Decimal, unmatched_amount) on a partial match (spent more than was
+        recorded — e.g. tokens acquired before the accounting system was deployed).
+
+        cost_basis_consumed is the USD cost of the consumed lot quantity.  Returns
+        None when any consumed lot had cost_usd=None — missing basis means realized
+        PnL cannot be reliably computed for this disposal.  Callers must treat a
+        None return as ESTIMATED confidence.
+        """
+        key = self._key(deployment_id, position_key, token)
+        lots = self._lots.get(key)
+
+        # No lots at all for this token — cannot compute realized PnL.
+        if lots is None:
+            return None, amount
+
+        remaining = amount
+        cost_consumed = Decimal("0")
+        _has_unknown_basis = False
+
+        for lot in lots:
+            if remaining <= 0:
+                break
+            available = lot.get("remaining", Decimal("0"))
+            if available <= 0:
+                continue
+            consume = min(available, remaining)
+            lot["remaining"] -= consume
+            remaining -= consume
+            lot_cost_usd: Decimal | None = lot.get("cost_usd")
+            if lot_cost_usd is not None and lot["amount"] > 0:
+                # Pro-rate the lot's cost by the fraction consumed.
+                cost_consumed += lot_cost_usd * (consume / lot["amount"])
+            else:
+                _has_unknown_basis = True
+
+        if _has_unknown_basis:
+            return None, remaining
+
+        return cost_consumed, remaining

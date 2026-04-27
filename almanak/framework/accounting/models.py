@@ -317,6 +317,99 @@ class PendleAccountingEvent:
 
 
 @dataclass
+class SwapAccountingEvent:
+    """Accounting event emitted after a successful SWAP intent execution (VIB-3473).
+
+    Tracks token flow (token_in → token_out), USD amounts from price_inputs_json,
+    FIFO realized PnL for token_in, and acquisition lot recording for token_out.
+
+    Design rules:
+    - None = unmeasured / unavailable. Decimal("0") = measured zero. Never conflate.
+    - realized_pnl_usd is None when no prior acquisition lot exists for token_in
+      (e.g. first swap, or lot history predates the accounting system).
+    - cost_basis_recorded = True when the token_out acquisition lot was stored
+      in FIFOBasisStore (always True when basis_store is provided).
+    - swap_position_key is stored in the payload to enable FIFO lot reconstruction
+      on restart (reconstruct_from_events reads it back).
+    """
+
+    identity: AccountingIdentity
+    event_type: SwapEventType  # always SwapEventType.SWAP
+    protocol: str  # "enso" | "uniswap_v3" | "jupiter" | etc.
+    token_in: str
+    token_out: str
+    amount_in: Decimal
+    amount_out: Decimal
+    amount_in_usd: Decimal | None
+    amount_out_usd: Decimal | None
+    effective_price: Decimal  # amount_out / amount_in (0 if amount_in is 0)
+    slippage_bps: int | None
+    realized_pnl_usd: Decimal | None  # amount_in_usd - cost_basis_consumed; None if no prior lot
+    cost_basis_recorded: bool  # True if acquisition lot was recorded for token_out
+    gas_usd: Decimal | None
+    confidence: AccountingConfidence
+    unavailable_reason: str
+    # Position key used for FIFO lot lookup (swap:<chain>:<wallet>).
+    # Stored in payload for reconstruct_from_events reconstruction.
+    swap_position_key: str = ""
+    schema_version: int = 1
+
+    def to_payload_json(self) -> str:
+        def _enc(v: Any) -> Any:
+            if isinstance(v, Decimal):
+                return str(v)
+            if isinstance(v, AccountingConfidence | SwapEventType):
+                return v.value
+            return v
+
+        d = {
+            "event_type": self.event_type.value,
+            "protocol": self.protocol,
+            "token_in": self.token_in,
+            "token_out": self.token_out,
+            "amount_in": _enc(self.amount_in),
+            "amount_out": _enc(self.amount_out),
+            "amount_in_usd": _enc(self.amount_in_usd),
+            "amount_out_usd": _enc(self.amount_out_usd),
+            "effective_price": _enc(self.effective_price),
+            "slippage_bps": self.slippage_bps,
+            "realized_pnl_usd": _enc(self.realized_pnl_usd),
+            "cost_basis_recorded": self.cost_basis_recorded,
+            "gas_usd": _enc(self.gas_usd),
+            "confidence": self.confidence.value,
+            "unavailable_reason": self.unavailable_reason,
+            "swap_position_key": self.swap_position_key,
+            "schema_version": self.schema_version,
+        }
+        return json.dumps(d)
+
+    @classmethod
+    def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> SwapAccountingEvent:
+        d = json.loads(payload)
+        schema_version = _validate_schema_version(d, "SwapAccountingEvent")
+        return cls(
+            identity=identity,
+            event_type=SwapEventType(d["event_type"]),
+            protocol=d.get("protocol", ""),
+            token_in=d.get("token_in", ""),
+            token_out=d.get("token_out", ""),
+            amount_in=Decimal(d["amount_in"]) if d.get("amount_in") is not None else Decimal("0"),
+            amount_out=Decimal(d["amount_out"]) if d.get("amount_out") is not None else Decimal("0"),
+            amount_in_usd=_dec(d.get("amount_in_usd")),
+            amount_out_usd=_dec(d.get("amount_out_usd")),
+            effective_price=Decimal(d["effective_price"]) if d.get("effective_price") is not None else Decimal("0"),
+            slippage_bps=d.get("slippage_bps"),
+            realized_pnl_usd=_dec(d.get("realized_pnl_usd")),
+            cost_basis_recorded=bool(d.get("cost_basis_recorded", False)),
+            gas_usd=_dec(d.get("gas_usd")),
+            confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
+            unavailable_reason=d.get("unavailable_reason", ""),
+            swap_position_key=d.get("swap_position_key", ""),
+            schema_version=schema_version,
+        )
+
+
+@dataclass
 class BorrowLot:
     """A single borrow lot for FIFO interest matching."""
 

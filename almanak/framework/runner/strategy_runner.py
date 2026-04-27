@@ -2010,6 +2010,15 @@ class StrategyRunner:
                 )
                 return position_key, market_address
 
+            # Non-Pendle SWAP — position key groups by chain+wallet for FIFO lot tracking.
+            if t == "SWAP":
+                position_key = (
+                    f"swap:{chain.lower().strip()}:{wallet_address.lower().strip()}"
+                    if (chain and wallet_address)
+                    else ""
+                )
+                return position_key, ""
+
         except Exception:
             logger.debug("_compute_outbox_position_key failed", exc_info=True)
 
