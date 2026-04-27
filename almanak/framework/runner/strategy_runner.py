@@ -1905,19 +1905,22 @@ class StrategyRunner:
     ) -> None:
         """Write a LendingAccountingEvent after a successful lending intent (VIB-3418).
 
-        Best-effort: any exception is logged at WARNING and swallowed.  In live
-        mode the accounting record is important but secondary to the ledger entry
-        that is already persisted — a write failure here does not halt the loop.
+        Fail-closed in live mode for BORROW and REPAY — those events carry health
+        factor and interest data that must be durable for looping strategies.
+        SUPPLY and WITHDRAW remain best-effort in all modes.
 
         Reads after-state (HF, collateral, debt) from the chain via the gateway.
-        Before-state is None for now; pre-execution capture is a follow-up item.
+        Before-state is None for now; pre-execution capture is a follow-up (VIB-3489).
         """
+        # BORROW and REPAY are mandatory in live mode: they carry HF and interest data.
+        _MANDATORY_LIVE_TYPES = frozenset({"BORROW", "REPAY"})
+        intent_type_str = ""
+        is_mandatory_live = False
         try:
             from ..accounting.lending_accounting import _LENDING_INTENT_TYPES, build_lending_accounting_event
             from ..accounting.writer import AccountingWriter
             from ..observability.context import get_cycle_id
 
-            intent_type_str = ""
             it = getattr(intent, "intent_type", None)
             if it is not None:
                 intent_type_str = it.value if hasattr(it, "value") else str(it)
@@ -1927,6 +1930,8 @@ class StrategyRunner:
 
             if not self.state_manager:
                 return
+
+            is_mandatory_live = self._is_live_mode() and intent_type_str in _MANDATORY_LIVE_TYPES
 
             deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
             cycle_id = get_cycle_id() or ""
@@ -1960,15 +1965,31 @@ class StrategyRunner:
                     event.asset,
                     event.confidence,
                 )
+            elif is_mandatory_live:
+                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message=f"Mandatory accounting event not persisted — backend unsupported ({intent_type_str})",
+                )
             else:
                 logger.debug(
                     "Lending accounting event not persisted (backend unsupported): %s %s", event.event_type, event.asset
                 )
-        except Exception:
-            logger.warning(
-                "Lending accounting write failed (non-blocking)",
-                exc_info=True,
-            )
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            if is_mandatory_live:
+                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message=f"Mandatory lending accounting write failed in live mode ({intent_type_str})",
+                    cause=e,
+                ) from e
+            logger.warning("Lending accounting write failed (non-blocking)", exc_info=True)
 
     async def _try_write_pendle_lp_accounting(
         self,
@@ -2043,12 +2064,14 @@ class StrategyRunner:
     ) -> None:
         """Write a PendleAccountingEvent(PT_BUY) + record FIFO lot after a Pendle PT swap (VIB-3422/3423).
 
-        Best-effort: any exception is logged at WARNING and swallowed.
+        Fail-closed in live mode once a PT buy is confirmed: the locked implied APR
+        and FIFO lot must be durable for PT_REDEEM to compute correct realized yield.
         Detects PT buys from the intent's to_token symbol and writes the
         locked implied APR computed from the PT price and days to maturity.
         Also records a FIFO lot in _lending_basis_store so PT_REDEEM can match
         the original cost basis and compute realized yield.
         """
+        is_mandatory_live = False
         try:
             from datetime import UTC, datetime
 
@@ -2087,27 +2110,12 @@ class StrategyRunner:
             if event is None:
                 return
 
-            # VIB-3423: record FIFO PT lot so PT_REDEEM can compute realized yield.
-            # sy_amount and pt_amount are stored as raw Decimal (int units).
-            # Use 18-decimal assumption for both SY and PT (standard for Pendle tokens).
-            if event.sy_amount is not None and event.pt_amount is not None:
-                from decimal import Decimal as _D
+            # PT buy confirmed — mandatory in live mode from this point on.
+            is_mandatory_live = self._is_live_mode()
 
-                _DECIMALS = 18
-                _scale = _D(10**_DECIMALS)
-                sy_human = event.sy_amount / _scale
-                pt_human = event.pt_amount / _scale
-                if pt_human > 0:
-                    self._lending_basis_store.record_pt_buy(
-                        deployment_id=deployment_id,
-                        position_key=event.position_key,
-                        pt_token=event.pt_token or "PT",
-                        pt_amount=pt_human,
-                        sy_cost=sy_human,
-                        timestamp=datetime.now(UTC),
-                        lot_id=event.identity.id,
-                    )
-
+            # Persist the accounting event BEFORE updating the in-memory FIFO lot.
+            # Write-ahead: if persistence fails we raise without dirtying the in-memory
+            # store, so a restart reconstructs a consistent view from accounting_events.
             writer = AccountingWriter(self.state_manager)
             ok = await writer.write(event)
             if ok:
@@ -2116,7 +2124,44 @@ class StrategyRunner:
                     event.pt_token,
                     event.implied_apr_bps,
                 )
-        except Exception:
+                # VIB-3423: record FIFO PT lot AFTER successful persistence so the
+                # in-memory store stays consistent with accounting_events on restart.
+                if event.sy_amount is not None and event.pt_amount is not None:
+                    from decimal import Decimal as _D
+
+                    _scale = _D(10**18)
+                    sy_human = event.sy_amount / _scale
+                    pt_human = event.pt_amount / _scale
+                    if pt_human > 0:
+                        self._lending_basis_store.record_pt_buy(
+                            deployment_id=deployment_id,
+                            position_key=event.position_key,
+                            pt_token=event.pt_token or "PT",
+                            pt_amount=pt_human,
+                            sy_cost=sy_human,
+                            timestamp=datetime.now(UTC),
+                            lot_id=event.identity.id,
+                        )
+            elif is_mandatory_live:
+                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message="Mandatory Pendle PT_BUY accounting event not persisted — backend unsupported",
+                )
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            if is_mandatory_live:
+                from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message="Mandatory Pendle PT_BUY accounting write failed in live mode",
+                    cause=e,
+                ) from e
             logger.warning("Pendle PT buy accounting write failed (non-blocking)", exc_info=True)
 
     async def _try_write_pendle_pt_redeem_accounting(

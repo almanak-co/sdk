@@ -21,6 +21,7 @@ class AccountingWriteKind(StrEnum):
     LEDGER = "ledger"
     SNAPSHOT = "snapshot"
     METRICS = "metrics"
+    ACCOUNTING = "accounting"
 
 
 class AccountingPersistenceError(Exception):

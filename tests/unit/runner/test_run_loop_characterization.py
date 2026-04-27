@@ -97,6 +97,7 @@ def _make_runner(
         enable_alerting=enable_alerting,
     )
     state_mgr = AsyncMock()
+    state_mgr.get_accounting_events_sync = MagicMock(return_value=[])
     runner = StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),

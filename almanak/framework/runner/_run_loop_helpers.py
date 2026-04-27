@@ -64,12 +64,37 @@ async def initialize_run_loop(
     caller can feed it to the success-branch copy-trading persist step.
     """
     # Initialize state if enabled
+    state_manager_ready = False
     if runner.config.enable_state_persistence:
         try:
             await runner.state_manager.initialize()
+            state_manager_ready = True
             logger.debug(f"State manager initialized for {strategy_id}")
         except Exception as e:
+            if runner._is_live_mode():
+                raise RuntimeError(f"Failed to initialize state manager for {strategy_id}: {e}") from e
             logger.error(f"Failed to initialize state manager: {e}")
+
+    # Reconstruct FIFO basis store from durable accounting_events so REPAY and
+    # PT_REDEEM attribution is correct after a runner restart (VIB-3484).
+    # Gate on state_manager_ready: an uninitialized backend returns [] silently,
+    # which would leave the FIFO store empty — the exact restart hole VIB-3484 fixes.
+    if runner.config.enable_state_persistence and state_manager_ready:
+        try:
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+            events = runner.state_manager.get_accounting_events_sync(deployment_id)
+            if events:
+                replayed = runner._lending_basis_store.reconstruct_from_events(events)
+                if replayed:
+                    logger.info(
+                        "Reconstructed %d FIFO lot operations for %s from accounting_events",
+                        replayed,
+                        deployment_id,
+                    )
+        except Exception as e:
+            if runner._is_live_mode():
+                raise RuntimeError(f"Failed to reconstruct FIFO basis store for {deployment_id}: {e}") from e
+            logger.warning("Failed to reconstruct FIFO basis store on startup: %s", e)
 
     # Recover incomplete sessions from previous runs
     try:

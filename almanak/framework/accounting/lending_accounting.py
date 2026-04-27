@@ -406,6 +406,7 @@ def build_lending_accounting_event(
         principal_delta_usd=principal_delta_usd,
         interest_delta_usd=interest_delta_usd,
         gas_usd=gas_usd,
+        amount_token=amount_human,
         confidence=confidence,
         unavailable_reason=unavailable_reason,
     )

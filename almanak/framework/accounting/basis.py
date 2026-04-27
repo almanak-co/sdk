@@ -50,12 +50,178 @@ class MatchResult:
 class FIFOBasisStore:
     """In-memory FIFO lot store backed by the accounting_events table.
 
-    In production, lots are reconstructed from BORROW/PT_BUY accounting events
-    so the store is always consistent with durable state.
+    On runner startup, call reconstruct_from_events() with the full accounting_events
+    history for the deployment to rebuild open lots from durable storage. This keeps
+    FIFO interest and yield attribution correct across runner restarts.
     """
 
     def __init__(self) -> None:
         self._lots: dict[str, list[dict[str, Any]]] = {}
+
+    def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:
+        """Replay durable accounting events to rebuild open FIFO lots.
+
+        Call once on runner startup with get_accounting_events_sync() results for
+        the deployment, ordered by timestamp ASC (the default query order).
+
+        Replays BORROW → REPAY pairs and PT_BUY → PT_SELL/PT_REDEEM pairs.
+        Returns the number of lot operations replayed.
+
+        Unrecognised event types are silently skipped so new types added in future
+        schema versions do not break older runners replaying a mixed history.
+        """
+        import json as _json
+        import logging as _logging
+
+        _log = _logging.getLogger(__name__)
+
+        self._lots.clear()
+
+        _DECIMALS_18 = Decimal(10**18)
+        replayed = 0
+
+        def _parse_decimal(value: Any) -> Decimal | None:
+            """Safely parse a Decimal; return None on any conversion failure or non-finite value."""
+            if value is None:
+                return None
+            try:
+                parsed = Decimal(str(value))
+            except Exception:  # noqa: BLE001
+                return None
+            # Reject NaN and Infinity — downstream comparisons (e.g. <= 0) raise
+            # InvalidOperation for NaN and produce wrong results for infinities.
+            return parsed if parsed.is_finite() else None
+
+        for row in events:
+            event_type = row.get("event_type", "")
+            position_key = row.get("position_key", "")
+            deployment_id = row.get("deployment_id", "")
+            timestamp_str = row.get("timestamp")
+
+            # Rows missing identity fields cannot be keyed into the lot store.
+            if not deployment_id or not position_key:
+                continue
+
+            try:
+                payload = _json.loads(row.get("payload_json") or "{}")
+            except Exception:  # noqa: BLE001
+                continue
+
+            try:
+                # Normalise UTC offset — Python <3.11 fromisoformat cannot parse trailing "Z"
+                ts_norm = timestamp_str.replace("Z", "+00:00") if timestamp_str else None
+                ts: datetime | None = datetime.fromisoformat(ts_norm) if ts_norm else None
+            except (ValueError, TypeError):
+                ts = None
+
+            if event_type == "BORROW":
+                amount_token = _parse_decimal(payload.get("amount_token"))
+                asset = payload.get("asset", "")
+                if amount_token is None or amount_token <= 0 or not asset:
+                    continue
+                self.record_borrow(
+                    deployment_id=deployment_id,
+                    position_key=position_key,
+                    token=asset,
+                    principal_amount=amount_token,
+                    timestamp=ts,
+                )
+                replayed += 1
+
+            elif event_type in ("REPAY", "DELEVERAGE"):
+                # DELEVERAGE is structurally a repay — it reduces an open borrow lot.
+                amount_token = _parse_decimal(payload.get("amount_token"))
+                asset = payload.get("asset", "")
+                if amount_token is None or amount_token <= 0 or not asset:
+                    continue
+                self.match_repay(
+                    deployment_id=deployment_id,
+                    position_key=position_key,
+                    token=asset,
+                    repay_amount=amount_token,
+                )
+                replayed += 1
+
+            elif event_type == "PT_BUY":
+                pt_token = payload.get("pt_token", "")
+                if not pt_token:
+                    continue
+                # PT_BUY stores raw 18-decimal integers from the swap receipt.
+                pt_human = _parse_decimal(payload.get("pt_amount"))
+                sy_human = _parse_decimal(payload.get("sy_amount"))
+                if pt_human is None or sy_human is None:
+                    continue
+                pt_human = pt_human / _DECIMALS_18
+                sy_human = sy_human / _DECIMALS_18
+                if pt_human <= 0:
+                    continue
+                self.record_pt_buy(
+                    deployment_id=deployment_id,
+                    position_key=position_key,
+                    pt_token=pt_token,
+                    pt_amount=pt_human,
+                    sy_cost=sy_human,
+                    timestamp=ts,
+                )
+                replayed += 1
+
+            elif event_type == "PT_SELL":
+                # PT_SELL follows the same raw-integer convention as PT_BUY.
+                pt_token = payload.get("pt_token", "")
+                if not pt_token:
+                    continue
+                pt_raw = _parse_decimal(payload.get("pt_amount"))
+                if pt_raw is None:
+                    continue
+                pt_human = pt_raw / _DECIMALS_18
+                if pt_human <= 0:
+                    continue
+                sy_raw = _parse_decimal(payload.get("sy_amount"))
+                # sy_amount is required for PT_SELL: it's the actual market proceeds.
+                # Defaulting to pt_amount (1:1 assumption) would invent cost-basis data.
+                if sy_raw is None or sy_raw <= 0:
+                    continue
+                sy_human = sy_raw / _DECIMALS_18
+                self.match_pt_redeem(
+                    deployment_id=deployment_id,
+                    position_key=position_key,
+                    pt_token=pt_token,
+                    pt_redeemed=pt_human,
+                    sy_received=sy_human,
+                )
+                replayed += 1
+
+            elif event_type == "PT_REDEEM":
+                pt_token = payload.get("pt_token", "")
+                if not pt_token:
+                    continue
+                # PT_REDEEM events are written by build_pendle_pt_redeem_accounting_event()
+                # which converts to human-decimal before storing (unlike PT_BUY / PT_SELL).
+                # When py_redeemed was missing from the receipt, pt_amount is None and the
+                # builder fell back to sy_amount — mirror that fallback here.
+                pt_raw = _parse_decimal(payload.get("pt_amount"))
+                sy_raw = _parse_decimal(payload.get("sy_amount"))
+                if pt_raw is not None:
+                    pt_human = pt_raw
+                elif sy_raw is not None:
+                    pt_human = sy_raw
+                else:
+                    continue
+                if pt_human <= 0:
+                    continue
+                sy_human = sy_raw if sy_raw is not None else pt_human
+                self.match_pt_redeem(
+                    deployment_id=deployment_id,
+                    position_key=position_key,
+                    pt_token=pt_token,
+                    pt_redeemed=pt_human,
+                    sy_received=sy_human,
+                )
+                replayed += 1
+
+        if replayed:
+            _log.info("FIFOBasisStore: reconstructed %d lot operations from accounting_events", replayed)
+        return replayed
 
     def _key(self, deployment_id: str, position_key: str, token: str) -> str:
         return f"{deployment_id}:{position_key}:{token.lower()}"

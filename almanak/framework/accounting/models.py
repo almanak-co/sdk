@@ -125,7 +125,11 @@ class LendingAccountingEvent:
     interest_delta_usd: Decimal | None
     gas_usd: Decimal | None
 
-    confidence: AccountingConfidence
+    # Raw token amount (human-decimal) — required for FIFO basis reconstruction on restart.
+    # None when the amount could not be derived from the execution result.
+    amount_token: Decimal | None = None
+
+    confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
 
@@ -157,6 +161,7 @@ class LendingAccountingEvent:
             "principal_delta_usd": _enc(self.principal_delta_usd),
             "interest_delta_usd": _enc(self.interest_delta_usd),
             "gas_usd": _enc(self.gas_usd),
+            "amount_token": _enc(self.amount_token),
             "confidence": self.confidence.value,
             "unavailable_reason": self.unavailable_reason,
             "schema_version": self.schema_version,
@@ -191,7 +196,8 @@ class LendingAccountingEvent:
             principal_delta_usd=_dec(d.get("principal_delta_usd")),
             interest_delta_usd=_dec(d.get("interest_delta_usd")),
             gas_usd=_dec(d.get("gas_usd")),
-            confidence=AccountingConfidence(d["confidence"]),
+            amount_token=_dec(d.get("amount_token")),
+            confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason", ""),
             schema_version=d.get("schema_version", 1),
         )

@@ -28,6 +28,7 @@ def _make_runner(enable_state_persistence: bool = True, dry_run: bool = False) -
     )
     state_mgr = AsyncMock()
     state_mgr.initialize = AsyncMock()
+    state_mgr.get_accounting_events_sync = MagicMock(return_value=[])
     runner = StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
