@@ -373,3 +373,76 @@ class TestGatewayMarketTokens:
 
         with pytest.raises(PendleOnChainError, match="unexpected data length"):
             gw_reader.get_market_tokens("0x1234567890abcdef1234567890abcdef12345678")
+
+
+# =========================================================================
+# Days-to-Maturity Tests
+# =========================================================================
+
+
+class TestGetDaysToMaturity:
+    """Tests for PendleOnChainReader.get_days_to_maturity().
+
+    Covers three branches:
+    1. Active market → positive integer days.
+    2. Expired market → clamped to 0.
+    3. RPC/exception → returns None (never raises).
+    """
+
+    def test_active_market_returns_positive_days(self, reader):
+        """Future expiry returns a positive day count."""
+        future_expiry = int(time.time()) + 180 * 86400  # 180 days
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.return_value = future_expiry
+        reader.web3.eth.contract.return_value = mock_contract
+
+        days = reader.get_days_to_maturity("0xmarket")
+        assert days is not None
+        assert 175 <= days <= 185  # allow a few seconds of clock drift
+
+    def test_expired_market_returns_zero(self, reader):
+        """Past expiry is clamped to 0, not a negative number."""
+        past_expiry = int(time.time()) - 86400  # expired yesterday
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.return_value = past_expiry
+        reader.web3.eth.contract.return_value = mock_contract
+
+        days = reader.get_days_to_maturity("0xmarket")
+        assert days == 0
+
+    def test_rpc_failure_returns_none(self, reader):
+        """Any exception is swallowed and None is returned (never raises)."""
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.side_effect = Exception("RPC error")
+        reader.web3.eth.contract.return_value = mock_contract
+
+        days = reader.get_days_to_maturity("0xmarket")
+        assert days is None
+
+
+class TestGatewayGetDaysToMaturity:
+    """Tests for get_days_to_maturity() in gateway mode."""
+
+    def test_active_market_returns_positive_days(self, gw_reader, gateway_client):
+        """Future expiry via gateway → positive day count."""
+        future_expiry = int(time.time()) + 90 * 86400  # 90 days
+        gateway_client.rpc.Call.return_value = _mock_rpc_response(hex(future_expiry))
+
+        days = gw_reader.get_days_to_maturity("0x1234567890abcdef1234567890abcdef12345678")
+        assert days is not None
+        assert 85 <= days <= 95
+
+    def test_expired_market_returns_zero(self, gw_reader, gateway_client):
+        """Past expiry via gateway → 0."""
+        past_expiry = int(time.time()) - 86400
+        gateway_client.rpc.Call.return_value = _mock_rpc_response(hex(past_expiry))
+
+        days = gw_reader.get_days_to_maturity("0x1234567890abcdef1234567890abcdef12345678")
+        assert days == 0
+
+    def test_gateway_failure_returns_none(self, gw_reader, gateway_client):
+        """Gateway RPC error is swallowed and None is returned."""
+        gateway_client.rpc.Call.side_effect = Exception("connection lost")
+
+        days = gw_reader.get_days_to_maturity("0x1234567890abcdef1234567890abcdef12345678")
+        assert days is None

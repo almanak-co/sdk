@@ -248,6 +248,11 @@ class PendleAccountingEvent:
     realized_yield_usd: Decimal | None
     basis_lot_id: str | None = None
 
+    # VIB-3488: SY price in USD, additive optional field (stays schema_version=1).
+    # None = price unavailable (preserve None vs Decimal("0") discipline).
+    # sy_value_usd = sy_amount * sy_price; pt_value_usd = pt_amount * pt_price.
+    sy_price: Decimal | None = None
+
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
@@ -271,6 +276,7 @@ class PendleAccountingEvent:
             "pt_amount": _enc(self.pt_amount),
             "sy_amount": _enc(self.sy_amount),
             "pt_price": _enc(self.pt_price),
+            "sy_price": _enc(self.sy_price),
             "implied_apr_bps": self.implied_apr_bps,
             "days_to_maturity": self.days_to_maturity,
             "realized_yield_usd": _enc(self.realized_yield_usd),
@@ -299,6 +305,7 @@ class PendleAccountingEvent:
             pt_amount=_dec(d.get("pt_amount")),
             sy_amount=_dec(d.get("sy_amount")),
             pt_price=_dec(d.get("pt_price")),
+            sy_price=_dec(d.get("sy_price")),
             implied_apr_bps=d.get("implied_apr_bps"),
             days_to_maturity=d.get("days_to_maturity"),
             realized_yield_usd=_dec(d.get("realized_yield_usd")),

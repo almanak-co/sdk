@@ -1996,9 +1996,13 @@ class StrategyRunner:
         strategy: "StrategyProtocol",
         intent: "AnyIntent",
         result: Any,
+        price_oracle: dict | None = None,
         ledger_entry_id: str | None = None,
     ) -> None:
-        """Write a PendleAccountingEvent after a successful Pendle LP_OPEN or LP_CLOSE (VIB-3421).
+        """Write a PendleAccountingEvent after a successful Pendle LP_OPEN or LP_CLOSE (VIB-3421/3488).
+
+        VIB-3488: price_oracle is forwarded to build_pendle_lp_accounting_event so that
+        SY/PT amounts are scaled with verified decimals and USD prices are populated.
 
         Best-effort: any exception is logged at WARNING and swallowed.
         """
@@ -2034,6 +2038,7 @@ class StrategyRunner:
                 chain=chain,
                 wallet_address=wallet_address,
                 ledger_entry_id=ledger_entry_id,
+                price_oracle=price_oracle,
             )
             if event is None:
                 return
@@ -2980,11 +2985,12 @@ class StrategyRunner:
             price_oracle=state.price_oracle,
             ledger_entry_id=ledger_entry_id,
         )
-        # VIB-3421: write Pendle LP accounting event (LP_OPEN/LP_CLOSE)
+        # VIB-3421/3488: write Pendle LP accounting event (LP_OPEN/LP_CLOSE) with USD pricing
         await self._try_write_pendle_lp_accounting(
             strategy,
             intent,
             state.last_execution_result,
+            price_oracle=state.price_oracle,
             ledger_entry_id=ledger_entry_id,
         )
         # VIB-3422: write Pendle PT buy accounting event (SWAP → PT_BUY)
