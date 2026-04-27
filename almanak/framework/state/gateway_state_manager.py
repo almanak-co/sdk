@@ -641,6 +641,58 @@ class GatewayStateManager:
             logger.warning("Failed to save position event via gateway: %s", e)
             return False
 
+    # -------------------------------------------------------------------------
+    # Accounting outbox (VIB-3467) — gateway gRPC extension pending VIB-3482
+    # -------------------------------------------------------------------------
+    # Write methods raise NotImplementedError so VIB-3477 (which removes the
+    # legacy inline writers) cannot merge before VIB-3482 ships the gateway
+    # extension.  Read methods return empty/False so drain_pending is a no-op
+    # on the gateway path (safe during dual-write: legacy writers still fire).
+
+    async def save_outbox_entry(
+        self,
+        outbox_id: str,
+        deployment_id: str,
+        strategy_id: str,
+        cycle_id: str,
+        ledger_entry_id: str,
+        intent_type: str,
+        wallet_address: str,
+        position_key: str,
+        market_id: str,
+        created_at: str,
+    ) -> None:
+        """Gateway gRPC outbox write not yet supported (VIB-3482).
+
+        Raises NotImplementedError so callers can detect the missing backend.
+        write_outbox_entry() catches this and returns None — outbox write is
+        skipped on the gateway path during the dual-write period.
+        """
+        raise NotImplementedError(
+            "GatewayStateManager.save_outbox_entry not implemented — gateway gRPC extension required (VIB-3482)."
+        )
+
+    async def get_outbox_by_ledger_id(self, ledger_entry_id: str) -> dict | None:
+        """Return None — gateway gRPC outbox read not yet supported (VIB-3482)."""
+        return None
+
+    async def get_outbox_pending(self, deployment_id: str, max_retries: int = 3) -> list[dict]:
+        """Return empty list — gateway gRPC outbox read not yet supported (VIB-3482)."""
+        return []
+
+    async def update_outbox_entry(
+        self, outbox_id: str, status: str, error: str = "", attempts: int | None = None
+    ) -> None:
+        """No-op — gateway gRPC outbox update not yet supported (VIB-3482)."""
+
+    async def has_accounting_events_for_ledger(self, ledger_entry_id: str) -> bool:
+        """Return False — gateway gRPC outbox query not yet supported (VIB-3482)."""
+        return False
+
+    async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict | None:
+        """Return None — gateway gRPC ledger read not yet supported (VIB-3482)."""
+        return None
+
     def get_accounting_events_sync(
         self,
         deployment_id: str,

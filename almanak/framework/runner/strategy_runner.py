@@ -427,6 +427,17 @@ class StrategyRunner:
 
         self._lending_basis_store = FIFOBasisStore()
 
+        # VIB-3467: AccountingProcessor — drains accounting_outbox after each execution.
+        # Initialised with an empty deployment_id; updated in run_loop once strategy_id is known.
+        from ..accounting.processor import AccountingProcessor
+
+        self._accounting_processor = AccountingProcessor(
+            state_manager=self.state_manager,
+            basis_store=self._lending_basis_store,
+        )
+        # Strong-ref set for drain tasks so they cannot be GC'd before completion.
+        self._pending_drain_tasks: set[asyncio.Task] = set()
+
         mode = "multi-chain" if self._is_multi_chain else "single-chain"
         logger.info(
             f"StrategyRunner initialized ({mode} mode) with config: "
@@ -1898,6 +1909,112 @@ class StrategyRunner:
             logger.error(f"Failed to write ledger entry (non-live): {e}")
         return None
 
+    async def _write_outbox_and_fire_processor(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        ledger_entry_id: str,
+    ) -> None:
+        """Write accounting_outbox row and fire asyncio task to drain it (VIB-3467).
+
+        Best-effort: failures are logged and swallowed so the execution hot path
+        is never blocked.  During the dual-write period the legacy _try_write_*
+        methods still run and serve as the primary write path.
+        """
+        try:
+            from ..accounting.processor import write_outbox_entry
+            from ..observability.context import get_cycle_id
+
+            intent_type_str = ""
+            it = getattr(intent, "intent_type", None)
+            if it is not None:
+                intent_type_str = it.value if hasattr(it, "value") else str(it)
+
+            if not intent_type_str:
+                return
+
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            wallet_address = getattr(strategy, "wallet_address", "") or ""
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            cycle_id = get_cycle_id() or ""
+
+            # Compute position_key and market_id for each supported category
+            position_key, market_id = self._compute_outbox_position_key(intent, intent_type_str, chain, wallet_address)
+
+            # Update processor deployment_id (set once per strategy run)
+            if self._accounting_processor._deployment_id != deployment_id:
+                self._accounting_processor._deployment_id = deployment_id
+
+            outbox_id = await write_outbox_entry(
+                self.state_manager,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                ledger_entry_id=ledger_entry_id,
+                intent_type=intent_type_str,
+                wallet_address=wallet_address,
+                position_key=position_key,
+                market_id=market_id,
+            )
+
+            if outbox_id:
+                task = asyncio.create_task(
+                    self._accounting_processor.drain_one(ledger_entry_id),
+                    name=f"accounting_drain_{ledger_entry_id[:8]}",
+                )
+                self._pending_drain_tasks.add(task)
+                task.add_done_callback(self._pending_drain_tasks.discard)
+        except Exception:
+            logger.warning("_write_outbox_and_fire_processor failed (non-blocking)", exc_info=True)
+
+    def _compute_outbox_position_key(
+        self,
+        intent: "AnyIntent",
+        intent_type_str: str,
+        chain: str,
+        wallet_address: str,
+    ) -> tuple[str, str]:
+        """Return (position_key, market_id) for the given intent.
+
+        Mirrors the position_key derivation logic in the inline accounting builders
+        so the outbox row and accounting_events row use identical keys.
+        """
+        try:
+            protocol = (getattr(intent, "protocol", "") or "").lower()
+            t = intent_type_str.upper()
+
+            # Lending (SUPPLY / BORROW / REPAY / DELEVERAGE / WITHDRAW)
+            if t in {"SUPPLY", "BORROW", "REPAY", "DELEVERAGE", "WITHDRAW"}:
+                from ..accounting.lending_accounting import _derive_position_key, _intent_asset, _intent_market_id
+
+                market_id = _intent_market_id(intent) or ""
+                asset = _intent_asset(intent)
+                position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
+                return position_key, market_id
+
+            # Pendle LP (LP_OPEN / LP_CLOSE for pendle protocol)
+            if t in {"LP_OPEN", "LP_CLOSE"} and "pendle" in protocol:
+                from ..accounting.pendle_accounting import _derive_pendle_position_key, _get_market_address
+
+                market_address = _get_market_address(intent)
+                position_key = (
+                    _derive_pendle_position_key(chain, wallet_address, market_address) if market_address else ""
+                )
+                return position_key, market_address
+
+            # Pendle PT (SWAP for pendle protocol)
+            if t == "SWAP" and "pendle" in protocol:
+                market_address = (getattr(intent, "pool", None) or "").lower()
+                position_key = (
+                    f"pendle_pt:{chain.lower()}:{wallet_address.lower()}:{market_address}" if market_address else ""
+                )
+                return position_key, market_address
+
+        except Exception:
+            logger.debug("_compute_outbox_position_key failed", exc_info=True)
+
+        return "", ""
+
     async def _try_write_lending_accounting(
         self,
         strategy: "StrategyProtocol",
@@ -3100,6 +3217,12 @@ class StrategyRunner:
             price_oracle=state.price_oracle,
             ledger_entry_id=ledger_entry_id,
         )
+        # VIB-3467: write outbox row + fire processor task AFTER all legacy writers complete.
+        # Ordering guarantee: accounting_events rows written by legacy path exist before
+        # drain_one runs, so has_accounting_events_for_ledger returns True and drain_one
+        # marks processed without re-mutating the FIFO basis store (prevents duplicate lots).
+        if ledger_entry_id:
+            await self._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
         if state.record_metrics:
             self._record_success(execution_proved=True)
 

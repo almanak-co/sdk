@@ -96,6 +96,21 @@ async def initialize_run_loop(
                 raise RuntimeError(f"Failed to reconstruct FIFO basis store for {deployment_id}: {e}") from e
             logger.warning("Failed to reconstruct FIFO basis store on startup: %s", e)
 
+    # VIB-3467: drain pending/failed outbox rows from the previous run.
+    if runner.config.enable_state_persistence and state_manager_ready:
+        try:
+            processor = getattr(runner, "_accounting_processor", None)
+            if processor is not None:
+                deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+                processor._deployment_id = deployment_id
+                drained = await processor.drain_pending()
+                if drained:
+                    logger.info("AccountingProcessor: drained %d pending outbox rows on startup", drained)
+        except Exception as e:
+            if runner._is_live_mode():
+                raise RuntimeError(f"AccountingProcessor.drain_pending failed: {e}") from e
+            logger.warning("AccountingProcessor.drain_pending failed on startup: %s", e)
+
     # Recover incomplete sessions from previous runs
     try:
         recovered = await runner._recover_incomplete_sessions()
@@ -510,6 +525,25 @@ async def finalize_run_loop(
             await strategy.flush_pending_saves()
         except Exception as e:
             logger.warning(f"Error flushing pending saves: {e}")
+
+    # Drain any in-flight accounting tasks before closing the state manager.
+    # The strong-ref set (self._pending_drain_tasks) prevents GC, but the tasks
+    # must complete before state_manager.close() so drain_one doesn't write to a
+    # closed backend.  5 s timeout: if tasks are still running after that, cancel
+    # them and log a warning rather than blocking shutdown indefinitely.
+    pending_tasks: set[asyncio.Task[bool]] = getattr(runner, "_pending_drain_tasks", set())
+    if pending_tasks:
+        try:
+            done, pending = await asyncio.wait(list(pending_tasks), timeout=5.0)
+            if pending:
+                logger.warning(
+                    "Shutdown: %d accounting drain task(s) did not complete in 5 s, cancelling",
+                    len(pending),
+                )
+                for task in pending:
+                    task.cancel()
+        except Exception as e:
+            logger.warning("Error waiting for accounting drain tasks: %s", e)
 
     # Cleanup
     if runner.config.enable_state_persistence:

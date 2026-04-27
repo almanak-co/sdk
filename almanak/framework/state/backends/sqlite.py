@@ -457,6 +457,9 @@ CREATE TABLE IF NOT EXISTS accounting_outbox (
     cycle_id TEXT NOT NULL,
     ledger_entry_id TEXT NOT NULL,           -- FK to transaction_ledger.id
     intent_type TEXT NOT NULL,               -- e.g. "SUPPLY", "LP_OPEN"
+    wallet_address TEXT NOT NULL DEFAULT '', -- runner wallet; needed for position_key derivation
+    position_key TEXT NOT NULL DEFAULT '',   -- pre-computed by runner to ensure derivation parity
+    market_id TEXT NOT NULL DEFAULT '',      -- e.g. Morpho Blue market ID; absent for Aave
     status TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | processed | failed
     attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT DEFAULT '',
@@ -661,6 +664,15 @@ class SQLiteStore:
         # event time so attribution can attribute real fee PnL (not the v1
         # placeholder of 0). Empty string remains the "unknown" sentinel.
         _add_column_if_missing("position_events", "protocol_fees_usd", "TEXT DEFAULT ''")
+
+        # VIB-3467: wallet_address, position_key, market_id on accounting_outbox.
+        # Guard: pre-VIB-3480 databases don't have this table yet — skip the ALTER
+        # when the table is absent (the CREATE TABLE IF NOT EXISTS in the DDL block
+        # will create it with the correct schema for new and old-schema databases).
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounting_outbox'").fetchone():
+            _add_column_if_missing("accounting_outbox", "wallet_address", "TEXT NOT NULL DEFAULT ''")
+            _add_column_if_missing("accounting_outbox", "position_key", "TEXT NOT NULL DEFAULT ''")
+            _add_column_if_missing("accounting_outbox", "market_id", "TEXT NOT NULL DEFAULT ''")
 
     async def backfill_deployment_id(self, old_strategy_id: str, new_deployment_id: str) -> int:
         """Migrate data from a bare strategy name to the canonical deployment_id.
@@ -2669,3 +2681,176 @@ class SQLiteStore:
 
         loop3 = asyncio.get_event_loop()
         return await loop3.run_in_executor(None, _sync_get_hist)
+
+    # -------------------------------------------------------------------------
+    # Accounting outbox (VIB-3467) — drained by AccountingProcessor
+    # -------------------------------------------------------------------------
+
+    async def save_outbox_entry(
+        self,
+        outbox_id: str,
+        deployment_id: str,
+        strategy_id: str,
+        cycle_id: str,
+        ledger_entry_id: str,
+        intent_type: str,
+        wallet_address: str,
+        position_key: str,
+        market_id: str,
+        created_at: str,
+    ) -> None:
+        """Write one row to accounting_outbox.  Called from the execution hot path via write_outbox_entry."""
+        if not self._initialized:
+            await self.initialize()
+        # Capture all args for the inner closure.
+        _outbox_id, _dep_id, _strat_id, _cycle_id = outbox_id, deployment_id, strategy_id, cycle_id
+        _led_id, _intent, _wallet, _pos, _mkt = ledger_entry_id, intent_type, wallet_address, position_key, market_id
+        _created = created_at
+
+        def _sync() -> None:
+            if not self._conn:
+                return
+            with self._db_lock:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO accounting_outbox
+                    (id, deployment_id, strategy_id, cycle_id, ledger_entry_id,
+                     intent_type, wallet_address, position_key, market_id,
+                     status, attempts, error, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, '', ?, ?)
+                    """,
+                    (
+                        _outbox_id,
+                        _dep_id,
+                        _strat_id,
+                        _cycle_id,
+                        _led_id,
+                        _intent,
+                        _wallet,
+                        _pos,
+                        _mkt,
+                        _created,
+                        _created,
+                    ),
+                )
+                self._conn.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync)
+
+    async def get_outbox_by_ledger_id(self, ledger_entry_id: str) -> dict | None:
+        """Return the outbox row for the given ledger_entry_id, or None."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> dict | None:
+            if not self._conn:
+                return None
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    "SELECT * FROM accounting_outbox WHERE ledger_entry_id = ? LIMIT 1",
+                    (ledger_entry_id,),
+                )
+                row = cursor.fetchone()
+            return dict(row) if row else None
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
+
+    async def get_outbox_pending(self, deployment_id: str, max_retries: int = 3) -> list[dict]:
+        """Return pending/failed (and any stuck 'processing') outbox rows eligible for drain.
+
+        'processing' rows are included so that entries that were in-flight when the runner
+        crashed are retried on restart rather than being permanently orphaned.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> list[dict]:
+            if not self._conn:
+                return []
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    """
+                    SELECT * FROM accounting_outbox
+                    WHERE deployment_id = ?
+                      AND status IN ('pending', 'failed', 'processing')
+                      AND attempts < ?
+                    ORDER BY created_at ASC
+                    """,
+                    (deployment_id, max_retries),
+                )
+                rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
+
+    async def update_outbox_entry(
+        self,
+        outbox_id: str,
+        status: str,
+        error: str = "",
+        attempts: int | None = None,
+    ) -> None:
+        """Update the status (and optionally attempts) of an outbox row."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> None:
+            if not self._conn:
+                return
+            now = datetime.now(UTC).isoformat()
+            with self._db_lock:
+                if attempts is not None:
+                    self._conn.execute(
+                        "UPDATE accounting_outbox SET status=?, error=?, attempts=?, updated_at=? WHERE id=?",
+                        (status, error, attempts, now, outbox_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE accounting_outbox SET status=?, error=?, updated_at=? WHERE id=?",
+                        (status, error, now, outbox_id),
+                    )
+                self._conn.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync)
+
+    async def has_accounting_events_for_ledger(self, ledger_entry_id: str) -> bool:
+        """Return True if accounting_events already has a row for ledger_entry_id."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> bool:
+            if not self._conn:
+                return False
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    "SELECT COUNT(*) FROM accounting_events WHERE ledger_entry_id = ?",
+                    (ledger_entry_id,),
+                )
+                count = cursor.fetchone()[0]
+            return count > 0
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
+
+    async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict | None:
+        """Return the full transaction_ledger row for the given id, or None."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> dict | None:
+            if not self._conn:
+                return None
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    "SELECT * FROM transaction_ledger WHERE id = ? LIMIT 1",
+                    (ledger_entry_id,),
+                )
+                row = cursor.fetchone()
+            return dict(row) if row else None
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
