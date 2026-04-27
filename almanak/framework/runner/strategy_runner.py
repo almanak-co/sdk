@@ -2169,6 +2169,68 @@ class StrategyRunner:
                 ) from e
             logger.warning("Pendle PT buy accounting write failed (non-blocking)", exc_info=True)
 
+    async def _try_write_pendle_pt_sell_accounting(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        result: Any,
+        ledger_entry_id: str | None = None,
+    ) -> None:
+        """Write a PendleAccountingEvent(PT_SELL) + reduce FIFO lot after a Pendle PT pre-maturity sale (VIB-3492).
+
+        Best-effort: any exception is logged at WARNING and swallowed.
+        Only fires when from_token is a PT token on a SWAP intent.
+        Calls basis_store.match_pt_redeem to reduce remaining_pt on the open lot
+        so a subsequent PT_REDEEM correctly matches only the remaining quantity.
+        """
+        try:
+            from ..accounting.pendle_pt_sell_accounting import build_pendle_pt_sell_accounting_event
+            from ..accounting.writer import AccountingWriter
+            from ..observability.context import get_cycle_id
+
+            intent_type_str = ""
+            it = getattr(intent, "intent_type", None)
+            if it is not None:
+                intent_type_str = it.value if hasattr(it, "value") else str(it)
+
+            if intent_type_str != "SWAP":
+                return
+
+            if not self.state_manager:
+                return
+
+            deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+            cycle_id = get_cycle_id() or ""
+            execution_mode = self._derive_execution_mode()
+            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            wallet_address = getattr(strategy, "wallet_address", "")
+
+            event = build_pendle_pt_sell_accounting_event(
+                intent=intent,
+                result=result,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                execution_mode=execution_mode,
+                chain=chain,
+                wallet_address=wallet_address,
+                basis_store=self._lending_basis_store,
+                ledger_entry_id=ledger_entry_id,
+            )
+            if event is None:
+                return
+
+            writer = AccountingWriter(self.state_manager)
+            ok = await writer.write(event)
+            if ok:
+                logger.debug(
+                    "Pendle PT sell accounting event written: pt=%s pt_price=%s",
+                    event.pt_token,
+                    event.pt_price,
+                )
+        except Exception:
+            logger.warning("Pendle PT sell accounting write failed (non-blocking)", exc_info=True)
+
     async def _try_write_pendle_pt_redeem_accounting(
         self,
         strategy: "StrategyProtocol",
@@ -2995,6 +3057,13 @@ class StrategyRunner:
         )
         # VIB-3422: write Pendle PT buy accounting event (SWAP → PT_BUY)
         await self._try_write_pendle_pt_buy_accounting(
+            strategy,
+            intent,
+            state.last_execution_result,
+            ledger_entry_id=ledger_entry_id,
+        )
+        # VIB-3492: write Pendle PT sell accounting event (SWAP from PT → PT_SELL)
+        await self._try_write_pendle_pt_sell_accounting(
             strategy,
             intent,
             state.last_execution_result,

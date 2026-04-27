@@ -1,4 +1,4 @@
-"""Pendle PT maturity settlement accounting event builder (VIB-3423).
+"""Pendle PT maturity settlement accounting event builder (VIB-3423, VIB-3496).
 
 Wired into strategy_runner after every successful WITHDRAW intent on Pendle
 that produces a RedeemPY event (PT redemption at maturity).
@@ -17,6 +17,11 @@ Lot matching uses FIFOBasisStore (same instance as lending):
 
 SY decimals assumption: 18 (consistent with PT_BUY recording; most Pendle SY tokens
 are 18-decimal wrappers). ESTIMATED confidence records this assumption.
+
+VIB-3496: Oracle key resolution
+  Instead of the generic "SY" key, the oracle is queried using the resolved symbol
+  of the SY underlying token (e.g. "wstETH", "sUSDe"). Falls back to "SY" when
+  symbol resolution fails; confidence remains ESTIMATED in all cases.
 """
 
 from __future__ import annotations
@@ -35,6 +40,36 @@ logger = logging.getLogger(__name__)
 
 _PENDLE_WITHDRAW_PROTOCOL = "pendle"
 _SY_DECIMALS_ASSUMED = 18  # See module docstring — 18d is correct for most SY tokens
+
+
+def _resolve_sy_oracle_key(chain: str, market_address: str) -> str:
+    """Resolve the price-oracle lookup key for the SY received on redemption.
+
+    VIB-3496: The generic key "SY" is unlikely to exist in any real oracle dict.
+    Instead, resolve the underlying token symbol via MARKET_TOKEN_MINT_SY → token
+    resolver, e.g. "wstETH" or "sUSDe".  Falls back to "SY" when resolution fails
+    so downstream code always receives a non-empty string.
+
+    Returns the symbol string (never None, never empty).
+    """
+    if not chain or not market_address:
+        return "SY"
+    try:
+        from almanak.framework.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
+
+        underlying_address = MARKET_TOKEN_MINT_SY.get(chain.lower(), {}).get(market_address.lower())
+        if not underlying_address:
+            return "SY"
+
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        resolved = resolver.resolve(underlying_address, chain)
+        if resolved and resolved.symbol:
+            return resolved.symbol
+    except Exception:
+        logger.debug("_resolve_sy_oracle_key failed for chain=%s market=%s", chain, market_address, exc_info=True)
+    return "SY"
 
 
 def _derive_pendle_pt_position_key(chain: str, wallet: str, market_address: str) -> str:
@@ -136,9 +171,18 @@ def build_pendle_pt_redeem_accounting_event(
     # ── USD conversion ─────────────────────────────────────────────────────────
     # Only convert when fully matched: unmatched PT has zero cost basis so
     # interest_or_yield would equal all of sy_received, overstating realized yield.
+    # VIB-3496: use the resolved SY underlying symbol as oracle key (e.g. "wstETH",
+    # "sUSDe") rather than the generic "SY" key which is absent from real oracles.
     realized_yield_usd: Decimal | None = None
+    sy_oracle_key = _resolve_sy_oracle_key(chain, market_address)
     if has_lots and price_oracle is not None:
-        sy_price = price_oracle.get("SY") or price_oracle.get("sy")
+        # Try resolved symbol first (possibly with case variants), then fall back to "SY".
+        sy_price = None
+        for candidate in (sy_oracle_key, sy_oracle_key.upper(), sy_oracle_key.lower(), "SY", "sy"):
+            val = price_oracle.get(candidate)
+            if val is not None:
+                sy_price = val
+                break
         if sy_price is not None and interest_human is not None:
             try:
                 realized_yield_usd = Decimal(str(sy_price)) * interest_human
@@ -171,10 +215,10 @@ def build_pendle_pt_redeem_accounting_event(
     # ── Confidence ───────────────────────────────────────────────────────────
     if realized_yield_usd is not None and has_lots:
         confidence = AccountingConfidence.ESTIMATED  # 18d SY assumption
-        unavailable_reason = "SY decimals assumed 18; USD price from oracle"
+        unavailable_reason = f"SY decimals assumed 18; USD price from oracle (key={sy_oracle_key!r})"
     elif has_lots:
         confidence = AccountingConfidence.ESTIMATED
-        unavailable_reason = "realized_yield_usd unavailable (no SY price in oracle)"
+        unavailable_reason = f"realized_yield_usd unavailable (oracle key {sy_oracle_key!r} not found in price_oracle)"
     else:
         confidence = AccountingConfidence.ESTIMATED
         unavailable_reason = (
