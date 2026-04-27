@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths
 
 # Load .env file if it exists
 -include .env
@@ -35,14 +35,20 @@ typecheck-report:
 	@echo "Report written to mypy-report.txt"
 	@uv run mypy almanak --error-summary-only 2>&1 || true
 
+# Audit the intent-test path filter against actual transitive imports.
+# Fails when the filter is missing a reachable import or contains a stale entry.
+audit-intent-paths:
+	uv run python scripts/ci/audit_intent_test_paths.py
+
 # Run security checks (bandit for Python security issues)
 security:
 	uv run pip install bandit 2>/dev/null || true
 	uv run bandit -r almanak/ -ll --skip B101,B311 || true
 
-# Run unit tests only (no Anvil required)
+# Run local pre-push test suite. Requires Anvil (Foundry) for tests/framework.
+# Excludes intent tests (separate target) and visual/nightly.
 test-unit:
-	uv run pytest tests/ --ignore=tests/framework --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib
+	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib
 
 # Alias for test-unit
 test: test-unit
