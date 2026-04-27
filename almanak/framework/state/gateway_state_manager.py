@@ -340,6 +340,9 @@ class GatewayStateManager:
                 success=bool(getattr(entry, "success", True)),
                 error=getattr(entry, "error", "") or "",
                 extracted_data_json=(getattr(entry, "extracted_data_json", "") or "").encode("utf-8"),
+                price_inputs_json=(getattr(entry, "price_inputs_json", "") or "").encode("utf-8"),
+                pre_state_json=(getattr(entry, "pre_state_json", "") or "").encode("utf-8"),
+                post_state_json=(getattr(entry, "post_state_json", "") or "").encode("utf-8"),
             )
             # slippage_bps is ``optional`` in the proto so None stays
             # distinguishable from 0.0 on the wire.

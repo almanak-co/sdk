@@ -1418,6 +1418,10 @@ _LEDGER_ENTRY_GOLDEN_KEYS: frozenset[str] = frozenset(
         "success",
         "error",
         "extracted_data_json",
+        # VIB-3480: audit-grade replay columns (added to DDL, INSERT, and proto in same PR)
+        "price_inputs_json",
+        "pre_state_json",
+        "post_state_json",
     }
 )
 
@@ -1425,10 +1429,10 @@ _LEDGER_ENTRY_GOLDEN_KEYS: frozenset[str] = frozenset(
 class TestLedgerEntryGoldenKeyset:
     """Pin the LedgerEntry dataclass contract at Phase 5k.
 
-    The SQLite INSERT at backends/sqlite.py:2291-2322 names 21 columns and
-    pairs each with a specific attribute read. Any rename here must also
-    update the INSERT column list + value tuple in the SAME PR; this golden
-    set forces that coupling.
+    The SQLite INSERT at backends/sqlite.py names 24 columns and pairs each
+    with a specific attribute read. Any rename here must also update the
+    INSERT column list + value tuple in the SAME PR; this golden set forces
+    that coupling.
     """
 
     def test_dataclass_fields_match_golden(self):
@@ -1443,8 +1447,8 @@ class TestLedgerEntryGoldenKeyset:
         )
         assert actual == _LEDGER_ENTRY_GOLDEN_KEYS
 
-    def test_dataclass_field_count_is_21(self):
-        assert len(fields(LedgerEntry)) == 21
+    def test_dataclass_field_count_is_24(self):
+        assert len(fields(LedgerEntry)) == 24
 
     def test_to_dict_and_asdict_keys_match(self):
         e = LedgerEntry()

@@ -2105,6 +2105,7 @@ class StrategyRunner:
                         pt_amount=pt_human,
                         sy_cost=sy_human,
                         timestamp=datetime.now(UTC),
+                        lot_id=event.identity.id,
                     )
 
             writer = AccountingWriter(self.state_manager)

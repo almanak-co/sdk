@@ -407,7 +407,7 @@ class TestAccountingModels:
         assert result.repaid_principal == Decimal("0"), "No principal without lots"
         assert result.interest_or_yield == Decimal("0"), "Must not fabricate interest"
         assert result.unmatched_amount == Decimal("5000"), "Full repay is unmatched"
-        assert result.matched_lot_ids == []
+        assert result.lot_matches == []
 
     def test_fifo_basis_matching_full_repay(self):  # noqa: layers
         """FIFO lot matching: full repay after single borrow."""
@@ -430,7 +430,7 @@ class TestAccountingModels:
         assert result.repaid_principal == Decimal("10000"), "Principal must match borrow amount"
         assert result.interest_or_yield == Decimal("420"), "Interest = repay - principal"
         assert result.unmatched_amount == Decimal("0")
-        assert lot_id in result.matched_lot_ids
+        assert any(lm.lot_id == lot_id for lm in result.lot_matches)
 
     def test_fifo_basis_matching_partial_repay(self):  # noqa: layers
         """FIFO lot matching: two borrows, partial repay = pure principal (no interest yet).
@@ -449,8 +449,8 @@ class TestAccountingModels:
         assert result.repaid_principal == Decimal("4200"), "All 4200 is principal (partial repay)"
         assert result.interest_or_yield == Decimal("0"), "No interest when repay < outstanding"
         assert result.unmatched_amount == Decimal("0")
-        assert lot1 in result.matched_lot_ids
-        assert lot2 in result.matched_lot_ids
+        assert any(lm.lot_id == lot1 for lm in result.lot_matches)
+        assert any(lm.lot_id == lot2 for lm in result.lot_matches)
 
         # Second repay of remaining 5800 (lot2) + 620 interest
         result2 = store.match_repay("d1", key, "USDC", Decimal("6420"))

@@ -43,20 +43,58 @@ logger = logging.getLogger(__name__)
 MAX_SNAPSHOTS = 1000
 
 
-# Module-level constants for accounting event type dispatch — avoids
-# rebuilding these sets on every RPC call under high-frequency accounting load.
+# Module-level whitelist of all valid accounting event type strings.
+# Built once at import time from the canonical enum definitions in models.py.
+# ALL_ACCOUNTING_EVENT_TYPES covers all 6 economic categories:
+# lending, pendle, lp, perp, vault, swap (VIB-3480).
 def _build_accounting_type_sets() -> tuple[frozenset[str], frozenset[str]]:
     from almanak.framework.accounting.models import LendingEventType, PendleEventType
 
     return frozenset(e.value for e in LendingEventType), frozenset(e.value for e in PendleEventType)
 
 
+def _build_all_accounting_event_types() -> frozenset[str]:
+    from almanak.framework.accounting.models import ALL_ACCOUNTING_EVENT_TYPES
+
+    return ALL_ACCOUNTING_EVENT_TYPES
+
+
 try:
     _LENDING_EVENT_TYPES, _PENDLE_EVENT_TYPES = _build_accounting_type_sets()
+    _ALL_ACCOUNTING_EVENT_TYPES = _build_all_accounting_event_types()
 except Exception as _e:  # pragma: no cover — graceful fallback if models not importable at load time
     logger.error("Failed to build accounting type sets; SaveAccountingEvent will reject all event_types: %s", _e)
     _LENDING_EVENT_TYPES = frozenset()
     _PENDLE_EVENT_TYPES = frozenset()
+    _ALL_ACCOUNTING_EVENT_TYPES = frozenset()
+
+
+class _RawAccountingEvent:
+    """Pass-through wrapper for accounting event categories without typed models yet.
+
+    Satisfies the duck-typed interface expected by SQLiteStore.save_accounting_event:
+    .identity, .event_type, .position_key, .confidence, .schema_version, .to_payload_json().
+    Used for LP/Perp/Vault/Swap events until VIB-3470–3473 add their typed models.
+    """
+
+    def __init__(
+        self,
+        identity: Any,
+        event_type: str,
+        position_key: str,
+        confidence: Any,
+        schema_version: int,
+        _payload_json: str,
+    ) -> None:
+        self.identity = identity
+        self.event_type = event_type
+        self.position_key = position_key
+        self.confidence = confidence
+        self.schema_version = schema_version
+        self._payload_json = _payload_json
+
+    def to_payload_json(self) -> str:
+        return self._payload_json
 
 
 class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
@@ -925,11 +963,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         if self._snapshot_pool is not None:
             # PostgreSQL mode (deployed) -- columns match the transaction_ledger
-            # reference DDL in almanak/gateway/database.py. ``extracted_data_json``
-            # is intentionally excluded: it lives on the SDK-local SQLite schema
-            # but has not yet been added to the metrics-database Postgres
-            # migration. Proto carries it forward-compat so the wire format is
-            # stable once the column lands.
+            # reference DDL in almanak/gateway/database.py.
+            # Forward-compat-only fields intentionally excluded pending VIB-3481/3482
+            # metrics-database migration: extracted_data_json, price_inputs_json,
+            # pre_state_json, post_state_json. Proto carries them so the wire format
+            # is stable once the columns land.
             try:
                 await self._snapshot_execute(
                     """
@@ -1005,6 +1043,26 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
                 from almanak.framework.observability.ledger import LedgerEntry
 
+                class _InvalidUtf8FieldError(ValueError):
+                    pass
+
+                def _decode_optional_bytes(field_name: str, b: bytes) -> str:
+                    if not b:
+                        return ""
+                    try:
+                        return b.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise _InvalidUtf8FieldError(f"{field_name} must be valid UTF-8") from None
+
+                try:
+                    price_inputs_json = _decode_optional_bytes("price_inputs_json", request.price_inputs_json)
+                    pre_state_json = _decode_optional_bytes("pre_state_json", request.pre_state_json)
+                    post_state_json = _decode_optional_bytes("post_state_json", request.post_state_json)
+                except _InvalidUtf8FieldError as exc:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(str(exc))
+                    return gateway_pb2.SaveLedgerEntryResponse(success=False, error=str(exc))
+
                 entry = LedgerEntry(
                     id=entry_id,
                     cycle_id=request.cycle_id,
@@ -1027,6 +1085,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     success=request.success,
                     error=request.error,
                     extracted_data_json=extracted_json,
+                    price_inputs_json=price_inputs_json,
+                    pre_state_json=pre_state_json,
+                    post_state_json=post_state_json,
                 )
                 await warm.save_ledger_entry(entry)
                 return gateway_pb2.SaveLedgerEntryResponse(success=True)
@@ -1077,9 +1138,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("timestamp must be positive")
             return gateway_pb2.SaveAccountingEventResponse(success=False, error="timestamp must be positive")
 
-        # Validate event_type against known accounting schemas before any
-        # deserialization attempt — unknown types get INVALID_ARGUMENT, not INTERNAL.
-        if request.event_type not in _LENDING_EVENT_TYPES and request.event_type not in _PENDLE_EVENT_TYPES:
+        # Validate event_type against all known accounting schemas (all 5 categories)
+        # before any deserialization attempt — unknown types get INVALID_ARGUMENT, not INTERNAL.
+        if request.event_type not in _ALL_ACCOUNTING_EVENT_TYPES:
             err = f"unknown event_type: {request.event_type!r}"
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(err)
@@ -1149,13 +1210,38 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # Reconstruct the typed event from payload_json so the SQLite
             # store receives the correct dataclass (with to_payload_json(),
             # event_type, confidence, schema_version attributes).
-            # event_type has already been validated against the known type sets above.
+            # event_type has already been validated against ALL_ACCOUNTING_EVENT_TYPES.
+            # Known typed deserializers exist for Lending and Pendle; all other valid
+            # categories (LP, Perp, Vault, Swap) use a pass-through wrapper until
+            # their handler models are added in VIB-3470–3473.
+            from almanak.framework.accounting.models import AccountingConfidence
+
+            raw_confidence = AccountingConfidence.ESTIMATED
+            if request.confidence:
+                try:
+                    raw_confidence = AccountingConfidence(request.confidence)
+                except ValueError:
+                    err = f"invalid confidence: {request.confidence!r}"
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(err)
+                    return gateway_pb2.SaveAccountingEventResponse(success=False, error=err)
+
             try:
-                accounting_event: LendingAccountingEvent | PendleAccountingEvent
+                accounting_event: LendingAccountingEvent | PendleAccountingEvent | _RawAccountingEvent
                 if request.event_type in _LENDING_EVENT_TYPES:
                     accounting_event = LendingAccountingEvent.from_payload_json(identity, payload_str)
-                else:
+                elif request.event_type in _PENDLE_EVENT_TYPES:
                     accounting_event = PendleAccountingEvent.from_payload_json(identity, payload_str)
+                else:
+                    # Pass-through for categories without typed models yet.
+                    accounting_event = _RawAccountingEvent(
+                        identity=identity,
+                        event_type=request.event_type,
+                        position_key=request.position_key,
+                        confidence=raw_confidence,
+                        schema_version=request.schema_version or 1,
+                        _payload_json=payload_str,
+                    )
             except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
                 err = f"invalid payload_json for event_type {request.event_type!r}: {exc}"
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)

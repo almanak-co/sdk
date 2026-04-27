@@ -20,17 +20,15 @@ FIFO interest attribution:
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-# Fixed namespace for deterministic AccountingIdentity.id (uuid5 → same inputs → same UUID).
-_ACCOUNTING_EVENT_NAMESPACE = uuid.UUID("5c4da812-3b0f-4e47-9a32-1b8c6d0f2e5a")
-
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
+
+from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -313,14 +311,17 @@ def build_lending_accounting_event(
 
     if amount_human is not None:
         if intent_type_str == "BORROW":
+            principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
+            _borrow_id_seed = tx_hash or ledger_entry_id or position_key
             basis_store.record_borrow(
                 deployment_id=deployment_id,
                 position_key=position_key,
                 token=asset,
                 principal_amount=amount_human,
+                principal_usd=principal_delta_usd,
                 timestamp=now,
+                lot_id=make_accounting_event_id(deployment_id, cycle_id, "BORROW_LOT", _borrow_id_seed, position_key),
             )
-            principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
             interest_delta_usd = None  # interest accrues, not known at borrow time
 
         elif intent_type_str == "REPAY":
@@ -371,12 +372,7 @@ def build_lending_accounting_event(
 
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
-        id=str(
-            uuid.uuid5(
-                _ACCOUNTING_EVENT_NAMESPACE,
-                f"lending:{deployment_id}:{cycle_id}:{intent_type_str}:{_id_seed}",
-            )
-        ),
+        id=make_accounting_event_id(deployment_id, cycle_id, intent_type_str, _id_seed, position_key),
         deployment_id=deployment_id,
         strategy_id=strategy_id,
         cycle_id=cycle_id,

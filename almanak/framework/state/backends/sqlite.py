@@ -342,7 +342,10 @@ CREATE TABLE IF NOT EXISTS transaction_ledger (
     protocol TEXT,
     success BOOLEAN NOT NULL DEFAULT 1,
     error TEXT,
-    extracted_data_json TEXT DEFAULT ''
+    extracted_data_json TEXT DEFAULT '',
+    price_inputs_json TEXT DEFAULT '',   -- token prices at execution time (VIB-3480)
+    pre_state_json TEXT DEFAULT '',      -- on-chain state before execution (VIB-3480)
+    post_state_json TEXT DEFAULT ''      -- on-chain state after execution (VIB-3480)
 );
 
 -- Index for strategy + time queries
@@ -442,6 +445,29 @@ ON accounting_events (cycle_id);
 
 CREATE INDEX IF NOT EXISTS idx_ae_ledger
 ON accounting_events (ledger_entry_id);
+
+-- Durable accounting outbox (VIB-3480).
+-- Written synchronously on the execution hot path; drained asynchronously by
+-- AccountingProcessor (VIB-3467).  Crash-safe: items remain pending until the
+-- processor confirms successful write to accounting_events.
+CREATE TABLE IF NOT EXISTS accounting_outbox (
+    id TEXT PRIMARY KEY,                     -- UUID, generated at write time
+    deployment_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    cycle_id TEXT NOT NULL,
+    ledger_entry_id TEXT NOT NULL,           -- FK to transaction_ledger.id
+    intent_type TEXT NOT NULL,               -- e.g. "SUPPLY", "LP_OPEN"
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | processed | failed
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Partial index for drain queries — only unprocessed rows are ever scanned.
+CREATE INDEX IF NOT EXISTS idx_outbox_drain
+ON accounting_outbox (deployment_id, status, created_at ASC)
+WHERE status != 'processed';
 """
 
 
@@ -610,6 +636,11 @@ class SQLiteStore:
         # Phase 1b: extracted_data_json on transaction_ledger
         _add_column_if_missing("transaction_ledger", "extracted_data_json", "TEXT DEFAULT ''")
 
+        # VIB-3480: price and state capture columns for audit-grade replay
+        _add_column_if_missing("transaction_ledger", "price_inputs_json", "TEXT DEFAULT ''")
+        _add_column_if_missing("transaction_ledger", "pre_state_json", "TEXT DEFAULT ''")
+        _add_column_if_missing("transaction_ledger", "post_state_json", "TEXT DEFAULT ''")
+
         # Phase 1c: token_prices_json and wallet_balances_json on portfolio_snapshots
         _add_column_if_missing("portfolio_snapshots", "token_prices_json", "TEXT DEFAULT '{}'")
         _add_column_if_missing("portfolio_snapshots", "wallet_balances_json", "TEXT DEFAULT '[]'")
@@ -664,6 +695,7 @@ class SQLiteStore:
                 "portfolio_metrics",
                 "transaction_ledger",
                 "timeline_events",
+                "accounting_outbox",
             ]
 
             with self._db_lock:
@@ -701,8 +733,8 @@ class SQLiteStore:
                         )
                         total += cursor.rowcount
 
-                    # position_events and accounting_events use deployment_id instead of strategy_id
-                    for dep_id_table in ("position_events", "accounting_events"):
+                    # position_events, accounting_events, and accounting_outbox use deployment_id
+                    for dep_id_table in ("position_events", "accounting_events", "accounting_outbox"):
                         tbl_exists = conn.execute(
                             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                             (dep_id_table,),
@@ -2334,8 +2366,8 @@ class SQLiteStore:
                      token_in, amount_in, token_out, amount_out,
                      effective_price, slippage_bps, gas_used, gas_usd,
                      tx_hash, chain, protocol, success, error,
-                     extracted_data_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.id,
@@ -2359,6 +2391,9 @@ class SQLiteStore:
                         entry.success,
                         entry.error,
                         entry.extracted_data_json,
+                        entry.price_inputs_json,
+                        entry.pre_state_json,
+                        entry.post_state_json,
                     ),
                 )
                 self._conn.commit()  # type: ignore[union-attr]
@@ -2443,6 +2478,9 @@ class SQLiteStore:
                         success=bool(row["success"]),
                         error=row["error"] or "",
                         extracted_data_json=row["extracted_data_json"] if "extracted_data_json" in row_keys else "",
+                        price_inputs_json=row["price_inputs_json"] if "price_inputs_json" in row_keys else "",
+                        pre_state_json=row["pre_state_json"] if "pre_state_json" in row_keys else "",
+                        post_state_json=row["post_state_json"] if "post_state_json" in row_keys else "",
                     )
                 )
             return entries

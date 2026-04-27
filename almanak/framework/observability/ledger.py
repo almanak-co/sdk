@@ -90,6 +90,9 @@ class LedgerEntry:
     success: bool = True
     error: str = ""
     extracted_data_json: str = ""
+    price_inputs_json: str = ""  # token prices at execution time — enables audit-grade replay (VIB-3480)
+    pre_state_json: str = ""  # on-chain state before execution (VIB-3480)
+    post_state_json: str = ""  # on-chain state after execution (VIB-3480)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage."""
@@ -127,6 +130,9 @@ class LedgerEntry:
             success=data.get("success", True),
             error=data.get("error", ""),
             extracted_data_json=data.get("extracted_data_json", ""),
+            price_inputs_json=data.get("price_inputs_json", ""),
+            pre_state_json=data.get("pre_state_json", ""),
+            post_state_json=data.get("post_state_json", ""),
         )
 
 

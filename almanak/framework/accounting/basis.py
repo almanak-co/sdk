@@ -18,7 +18,21 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-MATCHING_POLICY_VERSION = 1
+MATCHING_POLICY_VERSION = 2
+
+
+@dataclass
+class LotMatch:
+    """Per-lot consumption record for FIFO reconstruction.
+
+    consumed_quantity is in token units (not USD) — sufficient to reconstruct
+    lot state on restart without a price oracle.  consumed_basis_usd is
+    populated when the price was known at record time, None otherwise.
+    """
+
+    lot_id: str
+    consumed_quantity: Decimal
+    consumed_basis_usd: Decimal | None = None
 
 
 @dataclass
@@ -27,7 +41,7 @@ class MatchResult:
 
     repaid_principal: Decimal
     interest_or_yield: Decimal
-    matched_lot_ids: list[str]
+    lot_matches: list[LotMatch]
     unmatched_amount: Decimal
     matching_policy_version: int = MATCHING_POLICY_VERSION
     earliest_lot_timestamp: datetime | None = None
@@ -53,8 +67,10 @@ class FIFOBasisStore:
         token: str,
         principal_amount: Decimal,
         timestamp: datetime | None = None,
+        principal_usd: Decimal | None = None,
+        lot_id: str | None = None,
     ) -> str:
-        lot_id = str(uuid.uuid4())
+        lot_id = lot_id or str(uuid.uuid4())
         key = self._key(deployment_id, position_key, token)
         if key not in self._lots:
             self._lots[key] = []
@@ -64,6 +80,9 @@ class FIFOBasisStore:
                 "principal": principal_amount,
                 "remaining": principal_amount,
                 "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
+                "price_usd_per_token": (
+                    principal_usd / principal_amount if principal_usd is not None and principal_amount else None
+                ),
             }
         )
         return lot_id
@@ -91,13 +110,13 @@ class FIFOBasisStore:
             return MatchResult(
                 repaid_principal=Decimal("0"),
                 interest_or_yield=Decimal("0"),
-                matched_lot_ids=[],
+                lot_matches=[],
                 unmatched_amount=repay_amount,
             )
 
         remaining_repay = repay_amount
         principal_consumed = Decimal("0")
-        matched_lot_ids: list[str] = []
+        lot_matches: list[LotMatch] = []
 
         for lot in lots:
             if remaining_repay <= 0:
@@ -109,7 +128,11 @@ class FIFOBasisStore:
             lot["remaining"] -= consume
             principal_consumed += consume
             remaining_repay -= consume
-            matched_lot_ids.append(lot["lot_id"])
+            price = lot.get("price_usd_per_token")
+            consumed_basis_usd = (Decimal(str(price)) * consume) if price is not None else None
+            lot_matches.append(
+                LotMatch(lot_id=lot["lot_id"], consumed_quantity=consume, consumed_basis_usd=consumed_basis_usd)
+            )
 
         # interest = excess of repayment over total outstanding principal consumed.
         # If repay_amount <= total outstanding principal, interest = 0 (partial repay).
@@ -121,7 +144,7 @@ class FIFOBasisStore:
         return MatchResult(
             repaid_principal=principal_consumed,
             interest_or_yield=interest,
-            matched_lot_ids=matched_lot_ids,
+            lot_matches=lot_matches,
             unmatched_amount=unmatched,
         )
 
@@ -133,8 +156,9 @@ class FIFOBasisStore:
         pt_amount: Decimal,
         sy_cost: Decimal,
         timestamp: datetime | None = None,
+        lot_id: str | None = None,
     ) -> str:
-        lot_id = str(uuid.uuid4())
+        lot_id = lot_id or str(uuid.uuid4())
         key = self._key(deployment_id, position_key, pt_token)
         if key not in self._lots:
             self._lots[key] = []
@@ -163,7 +187,7 @@ class FIFOBasisStore:
         lots = self._lots.get(key, [])
         remaining = pt_redeemed
         original_cost = Decimal("0")
-        matched_lot_ids: list[str] = []
+        lot_matches: list[LotMatch] = []
         earliest_ts: datetime | None = None
 
         for lot in lots:
@@ -177,7 +201,7 @@ class FIFOBasisStore:
             cost_share = lot["cost_per_pt"] * consume
             original_cost += cost_share
             remaining -= consume
-            matched_lot_ids.append(lot["lot_id"])
+            lot_matches.append(LotMatch(lot_id=lot["lot_id"], consumed_quantity=consume))
             ts_str = lot.get("timestamp")
             if ts_str:
                 try:
@@ -191,7 +215,7 @@ class FIFOBasisStore:
         return MatchResult(
             repaid_principal=original_cost,
             interest_or_yield=realized_yield,
-            matched_lot_ids=matched_lot_ids,
+            lot_matches=lot_matches,
             unmatched_amount=max(Decimal("0"), remaining),
             earliest_lot_timestamp=earliest_ts,
         )

@@ -325,6 +325,9 @@ message SaveLedgerEntryRequest {
   bool success = 19;
   string error = 20;
   bytes extracted_data_json = 21;   // Serialised extracted_data dict (may be empty)
+  bytes price_inputs_json = 22;     // Token prices at execution time — enables replay (VIB-3480)
+  bytes pre_state_json = 23;        // On-chain state before execution (VIB-3480)
+  bytes post_state_json = 24;       // On-chain state after execution (VIB-3480)
 }
 
 message SaveLedgerEntryResponse {

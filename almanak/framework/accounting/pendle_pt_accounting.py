@@ -27,6 +27,8 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.framework.accounting.ids import make_accounting_event_id
+
 logger = logging.getLogger(__name__)
 
 _PENDLE_SWAP_PROTOCOL = "pendle"
@@ -225,9 +227,10 @@ def build_pendle_pt_buy_accounting_event(
         unavailable_reason = "PT buy amounts unavailable from receipt"
 
     position_key = f"pendle_pt:{chain.lower()}:{wallet_address.lower()}:{market_address}"
+    _id_seed = tx_hash or ledger_entry_id or position_key
 
     identity = AccountingIdentity(
-        id=f"pendle_pt_{deployment_id}_{cycle_id}_PT_BUY_{tx_hash[-8:] if tx_hash else 'unknown'}",
+        id=make_accounting_event_id(deployment_id, cycle_id, "PT_BUY", _id_seed, position_key),
         deployment_id=deployment_id,
         strategy_id=strategy_id,
         cycle_id=cycle_id,

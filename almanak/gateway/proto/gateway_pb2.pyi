@@ -900,6 +900,9 @@ class SaveLedgerEntryRequest(_message.Message):
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
     EXTRACTED_DATA_JSON_FIELD_NUMBER: _builtins.int
+    PRICE_INPUTS_JSON_FIELD_NUMBER: _builtins.int
+    PRE_STATE_JSON_FIELD_NUMBER: _builtins.int
+    POST_STATE_JSON_FIELD_NUMBER: _builtins.int
     id: _builtins.str
     """UUID primary key (idempotent ON CONFLICT target)"""
     cycle_id: _builtins.str
@@ -931,6 +934,12 @@ class SaveLedgerEntryRequest(_message.Message):
     error: _builtins.str
     extracted_data_json: _builtins.bytes
     """Serialised extracted_data dict (may be empty)"""
+    price_inputs_json: _builtins.bytes
+    """Token prices at execution time — enables replay (VIB-3480)"""
+    pre_state_json: _builtins.bytes
+    """On-chain state before execution (VIB-3480)"""
+    post_state_json: _builtins.bytes
+    """On-chain state after execution (VIB-3480)"""
     def __init__(
         self,
         *,
@@ -955,10 +964,13 @@ class SaveLedgerEntryRequest(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
         extracted_data_json: _builtins.bytes = ...,
+        price_inputs_json: _builtins.bytes = ...,
+        pre_state_json: _builtins.bytes = ...,
+        post_state_json: _builtins.bytes = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "slippage_bps", b"slippage_bps"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__slippage_bps: _TypeAlias = _typing.Literal["slippage_bps"]  # noqa: Y015
     _WhichOneofArgType__slippage_bps: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps"]  # noqa: Y015

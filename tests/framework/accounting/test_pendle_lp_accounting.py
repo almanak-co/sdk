@@ -80,14 +80,14 @@ class TestBuildPendleLpAccountingEvent:
 
         ev = self._call("LP_OPEN")
         assert ev is not None
-        assert ev.event_type == PendleEventType.LP_OPEN
+        assert ev.event_type == PendleEventType.PENDLE_LP_OPEN
 
     def test_lp_close_event_type(self):
         from almanak.framework.accounting.models import PendleEventType
 
         ev = self._call("LP_CLOSE")
         assert ev is not None
-        assert ev.event_type == PendleEventType.LP_CLOSE
+        assert ev.event_type == PendleEventType.PENDLE_LP_CLOSE
 
     def test_lp_open_amounts_populated(self):
         ev = self._call("LP_OPEN")

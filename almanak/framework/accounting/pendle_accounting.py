@@ -17,13 +17,11 @@ Amount reporting:
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-# Fixed namespace for deterministic AccountingIdentity.id (uuid5 → same inputs → same UUID).
-_ACCOUNTING_EVENT_NAMESPACE = uuid.UUID("5c4da812-3b0f-4e47-9a32-1b8c6d0f2e5a")
+from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +92,7 @@ def build_pendle_lp_accounting_event(
     if "pendle" not in protocol:
         return None
 
-    event_type = PendleEventType.LP_OPEN if intent_type_str == "LP_OPEN" else PendleEventType.LP_CLOSE
+    event_type = PendleEventType.PENDLE_LP_OPEN if intent_type_str == "LP_OPEN" else PendleEventType.PENDLE_LP_CLOSE
 
     now = datetime.now(UTC)
     tx_hash = getattr(result, "tx_hash", None) or ""
@@ -139,12 +137,7 @@ def build_pendle_lp_accounting_event(
 
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
-        id=str(
-            uuid.uuid5(
-                _ACCOUNTING_EVENT_NAMESPACE,
-                f"pendle_lp:{deployment_id}:{cycle_id}:{intent_type_str}:{_id_seed}",
-            )
-        ),
+        id=make_accounting_event_id(deployment_id, cycle_id, event_type.value, _id_seed, position_key),
         deployment_id=deployment_id,
         strategy_id=strategy_id,
         cycle_id=cycle_id,

@@ -22,7 +22,6 @@ are 18-decimal wrappers). ESTIMATED confidence records this assumption.
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -30,8 +29,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
 
-# Fixed namespace for deterministic AccountingIdentity.id (uuid5 → same inputs → same UUID).
-_ACCOUNTING_EVENT_NAMESPACE = uuid.UUID("5c4da812-3b0f-4e47-9a32-1b8c6d0f2e5a")
+from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -188,12 +186,7 @@ def build_pendle_pt_redeem_accounting_event(
 
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
-        id=str(
-            uuid.uuid5(
-                _ACCOUNTING_EVENT_NAMESPACE,
-                f"pendle_pt:{deployment_id}:{cycle_id}:PT_REDEEM:{_id_seed}",
-            )
-        ),
+        id=make_accounting_event_id(deployment_id, cycle_id, "PT_REDEEM", _id_seed, position_key),
         deployment_id=deployment_id,
         strategy_id=strategy_id,
         cycle_id=cycle_id,

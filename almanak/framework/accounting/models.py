@@ -38,8 +38,44 @@ class PendleEventType(StrEnum):
     PT_BUY = "PT_BUY"
     PT_SELL = "PT_SELL"
     PT_REDEEM = "PT_REDEEM"
+    PENDLE_LP_OPEN = "PENDLE_LP_OPEN"
+    PENDLE_LP_CLOSE = "PENDLE_LP_CLOSE"
+
+
+class LPEventType(StrEnum):
     LP_OPEN = "LP_OPEN"
     LP_CLOSE = "LP_CLOSE"
+    LP_COLLECT_FEES = "LP_COLLECT_FEES"
+    LP_SNAPSHOT = "LP_SNAPSHOT"
+    LP_REBALANCE = "LP_REBALANCE"
+
+
+class PerpEventType(StrEnum):
+    PERP_OPEN = "PERP_OPEN"
+    PERP_CLOSE = "PERP_CLOSE"
+    PERP_INCREASE = "PERP_INCREASE"
+    PERP_DECREASE = "PERP_DECREASE"
+    PERP_LIQUIDATE = "PERP_LIQUIDATE"
+
+
+class VaultEventType(StrEnum):
+    VAULT_DEPOSIT = "VAULT_DEPOSIT"
+    VAULT_WITHDRAW = "VAULT_WITHDRAW"
+    VAULT_HARVEST = "VAULT_HARVEST"
+    VAULT_SNAPSHOT = "VAULT_SNAPSHOT"
+
+
+class SwapEventType(StrEnum):
+    SWAP = "SWAP"
+
+
+# Union of all valid accounting event type strings — used by the gateway
+# whitelist (state_service.py) and the AccountingProcessor classifier.
+ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
+    e.value
+    for cls in (LendingEventType, PendleEventType, LPEventType, PerpEventType, VaultEventType, SwapEventType)
+    for e in cls
+)
 
 
 @dataclass
