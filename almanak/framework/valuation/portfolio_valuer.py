@@ -1697,59 +1697,220 @@ class PortfolioValuer:
         chain: str,
     ) -> None:
         """Populate cost_basis_usd, unrealized_pnl_usd, realized_pnl_usd, and timestamps
-        from stored accounting events. Best-effort: silently skips on any failure.
+        from stored accounting or position events. Best-effort: silently skips on any failure.
 
-        Only enriches position types that have accounting events (lending for now).
-        LP / perps / vault positions remain at their default-zero values until their
-        accounting writers are implemented.
+        Enrichment paths by position type:
+        - SUPPLY / BORROW: accounting_events table keyed by lending position_key.
+        - LP: position_events table, OPEN event keyed by NFT position_id.
+        - PERP: position_events table, OPEN event keyed by position_id.
+        - VAULT: accounting_events table keyed by vault position_key (VAULT_DEPOSIT events).
         """
         if not self._accounting_store or not self._deployment_id:
             return
         try:
-            from almanak.framework.accounting.position_pnl import compute_position_pnl
             from almanak.framework.teardown.models import PositionType
 
-            position_key = self._try_derive_lending_position_key(position_info, chain)
-            if not position_key:
-                return
-
-            events = self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
-            if not events:
-                return
-
-            # P2 fix: filter events to those relevant for this position side so that a
-            # SUPPLY and BORROW for the same wallet/protocol/asset do not cross-contaminate.
-            # The accounting position_key omits the lending side, so both sides share a key.
-            if position_info.position_type == PositionType.BORROW:
-                relevant_event_types = {"BORROW", "REPAY"}
-            else:
-                relevant_event_types = {"SUPPLY", "WITHDRAW"}
-            events = [e for e in events if e.get("event_type") in relevant_event_types]
-            if not events:
-                return
-
-            pnl = compute_position_pnl(events)
-            if pnl is None:
-                return
-
-            position_value.cost_basis_usd = pnl.cost_basis_usd
-            # P1 fix: BORROW positions carry a negative value_usd (liability semantics).
-            # unrealized_pnl = value_usd + cost_basis_usd
-            #                = (-current_debt) + outstanding_principal
-            #                = -(accrued_interest)   [negative when interest has accrued]
-            # SUPPLY positions use the standard asset formula: value - cost_basis.
-            if position_info.position_type == PositionType.BORROW:
-                position_value.unrealized_pnl_usd = position_value.value_usd + pnl.cost_basis_usd
-            else:
-                # Always compute for SUPPLY even when cost_basis is zero: a position
-                # that has fully recovered principal still has unrealized PnL = value_usd.
-                position_value.unrealized_pnl_usd = position_value.value_usd - pnl.cost_basis_usd
-            position_value.realized_pnl_usd = pnl.realized_pnl_usd
-            position_value.entry_timestamp = pnl.entry_timestamp
-            position_value.last_update_timestamp = pnl.latest_timestamp
-            position_value.ledger_entry_id = pnl.latest_ledger_entry_id
+            if position_info.position_type in (PositionType.SUPPLY, PositionType.BORROW):
+                self._enrich_lending_pnl(position_value, position_info, chain)
+            elif position_info.position_type == PositionType.LP:
+                self._enrich_lp_pnl(position_value, position_info)
+            elif position_info.position_type == PositionType.PERP:
+                self._enrich_perp_pnl(position_value, position_info)
+            elif position_info.position_type == PositionType.VAULT:
+                self._enrich_vault_pnl(position_value, position_info, chain)
         except Exception:
             logger.debug("_enrich_position_pnl failed for %s", position_info.position_id, exc_info=True)
+
+    def _enrich_lending_pnl(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+        chain: str,
+    ) -> None:
+        """Enrich SUPPLY/BORROW positions from accounting_events (existing path)."""
+        from almanak.framework.accounting.position_pnl import compute_position_pnl
+        from almanak.framework.teardown.models import PositionType
+
+        position_key = self._try_derive_lending_position_key(position_info, chain)
+        if not position_key:
+            return
+
+        events = self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+        if not events:
+            return
+
+        # P2 fix: filter events to those relevant for this position side so that a
+        # SUPPLY and BORROW for the same wallet/protocol/asset do not cross-contaminate.
+        # The accounting position_key omits the lending side, so both sides share a key.
+        if position_info.position_type == PositionType.BORROW:
+            relevant_event_types = {"BORROW", "REPAY"}
+        else:
+            relevant_event_types = {"SUPPLY", "WITHDRAW"}
+        events = [e for e in events if e.get("event_type") in relevant_event_types]
+        if not events:
+            return
+
+        pnl = compute_position_pnl(events)
+        if pnl is None:
+            return
+
+        position_value.cost_basis_usd = pnl.cost_basis_usd
+        # P1 fix: BORROW positions carry a negative value_usd (liability semantics).
+        # unrealized_pnl = value_usd + cost_basis_usd
+        #                = (-current_debt) + outstanding_principal
+        #                = -(accrued_interest)   [negative when interest has accrued]
+        # SUPPLY positions use the standard asset formula: value - cost_basis.
+        if position_info.position_type == PositionType.BORROW:
+            position_value.unrealized_pnl_usd = position_value.value_usd + pnl.cost_basis_usd
+        else:
+            # Always compute for SUPPLY even when cost_basis is zero: a position
+            # that has fully recovered principal still has unrealized PnL = value_usd.
+            position_value.unrealized_pnl_usd = position_value.value_usd - pnl.cost_basis_usd
+        position_value.realized_pnl_usd = pnl.realized_pnl_usd
+        position_value.entry_timestamp = pnl.entry_timestamp
+        position_value.last_update_timestamp = pnl.latest_timestamp
+        position_value.ledger_entry_id = pnl.latest_ledger_entry_id
+
+    def _enrich_lp_pnl(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+    ) -> None:
+        """Enrich LP positions from the position_events table.
+
+        Looks up the earliest OPEN event for this position_id and extracts
+        value_usd as cost_basis_usd (= USD value at the time the position
+        was opened).  If no OPEN event exists, leaves cost_basis_usd = 0.
+        """
+        self._enrich_from_open_event(position_value, position_info, position_type="LP")
+
+    def _enrich_perp_pnl(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+    ) -> None:
+        """Enrich PERP positions from the position_events table.
+
+        Looks up the earliest OPEN event for this position_id.  The
+        value_usd on the OPEN event is the initial collateral/notional
+        deployed, used as cost_basis_usd.
+        """
+        self._enrich_from_open_event(position_value, position_info, position_type="PERP")
+
+    def _enrich_from_open_event(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+        position_type: str,
+    ) -> None:
+        """Shared helper: enrich a position from its earliest OPEN event in position_events.
+
+        Reads the first OPEN event for the given position_id and position_type, then
+        populates cost_basis_usd, unrealized_pnl_usd, entry_timestamp, and
+        ledger_entry_id on the PositionValue.  No-op when no matching event exists.
+
+        Args:
+            position_value: The PositionValue to enrich (mutated in place).
+            position_info: Source PositionInfo carrying the position_id.
+            position_type: Value passed to get_position_events_sync (e.g. "LP", "PERP").
+        """
+        if not hasattr(self._accounting_store, "get_position_events_sync"):
+            return
+
+        position_id = position_info.position_id
+        if not position_id:
+            return
+
+        events = self._accounting_store.get_position_events_sync(
+            self._deployment_id,
+            position_id=position_id,
+            position_type=position_type,
+            event_type="OPEN",
+        )
+        if not events:
+            return
+
+        # Events are returned ASC; the first is the earliest OPEN.
+        open_event = events[0]
+        value_usd_raw = open_event.get("value_usd")
+        if value_usd_raw is None or value_usd_raw == "":
+            return
+
+        try:
+            cost_basis = Decimal(str(value_usd_raw))
+        except Exception:
+            return
+
+        if cost_basis <= Decimal("0"):
+            return
+
+        position_value.cost_basis_usd = cost_basis
+        position_value.unrealized_pnl_usd = position_value.value_usd - cost_basis
+        entry_ts = open_event.get("timestamp") or ""
+        if isinstance(entry_ts, str):
+            position_value.entry_timestamp = entry_ts
+        ledger_id = open_event.get("ledger_entry_id") or ""
+        if ledger_id:
+            position_value.ledger_entry_id = ledger_id
+
+    def _enrich_vault_pnl(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+        chain: str,
+    ) -> None:
+        """Enrich VAULT positions from the accounting_events table.
+
+        Looks up VAULT_DEPOSIT events for this position's vault+wallet key
+        and uses the deposit_usd payload field as cost_basis_usd.
+        If no VAULT_DEPOSIT events exist, leaves cost_basis_usd = 0.
+        """
+        if not hasattr(self._accounting_store, "get_accounting_events_sync"):
+            return
+
+        position_key = self._try_derive_vault_position_key(position_info, chain)
+        if not position_key:
+            return
+
+        events = self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+        if not events:
+            return
+
+        # Filter to VAULT_DEPOSIT events only
+        deposit_events = [e for e in events if e.get("event_type") == "VAULT_DEPOSIT"]
+        if not deposit_events:
+            return
+
+        # Sum all deposits for the cost basis (similar to SUPPLY logic)
+        cost_basis = Decimal("0")
+        for ev in deposit_events:
+            try:
+                payload = json.loads(ev.get("payload_json") or "{}")
+            except Exception:
+                continue
+            deposit_raw = payload.get("deposit_usd")
+            if deposit_raw is None:
+                continue
+            try:
+                cost_basis += Decimal(str(deposit_raw))
+            except Exception:
+                pass
+
+        if cost_basis <= Decimal("0"):
+            return
+
+        sorted_events = sorted(deposit_events, key=lambda e: e.get("timestamp", ""))
+        oldest = sorted_events[0]
+        latest = sorted_events[-1]
+
+        position_value.cost_basis_usd = cost_basis
+        position_value.unrealized_pnl_usd = position_value.value_usd - cost_basis
+        entry_ts = oldest.get("timestamp") or ""
+        if isinstance(entry_ts, str):
+            position_value.entry_timestamp = entry_ts
+        ledger_id = latest.get("ledger_entry_id") or ""
+        if ledger_id:
+            position_value.ledger_entry_id = ledger_id
 
     @staticmethod
     def _try_derive_lending_position_key(position: "PositionInfo", chain: str) -> str | None:
@@ -1780,6 +1941,33 @@ class PortfolioValuer:
             parts.append(str(market_id).lower())
         parts.append(asset.lower())
         return ":".join(parts)
+
+    @staticmethod
+    def _try_derive_vault_position_key(position: "PositionInfo", chain: str) -> str | None:
+        """Derive the accounting position_key for a VAULT position.
+
+        The key mirrors whatever the vault accounting writer uses when it records
+        VAULT_DEPOSIT events.  For now, the canonical form is:
+            vault:<chain>:<protocol>:<wallet_lower>:<vault_address_lower>
+
+        Returns None for non-vault position types or when required details are absent.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        if position.position_type != PositionType.VAULT:
+            return None
+        if not chain:
+            return None
+        wallet = (
+            position.details.get("wallet")
+            or position.details.get("wallet_address")
+            or position.details.get("owner")
+            or ""
+        )
+        vault_address = position.details.get("vault_address") or position.details.get("vault") or ""
+        if not wallet or not vault_address:
+            return None
+        return ":".join(["vault", chain.lower(), position.protocol.lower(), wallet.lower(), vault_address.lower()])
 
     @staticmethod
     def _price_ratio_to_tick(

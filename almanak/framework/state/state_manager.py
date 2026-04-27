@@ -1836,6 +1836,32 @@ class StateManager:
             logger.debug("get_accounting_events_sync failed", exc_info=True)
             return []
 
+    def get_position_events_sync(
+        self,
+        deployment_id: str,
+        position_id: str | None = None,
+        position_type: str | None = None,
+        event_type: str | None = None,
+    ) -> list[dict]:
+        """Synchronous position event query — delegates to the warm backend.
+
+        Used by PortfolioValuer (synchronous) to enrich LP/PERP PositionValue
+        objects with cost_basis_usd at snapshot time by looking up the OPEN event.
+        Returns [] when no warm backend or the backend predates this method.
+        """
+        if not self._warm or not hasattr(self._warm, "get_position_events_sync"):
+            return []
+        try:
+            return self._warm.get_position_events_sync(
+                deployment_id=deployment_id,
+                position_id=position_id,
+                position_type=position_type,
+                event_type=event_type,
+            )
+        except Exception:
+            logger.debug("get_position_events_sync failed", exc_info=True)
+            return []
+
     async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
         """Partial update of attribution_json + attribution_version on a PositionEvent."""
         if not self._initialized:

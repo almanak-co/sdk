@@ -982,3 +982,376 @@ class TestDeployedCapitalUsd:
         )
         # Sanity: total_value_usd comes from external
         assert reconciled.total_value_usd == Decimal("1050")
+
+
+# ---------------------------------------------------------------------------
+# VIB-3491: LP/perp/vault PositionValue enrichment from position_events
+# ---------------------------------------------------------------------------
+
+
+def _make_lp_position_info(position_id="12345", protocol="uniswap_v3", chain="arbitrum"):
+    """Build a mock PositionInfo for an LP position."""
+    return PositionInfo(
+        position_type=PositionType.LP,
+        position_id=position_id,
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("1100"),
+        details={"tokens": ["WETH", "USDC"]},
+    )
+
+
+def _make_perp_position_info(position_id="perp-abc123", protocol="gmx_v2", chain="arbitrum"):
+    """Build a mock PositionInfo for a PERP position."""
+    return PositionInfo(
+        position_type=PositionType.PERP,
+        position_id=position_id,
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("2200"),
+        details={
+            "market": "0xmarketaddress",
+            "is_long": True,
+            "wallet": "0x1234567890123456789012345678901234567890",
+        },
+    )
+
+
+def _make_vault_position_info(
+    position_id="vault-pos-1",
+    protocol="morpho",
+    chain="arbitrum",
+    wallet="0x1234567890123456789012345678901234567890",
+    vault_address="0xvaultaddress",
+):
+    """Build a mock PositionInfo for a VAULT position."""
+    return PositionInfo(
+        position_type=PositionType.VAULT,
+        position_id=position_id,
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("550"),
+        details={
+            "wallet": wallet,
+            "wallet_address": wallet,
+            "vault_address": vault_address,
+            "asset": "USDC",
+        },
+    )
+
+
+def _make_lp_open_event(position_id="12345", value_usd="1000", timestamp="2026-01-01T10:00:00", ledger_entry_id="ledger-lp-001"):
+    """Build a synthetic LP OPEN event row as returned by get_position_events_sync."""
+    return {
+        "id": "evt-001",
+        "deployment_id": "test-deployment",
+        "position_id": position_id,
+        "position_type": "LP",
+        "event_type": "OPEN",
+        "timestamp": timestamp,
+        "protocol": "uniswap_v3",
+        "chain": "arbitrum",
+        "value_usd": value_usd,
+        "token0": "WETH",
+        "token1": "USDC",
+        "ledger_entry_id": ledger_entry_id,
+        "attribution_json": "{}",
+    }
+
+
+def _make_perp_open_event(position_id="perp-abc123", value_usd="2000", timestamp="2026-01-02T10:00:00", ledger_entry_id="ledger-perp-001"):
+    """Build a synthetic PERP OPEN event row."""
+    return {
+        "id": "evt-002",
+        "deployment_id": "test-deployment",
+        "position_id": position_id,
+        "position_type": "PERP",
+        "event_type": "OPEN",
+        "timestamp": timestamp,
+        "protocol": "gmx_v2",
+        "chain": "arbitrum",
+        "value_usd": value_usd,
+        "ledger_entry_id": ledger_entry_id,
+        "attribution_json": "{}",
+    }
+
+
+def _make_vault_deposit_event(value_usd="500", timestamp="2026-01-03T10:00:00", ledger_entry_id="ledger-vault-001"):
+    """Build a synthetic VAULT_DEPOSIT accounting event row."""
+    import json
+    return {
+        "id": "evt-003",
+        "deployment_id": "test-deployment",
+        "event_type": "VAULT_DEPOSIT",
+        "position_key": "vault:arbitrum:morpho:0x1234567890123456789012345678901234567890:0xvaultaddress",
+        "timestamp": timestamp,
+        "protocol": "morpho",
+        "chain": "arbitrum",
+        "ledger_entry_id": ledger_entry_id,
+        "payload_json": json.dumps({"deposit_usd": value_usd, "schema_version": 1}),
+        "confidence": "HIGH",
+        "schema_version": 1,
+    }
+
+
+class TestLpPerpVaultPositionEnrichment:
+    """VIB-3491: LP/perp/vault PositionValue enrichment from position_events.
+
+    Tests cover:
+    - cost_basis_usd and entry_timestamp populated from LP_OPEN event
+    - cost_basis_usd and entry_timestamp populated from PERP OPEN event
+    - cost_basis_usd populated from VAULT_DEPOSIT accounting event
+    - Position without OPEN event leaves cost_basis at 0
+    - deployed_capital_usd reflects LP cost basis
+    """
+
+    def _make_mock_store(self, position_events=None, accounting_events=None):
+        """Build a mock store that returns given events from the appropriate methods."""
+        store = MagicMock()
+        store.get_position_events_sync.return_value = position_events or []
+        store.get_accounting_events_sync.return_value = accounting_events or []
+        return store
+
+    def test_lp_position_enriched_from_lp_open_event(self):
+        """LP PositionValue gets cost_basis_usd and entry_timestamp from position_events OPEN row."""
+        valuer = PortfolioValuer()
+        open_event = _make_lp_open_event(value_usd="1000", timestamp="2026-01-01T10:00:00", ledger_entry_id="ledger-lp-001")
+        store = self._make_mock_store(position_events=[open_event])
+        valuer.set_accounting_context(store, "test-deployment")
+
+        from almanak.framework.portfolio.models import PositionValue
+
+        pos_val = PositionValue(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            value_usd=Decimal("1100"),
+            label="uniswap_v3 lp",
+        )
+        pos_info = _make_lp_position_info(position_id="12345")
+
+        valuer._enrich_position_pnl(pos_val, pos_info, "arbitrum")
+
+        assert pos_val.cost_basis_usd == Decimal("1000"), (
+            f"expected cost_basis_usd=1000 but got {pos_val.cost_basis_usd}"
+        )
+        assert pos_val.unrealized_pnl_usd == Decimal("100"), (
+            f"expected unrealized_pnl_usd=100 (1100-1000) but got {pos_val.unrealized_pnl_usd}"
+        )
+        assert pos_val.entry_timestamp == "2026-01-01T10:00:00"
+        assert pos_val.ledger_entry_id == "ledger-lp-001"
+
+        # Verify the store was called with the correct position_id and event_type
+        store.get_position_events_sync.assert_called_once_with(
+            "test-deployment",
+            position_id="12345",
+            position_type="LP",
+            event_type="OPEN",
+        )
+
+    def test_perp_position_enriched_from_perp_open_event(self):
+        """PERP PositionValue gets cost_basis_usd and entry_timestamp from position_events OPEN row."""
+        valuer = PortfolioValuer()
+        open_event = _make_perp_open_event(value_usd="2000", timestamp="2026-01-02T10:00:00", ledger_entry_id="ledger-perp-001")
+        store = self._make_mock_store(position_events=[open_event])
+        valuer.set_accounting_context(store, "test-deployment")
+
+        from almanak.framework.portfolio.models import PositionValue
+
+        pos_val = PositionValue(
+            position_type=PositionType.PERP,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            value_usd=Decimal("2200"),
+            label="gmx_v2 perp",
+        )
+        pos_info = _make_perp_position_info(position_id="perp-abc123")
+
+        valuer._enrich_position_pnl(pos_val, pos_info, "arbitrum")
+
+        assert pos_val.cost_basis_usd == Decimal("2000")
+        assert pos_val.unrealized_pnl_usd == Decimal("200")  # 2200 - 2000
+        assert pos_val.entry_timestamp == "2026-01-02T10:00:00"
+        assert pos_val.ledger_entry_id == "ledger-perp-001"
+
+        store.get_position_events_sync.assert_called_once_with(
+            "test-deployment",
+            position_id="perp-abc123",
+            position_type="PERP",
+            event_type="OPEN",
+        )
+
+    def test_vault_position_enriched_from_vault_deposit_event(self):
+        """VAULT PositionValue gets cost_basis_usd from VAULT_DEPOSIT accounting event."""
+        valuer = PortfolioValuer()
+        vault_event = _make_vault_deposit_event(value_usd="500", timestamp="2026-01-03T10:00:00", ledger_entry_id="ledger-vault-001")
+        store = self._make_mock_store(accounting_events=[vault_event])
+        valuer.set_accounting_context(store, "test-deployment")
+
+        from almanak.framework.portfolio.models import PositionValue
+
+        pos_val = PositionValue(
+            position_type=PositionType.VAULT,
+            protocol="morpho",
+            chain="arbitrum",
+            value_usd=Decimal("550"),
+            label="morpho vault",
+        )
+        pos_info = _make_vault_position_info()
+
+        valuer._enrich_position_pnl(pos_val, pos_info, "arbitrum")
+
+        assert pos_val.cost_basis_usd == Decimal("500")
+        assert pos_val.unrealized_pnl_usd == Decimal("50")  # 550 - 500
+        assert pos_val.entry_timestamp == "2026-01-03T10:00:00"
+        assert pos_val.ledger_entry_id == "ledger-vault-001"
+
+        # get_accounting_events_sync is called with the derived vault position_key
+        store.get_accounting_events_sync.assert_called_once_with(
+            "test-deployment",
+            position_key="vault:arbitrum:morpho:0x1234567890123456789012345678901234567890:0xvaultaddress",
+        )
+
+    def test_position_without_open_event_left_as_zero(self):
+        """When no OPEN event exists for an LP position, cost_basis stays at 0."""
+        valuer = PortfolioValuer()
+        # Store returns empty list — no OPEN event
+        store = self._make_mock_store(position_events=[])
+        valuer.set_accounting_context(store, "test-deployment")
+
+        from almanak.framework.portfolio.models import PositionValue
+
+        pos_val = PositionValue(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            value_usd=Decimal("1100"),
+            label="uniswap_v3 lp",
+        )
+        pos_info = _make_lp_position_info(position_id="99999")
+
+        valuer._enrich_position_pnl(pos_val, pos_info, "arbitrum")
+
+        assert pos_val.cost_basis_usd == Decimal("0"), (
+            f"expected cost_basis_usd=0 when no OPEN event but got {pos_val.cost_basis_usd}"
+        )
+        assert pos_val.unrealized_pnl_usd == Decimal("0")
+        assert pos_val.entry_timestamp == ""
+        assert pos_val.ledger_entry_id == ""
+
+    def test_deployed_capital_includes_lp_positions(self):
+        """deployed_capital_usd reflects LP cost basis in addition to lending."""
+        valuer = PortfolioValuer()
+        open_event = _make_lp_open_event(position_id="12345", value_usd="3000")
+        store = MagicMock()
+        store.get_position_events_sync.return_value = [open_event]
+        store.get_accounting_events_sync.return_value = []
+        valuer.set_accounting_context(store, "test-deployment")
+
+        strategy = _make_strategy(
+            tracked_tokens=["ETH"],
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.LP,
+                    position_id="12345",
+                    chain="arbitrum",
+                    protocol="uniswap_v3",
+                    value_usd=Decimal("3200"),
+                    details={"tokens": ["WETH", "USDC"]},
+                )
+            ],
+        )
+        market = _make_market(
+            prices={"ETH": Decimal("3000")},
+            balances={"ETH": Decimal("0")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        assert snapshot.deployed_capital_usd == Decimal("3000"), (
+            f"expected deployed_capital_usd=3000 from LP cost basis, got {snapshot.deployed_capital_usd}"
+        )
+
+    def test_lp_position_without_accounting_context_stays_zero(self):
+        """LP position with no accounting context set → cost_basis stays 0."""
+        valuer = PortfolioValuer()
+        # No set_accounting_context call
+
+        from almanak.framework.portfolio.models import PositionValue
+
+        pos_val = PositionValue(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            value_usd=Decimal("1000"),
+            label="uniswap_v3 lp",
+        )
+        pos_info = _make_lp_position_info(position_id="12345")
+
+        valuer._enrich_position_pnl(pos_val, pos_info, "arbitrum")
+
+        assert pos_val.cost_basis_usd == Decimal("0")
+
+    def test_lp_open_event_zero_value_usd_not_used(self):
+        """An LP OPEN event with value_usd='0' does not set cost_basis (guard against bogus records)."""
+        valuer = PortfolioValuer()
+        open_event = _make_lp_open_event(value_usd="0")
+        store = self._make_mock_store(position_events=[open_event])
+        valuer.set_accounting_context(store, "test-deployment")
+
+        from almanak.framework.portfolio.models import PositionValue
+
+        pos_val = PositionValue(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            value_usd=Decimal("1000"),
+            label="uniswap_v3 lp",
+        )
+        pos_info = _make_lp_position_info(position_id="12345")
+
+        valuer._enrich_position_pnl(pos_val, pos_info, "arbitrum")
+
+        # Zero value_usd is filtered out — cost_basis stays 0
+        assert pos_val.cost_basis_usd == Decimal("0")
+
+    def test_vault_position_key_derivation(self):
+        """_try_derive_vault_position_key produces expected colon-delimited key."""
+        pos_info = _make_vault_position_info(
+            protocol="morpho",
+            chain="arbitrum",
+            wallet="0xABCD",
+            vault_address="0xVAULT",
+        )
+        key = PortfolioValuer._try_derive_vault_position_key(pos_info, "arbitrum")
+        assert key == "vault:arbitrum:morpho:0xabcd:0xvault"
+
+    def test_vault_position_key_none_when_missing_wallet(self):
+        """Returns None if vault PositionInfo has no wallet detail."""
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        pos_info = PositionInfo(
+            position_type=PositionType.VAULT,
+            position_id="vault-pos",
+            chain="arbitrum",
+            protocol="morpho",
+            value_usd=Decimal("100"),
+            details={"vault_address": "0xvault"},  # no wallet
+        )
+        key = PortfolioValuer._try_derive_vault_position_key(pos_info, "arbitrum")
+        assert key is None
+
+    def test_vault_position_key_none_when_missing_vault_address(self):
+        """Returns None if vault PositionInfo has no vault_address detail."""
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        pos_info = PositionInfo(
+            position_type=PositionType.VAULT,
+            position_id="vault-pos",
+            chain="arbitrum",
+            protocol="morpho",
+            value_usd=Decimal("100"),
+            details={"wallet": "0xwallet"},  # no vault_address
+        )
+        key = PortfolioValuer._try_derive_vault_position_key(pos_info, "arbitrum")
+        assert key is None

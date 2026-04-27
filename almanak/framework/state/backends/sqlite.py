@@ -2601,6 +2601,51 @@ class SQLiteStore:
             rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+    def get_position_events_sync(
+        self,
+        deployment_id: str,
+        position_id: str | None = None,
+        position_type: str | None = None,
+        event_type: str | None = None,
+    ) -> list[dict]:
+        """Synchronous position event query for use from non-async callers.
+
+        Bypasses the async executor wrapper so PortfolioValuer (synchronous)
+        can enrich PositionValue objects with cost_basis_usd at snapshot time.
+        Returns [] when the store is not yet initialized.
+
+        Ordered by timestamp ASC so that the first row is always the earliest
+        OPEN event (reliable cost-basis anchor regardless of pagination).
+
+        Args:
+            deployment_id: Strategy deployment identifier.
+            position_id: Optional filter by position_id.
+            position_type: Optional filter by position_type (LP, PERP).
+            event_type: Optional filter by event_type (OPEN, CLOSE, etc.).
+        """
+        if not self._initialized or not self._conn:
+            return []
+        params: list[Any] = [deployment_id]
+        where = ["deployment_id = ?"]
+        if position_id is not None:
+            where.append("position_id = ?")
+            params.append(position_id)
+        if position_type is not None:
+            where.append("position_type = ?")
+            params.append(position_type)
+        if event_type is not None:
+            where.append("event_type = ?")
+            params.append(event_type)
+        sql = f"""
+            SELECT * FROM position_events
+            WHERE {" AND ".join(where)}
+            ORDER BY timestamp ASC
+        """
+        with self._db_lock:
+            cursor = self._conn.execute(sql, params)
+            rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def get_accounting_history(
         self,
         deployment_id: str,
