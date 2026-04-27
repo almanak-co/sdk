@@ -13,6 +13,7 @@ from typing import Any
 
 import grpc
 
+from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
@@ -146,6 +147,14 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self.wallet_registry: object | None = None
+        # Wired up by GatewayServer after both services are registered so that
+        # balance providers can fall back to TokenService's dynamic resolution
+        # stack (CoinGecko / DexScreener / protocol APIs) for symbols absent
+        # from the static registry.
+        self._token_servicer: Any = None
+        # Negative-miss cache: (chain, symbol) -> expiry monotonic time.
+        # Prevents repeated slow API calls for symbols that don't exist.
+        self._dynamic_miss_cache: dict[tuple[str, str], float] = {}
 
     async def close(self) -> None:
         """Close resources held by MarketService (HTTP sessions, etc.)."""
@@ -332,6 +341,50 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             except Exception as e:
                 logger.warning("Balance provider warmup failed for chain=%s: %s", chain, e)
 
+    def _make_dynamic_symbol_resolver(self):
+        """Return an async callable that resolves unknown EVM symbols via TokenService.
+
+        The returned callable has signature:
+            async (symbol: str, chain: str) -> tuple[str, str, int] | None
+        returning (symbol, address, decimals) on success.
+
+        Reads self._token_servicer at call time so providers created before
+        the token servicer is wired up still benefit once it is set.
+        """
+
+        async def _resolver(symbol: str, chain: str):
+            if self._token_servicer is None:
+                logger.warning(
+                    "dynamic_symbol_resolver invoked but _token_servicer not wired; check server.py registration order"
+                )
+                return None
+
+            # Short-circuit repeated API calls for symbols confirmed absent.
+            miss_key = (chain, symbol)
+            now = time.monotonic()
+            if miss_key in self._dynamic_miss_cache and self._dynamic_miss_cache[miss_key] > now:
+                return None
+
+            try:
+                response = await asyncio.wait_for(
+                    self._token_servicer._try_evm_symbol_lookup(symbol, chain),
+                    timeout=8.0,
+                )
+                if response is not None and response.address:
+                    return (response.symbol, response.address, response.decimals)
+                # Definitive miss — cache to avoid repeating the full tier walk.
+                self._dynamic_miss_cache[miss_key] = now + 60.0
+            except TimeoutError:
+                logger.warning("Dynamic token lookup timed out for %s on %s (8 s)", symbol, chain)
+                self._dynamic_miss_cache[miss_key] = now + 30.0
+            except AmbiguousTokenError:
+                raise  # Preserve the candidate-address message; GetBalance surfaces it as INVALID_ARGUMENT
+            except Exception as exc:
+                logger.warning("TokenService dynamic lookup failed for %s on %s: %s", symbol, chain, exc)
+            return None
+
+        return _resolver
+
     async def _get_balance_provider(self, chain: str, wallet_address: str):
         """Get or create balance provider for a chain.
 
@@ -364,6 +417,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     rpc_url=rpc_url,
                     wallet_address=wallet_address,
                     chain=chain,
+                    dynamic_symbol_resolver=self._make_dynamic_symbol_resolver(),
                 )
 
         return self._balance_providers[cache_key]
@@ -721,6 +775,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 timestamp=int(result.timestamp.timestamp()),
                 stale=result.stale,
             )
+        except AmbiguousTokenError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.BalanceResponse()
         except Exception as e:
             # VIB-2580: In single-chain Anvil mode, balance queries for non-running
             # chains are expected failures. Downgrade to WARNING to avoid noise.

@@ -36,6 +36,11 @@ class MultiChainWeb3BalanceProvider:
     This class provides a unified interface for querying token balances
     across multiple blockchain networks.
 
+    NOTE: Token resolution uses the static registry only (no dynamic
+    CoinGecko/DexScreener fallback). For dynamic fallback, use the
+    gateway's MarketServiceServicer._get_balance_provider path, which
+    wires TokenService into each Web3BalanceProvider at construction time.
+
     Attributes:
         rpc_urls: Mapping of chain names to RPC URLs
         wallet_address: The wallet address to query balances for

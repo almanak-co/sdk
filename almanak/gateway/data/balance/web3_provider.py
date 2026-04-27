@@ -51,10 +51,11 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
 )
 from almanak.framework.data.tokens.exceptions import (
-    TokenNotFoundError as FrameworkTokenNotFoundError,
+    AmbiguousTokenError,
+    TokenResolutionError,
 )
 from almanak.framework.data.tokens.exceptions import (
-    TokenResolutionError,
+    TokenNotFoundError as FrameworkTokenNotFoundError,
 )
 from almanak.gateway.services.onchain_lookup import OnChainLookup
 
@@ -313,6 +314,7 @@ class Web3BalanceProvider:
         max_retries: int = 3,
         retry_delay: float = 0.5,
         token_resolver: "TokenResolver | None" = None,
+        dynamic_symbol_resolver: Any | None = None,
     ) -> None:
         """Initialize the Web3 balance provider.
 
@@ -347,6 +349,13 @@ class Web3BalanceProvider:
             from almanak.framework.data.tokens.resolver import get_token_resolver
 
             self._token_resolver = get_token_resolver()
+
+        # Optional async callback for symbols that miss the static registry.
+        # Signature: async (symbol: str, chain: str) -> tuple[str, str, int] | None
+        # Returns (symbol, address, decimals) on success, None on miss.
+        # Wired up by MarketService to delegate to TokenService's dynamic stack
+        # (CoinGecko / DexScreener / protocol-specific APIs).
+        self._dynamic_symbol_resolver = dynamic_symbol_resolver
 
         # Native token symbol for this chain
         self._native_symbol = NATIVE_TOKEN_SYMBOLS.get(self._chain, "ETH")
@@ -653,10 +662,32 @@ class Web3BalanceProvider:
         # Coercing them to "token not found" would mask programmer errors
         # and put strategies into HOLD instead of surfacing the real failure.
 
-        # 2. On-chain fallback: only meaningful for raw EVM addresses.
-        # Symbol misses cannot be recovered without dynamic discovery
-        # (CoinGecko/Jupiter), which is intentionally out of scope here.
+        # 2. Dynamic symbol fallback: delegate to the gateway's TokenService
+        # dynamic stack (CoinGecko / DexScreener / protocol APIs) when wired.
+        # Only attempted for symbol-like inputs (not raw EVM addresses, which
+        # go to the on-chain ERC20 path below).
         if not _EVM_ADDRESS_RE.match(token):
+            if self._dynamic_symbol_resolver is not None:
+                try:
+                    dynamic_result = await self._dynamic_symbol_resolver(token, self._chain)
+                    if dynamic_result is not None:
+                        sym, addr, dec = dynamic_result
+                        logger.debug(
+                            "Dynamic symbol resolution succeeded for %s on %s: address=%s",
+                            token,
+                            self._chain,
+                            addr,
+                        )
+                        return TokenMetadata(symbol=sym, address=addr, decimals=dec, is_native=False)
+                except AmbiguousTokenError:
+                    raise  # Preserve candidate-address message; GetBalance surfaces as INVALID_ARGUMENT
+                except Exception as exc:
+                    logger.warning(
+                        "Dynamic symbol resolver raised for %s on %s: %s",
+                        token,
+                        self._chain,
+                        exc,
+                    )
             logger.debug(
                 "TokenResolver miss for symbol-like input '%s' on %s: %s",
                 token,

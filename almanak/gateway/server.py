@@ -365,6 +365,10 @@ class GatewayServer:
 
         self._token_servicer = TokenServiceServicer(self.settings)
         gateway_pb2_grpc.add_TokenServiceServicer_to_server(self._token_servicer, self.server)
+        # Wire TokenService into MarketService so balance providers can fall
+        # back to the dynamic resolution stack for symbols absent from the
+        # static registry (CoinGecko / DexScreener / protocol APIs).
+        self._market_servicer._token_servicer = self._token_servicer
 
         self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
         gateway_pb2_grpc.add_LifecycleServiceServicer_to_server(self._lifecycle_servicer, self.server)
