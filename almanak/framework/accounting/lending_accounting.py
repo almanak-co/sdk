@@ -2,10 +2,11 @@
 
 Wired into strategy_runner after every successful SUPPLY / BORROW / REPAY / WITHDRAW.
 
-Before-state: None — we capture after-state only via a post-execution gateway read.
-              Pre-execution state capture is a follow-up item; omitting it is honest
-              (None) rather than STALE (fabricated from a snapshot that may have
-              drifted before the TX landed).
+Before-state (VIB-3489): captured via capture_lending_pre_state() called by the runner
+                          BEFORE the transaction is submitted.  The runner passes the
+                          result as pre_execution_state to build_lending_accounting_event().
+                          If the read fails, None is passed and before fields are None
+                          with an unavailable_reason note — never fabricated or stale.
 
 After-state (Aave V3): Pool.getUserAccountData — one call gives collateral_usd,
                         debt_usd, health_factor, liquidation_threshold.
@@ -320,6 +321,125 @@ def read_morpho_blue_account_state(
         return None
 
 
+def capture_lending_pre_state(
+    *,
+    intent: Any,
+    chain: str,
+    wallet_address: str,
+    gateway_client: Any | None,
+    price_oracle: dict | None,
+) -> AaveAccountState | MorphoBlueAccountState | None:
+    """Read on-chain lending state BEFORE the transaction is submitted (VIB-3489).
+
+    Called by the strategy runner before executing the intent bundle.  The
+    returned state is later forwarded as ``pre_execution_state`` to
+    ``build_lending_accounting_event()`` so that before/after deltas can be
+    computed.
+
+    Returns None (silently, with a debug log) when:
+    - The gateway client is not available.
+    - The intent is not a supported lending protocol (Aave V3 / Morpho Blue).
+    - Any gateway eth_call fails.
+
+    Never raises; never substitutes stale data on failure.
+    """
+    if gateway_client is None:
+        return None
+
+    protocol = str(getattr(intent, "protocol", "") or "").lower()
+    intent_type_str = _intent_type_value(intent)
+
+    if intent_type_str not in _LENDING_INTENT_TYPES:
+        return None
+
+    # ── Aave V3 ──────────────────────────────────────────────────────────────
+    if protocol in ("aave_v3", "aave"):
+        aave_state: AaveAccountState | None = read_aave_account_state(gateway_client, chain, wallet_address)
+        if aave_state is None:
+            logger.debug("capture_lending_pre_state: Aave read returned None for chain=%s", chain)
+        return aave_state
+
+    # ── Morpho Blue (all lending intent types for parity with Aave V3) ──────
+    if protocol == "morpho_blue":
+        market_id = _intent_market_id(intent)
+        if not market_id:
+            logger.debug("capture_lending_pre_state: Morpho market_id missing — skipping pre-state read")
+            return None
+
+        collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
+        loan_token_sym: str | None = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+
+        _collateral_decimals: int | None = None
+        _loan_decimals: int | None = None
+        _lltv_raw: int | None = None
+
+        try:
+            from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+
+            _markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
+            # O(1) lookup using the same normalisation as _normalize_market_id_hex
+            _normalized_key = "0x" + _normalize_market_id_hex(market_id)
+            _market_info: dict | None = _markets_for_chain.get(_normalized_key)
+
+            if _market_info is not None:
+                if collateral_token_sym is None:
+                    collateral_token_sym = _market_info.get("collateral_token")
+                if loan_token_sym is None:
+                    loan_token_sym = _market_info.get("loan_token")
+                _lltv_raw = _market_info.get("lltv")
+
+                try:
+                    from almanak.framework.data.tokens.resolver import get_token_resolver
+
+                    _resolver = get_token_resolver()
+                    if collateral_token_sym:
+                        _ct = _resolver.resolve(collateral_token_sym, chain=chain)
+                        if _ct:
+                            _collateral_decimals = _ct.decimals
+                    if loan_token_sym:
+                        _lt = _resolver.resolve(loan_token_sym, chain=chain)
+                        if _lt:
+                            _loan_decimals = _lt.decimals
+                except Exception:
+                    logger.debug("capture_lending_pre_state: token resolver failed for Morpho Blue", exc_info=True)
+        except Exception:
+            logger.debug("capture_lending_pre_state: MORPHO_MARKETS lookup failed for chain=%s", chain, exc_info=True)
+
+        if not (
+            collateral_token_sym
+            and loan_token_sym
+            and _collateral_decimals is not None
+            and _loan_decimals is not None
+            and _lltv_raw is not None
+        ):
+            logger.debug(
+                "capture_lending_pre_state: Morpho Blue pre-state skipped (missing params) for market=%s",
+                market_id[:18] if market_id else "?",
+            )
+            return None
+
+        morpho_state: MorphoBlueAccountState | None = read_morpho_blue_account_state(
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            market_id=market_id,
+            collateral_token=collateral_token_sym,
+            loan_token=loan_token_sym,
+            collateral_decimals=_collateral_decimals,
+            loan_decimals=_loan_decimals,
+            lltv_raw=_lltv_raw,
+            price_oracle=price_oracle,
+        )
+        if morpho_state is None:
+            logger.debug(
+                "capture_lending_pre_state: Morpho Blue read returned None for market=%s",
+                market_id[:18] if market_id else "?",
+            )
+        return morpho_state
+
+    return None
+
+
 def _derive_position_key(protocol: str, chain: str, wallet: str, market_id: str | None, asset: str) -> str:
     """Canonical position key for a lending position."""
     parts = ["lending", chain.lower(), protocol.lower(), wallet.lower()]
@@ -416,10 +536,16 @@ def build_lending_accounting_event(
     basis_store: FIFOBasisStore,
     price_oracle: dict | None,
     ledger_entry_id: str | None = None,
+    pre_execution_state: AaveAccountState | MorphoBlueAccountState | None = None,
 ) -> Any | None:
     """Build a LendingAccountingEvent for a completed lending intent.
 
     Returns None for non-lending intents or if the intent type cannot be mapped.
+
+    pre_execution_state (VIB-3489): on-chain account state captured BEFORE the
+    transaction was submitted, obtained by calling capture_lending_pre_state()
+    in the runner.  When None, before fields are left as None rather than
+    fabricated — honest absence is always preferred over stale data.
 
     FIFO lot tracking:
       - BORROW  → records a lot; interest_delta_usd = None at borrow time.
@@ -668,7 +794,32 @@ def build_lending_accounting_event(
         (collateral_after - debt_after) if (collateral_after is not None and debt_after is not None) else None
     )
 
-    # Confidence: HIGH if we got a live after-state read, ESTIMATED otherwise
+    # ── Before-state: from pre_execution_state (VIB-3489) ────────────────────
+    # pre_execution_state is captured by the runner BEFORE the tx is submitted.
+    # If None (read failed or not available), before fields stay None — honest
+    # absence is preferred over stale data. Absence is signaled by before fields
+    # being None; it does NOT affect unavailable_reason (which tracks after-state
+    # quality) or confidence.
+    collateral_before: Decimal | None = None
+    debt_before: Decimal | None = None
+    hf_before: Decimal | None = None
+    net_equity_before: Decimal | None = None
+
+    if pre_execution_state is not None:
+        # Both AaveAccountState and MorphoBlueAccountState share the same field
+        # names for the data being extracted — no protocol-specific branching needed.
+        collateral_before = pre_execution_state.collateral_usd
+        debt_before = pre_execution_state.debt_usd
+        hf_before = pre_execution_state.health_factor
+        if collateral_before is not None and debt_before is not None:
+            net_equity_before = collateral_before - debt_before
+
+    # Confidence: HIGH if we got a live after-state read, ESTIMATED otherwise.
+    # unavailable_reason tracks the primary (after-state) signal only — callers
+    # interpret confidence + unavailable_reason as a pair. Pre-state absence is
+    # already observable via the before fields being None; polluting
+    # unavailable_reason with it would degrade HIGH-confidence events when
+    # pre-state was simply not yet available on this cycle.
     confidence = AccountingConfidence.HIGH if got_after_state else AccountingConfidence.ESTIMATED
     if not got_after_state:
         if is_morpho and morpho_unavailable_reason:
@@ -699,13 +850,13 @@ def build_lending_accounting_event(
         position_key=position_key,
         market_id=market_id or "",
         asset=asset,
-        collateral_value_before_usd=None,  # pre-execution read not yet implemented
+        collateral_value_before_usd=collateral_before,
         collateral_value_after_usd=collateral_after,
-        debt_value_before_usd=None,
+        debt_value_before_usd=debt_before,
         debt_value_after_usd=debt_after,
-        net_equity_before_usd=None,
+        net_equity_before_usd=net_equity_before,
         net_equity_after_usd=net_equity_after,
-        health_factor_before=None,
+        health_factor_before=hf_before,
         health_factor_after=hf_after,
         liquidation_threshold=liquidation_threshold,
         lltv=lltv_after,

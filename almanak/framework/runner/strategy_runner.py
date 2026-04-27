@@ -250,6 +250,9 @@ class SingleChainExecutionState:
     compiler: Any = None
     state_machine: Any = None
     pre_snapshot: Any | None = None
+    # VIB-3489: on-chain lending state captured BEFORE the tx is submitted.
+    # Forwarded to build_lending_accounting_event() as pre_execution_state.
+    pre_lending_state: Any | None = None
 
     # --- Running bookkeeping (updated by state-machine loop) ---
     last_execution_result: Any | None = None
@@ -1902,6 +1905,7 @@ class StrategyRunner:
         result: Any,
         price_oracle: dict | None = None,
         ledger_entry_id: str | None = None,
+        pre_lending_state: Any | None = None,
     ) -> None:
         """Write a LendingAccountingEvent after a successful lending intent (VIB-3418).
 
@@ -1910,7 +1914,7 @@ class StrategyRunner:
         SUPPLY and WITHDRAW remain best-effort in all modes.
 
         Reads after-state (HF, collateral, debt) from the chain via the gateway.
-        Before-state is None for now; pre-execution capture is a follow-up (VIB-3489).
+        pre_lending_state is the before-state captured pre-execution (VIB-3489).
         """
         # BORROW and REPAY are mandatory in live mode: they carry HF and interest data.
         _MANDATORY_LIVE_TYPES = frozenset({"BORROW", "REPAY"})
@@ -1952,6 +1956,7 @@ class StrategyRunner:
                 basis_store=self._lending_basis_store,
                 price_oracle=price_oracle,
                 ledger_entry_id=ledger_entry_id,
+                pre_execution_state=pre_lending_state,
             )
             if event is None:
                 return
@@ -2566,6 +2571,22 @@ class StrategyRunner:
         # Non-fatal: on failure we fall back to the legacy post-only mode.
         state.pre_snapshot = await self._snapshot_balances_for_intent(intent)
 
+        # Capture pre-execution lending state for before/after delta (VIB-3489).
+        # Non-fatal: None is an honest absence; never substituted with stale data.
+        try:
+            from ..accounting.lending_accounting import capture_lending_pre_state
+
+            state.pre_lending_state = capture_lending_pre_state(
+                intent=intent,
+                chain=strategy.chain,
+                wallet_address=strategy.wallet_address,
+                gateway_client=state.gateway_client,
+                price_oracle=state.price_oracle,
+            )
+        except Exception:
+            logger.debug("Pre-execution lending state capture failed (non-fatal)", exc_info=True)
+            state.pre_lending_state = None
+
     @staticmethod
     def _build_single_chain_price_oracle(market: Any | None, intent: AnyIntent) -> dict | None:
         """Extract and normalize the price oracle dict from a market snapshot.
@@ -3040,12 +3061,14 @@ class StrategyRunner:
             strategy, intent, result=state.last_execution_result, success=True
         )
         # VIB-3418: write lending accounting event (SUPPLY/BORROW/REPAY/WITHDRAW)
+        # VIB-3489: pre_lending_state carries before-state captured pre-execution.
         await self._try_write_lending_accounting(
             strategy,
             intent,
             state.last_execution_result,
             price_oracle=state.price_oracle,
             ledger_entry_id=ledger_entry_id,
+            pre_lending_state=state.pre_lending_state,
         )
         # VIB-3421/3488: write Pendle LP accounting event (LP_OPEN/LP_CLOSE) with USD pricing
         await self._try_write_pendle_lp_accounting(
