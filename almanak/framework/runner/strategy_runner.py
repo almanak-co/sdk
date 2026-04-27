@@ -3444,6 +3444,20 @@ class StrategyRunner:
         # marks processed without re-mutating the FIFO basis store (prevents duplicate lots).
         if ledger_entry_id:
             await self._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
+        # VIB-3454: append one JSON line to the per-strategy sidecar file so the
+        # portfolio dashboard can consume execution data without touching gateway.db.
+        # Best-effort: the writer swallows all exceptions internally.
+        try:
+            from ..accounting.sidecar import AccountingSidecarWriter
+
+            AccountingSidecarWriter().append(
+                strategy_id=strategy.strategy_id,
+                intent=intent,
+                result=state.last_execution_result,
+                chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Sidecar import/call failed (non-blocking)", exc_info=True)
         if state.record_metrics:
             self._record_success(execution_proved=True)
 
