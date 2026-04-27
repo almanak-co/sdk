@@ -56,6 +56,15 @@ class TestUniswapV3SwapIntent:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["uniswap_v3"],
+        intent_types=["SWAP"],
+        # Token hints drive ``generate_manifest``'s ERC-20 approve inference
+        # (``_TOKEN_CONFIG_FIELDS`` in ``permissions/generator.py``). Both
+        # swap directions in this file use USDC↔WETH, so declaring both in
+        # the marker gives the manifest approve permissions for each side.
+        config={"base_token": "USDC", "quote_token": "WETH"},
+    )
     async def test_swap_usdc_to_weth_using_intent(
         self,
         web3: Web3,
@@ -70,6 +79,12 @@ class TestUniswapV3SwapIntent:
         2. Compile to ActionBundle using IntentCompiler
         3. Execute via ExecutionOrchestrator
         4. Verify balances changed correctly
+
+        Phase G.1 pilot: the ``uses_zodiac`` marker routes this test through
+        Safe + Zodiac Roles. ``funded_wallet`` returns the Safe address;
+        ``orchestrator`` is a ``ZodiacOrchestrator`` that wraps each inner tx
+        into ``Roles.execTransactionWithRole``. The test body is unchanged —
+        the same assertions hold because the balance deltas land on the Safe.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         token_in = tokens["USDC"]
@@ -173,6 +188,12 @@ class TestUniswapV3SwapIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    @pytest.mark.uses_zodiac(
+        protocols=["uniswap_v3"],
+        intent_types=["SWAP"],
+        # See sibling test for the ``base_token``/``quote_token`` rationale.
+        config={"base_token": "USDC", "quote_token": "WETH"},
+    )
     async def test_swap_weth_to_usdc_using_intent(
         self,
         web3: Web3,
@@ -180,7 +201,12 @@ class TestUniswapV3SwapIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ):
-        """Test WETH -> USDC swap using SwapIntent (reverse direction)."""
+        """Test WETH -> USDC swap using SwapIntent (reverse direction).
+
+        Phase G.1 pilot: routes through Safe + Zodiac Roles via the
+        ``uses_zodiac`` marker. See ``test_swap_usdc_to_weth_using_intent``
+        for details on the fixture substitution.
+        """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         token_in = tokens["WETH"]
         token_out = tokens["USDC"]

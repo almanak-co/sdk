@@ -1715,3 +1715,339 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         pytest.skip(f"No price oracle fixture for chain: {chain_name}")
 
     return request.getfixturevalue(fixture_name)
+
+
+# =============================================================================
+# Zodiac Fixture (Phase G.1 pilot)
+# =============================================================================
+#
+# Tests opt into Safe+Zodiac execution by marking themselves with
+# ``@pytest.mark.uses_zodiac(protocols=[...], intent_types=[...], config={...})``.
+# The marker declares the manifest scope — the same triple ``generate_manifest``
+# takes.
+#
+# When a test has the marker, the ``zodiac_safe`` fixture below:
+#   1. Deploys a fresh Safe + Roles Modifier on the per-chain Anvil fork.
+#   2. Assigns the member EOA (``TEST_WALLET`` / ``TEST_PRIVATE_KEY``, reused
+#      from the existing EOA path so the test's signing key is unchanged) to a
+#      per-test role key on the Roles Modifier.
+#   3. Generates the manifest from the marker's ``protocols`` / ``intent_types``
+#      / ``config`` kwargs and applies its targets under the role key.
+#   4. Seeds the Safe with the same CHAIN_CONFIGS ERC-20 balances that
+#      ``funded_wallet`` would have received on the EOA path.
+#
+# The per-chain conftests (e.g. ``tests/intents/arbitrum/conftest.py``) then
+# override ``funded_wallet`` (to return the Safe) and ``orchestrator`` (to
+# route through ``Roles.execTransactionWithRole``) when the marker is present.
+# Unmarked tests see no change: ``zodiac_safe`` yields ``None`` for them.
+#
+# Design decisions (see G.1 PR body for rationale):
+#   - Fixture scope: per-test (default). Safe + Roles deploy ≈ 1-2s/test; the
+#     safety of per-test isolation outweighs the saved wall-clock for the
+#     pilot. G.2 may re-evaluate per-class / session scope once overheads
+#     accumulate.
+#   - Manifest generation: eager, from ``marker.kwargs``. Mirrors how a
+#     strategy declares its permission surface at config time.
+#   - Token funding: eager — seed every ``CHAIN_CONFIGS[chain].tokens`` token
+#     the EOA would have received. Storage-slot writes are cheap and it keeps
+#     the pilot's marker payload minimal.
+#   - Marker kwargs shape: ``protocols: list[str]``, ``intent_types: list[str]``,
+#     ``config: dict[str, Any]``. Mirrors ``generate_manifest``.
+# =============================================================================
+
+
+# Anvil's second pre-funded account (mnemonic "test test test test test test
+# test test test test test junk", account index 1). Used as the Safe owner so
+# that the *member* (the role-holder who signs ``execTransactionWithRole``)
+# remains ``TEST_WALLET`` and existing tests' signing keys keep working
+# unchanged. Safe owner vs role-member separation is a correctness property of
+# Zodiac Roles — the Safe's execTransaction calls (enableModule, scopeTarget,
+# allowFunction, revokeTarget, assignRoles, setDefaultRole) MUST be signed by
+# the Safe owner, not by the role member.
+ZODIAC_OWNER_ADDRESS = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+ZODIAC_OWNER_PRIVATE_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+
+
+from dataclasses import dataclass as _zodiac_dataclass
+
+
+@_zodiac_dataclass
+class ZodiacContext:
+    """Per-test Safe+Zodiac harness wiring for ``uses_zodiac``-marked tests.
+
+    Fields:
+        safe_address: Newly-deployed Safe v1.4.1 proxy. Holds the tokens the
+            test spends; ``funded_wallet`` returns this when the marker is
+            present.
+        roles_address: Newly-deployed Zodiac Roles Modifier v2 proxy,
+            ``owner == avatar == target == safe_address``, enabled on the Safe.
+        role_key: 32-byte role key the manifest's targets were applied under
+            and the member's membership was granted for. Also the role key
+            passed to ``execTransactionWithRole``.
+        owner_eoa / owner_private_key: EOA that signed the Safe administrative
+            transactions (``enableModule``, ``scopeTarget``, ``allowFunction``,
+            etc.). Distinct from the member to enforce the owner/member split.
+        member_eoa / member_private_key: EOA whose signature goes into each
+            ``execTransactionWithRole`` call. Defaults to ``TEST_WALLET`` /
+            ``TEST_PRIVATE_KEY`` so tests' existing signing keys keep working.
+        manifest_targets: Output of ``PermissionManifest.to_zodiac_targets()``
+            — the target list that was applied on-chain. Retained so negative
+            tests (future G-phase work) can identify which target to revoke.
+    """
+
+    safe_address: str
+    roles_address: str
+    role_key: bytes
+    owner_eoa: str
+    owner_private_key: str
+    member_eoa: str
+    member_private_key: str
+    manifest_targets: list[dict]
+
+
+def _build_zodiac_context(
+    web3: Web3,
+    chain: str,
+    anvil_rpc_url: str,
+    marker_kwargs: dict[str, Any],
+    *,
+    member_eoa: str = TEST_WALLET,
+    member_private_key: str = TEST_PRIVATE_KEY,
+    strategy_name: str = "zodiac-fixture-pilot",
+) -> "ZodiacContext":
+    """Deploy Safe+Roles, apply the manifest the marker declares, seed tokens.
+
+    Ownership of this helper intentionally sits in the shared conftest (not
+    the harness module) because it composes fixtures, manifest generation,
+    and wallet seeding — the three surfaces pytest fixtures already own.
+
+    Side effects:
+      - ``anvil_setBalance`` funds ``ZODIAC_OWNER_ADDRESS`` with 10 native
+        tokens so the owner can pay gas for Safe admin txs.
+      - ``fund_erc20_token`` seeds the Safe with every token+slot pair in
+        ``CHAIN_CONFIGS[chain]`` (eager funding — see fixture docstring).
+    """
+    # Local imports to keep the shared conftest from taking a hard import
+    # dependency on Safe / manifest machinery at collection time. Only tests
+    # that actually use ``zodiac_safe`` pay the cost.
+    from almanak.framework.permissions.generator import generate_manifest
+    from tests.intents._zodiac_helpers import (
+        apply_manifest_targets,
+        assign_role_to_member,
+        deploy_test_safe,
+        deploy_test_zodiac_roles,
+    )
+
+    protocols = list(marker_kwargs.get("protocols") or [])
+    intent_types = [it.upper() for it in (marker_kwargs.get("intent_types") or [])]
+    config = dict(marker_kwargs.get("config") or {})
+    if not protocols:
+        raise ValueError(
+            "uses_zodiac marker: protocols=[] — at least one protocol is required to "
+            "generate a manifest. Add protocols=[...] to the marker kwargs."
+        )
+    if not intent_types:
+        raise ValueError(
+            "uses_zodiac marker: intent_types=[] — at least one intent type is required. "
+            "Add intent_types=[...] to the marker kwargs."
+        )
+
+    # Owner gas. ``anvil_setBalance`` is idempotent and cheap.
+    fund_native_token(ZODIAC_OWNER_ADDRESS, 10 * 10**18, anvil_rpc_url)
+
+    safe = deploy_test_safe(web3, ZODIAC_OWNER_ADDRESS, ZODIAC_OWNER_PRIVATE_KEY)
+    # Fund the Safe itself with native tokens. Intents that send ETH value
+    # (wrap, native swaps, native-leg LP mints) would otherwise revert with an
+    # opaque insufficient-balance error — the Safe's own native balance matters
+    # regardless of what the member EOA holds.
+    fund_native_token(safe, 10 * 10**18, anvil_rpc_url)
+    roles = deploy_test_zodiac_roles(
+        web3, safe, ZODIAC_OWNER_ADDRESS, ZODIAC_OWNER_PRIVATE_KEY
+    )
+    # Per-test role key derived from the protocol set so two tests on the same
+    # fork that end up on the same Roles instance won't collide. Not a security
+    # property — tests isolate via fresh Roles deploys — just a debugging aid.
+    role_label = ("zodiac-pilot:" + "+".join(sorted(protocols))).encode("utf-8")
+    role_key = role_label[:32].ljust(32, b"\0")
+
+    assign_role_to_member(
+        web3,
+        roles,
+        safe,
+        role_key,
+        member_eoa=member_eoa,
+        owner_eoa=ZODIAC_OWNER_ADDRESS,
+        owner_private_key=ZODIAC_OWNER_PRIVATE_KEY,
+    )
+
+    manifest = generate_manifest(
+        strategy_name=strategy_name,
+        chain=chain,
+        supported_protocols=protocols,
+        intent_types=intent_types,
+        config=config,
+        rpc_url=anvil_rpc_url,
+    )
+    targets = manifest.to_zodiac_targets()
+    if not targets:
+        raise RuntimeError(
+            f"uses_zodiac: generate_manifest produced no Zodiac targets for "
+            f"protocols={protocols} intent_types={intent_types} on {chain}. "
+            "The Safe cannot execute anything without applied targets — check "
+            "the manifest generator's supported-protocols set."
+        )
+    apply_manifest_targets(
+        web3,
+        roles,
+        safe,
+        role_key,
+        targets=targets,
+        owner_eoa=ZODIAC_OWNER_ADDRESS,
+        owner_private_key=ZODIAC_OWNER_PRIVATE_KEY,
+    )
+
+    # Eager token seeding — fund the Safe with the same tokens the EOA would
+    # have received. The existing module-scoped ``funded_wallet`` seeding has
+    # already run (it seeded ``TEST_WALLET``); here we mirror the same set
+    # onto the Safe. Storage-slot writes are cheap (~20ms/token on Anvil), so
+    # we don't bother filtering by what the test will actually spend.
+    #
+    # Required-token policy: tokens named by the marker's ``config`` (the
+    # intent's inputs — ``base_token``, ``quote_token``, etc.) fail the
+    # fixture fast on probe OR fund errors. Swallowing those errors turns a
+    # setup failure into a mysterious downstream "zero balance" execution
+    # error that's much harder to diagnose.
+    chain_cfg = CHAIN_CONFIGS[chain]
+    required_symbols = {
+        str(config[key])
+        for key in (
+            "base_token",
+            "quote_token",
+            "token",
+            "collateral_token",
+            "borrow_token",
+            "token0",
+            "token1",
+        )
+        if key in config and config[key] is not None
+    }
+    funding_errors: dict[str, str] = {}
+    for token_symbol, token_address in chain_cfg.get("tokens", {}).items():
+        balance_slot = chain_cfg.get("balance_slots", {}).get(token_symbol)
+        if balance_slot is None:
+            continue
+        try:
+            decimals = get_token_decimals(web3, token_address)
+        except Exception as exc:
+            if token_symbol in required_symbols:
+                raise RuntimeError(
+                    f"uses_zodiac setup failed: decimals probe failed for "
+                    f"required token {token_symbol} ({token_address}): {exc}"
+                ) from exc
+            # Non-required token — skip rather than abort the fixture.
+            continue
+        if token_symbol in ("WETH", "WAVAX", "WMATIC", "WBNB", "WMON", "W0G"):
+            # Wrapped-native tokens: use direct storage-slot writes for the
+            # Safe (wrapping requires an EOA→WETH self-call, which would have
+            # to go through execTransactionWithRole — a chicken/egg problem
+            # during setup). Storage writes give the same end-state.
+            amount = 10 * (10**decimals)
+        else:
+            amount = 100_000 * (10**decimals)
+        try:
+            fund_erc20_token(
+                safe, token_address, amount, balance_slot, anvil_rpc_url
+            )
+        except Exception as exc:  # noqa: BLE001 — token-seeding failures shouldn't hide authz errors
+            funding_errors[token_symbol] = str(exc)
+            if token_symbol in required_symbols:
+                raise RuntimeError(
+                    f"uses_zodiac setup failed: could not fund required token "
+                    f"{token_symbol} ({token_address}) on Safe {safe}: {exc}"
+                ) from exc
+            print(f"  [zodiac_safe] warning: could not fund Safe with {token_symbol}: {exc}")
+
+    # Post-seed verification for required tokens. A successful ``fund_erc20_token``
+    # write doesn't guarantee the balance materialised (wrong balance slot, proxy
+    # storage layout, etc.) — the only reliable signal is a balance read.
+    for token_symbol in required_symbols:
+        token_address = chain_cfg.get("tokens", {}).get(token_symbol)
+        if token_address is None:
+            raise RuntimeError(
+                f"uses_zodiac setup failed: required token {token_symbol} is not "
+                f"configured in CHAIN_CONFIGS[{chain!r}] — marker config references "
+                f"a token that has no entry on this chain."
+            )
+        balance = get_token_balance(web3, token_address, safe)
+        if balance == 0:
+            detail = funding_errors.get(
+                token_symbol, "balance remained zero after setup"
+            )
+            raise RuntimeError(
+                f"uses_zodiac setup failed: required token {token_symbol} "
+                f"({token_address}) was not funded on Safe {safe} ({detail})."
+            )
+
+    return ZodiacContext(
+        safe_address=safe,
+        roles_address=roles,
+        role_key=role_key,
+        owner_eoa=ZODIAC_OWNER_ADDRESS,
+        owner_private_key=ZODIAC_OWNER_PRIVATE_KEY,
+        member_eoa=member_eoa,
+        member_private_key=member_private_key,
+        manifest_targets=targets,
+    )
+
+
+def uses_zodiac_marker(request: pytest.FixtureRequest) -> pytest.Mark | None:
+    """Return the ``uses_zodiac`` marker on the current test, or ``None``.
+
+    Exposed here (rather than buried inside the fixture body) so per-chain
+    conftests' ``funded_wallet`` / ``orchestrator`` overrides can check it
+    without each reinventing the ``request.node.get_closest_marker`` call.
+    """
+    return request.node.get_closest_marker("uses_zodiac")
+
+
+@pytest.fixture
+def zodiac_safe(
+    request: pytest.FixtureRequest,
+) -> ZodiacContext | None:
+    """Per-test Safe+Zodiac context when ``@pytest.mark.uses_zodiac(...)`` is set.
+
+    Returns ``None`` for unmarked tests so every test can request this fixture
+    safely (the chain conftests' fixture overrides key off the return value).
+
+    The actual fork+deploy work is driven by ``_build_zodiac_context``. This
+    fixture wires in the per-chain ``web3`` / ``anvil_rpc_url`` / ``chain_name``
+    fixtures from the chain-local conftest, which is why the shared conftest
+    defines it here but each chain supplies the fork.
+
+    Scope is per-test (``function``). A Safe + Roles deploy is ~1-2s on Anvil;
+    per-test keeps state leakage impossible at the cost of a small wall-clock
+    hit. If G.2 finds the overhead unacceptable, the scope can be bumped to
+    ``class`` for tests that share a marker shape — measured first.
+    """
+    marker = uses_zodiac_marker(request)
+    if marker is None:
+        return None
+
+    # Chain-local fixtures. Delayed lookup — unmarked tests never run this
+    # block, so they don't force the Anvil fork to spin up.
+    web3: Web3 = request.getfixturevalue("web3")
+    anvil_rpc_url: str = request.getfixturevalue("anvil_rpc_url")
+    # Prefer the per-chain fixture; fall back to deriving from chain_id if a
+    # future chain conftest skips the explicit ``chain_name`` fixture.
+    try:
+        chain: str = request.getfixturevalue("chain_name")
+    except pytest.FixtureLookupError:
+        chain_id_val: int = web3.eth.chain_id
+        chain = get_chain_name_from_id(chain_id_val)
+
+    return _build_zodiac_context(
+        web3=web3,
+        chain=chain,
+        anvil_rpc_url=anvil_rpc_url,
+        marker_kwargs=dict(marker.kwargs),
+    )

@@ -22,6 +22,7 @@ they land alongside the connector coverage in later phases.
 from __future__ import annotations
 
 import importlib.util
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -85,6 +86,183 @@ class SeedingFailed(RuntimeError):
     authz assertion has not yet been exercised when this fires, so the failure
     does NOT indicate a manifest/generator regression.
     """
+
+
+class AuthorizationFailed(RuntimeError):
+    """Raised when Zodiac Roles Modifier blocks a call due to manifest permissions.
+
+    Distinct from ``SeedingFailed`` (pre-test infra failure — no authz was
+    attempted) and from generic execution reverts (insufficient balance,
+    slippage, connector bugs — authz passed, the protocol itself reverted).
+    The ``uses_zodiac`` fixture's orchestrator override raises this when a tx
+    submitted through ``Roles.execTransactionWithRole`` reverts with a
+    Zodiac-specific error selector — i.e. the authorisation layer said "no".
+
+    Tests asserting authz-specific failure modes should catch this type.
+    Generic execution failures continue to surface as
+    ``ExecutionResult(success=False, error=...)`` so the insufficient-balance /
+    slippage-style tests are unaffected when run under Zodiac.
+    """
+
+
+# Zodiac Roles Modifier custom-error selectors. A reverted inner tx whose
+# revert data matches one of these selectors is an authorisation failure, not
+# a protocol-layer revert. When an inner tx reverts with ANY of these the
+# ZodiacOrchestrator raises ``AuthorizationFailed`` rather than returning a
+# generic ``ExecutionResult(success=False)``.
+#
+# Selectors are 4-byte prefixes of keccak256("ErrorName(types)") per Solidity
+# ABI. Signatures come from the upstream Zodiac Roles source:
+#   - v2 unified: ConditionViolation(uint8,bytes32) — Status enum encodes which
+#     sub-rule failed (target / function / parameter / etc.).
+#   - NoMembership() — sender isn't assigned to the role_key.
+#   - Legacy v1-style names are retained: some forks / versions still surface
+#     TargetAddressNotAllowed / FunctionNotAllowed / ParameterNotAllowed.
+#
+# The set is intentionally closed: when a revert surfaces with a selector NOT
+# on this list we treat it as a protocol revert (correct default: unknown =
+# not-authz, so the generic ``ExecutionResult(success=False)`` path fires).
+# G.2 connector rollouts that hit an authz revert not matched here will need
+# to extend this set — the exception message includes the unmatched selector
+# to make that diagnosis one-shot.
+_ZODIAC_AUTHZ_ERROR_SELECTORS: frozenset[str] = frozenset(
+    {
+        "0xd0a9bf58",  # ConditionViolation(uint8,bytes32)  (Roles v2 unified denial)
+        "0xfd8e9f28",  # NoMembership()
+        "0xef3440ac",  # TargetAddressNotAllowed()  (legacy)
+        "0x05e5a82e",  # FunctionNotAllowed()  (legacy)
+        "0x31e98246",  # ParameterNotAllowed()  (legacy)
+    }
+)
+
+
+def _extract_revert_selector(web3: Web3, tx_hash: bytes | str, block_number: int) -> str | None:
+    """Replay ``tx_hash`` via ``eth_call`` at ``block_number`` and return the 4-byte
+    revert-data selector (``0x...`` lowercase), or ``None`` if no selector
+    could be extracted.
+
+    Used by ``ZodiacOrchestrator`` to distinguish Zodiac authz denials (match in
+    ``_ZODIAC_AUTHZ_ERROR_SELECTORS``) from protocol-layer reverts (anything
+    else). Replay at the same block the tx was included in gives the identical
+    state context, so the revert-data matches 1:1.
+
+    This mirrors ``PublicMempoolSubmitter._extract_revert_reason_from_tx`` in
+    the framework: the pattern is intentionally duplicated in the test harness
+    rather than imported because the test path needs synchronous, lower-level
+    access (sync ``eth_call``, no logging, no retries) and the framework helper
+    is async + tied to the submitter class. If the pattern is needed in a
+    third place, extract a shared util in ``almanak/framework/execution/`` and
+    wrap both call sites.
+    """
+    tx_hex = tx_hash.hex() if isinstance(tx_hash, (bytes, bytearray)) else tx_hash
+    if not tx_hex.startswith("0x"):
+        tx_hex = "0x" + tx_hex
+    try:
+        tx = web3.eth.get_transaction(tx_hex)
+    except Exception:
+        return None
+    call_params: dict[str, Any] = {
+        "from": tx.get("from"),
+        "to": tx.get("to"),
+        "value": tx.get("value", 0),
+        "data": tx.get("input", tx.get("data", "0x")),
+    }
+    if tx.get("gas"):
+        call_params["gas"] = tx.get("gas")
+    try:
+        web3.eth.call(call_params, block_identifier=block_number)
+    except Exception as err:
+        return _selector_from_web3_error(err)
+    # eth_call succeeded but the mined tx reverted — state drift. Treat as
+    # "unknown revert" so callers fall through to the generic-failure path.
+    return None
+
+
+# ``0x`` + 8 hex chars = 4-byte selector. We deliberately accept ``>= 8`` hex
+# digits (not ``== 8``) because revert payloads include the full ABI-encoded
+# error args after the selector; taking the first 10 chars gives us
+# ``0x<selector>``.
+_SELECTOR_RE = re.compile(r"0x[0-9a-fA-F]{8,}")
+
+
+def _selector_from_web3_error(err: BaseException) -> str | None:
+    """Extract the 4-byte revert selector (``0x...``, lowercase, 10 chars incl.
+    prefix) from a web3.py exception.
+
+    web3.py surfaces revert data in multiple shapes depending on the provider
+    and the exception subclass:
+
+    1. ``err.args[0]`` as a dict (geth-style JSON-RPC error payload) — often
+       ``{"code": 3, "message": "...", "data": "0x..."}`` or a nested
+       ``{"error": {"data": "0x..."}}`` shape.
+    2. ``err.data`` — ``ContractLogicError`` stashes the raw revert bytes here
+       on modern web3.py.
+    3. The exception string — some providers only embed the selector inside
+       ``str(err)`` (e.g., ``"execution reverted: 0xdeadbeef..."``).
+
+    Returning ``None`` means "no selector could be extracted"; callers treat
+    that as an unknown revert, not a Zodiac authz denial.
+    """
+    # (1) err.args[0] as dict — JSON-RPC style payload.
+    data: Any = None
+    if err.args and isinstance(err.args[0], dict):
+        root = err.args[0]
+        data = root.get("data")
+        if data is None and isinstance(root.get("error"), dict):
+            data = root["error"].get("data")
+    if isinstance(data, dict):
+        data = data.get("data")
+    selector = _normalise_selector(data)
+    if selector:
+        return selector
+
+    # (2) err.data — ContractLogicError on modern web3.py stashes the raw
+    # revert bytes here. May be ``str`` (``"0x..."``), ``bytes``, or a dict
+    # (older exception shapes).
+    raw = getattr(err, "data", None)
+    selector = _normalise_selector(raw)
+    if selector:
+        return selector
+
+    # (3) Regex scan of the exception message — last-resort fallback for
+    # providers that only embed the selector in the human-readable string.
+    match = _SELECTOR_RE.search(str(err))
+    if match:
+        return match.group(0)[:10].lower()
+
+    return None
+
+
+def _normalise_selector(data: Any) -> str | None:
+    """Return a canonical ``0x<8 hex chars>`` selector from ``data``, or None.
+
+    Accepts strings (hex-prefixed or not), bytes/bytearray/memoryview, and
+    nested dicts (e.g. ``{"data": {"data": "0x..."}}``). Anything else returns
+    ``None`` so callers can walk to the next extraction strategy.
+    """
+    # Unwrap nested dicts one level — some providers wrap revert data in an
+    # inner ``{"data": ...}`` object.
+    while isinstance(data, dict):
+        data = data.get("data")
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        data = "0x" + bytes(data).hex()
+    if isinstance(data, str):
+        match = _SELECTOR_RE.search(data)
+        if match:
+            return match.group(0)[:10].lower()
+    return None
+
+
+def is_zodiac_authz_revert(selector: str | None) -> bool:
+    """Return True if ``selector`` is a known Zodiac Roles authz-denial error.
+
+    ``None`` (selector couldn't be extracted) returns False — unknown revert
+    origin means "not proven to be authz," and the conservative path is to
+    surface it as a generic execution failure.
+    """
+    if not selector:
+        return False
+    return selector.lower() in _ZODIAC_AUTHZ_ERROR_SELECTORS
 
 
 @dataclass(frozen=True)
@@ -226,6 +404,14 @@ def _exec_bundle_via_zodiac(
         # CALL otherwise. ``get_operation_type`` owns this decision so the test
         # infra stays in lockstep with the real signer path.
         op_type = get_operation_type(to_addr)
+        # Mirror the gas sizing used by ``ZodiacOrchestrator``: the wrapper
+        # needs at least ``_ZODIAC_WRAPPER_GAS`` regardless of the inner-tx
+        # gas hint, and ``UnsignedTransaction`` uses ``gas_limit``.
+        inner_gas = (
+            tx.get("gas")
+            if isinstance(tx, dict)
+            else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
+        )
         built = roles_c.functions.execTransactionWithRole(
             Web3.to_checksum_address(to_addr),
             value,
@@ -237,7 +423,7 @@ def _exec_bundle_via_zodiac(
             {
                 "from": member_addr,
                 "nonce": web3.eth.get_transaction_count(member_addr),
-                "gas": (tx.get("gas") if isinstance(tx, dict) else getattr(tx, "gas", None)) or _ZODIAC_WRAPPER_GAS,
+                "gas": max(int(inner_gas or 0), _ZODIAC_WRAPPER_GAS),
             }
         )
         signed = Account.sign_transaction(built, member_private_key)
@@ -2130,3 +2316,228 @@ def discover_negative_cases(chain: str) -> list[PermissionTestCase]:
     reason. No silent divergence.
     """
     return discover_cases(chain)
+
+
+# =============================================================================
+# ZodiacOrchestrator — routes ActionBundles through Roles.execTransactionWithRole
+# =============================================================================
+#
+# Used by ``uses_zodiac``-marked tests (Phase G.1 pilot). When the pytest
+# marker is present, the per-chain ``orchestrator`` fixture substitutes this
+# wrapper in place of the standard ``ExecutionOrchestrator``. The wrapper
+# preserves the orchestrator's outward shape (``async def execute(...) ->
+# ExecutionResult``) so tests don't have to care whether they're running in
+# EOA-mode or Zodiac-mode — the same balance-delta assertions hold.
+#
+# The tx shape each inner tx gets wrapped into matches
+# ``_exec_bundle_via_zodiac`` (same CALL/DELEGATECALL split via
+# ``get_operation_type``, same ``shouldRevert=True`` semantics). This is
+# deliberate: the Arbitrum pilot test (``test_zodiac_permission_correctness``)
+# proves the helper's shape works end-to-end, and the pilot fixture inherits
+# that guarantee without re-proving it.
+
+
+class ZodiacOrchestrator:
+    """Orchestrator shim that routes each tx in an ActionBundle through
+    ``Roles.execTransactionWithRole`` instead of a raw EOA send.
+
+    Contract matches ``ExecutionOrchestrator.execute`` for the subset the
+    intent tests actually rely on:
+
+    - ``execute(action_bundle)`` is awaitable and returns an ``ExecutionResult``.
+    - ``ExecutionResult.success`` is ``False`` on any tx revert.
+    - ``ExecutionResult.transaction_results`` contains one
+      ``TransactionResult`` per inner tx, in order, each with a populated
+      ``TransactionReceipt`` if the tx was mined.
+
+    The shim does NOT replicate the full ExecutionOrchestrator pipeline
+    (RiskGuard / Simulator / gas-estimation / ResultEnricher) — those are
+    production concerns that don't affect authorisation semantics. Tests that
+    need those features should not use ``uses_zodiac`` yet (document the gap
+    in G.2 as connectors surface it).
+
+    Failure modes:
+
+    - Zodiac Roles-denied call → raises ``AuthorizationFailed`` (selector in
+      ``_ZODIAC_AUTHZ_ERROR_SELECTORS``). Halts the bundle immediately; no
+      partial ``ExecutionResult`` is returned because an authz failure is not
+      a "soft" failure the test should inspect — it's a manifest bug.
+    - Protocol-layer revert (insufficient balance, slippage, connector bug)
+      → returns ``ExecutionResult(success=False, error=<revert reason>)``.
+      This keeps unmarked-test failure semantics intact if a user later marks
+      a test that should still exercise an execution failure.
+    - Unknown revert (no selector extractable) → also returns
+      ``ExecutionResult(success=False)``. Conservative default: "unknown =
+      not-proven-authz" so a broken Zodiac integration surfaces as a real
+      failure rather than being silently re-cast.
+    """
+
+    def __init__(
+        self,
+        *,
+        web3: Web3,
+        roles_address: str,
+        role_key: bytes,
+        member_eoa: str,
+        member_private_key: str,
+        chain: str,
+    ) -> None:
+        self.web3 = web3
+        self.roles_address = Web3.to_checksum_address(roles_address)
+        self.role_key = role_key
+        self.member_eoa = Web3.to_checksum_address(member_eoa)
+        self.member_private_key = member_private_key
+        self.chain = chain
+        self._roles_contract = web3.eth.contract(
+            address=self.roles_address,
+            abi=ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
+        )
+
+    async def execute(self, action_bundle: Any, context: Any = None) -> Any:
+        """Route ``action_bundle.transactions`` through ``execTransactionWithRole``.
+
+        Returns the ``ExecutionResult`` shape the intent tests expect. The
+        actual on-chain work is synchronous (Anvil RPC over HTTP); we expose
+        an ``async def`` signature so tests that ``await`` the call work
+        unchanged.
+        """
+        # Local imports keep this harness importable from test files without
+        # pulling in the whole execution package at collection time.
+        from almanak.framework.execution.interfaces import TransactionReceipt
+        from almanak.framework.execution.orchestrator import (
+            ExecutionPhase,
+            ExecutionResult,
+            TransactionResult,
+        )
+
+        transactions = getattr(action_bundle, "transactions", None) or []
+        result = ExecutionResult(
+            success=True,  # optimistic — flipped on first failure
+            phase=ExecutionPhase.SUBMISSION,
+            transaction_results=[],
+        )
+
+        for tx in transactions:
+            to_addr, value, data = _normalise_bundle_tx(tx)
+            op_type = get_operation_type(to_addr)
+
+            member_nonce = self.web3.eth.get_transaction_count(self.member_eoa)
+            # Inner-tx gas is sized for the inner call, NOT the wrapper.
+            # ``execTransactionWithRole`` itself adds ~80k Zodiac overhead on
+            # top, so if we used a raw inner gas below ``_ZODIAC_WRAPPER_GAS``
+            # the outer tx would OOG before the inner call runs. Also:
+            # ``UnsignedTransaction`` uses ``gas_limit`` rather than ``gas`` —
+            # fall back to both names in case a dict-shaped tx with ``gas`` is
+            # ever passed.
+            inner_gas = (
+                tx.get("gas")
+                if isinstance(tx, dict)
+                else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
+            )
+            built = self._roles_contract.functions.execTransactionWithRole(
+                Web3.to_checksum_address(to_addr),
+                value,
+                data,
+                int(op_type),
+                self.role_key,
+                True,  # shouldRevert — bubble inner reverts up to the wrapper
+            ).build_transaction(
+                {
+                    "from": self.member_eoa,
+                    "nonce": member_nonce,
+                    "gas": max(int(inner_gas or 0), _ZODIAC_WRAPPER_GAS),
+                }
+            )
+            signed = Account.sign_transaction(built, self.member_private_key)
+            tx_hash_bytes = self.web3.eth.send_raw_transaction(signed.raw_transaction)
+            tx_hash_hex = self.web3.to_hex(tx_hash_bytes)
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash_bytes)
+
+            tx_receipt = TransactionReceipt(
+                tx_hash=tx_hash_hex,
+                block_number=receipt["blockNumber"],
+                block_hash=self.web3.to_hex(receipt["blockHash"]),
+                gas_used=receipt["gasUsed"],
+                effective_gas_price=receipt.get("effectiveGasPrice", 0),
+                status=int(receipt["status"]),
+                logs=[dict(log) for log in receipt.get("logs", [])],
+                contract_address=receipt.get("contractAddress"),
+                from_address=receipt.get("from"),
+                to_address=receipt.get("to"),
+            )
+            tx_result = TransactionResult(
+                tx_hash=tx_hash_hex,
+                success=(receipt["status"] == 1),
+                receipt=tx_receipt,
+                gas_used=receipt["gasUsed"],
+                gas_cost_wei=receipt["gasUsed"] * receipt.get("effectiveGasPrice", 0),
+                logs=[dict(log) for log in receipt.get("logs", [])],
+            )
+
+            if receipt["status"] != 1:
+                # Disambiguate: authz-denial vs protocol revert. We replay the
+                # tx via eth_call to pull the revert data; a selector match
+                # against the Zodiac set means the Modifier blocked the call.
+                selector = _extract_revert_selector(
+                    self.web3, tx_hash_bytes, receipt["blockNumber"]
+                )
+                if is_zodiac_authz_revert(selector):
+                    raise AuthorizationFailed(
+                        "Zodiac Roles Modifier blocked execTransactionWithRole "
+                        f"(to={to_addr}, tx={tx_hash_hex}, selector={selector}). "
+                        "Manifest is missing a target or function the bundle requires."
+                    )
+                # Protocol revert — record the error and break; downstream
+                # assertions compare against ``success=False``.
+                err_msg = (
+                    f"Inner tx reverted under execTransactionWithRole "
+                    f"(to={to_addr}, tx={tx_hash_hex}"
+                    + (f", selector={selector}" if selector else "")
+                    + "). Not a Zodiac authz denial — check balance / slippage / "
+                    "connector semantics."
+                )
+                tx_result.error = err_msg
+                result.success = False
+                # Align ``phase`` with ``error_phase`` — the failure is during
+                # confirmation, not submission (the tx *was* sent). Without
+                # this, ``result.phase`` stays at ``SUBMISSION`` and
+                # misrepresents where execution actually failed.
+                result.phase = ExecutionPhase.CONFIRMATION
+                result.error = err_msg
+                result.error_phase = ExecutionPhase.CONFIRMATION
+                result.transaction_results.append(tx_result)
+                return result
+
+            result.transaction_results.append(tx_result)
+
+        result.phase = ExecutionPhase.COMPLETE
+        return result
+
+
+def _normalise_bundle_tx(tx: Any) -> tuple[str, int, bytes]:
+    """Extract ``(to, value, data_bytes)`` from a compiled-bundle tx entry.
+
+    IntentCompiler emits plain dicts with hex-string ``data`` / ``value``.
+    Some callers pass dataclass-like ``UnsignedTransaction`` instances. The
+    same tuple shape is used by ``_exec_bundle_via_zodiac`` — lifted here
+    into a shared helper so the ZodiacOrchestrator and the legacy executor
+    can't drift on normalisation edge cases.
+    """
+    if isinstance(tx, dict):
+        to_addr = tx["to"]
+        raw_value = tx.get("value", 0)
+        raw_data = tx.get("data", "0x")
+    else:
+        to_addr = tx.to
+        raw_value = tx.value
+        raw_data = tx.data
+
+    if isinstance(raw_value, str):
+        value = int(raw_value, 16) if raw_value.startswith("0x") else int(raw_value)
+    else:
+        value = int(raw_value or 0)
+    if isinstance(raw_data, bytes):
+        data = raw_data
+    else:
+        data = bytes.fromhex(raw_data[2:] if raw_data.startswith("0x") else raw_data)
+    return to_addr, value, data
