@@ -98,6 +98,37 @@ class AccountingIdentity:
         return d
 
 
+# Supported payload schema versions for accounting event models.
+# When bumping schema_version on a model, add the new integer here.
+# Records stored with an unknown version are rejected at read time to prevent
+# silent payload drift from corrupting downstream consumers.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+
+
+def _validate_schema_version(data: dict[str, Any], model_name: str) -> int:
+    """Return the schema_version from *data*, defaulting to 1 for legacy records.
+
+    Raises ``ValueError`` if the version is not a plain ``int`` (rejects bool/float
+    edge cases: Python equality means ``True in {1}`` and ``1.0 in {1}`` are both
+    ``True``, so we must type-check first) or is not in ``SUPPORTED_SCHEMA_VERSIONS``.
+    """
+    version = data.get("schema_version", 1)
+    if type(version) is not int:
+        raise ValueError(
+            f"Invalid schema_version type {type(version).__name__!r} in {model_name} payload"
+            f"; expected int, got {version!r}"
+        )
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        supported = sorted(SUPPORTED_SCHEMA_VERSIONS)
+        raise ValueError(f"Unsupported schema_version {version!r} in {model_name} payload — supported: {supported}")
+    return version
+
+
+def _dec(v: Any) -> Decimal | None:
+    """Convert a string/number value to Decimal, or return None."""
+    return Decimal(v) if v is not None else None
+
+
 @dataclass
 class LendingAccountingEvent:
     identity: AccountingIdentity
@@ -171,10 +202,7 @@ class LendingAccountingEvent:
     @classmethod
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> LendingAccountingEvent:
         d = json.loads(payload)
-
-        def _dec(v: Any) -> Decimal | None:
-            return Decimal(v) if v is not None else None
-
+        schema_version = _validate_schema_version(d, "LendingAccountingEvent")
         return cls(
             identity=identity,
             event_type=LendingEventType(d["event_type"]),
@@ -199,7 +227,7 @@ class LendingAccountingEvent:
             amount_token=_dec(d.get("amount_token")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason", ""),
-            schema_version=d.get("schema_version", 1),
+            schema_version=schema_version,
         )
 
 
@@ -256,9 +284,7 @@ class PendleAccountingEvent:
     @classmethod
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> PendleAccountingEvent:
         d = json.loads(payload)
-
-        def _dec(v: Any) -> Decimal | None:
-            return Decimal(v) if v is not None else None
+        schema_version = _validate_schema_version(d, "PendleAccountingEvent")
 
         def _dt(v: Any) -> datetime | None:
             return datetime.fromisoformat(v) if v is not None else None
@@ -279,7 +305,7 @@ class PendleAccountingEvent:
             basis_lot_id=d.get("basis_lot_id"),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH)),
             unavailable_reason=d.get("unavailable_reason", ""),
-            schema_version=d.get("schema_version", 1),
+            schema_version=schema_version,
         )
 
 
