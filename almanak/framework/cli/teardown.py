@@ -379,6 +379,13 @@ def teardown():
         "NFTs."
     ),
 )
+@click.option(
+    "--network",
+    "-n",
+    default=None,
+    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
+    help="Network type: 'mainnet' (default) or 'anvil' to connect to an already-running Anvil fork.",
+)
 def execute_teardown(
     working_dir: str,
     config_file: str | None,
@@ -390,6 +397,7 @@ def execute_teardown(
     no_gateway: bool,
     discover: bool,
     include_empty: bool,
+    network: str | None,
 ):
     """Execute teardown directly from a strategy working directory.
 
@@ -437,6 +445,12 @@ def execute_teardown(
 
     # Install secret redaction after env is loaded so all secrets are registered.
     install_redaction()
+
+    # Fail fast on incompatible option combinations before touching the filesystem.
+    if no_gateway and network is not None:
+        raise click.ClickException(
+            "--network only applies when the managed gateway is auto-started. Remove --network or remove --no-gateway."
+        )
 
     # Find strategy.py
     strategy_file = working_path / "strategy.py"
@@ -524,7 +538,8 @@ def execute_teardown(
             click.echo()
             click.echo("  almanak strat teardown execute --no-gateway --gateway-port <port>")
             click.echo()
-            raise click.ClickException(str(e)) from None
+            logger.error("Managed gateway failed to start", exc_info=True)
+            raise click.ClickException(str(e)) from e
 
         # Security: generate a random session token for the managed gateway so it
         # is never running without authentication on mainnet (matching run.py pattern).
@@ -532,22 +547,26 @@ def execute_teardown(
 
         session_auth_token = uuid.uuid4().hex
 
+        resolved_network = network or "mainnet"
         gateway_settings = GatewaySettings(
             grpc_host=effective_host,
             grpc_port=gateway_port,
-            network="mainnet",
-            allow_insecure=False,
+            network=resolved_network,
+            allow_insecure=resolved_network == "anvil",
             metrics_enabled=False,
             audit_enabled=False,
             chains=[chain] if chain else [],
             auth_token=session_auth_token,
         )
 
-        click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network=mainnet, chain={chain})...")
+        click.echo(
+            f"Starting managed gateway on {effective_host}:{gateway_port} (network={resolved_network}, chain={chain})..."
+        )
         managed_gateway = ManagedGateway(gateway_settings)
         try:
             managed_gateway.start(timeout=10.0)
         except RuntimeError as e:
+            logger.error("Managed gateway startup failed", exc_info=True)
             click.echo()
             click.secho(f"ERROR: Failed to start managed gateway: {e}", fg="red", bold=True)
             click.echo()
@@ -601,7 +620,8 @@ def execute_teardown(
                 wallet_address=wallet_address,
             )
         except Exception as e:
-            raise click.ClickException(f"Failed to instantiate strategy: {e}") from None
+            logger.error("Failed to instantiate strategy", exc_info=True)
+            raise click.ClickException(f"Failed to instantiate strategy: {e}") from e
 
         # Inject balance provider so generate_teardown_intents() can use market.balance().
         # Without this, custom strategies that check balances during teardown crash.
@@ -642,7 +662,8 @@ def execute_teardown(
             try:
                 discovered = asyncio.run(_do_discover())
             except Exception as e:
-                raise click.ClickException(f"On-chain discovery failed: {e}") from None
+                logger.error("On-chain discovery failed", exc_info=True)
+                raise click.ClickException(f"On-chain discovery failed: {e}") from e
 
             positions = to_teardown_summary(
                 strategy_id=getattr(strategy, "strategy_id", strategy_class.__name__),
@@ -654,7 +675,8 @@ def execute_teardown(
             try:
                 positions = strategy.get_open_positions()
             except Exception as e:
-                raise click.ClickException(f"Failed to get positions: {e}") from None
+                logger.error("Failed to get positions from strategy", exc_info=True)
+                raise click.ClickException(f"Failed to get positions: {e}") from e
 
         if not positions.positions:
             click.echo("\nNo open positions found. Nothing to teardown.")
@@ -750,7 +772,8 @@ def execute_teardown(
                     else:
                         raise
             except Exception as e:
-                raise click.ClickException(f"Failed to generate teardown intents: {e}") from None
+                logger.error("Failed to generate teardown intents", exc_info=True)
+                raise click.ClickException(f"Failed to generate teardown intents: {e}") from e
 
         click.echo(f"\nTeardown Steps ({len(intents)}):")
         for i, intent in enumerate(intents, 1):
@@ -785,7 +808,10 @@ def execute_teardown(
         # market and price_oracle were created above (before preview) so the
         # operator confirms the same intents that will execute.
 
-        # Create compiler with real prices if available
+        # Create compiler with real prices if available.
+        # gateway_client is mandatory: LP_CLOSE compilation queries on-chain state
+        # (ERC20 LP balances for Aerodrome, position liquidity for Uniswap V3).
+        # Without it every on-chain query returns None and compilation fails silently.
         compiler_config = IntentCompilerConfig(allow_placeholder_prices=price_oracle is None)
         compiler = IntentCompiler(
             chain=chain,
@@ -793,6 +819,7 @@ def execute_teardown(
             rpc_url=None,  # Will use gateway
             price_oracle=price_oracle,
             config=compiler_config,
+            gateway_client=gateway_client,
         )
 
         # Create teardown manager with state persistence (VIB-2924)
@@ -829,7 +856,8 @@ def execute_teardown(
         try:
             result = asyncio.run(run_teardown())
         except Exception as e:
-            raise click.ClickException(f"Teardown execution failed: {e}") from None
+            logger.error("Teardown execution failed", exc_info=True)
+            raise click.ClickException(f"Teardown execution failed: {e}") from e
 
         # Display results
         click.echo("\n" + "=" * 60)
