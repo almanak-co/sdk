@@ -44,14 +44,15 @@ _POOL_ADDRESSES_LOWER: set[str] = {a.lower() for a in RADIANT_V2_POOL_ADDRESSES}
 EVENT_TOPICS: dict[str, str] = {
     # Core lending events — Aave V2 ABI (NOT V3!)
     # Deposit(address indexed reserve, address user, address indexed onBehalfOf,
-    #         uint256 amount, uint16 referralCode)
+    #         uint256 amount, uint16 indexed referral)
     "Deposit": "0xde6857219544bb5b7746f48ed30be6386fefc61b2f864cacf559893bf50fd951",
     # Withdraw has the same signature across V2 and V3
     # Withdraw(address indexed reserve, address indexed user, address indexed to, uint256 amount)
     "Withdraw": "0x3115d1449a7b732c986cba18244e897a450f61e1bb8d589cd2e69e6c8924f9f7",
     # Borrow V2 uses uint256 for borrowRateMode (V3 uses uint8 — different hash!)
     # Borrow(address indexed reserve, address user, address indexed onBehalfOf,
-    #        uint256 amount, uint256 borrowRateMode, uint256 borrowRate, uint16 referralCode)
+    #        uint256 amount, uint256 borrowRateMode, uint256 borrowRate,
+    #        uint16 indexed referral)
     "Borrow": "0xc6a898309e823ee50bac64e45ca8adba6690e99e7841c45d754e2a38e9019d9b",
     # Repay V2 omits the useATokens bool (V3 has it — different hash!)
     # Repay(address indexed reserve, address indexed user, address indexed repayer, uint256 amount)
@@ -69,9 +70,10 @@ _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 # Minimum data lengths (in hex chars, excluding 0x prefix) per event type.
 # Each ABI word is 32 bytes = 64 hex chars.
 _MIN_DATA_WORDS: dict[str, int] = {
-    "Deposit": 3,  # user + amount + referralCode
+    "Deposit": 2,  # user + amount  (referralCode is INDEXED, lives in topics[3])
     "Withdraw": 1,  # amount
-    "Borrow": 5,  # user + amount + borrowRateMode + borrowRate + referralCode
+    "Borrow": 4,  # user + amount + borrowRateMode + borrowRate
+    #            (referralCode is INDEXED, lives in topics[3])
     "Repay": 1,  # amount only (V2 has no useATokens)
 }
 
@@ -425,19 +427,28 @@ class RadiantV2ReceiptParser(BaseReceiptParser[RadiantV2Event, ParseResult]):
     def _decode_deposit(self, topics: list[Any], data: str) -> dict[str, Any]:
         """Decode Deposit event.
 
-        Deposit(address indexed reserve, address user, address indexed onBehalfOf,
-                uint256 amount, uint16 referralCode)
+        Aave V2 ABI (referral IS indexed in the deployed contracts, despite some
+        early documentation showing it as non-indexed):
+            Deposit(address indexed reserve, address user, address indexed onBehalfOf,
+                    uint256 amount, uint16 indexed referral)
+
+        Topic layout: [signature, reserve, onBehalfOf, referral]
+        Data layout:  [user, amount]
         """
-        if not self._has_min_topics(topics, 3) or not self._has_min_data(data, 3):
+        if not self._has_min_topics(topics, 3) or not self._has_min_data(data, 2):
             logger.warning("Deposit event: insufficient topics or data")
             return {}
+
+        # referral is indexed (topics[3]) when present; default to 0 if the log
+        # was emitted without it (defensive against ABI variants).
+        referral_code = int(HexDecoder.normalize_hex(topics[3]), 16) if len(topics) > 3 else 0
 
         return {
             "reserve": HexDecoder.topic_to_address(topics[1]),
             "on_behalf_of": HexDecoder.topic_to_address(topics[2]),
             "user": HexDecoder.decode_address_from_data(data, 0),
             "amount": str(Decimal(HexDecoder.decode_uint256(data, 32))),
-            "referral_code": HexDecoder.decode_uint256(data, 64),
+            "referral_code": referral_code,
         }
 
     def _decode_withdraw(self, topics: list[Any], data: str) -> dict[str, Any]:
@@ -460,16 +471,21 @@ class RadiantV2ReceiptParser(BaseReceiptParser[RadiantV2Event, ParseResult]):
     def _decode_borrow(self, topics: list[Any], data: str) -> dict[str, Any]:
         """Decode Borrow event.
 
-        Borrow(address indexed reserve, address user, address indexed onBehalfOf,
-               uint256 amount, uint256 borrowRateMode, uint256 borrowRate,
-               uint16 referralCode)
+        Aave V2 ABI (referral IS indexed, mirroring Deposit):
+            Borrow(address indexed reserve, address user, address indexed onBehalfOf,
+                   uint256 amount, uint256 borrowRateMode, uint256 borrowRate,
+                   uint16 indexed referral)
+
+        Topic layout: [signature, reserve, onBehalfOf, referral]
+        Data layout:  [user, amount, borrowRateMode, borrowRate]
         """
-        if not self._has_min_topics(topics, 3) or not self._has_min_data(data, 5):
+        if not self._has_min_topics(topics, 3) or not self._has_min_data(data, 4):
             logger.warning("Borrow event: insufficient topics or data")
             return {}
 
         borrow_rate_raw = HexDecoder.decode_uint256(data, 96)
         borrow_rate = Decimal(borrow_rate_raw) / Decimal("1e27")  # ray to decimal
+        referral_code = int(HexDecoder.normalize_hex(topics[3]), 16) if len(topics) > 3 else 0
 
         return {
             "reserve": HexDecoder.topic_to_address(topics[1]),
@@ -478,7 +494,7 @@ class RadiantV2ReceiptParser(BaseReceiptParser[RadiantV2Event, ParseResult]):
             "amount": str(Decimal(HexDecoder.decode_uint256(data, 32))),
             "interest_rate_mode": HexDecoder.decode_uint256(data, 64),
             "borrow_rate": str(borrow_rate),
-            "referral_code": HexDecoder.decode_uint256(data, 128),
+            "referral_code": referral_code,
         }
 
     def _decode_repay(self, topics: list[Any], data: str) -> dict[str, Any]:

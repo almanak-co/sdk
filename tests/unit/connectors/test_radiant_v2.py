@@ -176,3 +176,105 @@ class TestRadiantV2WithdrawCalldata:
         assert v2_calldata == v3_calldata
         selector = "0x" + v2_calldata[:4].hex()
         assert selector == AAVE_WITHDRAW_SELECTOR
+
+
+class TestRadiantV2ReceiptParser:
+    """Verify _decode_deposit/_decode_borrow handle the actual Aave V2 ABI
+    (referral indexed). Regression guard for the silent-no-events bug
+    surfaced by tests/intents/ethereum/test_radiant_v2_lending.py."""
+
+    def _make_log(self, address: str, topics: list[str], data: str) -> dict:
+        return {
+            "address": address,
+            "topics": [
+                bytes.fromhex(t[2:]) if t.startswith("0x") else bytes.fromhex(t)
+                for t in topics
+            ],
+            "data": data,
+            "logIndex": 0,
+            "transactionIndex": 0,
+            "transactionHash": b"\x00" * 32,
+            "blockHash": b"\x00" * 32,
+            "blockNumber": 0,
+            "removed": False,
+        }
+
+    def _make_receipt(self, logs: list[dict]) -> dict:
+        return {
+            "transactionHash": b"\x00" * 32,
+            "blockNumber": 0,
+            "status": 1,
+            "logs": logs,
+        }
+
+    def test_decode_deposit_with_indexed_referral(self):
+        from almanak.framework.connectors.radiant_v2.receipt_parser import (
+            EVENT_TOPICS,
+            RadiantV2ReceiptParser,
+        )
+
+        # Ethereum Radiant pool address (lowercased for the parser's filter).
+        pool = "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07"
+        reserve = "0x" + "11" * 20
+        on_behalf_of = "0x" + "22" * 20
+        user = "0x" + "33" * 20
+        amount = 1234567890
+        referral = 0
+        topics = [
+            EVENT_TOPICS["Deposit"],
+            "0x" + "00" * 12 + reserve[2:],
+            "0x" + "00" * 12 + on_behalf_of[2:],
+            "0x" + "00" * 31 + f"{referral:02x}",  # indexed uint16
+        ]
+        data = (
+            "0x"
+            + "00" * 12 + user[2:]              # user (address, 32 bytes)
+            + f"{amount:064x}"                  # amount (uint256, 32 bytes)
+        )
+        receipt = self._make_receipt([self._make_log(pool, topics, data)])
+
+        parser = RadiantV2ReceiptParser()
+        result = parser.parse_receipt(receipt)
+
+        assert result.success, "Parser should succeed with valid Deposit log"
+        assert len(result.supplies) == 1, "Must surface the Deposit event"
+        assert result.supplies[0].reserve.lower() == reserve.lower()
+        assert int(result.supplies[0].amount) == amount
+
+    def test_decode_borrow_with_indexed_referral(self):
+        from almanak.framework.connectors.radiant_v2.receipt_parser import (
+            EVENT_TOPICS,
+            RadiantV2ReceiptParser,
+        )
+
+        pool = "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07"
+        reserve = "0x" + "44" * 20
+        on_behalf_of = "0x" + "55" * 20
+        user = "0x" + "66" * 20
+        amount = 987654321
+        borrow_rate_mode = 2  # variable
+        borrow_rate_ray = 10**27  # 1.0 in ray
+        referral = 0
+        topics = [
+            EVENT_TOPICS["Borrow"],
+            "0x" + "00" * 12 + reserve[2:],
+            "0x" + "00" * 12 + on_behalf_of[2:],
+            "0x" + "00" * 31 + f"{referral:02x}",
+        ]
+        data = (
+            "0x"
+            + "00" * 12 + user[2:]
+            + f"{amount:064x}"
+            + f"{borrow_rate_mode:064x}"
+            + f"{borrow_rate_ray:064x}"
+        )
+        receipt = self._make_receipt([self._make_log(pool, topics, data)])
+
+        parser = RadiantV2ReceiptParser()
+        result = parser.parse_receipt(receipt)
+
+        assert result.success
+        assert len(result.borrows) == 1
+        assert result.borrows[0].reserve.lower() == reserve.lower()
+        assert int(result.borrows[0].amount) == amount
+        assert result.borrows[0].interest_rate_mode == 2
