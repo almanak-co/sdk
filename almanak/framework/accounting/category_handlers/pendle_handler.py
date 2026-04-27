@@ -287,6 +287,7 @@ def handle_pendle_pt(
             sy_cost=sy_amount,
             timestamp=now,
             lot_id=identity.id,
+            source_ledger_entry_id=ledger_entry_id,
         )
 
     return event

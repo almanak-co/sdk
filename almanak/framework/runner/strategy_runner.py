@@ -2283,6 +2283,7 @@ class StrategyRunner:
                             sy_cost=sy_human,
                             timestamp=datetime.now(UTC),
                             lot_id=event.identity.id,
+                            source_ledger_entry_id=event.identity.ledger_entry_id,
                         )
             elif is_mandatory_live:
                 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind

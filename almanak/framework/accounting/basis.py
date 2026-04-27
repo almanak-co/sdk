@@ -69,6 +69,10 @@ class FIFOBasisStore:
 
         Unrecognised event types are silently skipped so new types added in future
         schema versions do not break older runners replaying a mixed history.
+
+        Policy v1 events (written before VIB-3484, lacking amount_token in the payload)
+        cannot be reconstructed — each such event is skipped with a WARNING so callers
+        know that the FIFO store may be incomplete after restart.
         """
         import json as _json
         import logging as _logging
@@ -79,6 +83,7 @@ class FIFOBasisStore:
 
         _DECIMALS_18 = Decimal(10**18)
         replayed = 0
+        _v1_skipped: dict[str, int] = {}  # event_type → count, for aggregated warning at end
 
         def _parse_decimal(value: Any) -> Decimal | None:
             """Safely parse a Decimal; return None on any conversion failure or non-finite value."""
@@ -97,6 +102,8 @@ class FIFOBasisStore:
             position_key = row.get("position_key", "")
             deployment_id = row.get("deployment_id", "")
             timestamp_str = row.get("timestamp")
+            # ledger_entry_id links a lot back to the on-chain transaction (VIB-3468).
+            ledger_entry_id: str | None = row.get("ledger_entry_id") or None
 
             # Rows missing identity fields cannot be keyed into the lot store.
             if not deployment_id or not position_key:
@@ -115,9 +122,22 @@ class FIFOBasisStore:
                 ts = None
 
             if event_type == "BORROW":
-                amount_token = _parse_decimal(payload.get("amount_token"))
+                raw_amount_token = payload.get("amount_token")
+                amount_token = _parse_decimal(raw_amount_token)
                 asset = payload.get("asset", "")
-                if amount_token is None or amount_token <= 0 or not asset:
+                # amount_token key absent → policy v1 event (pre-VIB-3484); count for summary.
+                # amount_token present but non-positive → v2 extraction bug; skip silently (debug).
+                if raw_amount_token is None:
+                    _v1_skipped["BORROW"] = _v1_skipped.get("BORROW", 0) + 1
+                    continue
+                if amount_token is None or amount_token <= 0:
+                    _log.debug(
+                        "FIFOBasisStore: BORROW event %s/%s has non-positive amount_token — skipping",
+                        deployment_id,
+                        position_key,
+                    )
+                    continue
+                if not asset:
                     continue
                 self.record_borrow(
                     deployment_id=deployment_id,
@@ -125,14 +145,27 @@ class FIFOBasisStore:
                     token=asset,
                     principal_amount=amount_token,
                     timestamp=ts,
+                    source_ledger_entry_id=ledger_entry_id,
                 )
                 replayed += 1
 
             elif event_type in ("REPAY", "DELEVERAGE"):
                 # DELEVERAGE is structurally a repay — it reduces an open borrow lot.
-                amount_token = _parse_decimal(payload.get("amount_token"))
+                raw_amount_token = payload.get("amount_token")
+                amount_token = _parse_decimal(raw_amount_token)
                 asset = payload.get("asset", "")
-                if amount_token is None or amount_token <= 0 or not asset:
+                if raw_amount_token is None:
+                    _v1_skipped[event_type] = _v1_skipped.get(event_type, 0) + 1
+                    continue
+                if amount_token is None or amount_token <= 0:
+                    _log.debug(
+                        "FIFOBasisStore: %s event %s/%s has non-positive amount_token — skipping",
+                        event_type,
+                        deployment_id,
+                        position_key,
+                    )
+                    continue
+                if not asset:
                     continue
                 self.match_repay(
                     deployment_id=deployment_id,
@@ -162,6 +195,7 @@ class FIFOBasisStore:
                     pt_amount=pt_human,
                     sy_cost=sy_human,
                     timestamp=ts,
+                    source_ledger_entry_id=ledger_entry_id,
                 )
                 replayed += 1
 
@@ -221,6 +255,15 @@ class FIFOBasisStore:
 
         if replayed:
             _log.info("FIFOBasisStore: reconstructed %d lot operations from accounting_events", replayed)
+        if _v1_skipped:
+            total = sum(_v1_skipped.values())
+            breakdown = ", ".join(f"{k}={v}" for k, v in sorted(_v1_skipped.items()))
+            _log.warning(
+                "FIFOBasisStore: skipped %d policy-v1 event(s) during reconstruction (%s) — "
+                "amount_token missing (pre-VIB-3484); FIFO store may be incomplete on restart.",
+                total,
+                breakdown,
+            )
         return replayed
 
     def _key(self, deployment_id: str, position_key: str, token: str) -> str:
@@ -235,6 +278,7 @@ class FIFOBasisStore:
         timestamp: datetime | None = None,
         principal_usd: Decimal | None = None,
         lot_id: str | None = None,
+        source_ledger_entry_id: str | None = None,
     ) -> str:
         lot_id = lot_id or str(uuid.uuid4())
         key = self._key(deployment_id, position_key, token)
@@ -249,6 +293,7 @@ class FIFOBasisStore:
                 "price_usd_per_token": (
                     principal_usd / principal_amount if principal_usd is not None and principal_amount else None
                 ),
+                "source_ledger_entry_id": source_ledger_entry_id,
             }
         )
         return lot_id
@@ -323,6 +368,7 @@ class FIFOBasisStore:
         sy_cost: Decimal,
         timestamp: datetime | None = None,
         lot_id: str | None = None,
+        source_ledger_entry_id: str | None = None,
     ) -> str:
         lot_id = lot_id or str(uuid.uuid4())
         key = self._key(deployment_id, position_key, pt_token)
@@ -336,6 +382,7 @@ class FIFOBasisStore:
                 "remaining_pt": pt_amount,
                 "cost_per_pt": sy_cost / pt_amount if pt_amount else Decimal("0"),
                 "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
+                "source_ledger_entry_id": source_ledger_entry_id,
             }
         )
         return lot_id

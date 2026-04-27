@@ -1,4 +1,4 @@
-"""Tests for FIFOBasisStore.reconstruct_from_events (VIB-3484).
+"""Tests for FIFOBasisStore.reconstruct_from_events (VIB-3484, VIB-3468).
 
 Covers:
 - BORROW → REPAY reconstruction across a simulated restart
@@ -7,6 +7,8 @@ Covers:
 - Idempotency: calling reconstruct_from_events twice gives same result
 - Malformed / unknown event types are skipped without error
 - amount_token field round-trips through LendingAccountingEvent payload
+- source_ledger_entry_id stored on lots and propagated during reconstruction
+- Policy v1 events (missing amount_token) log WARNING and are skipped
 """
 
 from __future__ import annotations
@@ -373,3 +375,226 @@ class TestAmountTokenPayloadRoundTrip:
         event = LendingAccountingEvent.from_payload_json(identity, old_payload)
         assert event.amount_token is None
         assert event.health_factor_after == Decimal("1.5")
+
+
+# ---------------------------------------------------------------------------
+# Tests: source_ledger_entry_id (VIB-3468)
+# ---------------------------------------------------------------------------
+
+
+class TestSourceLedgerEntryId:
+    def test_record_borrow_stores_source_ledger_entry_id(self):
+        store = FIFOBasisStore()
+        store.record_borrow(
+            deployment_id="dep",
+            position_key="pk",
+            token="USDC",
+            principal_amount=Decimal("1000"),
+            source_ledger_entry_id="ledger-abc-123",
+        )
+        lots = store._lots["dep:pk:usdc"]
+        assert len(lots) == 1
+        assert lots[0]["source_ledger_entry_id"] == "ledger-abc-123"
+
+    def test_record_pt_buy_stores_source_ledger_entry_id(self):
+        store = FIFOBasisStore()
+        store.record_pt_buy(
+            deployment_id="dep",
+            position_key="pk",
+            pt_token="PT-wstETH",
+            pt_amount=Decimal("500"),
+            sy_cost=Decimal("480"),
+            source_ledger_entry_id="ledger-pt-999",
+        )
+        lots = store._lots["dep:pk:pt-wsteth"]
+        assert len(lots) == 1
+        assert lots[0]["source_ledger_entry_id"] == "ledger-pt-999"
+
+    def test_source_ledger_entry_id_none_when_not_provided(self):
+        store = FIFOBasisStore()
+        store.record_borrow(
+            deployment_id="dep",
+            position_key="pk",
+            token="DAI",
+            principal_amount=Decimal("100"),
+        )
+        lots = store._lots["dep:pk:dai"]
+        assert lots[0]["source_ledger_entry_id"] is None
+
+    def test_reconstruct_propagates_source_ledger_entry_id(self):
+        dep = "dep-recon"
+        pk = "lending:eth:aave_v3:0xwallet:USDC"
+        row = _lending_row("BORROW", dep, pk, "USDC", Decimal("2000"))
+        row["ledger_entry_id"] = "ledger-xyz-456"
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events([row])
+
+        lots = store._lots[f"{dep}:{pk}:usdc"]
+        assert len(lots) == 1
+        assert lots[0]["source_ledger_entry_id"] == "ledger-xyz-456"
+
+    def test_reconstruct_pt_buy_propagates_source_ledger_entry_id(self):
+        dep = "dep-pendle-recon"
+        pk = "pendle:arb:pendle:0xwallet"
+        pt_token = "0xPT_wstETH_30JUN2028"
+        row = _pt_row("PT_BUY", dep, pk, pt_token,
+                      pt_amount_human=Decimal("300"),
+                      sy_amount_human=Decimal("285"))
+        row["ledger_entry_id"] = "ledger-pt-buy-777"
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events([row])
+
+        lots = store._lots[f"{dep}:{pk}:{pt_token.lower()}"]
+        assert len(lots) == 1
+        assert lots[0]["source_ledger_entry_id"] == "ledger-pt-buy-777"
+
+    def test_empty_ledger_entry_id_coalesces_to_none(self):
+        dep = "dep-empty"
+        pk = "pk-empty"
+        row = _lending_row("BORROW", dep, pk, "USDC", Decimal("500"))
+        row["ledger_entry_id"] = ""  # proto default for missing string field
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events([row])
+
+        lots = store._lots[f"{dep}:{pk}:usdc"]
+        assert lots[0]["source_ledger_entry_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: policy v1 event warning (VIB-3468)
+# ---------------------------------------------------------------------------
+
+
+class TestPolicyV1Warning:
+    def _borrow_row_without_amount_token(
+        self,
+        deployment_id: str,
+        position_key: str,
+        asset: str,
+    ) -> dict:
+        """Simulate a pre-VIB-3484 BORROW event payload lacking amount_token."""
+        payload = {
+            "event_type": "BORROW",
+            "position_key": position_key,
+            "market_id": "test-market",
+            "asset": asset,
+            # amount_token intentionally absent — policy v1 fingerprint
+            "confidence": "HIGH",
+            "unavailable_reason": "",
+            "schema_version": 1,
+            "collateral_value_before_usd": None,
+            "collateral_value_after_usd": None,
+            "debt_value_before_usd": None,
+            "debt_value_after_usd": None,
+            "net_equity_before_usd": None,
+            "net_equity_after_usd": None,
+            "health_factor_before": None,
+            "health_factor_after": None,
+            "liquidation_threshold": None,
+            "lltv": None,
+            "supply_apr_bps": None,
+            "borrow_apr_bps": 500,
+            "principal_delta_usd": None,
+            "interest_delta_usd": None,
+            "gas_usd": None,
+        }
+        return {
+            "event_type": "BORROW",
+            "deployment_id": deployment_id,
+            "position_key": position_key,
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "payload_json": json.dumps(payload),
+        }
+
+    def test_policy_v1_borrow_logs_warning_and_skips(self, caplog):
+        dep = "dep-v1"
+        pk = "lending:arb:aave_v3:0xwallet:USDC"
+        row = self._borrow_row_without_amount_token(dep, pk, "USDC")
+
+        store = FIFOBasisStore()
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.accounting.basis"):
+            replayed = store.reconstruct_from_events([row])
+
+        assert replayed == 0
+        # Aggregated summary warning emitted at end of reconstruction
+        assert any("policy-v1" in r.message for r in caplog.records)
+        assert any("FIFO store may be incomplete" in r.message for r in caplog.records)
+        # Store must be empty — the lot was not recorded
+        assert store._lots == {}
+
+    def test_policy_v1_borrow_does_not_block_subsequent_v2_events(self, caplog):
+        dep = "dep-v1-mixed"
+        pk = "lending:arb:aave_v3:0xwallet:WETH"
+        events = [
+            self._borrow_row_without_amount_token(dep, pk, "WETH"),  # skipped (v1)
+            _lending_row("BORROW", dep, pk, "WETH", Decimal("2.0"),
+                         timestamp="2026-01-01T00:00:00+00:00"),  # recorded (v2)
+        ]
+
+        store = FIFOBasisStore()
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.accounting.basis"):
+            replayed = store.reconstruct_from_events(events)
+
+        assert replayed == 1
+        result = store.match_repay(dep, pk, "WETH", Decimal("2.1"))
+        assert result.repaid_principal == pytest.approx(Decimal("2.0"), abs=Decimal("0.001"))
+        assert result.interest_or_yield == pytest.approx(Decimal("0.1"), abs=Decimal("0.001"))
+
+    def test_policy_v1_repay_logs_warning_and_skips(self, caplog):
+        dep = "dep-v1-repay"
+        pk = "lending:eth:compound:0xwallet:DAI"
+        # First a valid BORROW
+        borrow = _lending_row("BORROW", dep, pk, "DAI", Decimal("500"))
+        # Then a policy v1 REPAY missing amount_token
+        repay_payload = json.dumps({
+            "event_type": "REPAY",
+            "position_key": pk,
+            "market_id": "test",
+            "asset": "DAI",
+            # amount_token absent
+            "confidence": "HIGH",
+            "unavailable_reason": "",
+            "schema_version": 1,
+            "collateral_value_before_usd": None,
+            "collateral_value_after_usd": None,
+            "debt_value_before_usd": None,
+            "debt_value_after_usd": None,
+            "net_equity_before_usd": None,
+            "net_equity_after_usd": None,
+            "health_factor_before": None,
+            "health_factor_after": None,
+            "liquidation_threshold": None,
+            "lltv": None,
+            "supply_apr_bps": None,
+            "borrow_apr_bps": None,
+            "principal_delta_usd": None,
+            "interest_delta_usd": None,
+            "gas_usd": None,
+        })
+        repay = {
+            "event_type": "REPAY",
+            "deployment_id": dep,
+            "position_key": pk,
+            "timestamp": "2025-06-01T00:00:00+00:00",
+            "payload_json": repay_payload,
+        }
+
+        store = FIFOBasisStore()
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.accounting.basis"):
+            replayed = store.reconstruct_from_events([borrow, repay])
+
+        # BORROW replayed; REPAY skipped (v1)
+        assert replayed == 1
+        assert any("policy-v1" in r.message for r in caplog.records)
+        # Lot still has full principal since REPAY was skipped
+        result = store.match_repay(dep, pk, "DAI", Decimal("502"))
+        assert result.repaid_principal == pytest.approx(Decimal("500"), abs=Decimal("0.001"))

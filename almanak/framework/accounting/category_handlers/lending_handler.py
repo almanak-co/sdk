@@ -162,6 +162,7 @@ def handle_lending(
                 principal_usd=principal_delta_usd,
                 timestamp=timestamp,
                 lot_id=make_accounting_event_id(deployment_id, cycle_id, "BORROW_LOT", _borrow_id_seed, position_key),
+                source_ledger_entry_id=ledger_entry_id,
             )
             interest_delta_usd = None
 

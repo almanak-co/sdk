@@ -312,3 +312,33 @@ def test_handle_pendle_pt_no_basis_store_no_fifo_side_effect() -> None:
 
     assert event is not None
     assert event.event_type == PendleEventType.PT_BUY
+
+
+def test_handle_pendle_pt_propagates_source_ledger_entry_id() -> None:
+    """PT lot created by handle_pendle_pt carries source_ledger_entry_id from ledger row."""
+    sy_in = int(0.9 * 10**18)
+    pt_out = int(1.0 * 10**18)
+    extracted = json.dumps({"swap_amounts": {"amount_in": sy_in, "amount_out": pt_out}})
+    future = datetime.now(UTC) + timedelta(days=730)
+    pt_symbol = f"PT-wstETH-{future.day:02d}{future.strftime('%b').upper()}{future.year}"
+
+    basis = FIFOBasisStore()
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_out=pt_symbol,
+        extracted_data_json=extracted,
+        tx_hash="0xdeadbeef",
+    )
+    # handler reads ledger_entry_id from led["id"] (the ledger row primary key)
+    expected_ledger_entry_id = led["id"]
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    pt_token_key = (event.pt_token or "PT").lower()
+    key = f"{event.identity.deployment_id}:{event.position_key}:{pt_token_key}"
+    lots = basis._lots.get(key, [])
+    assert len(lots) == 1
+    assert lots[0]["source_ledger_entry_id"] == expected_ledger_entry_id
