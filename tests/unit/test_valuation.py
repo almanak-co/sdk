@@ -778,13 +778,18 @@ class TestDeployedCapitalUsd:
 
         valuer = PortfolioValuer()
 
-        # Wire up a fake accounting store that returns one SUPPLY event for the position
+        # Wire up a fake accounting store that returns one SUPPLY event for the position.
+        # VIB-3503: PortfolioValuer now prefetches once per snapshot and groups events
+        # by the row's position_key; the cache lookup uses the key derived by
+        # _try_derive_lending_position_key, which for this test is
+        # "lending:arbitrum:aave_v3:<wallet-lowercased>:usdc". The mock event must
+        # carry that exact key so the cache-side filter finds it.
         mock_store = MagicMock()
         mock_store.get_accounting_events_sync.return_value = [
             {
                 "timestamp": "2026-04-26T10:00:00",
                 "event_type": "SUPPLY",
-                "position_key": "lending:arbitrum:aave_v3:0x1234...:usdc",
+                "position_key": "lending:arbitrum:aave_v3:0x1234567890123456789012345678901234567890:usdc",
                 "deployment_id": "test-deployment",
                 "ledger_entry_id": "ledger-001",
                 "payload_json": '{"principal_delta_usd": "1000", "interest_delta_usd": null}',

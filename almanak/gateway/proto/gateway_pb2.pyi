@@ -1258,6 +1258,131 @@ class SavePositionEventResponse(_message.Message):
 Global___SavePositionEventResponse: _TypeAlias = SavePositionEventResponse  # noqa: Y015
 
 @_typing.final
+class GetAccountingEventsRequest(_message.Message):
+    """Read accounting events (VIB-3503 Part 2c) -- mirrors SaveAccountingEventRequest
+    field-for-field so the wire shape is symmetric between writers and readers.
+    Empty-string filters mean "no filter on this field" (matches the convention
+    established by other Save* RPCs that treat "" as the unset sentinel).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    POSITION_KEY_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    SINCE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    """resolved to agent_id at the gateway via resolve_agent_id"""
+    deployment_id: _builtins.str
+    """required"""
+    position_key: _builtins.str
+    """"" = no filter"""
+    event_type: _builtins.str
+    """"" = no filter"""
+    since_timestamp: _builtins.int
+    """Unix epoch seconds; 0 = no lower bound"""
+    limit: _builtins.int
+    """0 = no limit (FIFO basis-store reconstruction needs full history)"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        position_key: _builtins.str = ...,
+        event_type: _builtins.str = ...,
+        since_timestamp: _builtins.int = ...,
+        limit: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "event_type", b"event_type", "limit", b"limit", "position_key", b"position_key", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetAccountingEventsRequest: _TypeAlias = GetAccountingEventsRequest  # noqa: Y015
+
+@_typing.final
+class AccountingEvent(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    POSITION_KEY_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_FIELD_NUMBER: _builtins.int
+    PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """UUIDv5, deterministic from (deployment, cycle, intent_type, tx, position)"""
+    deployment_id: _builtins.str
+    strategy_id: _builtins.str
+    """PG `agent_id` mapped back to strategy_id on the wire"""
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
+    timestamp: _builtins.int
+    """Unix epoch seconds"""
+    chain: _builtins.str
+    protocol: _builtins.str
+    wallet_address: _builtins.str
+    event_type: _builtins.str
+    position_key: _builtins.str
+    ledger_entry_id: _builtins.str
+    tx_hash: _builtins.str
+    confidence: _builtins.str
+    payload_json: _builtins.bytes
+    """JSON-serialised typed payload"""
+    schema_version: _builtins.int
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        event_type: _builtins.str = ...,
+        position_key: _builtins.str = ...,
+        ledger_entry_id: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        confidence: _builtins.str = ...,
+        payload_json: _builtins.bytes = ...,
+        schema_version: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AccountingEvent: _TypeAlias = AccountingEvent  # noqa: Y015
+
+@_typing.final
+class GetAccountingEventsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    EVENTS_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def events(self) -> _containers.RepeatedCompositeFieldContainer[Global___AccountingEvent]: ...
+    def __init__(
+        self,
+        *,
+        events: _abc.Iterable[Global___AccountingEvent] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["events", b"events"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetAccountingEventsResponse: _TypeAlias = GetAccountingEventsResponse  # noqa: Y015
+
+@_typing.final
 class CompileIntentRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

@@ -184,6 +184,18 @@ class TestSaveAccountingEventValidation:
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("deployment_id", ["", "   ", "\t"])
+    async def test_blank_or_whitespace_deployment_id_rejected(self, service, ctx, deployment_id):
+        """Symmetric with GetAccountingEvents: rows with no deployment_id are
+        unrecoverable by the replay RPC, so reject at the boundary.
+        """
+        req = _accounting_request(deployment_id=deployment_id)
+        resp = await service.SaveAccountingEvent(req, ctx)
+        assert resp.success is False
+        assert "deployment_id is required" in resp.error
+        ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+    @pytest.mark.asyncio
     async def test_missing_payload_json(self, service, ctx):
         req = _accounting_request(payload_json=b"")
         resp = await service.SaveAccountingEvent(req, ctx)
@@ -372,6 +384,18 @@ class TestSavePositionEventValidation:
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("deployment_id", ["", "   ", "\t"])
+    async def test_blank_or_whitespace_deployment_id_rejected(self, service, ctx, deployment_id):
+        """Symmetric with the other Save*/Get* paths: position rows with no
+        deployment_id can't be correlated back to their deployment.
+        """
+        req = _position_request(deployment_id=deployment_id)
+        resp = await service.SavePositionEvent(req, ctx)
+        assert resp.success is False
+        assert "deployment_id is required" in resp.error
+        ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+    @pytest.mark.asyncio
     async def test_timestamp_out_of_range(self, service, ctx):
         """Timestamps too large for datetime.fromtimestamp() → INVALID_ARGUMENT."""
         service._state_manager = MagicMock()
@@ -450,3 +474,119 @@ class TestSavePositionEventValidation:
         req = _position_request(position_type=position_type)
         resp = await service.SavePositionEvent(req, ctx)
         assert resp.success is True
+
+
+# ---------------------------------------------------------------------------
+# SaveAccountingEvent — VIB-3503 Part 2a: Postgres branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pg_service() -> StateServiceServicer:
+    """Service with the snapshot pool wired (truthy) so the PG branch runs."""
+    svc = StateServiceServicer(GatewaySettings())
+    svc._initialized = True
+    svc._snapshot_pool_initialized = True
+    svc._snapshot_pool = MagicMock()  # truthy → PG branch
+    svc._snapshot_execute = AsyncMock(return_value="INSERT 0 1")
+    svc._ensure_initialized = AsyncMock()
+    svc._ensure_snapshot_pool = AsyncMock()
+    return svc
+
+
+class TestSaveAccountingEventPostgresBranch:
+    """VIB-3503 Part 2a: hosted-mode SaveAccountingEvent writes to PG.
+
+    The PG branch runs when ``_snapshot_pool is not None`` and bypasses
+    the warm backend entirely. SDK sends ``strategy_id`` over the wire;
+    gateway resolves it via ``resolve_agent_id`` and binds to PG column
+    ``agent_id``. UPSERT semantics overwrite on conflict per ticket spec
+    (corrections welcome).
+    """
+
+    @pytest.mark.asyncio
+    async def test_pg_happy_path_pins_column_order(self, pg_service, ctx):
+        """Pins the 16 INSERT positional args at their expected slots so a
+        future column re-order or insertion is caught at PR review.
+        """
+        request = _accounting_request()
+
+        response = await pg_service.SaveAccountingEvent(request, ctx)
+
+        assert response.success is True
+        assert response.error == ""
+        pg_service._snapshot_execute.assert_awaited_once()
+
+        args = pg_service._snapshot_execute.call_args.args
+        # args[0] is the SQL string; args[1..16] are positional bindings.
+        assert args[1] == _VALID_UUID                    # id
+        assert args[2] == "deploy-1"                     # deployment_id
+        assert args[3] == _VALID_STRATEGY                # agent_id (no AGENT_ID env → passthrough)
+        assert args[4] == "cycle-1"                      # cycle_id
+        assert args[5] == "paper"                        # execution_mode
+        # args[6] is timestamp (datetime, tz-aware)
+        from datetime import UTC, datetime
+        assert args[6] == datetime.fromtimestamp(_VALID_TS, tz=UTC)
+        assert args[7] == "arbitrum"                     # chain
+        assert args[8] == "aave_v3"                      # protocol
+        assert args[9] == "0xwallet"                     # wallet_address
+        assert args[10] == "SUPPLY"                      # event_type
+        assert args[11] == "aave-usdc"                   # position_key
+        assert args[12] == _VALID_UUID                   # ledger_entry_id
+        assert args[13] == "0xtx"                        # tx_hash
+        assert args[14] == "HIGH"                        # confidence
+        assert args[15] == _LENDING_PAYLOAD.decode("utf-8")  # payload_json string
+        assert args[16] == 1                             # schema_version
+
+    @pytest.mark.asyncio
+    async def test_pg_exception_fails_closed(self, pg_service, ctx):
+        """PG exception → ``success=False``, ``INTERNAL`` status, generic
+        error string. The SDK side raises ``AccountingPersistenceError`` in
+        live mode → runner halts with ``ACCOUNTING_FAILED``.
+        """
+        pg_service._snapshot_execute = AsyncMock(side_effect=RuntimeError("pg down"))
+
+        response = await pg_service.SaveAccountingEvent(_accounting_request(), ctx)
+
+        assert response.success is False
+        assert response.error == "internal server error"
+        ctx.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
+        ctx.set_details.assert_called_with("internal server error")
+
+    @pytest.mark.asyncio
+    async def test_pg_upsert_on_conflict_refreshes_all_columns(self, pg_service, ctx):
+        """SQL contains ON CONFLICT DO UPDATE SET refreshing the 15 non-id
+        columns so corrections (e.g. confidence upgrade ESTIMATED → HIGH)
+        overwrite the original row per ticket spec.
+        """
+        await pg_service.SaveAccountingEvent(_accounting_request(), ctx)
+
+        import re
+        sql = pg_service._snapshot_execute.call_args.args[0]
+        assert "ON CONFLICT (id) DO UPDATE SET" in sql
+        # Every non-id column must be refreshed from EXCLUDED. Whitespace
+        # between the column name and the equals sign is collapsed before
+        # matching so cosmetic alignment changes don't break the test.
+        normalized = re.sub(r"\s+", " ", sql)
+        for col in (
+            "deployment_id", "agent_id", "cycle_id", "execution_mode",
+            "timestamp", "chain", "protocol", "wallet_address",
+            "event_type", "position_key", "ledger_entry_id", "tx_hash",
+            "confidence", "payload_json", "schema_version",
+        ):
+            assert f"{col} = EXCLUDED.{col}" in normalized, f"Missing SET clause for {col}"
+        # Cast preserves binary JSONB storage (load-bearing for the GIN index).
+        assert "$15::jsonb" in sql
+
+    @pytest.mark.asyncio
+    async def test_pg_resolves_agent_id_from_env(self, pg_service, ctx, monkeypatch):
+        """When ``AGENT_ID`` env var is set, PG column ``agent_id`` receives
+        the platform-injected value, not the wire-sent ``strategy_id``.
+        Mirrors the same translation done by SaveLedgerEntry.
+        """
+        monkeypatch.setenv("AGENT_ID", "platform-agent-uuid")
+
+        await pg_service.SaveAccountingEvent(_accounting_request(), ctx)
+
+        args = pg_service._snapshot_execute.call_args.args
+        assert args[3] == "platform-agent-uuid"  # agent_id slot

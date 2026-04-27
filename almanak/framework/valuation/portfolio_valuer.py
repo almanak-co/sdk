@@ -104,6 +104,12 @@ class PortfolioValuer:
         # VIB-3424: per-position PnL enrichment from accounting_events store.
         self._accounting_store: Any = None
         self._deployment_id: str = ""
+        # VIB-3503 Part 2c: per-snapshot prefetch cache for accounting events.
+        # Populated by _prefetch_accounting_events() at the top of value()
+        # so per-position enrichers can filter from memory rather than
+        # issuing one gRPC round trip per position. Cleared at the end
+        # of value() so the next snapshot does a fresh prefetch.
+        self._snapshot_event_cache: dict[str, list[dict]] | None = None
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client for on-chain queries.
@@ -153,6 +159,15 @@ class PortfolioValuer:
         now = datetime.now(UTC)
         strategy_id = ""
         chain = ""
+
+        # VIB-3503 Part 2c: prefetch accounting events once per snapshot so
+        # the per-position enrichers below filter from memory instead of
+        # issuing one gRPC round trip per position. Safe under any error
+        # (cache becomes None, enrichers fall back to empty / no-op).
+        # The outer try/finally guarantees the cache is cleared regardless
+        # of which exit path the value() body takes, so the next snapshot
+        # always starts with a fresh prefetch.
+        self._prefetch_accounting_events(self._deployment_id)
 
         try:
             strategy_id = strategy.strategy_id
@@ -256,6 +271,68 @@ class PortfolioValuer:
                 chain=chain,
                 iteration_number=iteration_number,
             )
+        finally:
+            # Always drop the per-snapshot cache so the next value() call
+            # does a fresh prefetch and never serves stale events.
+            self._snapshot_event_cache = None
+
+    def _prefetch_accounting_events(self, deployment_id: str) -> None:
+        """Fetch all accounting events for the deployment once per snapshot.
+
+        VIB-3503 Part 2c: in hosted mode each call to
+        ``get_accounting_events_sync`` is a real gRPC round trip. Calling
+        it per-position multiplied wire traffic by N positions per snapshot.
+        Prefetching once at the top of ``value()`` collapses N round trips
+        to 1 and the per-position enrichers filter from memory.
+
+        Cache shape: ``{position_key: [event_dict, ...]}``. Events without
+        a position_key (rare; defensive) are grouped under the empty key.
+
+        Silently no-ops when the accounting store is missing or doesn't
+        implement the sync primitive (preserves backwards compatibility
+        with old StateManager backends).
+        """
+        if not self._accounting_store or not deployment_id:
+            self._snapshot_event_cache = None
+            return
+        if not hasattr(self._accounting_store, "get_accounting_events_sync"):
+            self._snapshot_event_cache = None
+            return
+        # Wrap the entire fetch + cache-build in one try/except so a backend
+        # returning None, a non-iterable, or rows that aren't dicts can never
+        # leak out of value() as an unhandled exception. Snapshot building is
+        # the read-side hot path; we'd rather degrade to no PnL enrichment
+        # than crash the snapshot.
+        try:
+            events = self._accounting_store.get_accounting_events_sync(deployment_id) or []
+            cache: dict[str, list[dict]] = {}
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                key = ev.get("position_key") or ""
+                cache.setdefault(key, []).append(ev)
+            self._snapshot_event_cache = cache
+        except Exception:
+            logger.debug("Accounting prefetch failed; falling back to per-position lookups", exc_info=True)
+            self._snapshot_event_cache = None
+
+    def _events_for_position_key(self, position_key: str) -> list[dict]:
+        """Return cached events for ``position_key`` or fall back to a per-position lookup.
+
+        Falling back keeps backwards compatibility for any caller (test
+        harness, ad-hoc) that invokes ``_enrich_*`` without going through
+        ``value()`` (which is what does the prefetch).
+        """
+        if self._snapshot_event_cache is not None:
+            return self._snapshot_event_cache.get(position_key, [])
+        if not self._accounting_store or not self._deployment_id:
+            return []
+        if not hasattr(self._accounting_store, "get_accounting_events_sync"):
+            return []
+        try:
+            return self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+        except Exception:
+            return []
 
     def _reconcile_with_external(
         self,
@@ -1735,7 +1812,10 @@ class PortfolioValuer:
         if not position_key:
             return
 
-        events = self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+        # VIB-3503 Part 2c: read from the per-snapshot prefetch cache when
+        # available; fall back to a per-position lookup for callers that
+        # bypass value().
+        events = self._events_for_position_key(position_key)
         if not events:
             return
 
@@ -1865,14 +1945,13 @@ class PortfolioValuer:
         and uses the deposit_usd payload field as cost_basis_usd.
         If no VAULT_DEPOSIT events exist, leaves cost_basis_usd = 0.
         """
-        if not hasattr(self._accounting_store, "get_accounting_events_sync"):
-            return
-
         position_key = self._try_derive_vault_position_key(position_info, chain)
         if not position_key:
             return
 
-        events = self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+        # VIB-3503 Part 2c: read from the per-snapshot prefetch cache.
+        # Falls back to a per-position lookup for callers that bypass value().
+        events = self._events_for_position_key(position_key)
         if not events:
             return
 

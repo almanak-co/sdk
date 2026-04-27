@@ -574,6 +574,130 @@ async def test_snapshot_acc_error_swallowed_in_paper_mode() -> None:
     alert_mgr.send_alert.assert_not_called()
 
 
+def test_gateway_state_manager_get_accounting_events_sync_happy_path() -> None:
+    """VIB-3503 Part 2c: read events back through gateway gRPC.
+
+    Returned dicts must match the SQLiteStore.get_accounting_events_sync
+    return shape so PortfolioValuer's duck-typed access (e.g.
+    ``e.get("event_type")``, ``e.get("payload_json")``) is unchanged.
+    """
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+    from almanak.gateway.proto import gateway_pb2
+
+    proto_event = gateway_pb2.AccountingEvent(
+        id="aaa",
+        deployment_id="d1",
+        strategy_id="s1",
+        cycle_id="cyc",
+        execution_mode="live",
+        timestamp=1_712_000_000,
+        chain="arbitrum",
+        protocol="aave_v3",
+        wallet_address="0xwallet",
+        event_type="SUPPLY",
+        position_key="aave-usdc",
+        ledger_entry_id="le-1",
+        tx_hash="0xabc",
+        confidence="HIGH",
+        payload_json=b'{"foo":"bar"}',
+        schema_version=1,
+    )
+
+    response = MagicMock()
+    response.events = [proto_event]
+    client = MagicMock()
+    client.state.GetAccountingEvents = MagicMock(return_value=response)
+
+    gsm = GatewayStateManager(client=client)
+    rows = gsm.get_accounting_events_sync(deployment_id="d1", position_key="aave-usdc")
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "aaa"
+    assert rows[0]["event_type"] == "SUPPLY"
+    assert rows[0]["payload_json"] == '{"foo":"bar"}'  # decoded string, not bytes
+    # Timestamp converted from epoch (proto) → ISO string to match the
+    # SQLite contract that FIFOBasisStore.reconstruct_from_events expects.
+    assert rows[0]["timestamp"] == "2024-04-01T19:33:20+00:00"
+
+    # Wire request: position_key forwarded; deployment_id used as wire strategy_id
+    # placeholder (gateway prefers AGENT_ID env in hosted, ignores in local).
+    req = client.state.GetAccountingEvents.call_args.args[0]
+    assert req.deployment_id == "d1"
+    assert req.position_key == "aave-usdc"
+
+
+def test_gateway_state_manager_get_accounting_events_sync_empty() -> None:
+    """No events from gateway → empty list, no error."""
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    response = MagicMock()
+    response.events = []
+    client = MagicMock()
+    client.state.GetAccountingEvents = MagicMock(return_value=response)
+
+    gsm = GatewayStateManager(client=client)
+    rows = gsm.get_accounting_events_sync(deployment_id="d1")
+
+    assert rows == []
+
+
+def test_gateway_state_manager_get_accounting_events_sync_grpc_error_returns_empty() -> None:
+    """Read-side fail-quiet: gRPC raises → return [], do not raise.
+
+    Stale PnL is preferred over halting snapshot building. The write paths
+    stay fail-closed; the read path does not.
+    """
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    client = MagicMock()
+    client.state.GetAccountingEvents = MagicMock(side_effect=RuntimeError("rpc boom"))
+
+    gsm = GatewayStateManager(client=client)
+    rows = gsm.get_accounting_events_sync(deployment_id="d1")
+
+    assert rows == []  # No exception leaked.
+
+
+def test_gateway_state_manager_get_accounting_events_sync_dict_shape_parity() -> None:
+    """Returned dict keys match SQLiteStore.get_accounting_events_sync exactly.
+
+    PortfolioValuer accesses both backends through the same duck-typed
+    interface; any new key added by one backend or removed by the other
+    creates a silent drift bug.
+    """
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+    from almanak.gateway.proto import gateway_pb2
+
+    response = MagicMock()
+    response.events = [gateway_pb2.AccountingEvent()]
+    client = MagicMock()
+    client.state.GetAccountingEvents = MagicMock(return_value=response)
+
+    gsm = GatewayStateManager(client=client)
+    rows = gsm.get_accounting_events_sync(deployment_id="d1")
+
+    assert len(rows) == 1
+    expected_keys = {
+        "id",
+        "deployment_id",
+        "strategy_id",
+        "cycle_id",
+        "execution_mode",
+        "timestamp",
+        "chain",
+        "protocol",
+        "wallet_address",
+        "event_type",
+        "position_key",
+        "ledger_entry_id",
+        "tx_hash",
+        "confidence",
+        "payload_json",
+        "schema_version",
+    }
+    assert set(rows[0].keys()) == expected_keys
+
+
 def test_execution_mode_is_strenum() -> None:
     """ExecutionMode is a StrEnum so it serialises to bare strings for persistence."""
     from almanak.framework.runner.strategy_runner import (

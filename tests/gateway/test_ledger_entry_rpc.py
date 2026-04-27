@@ -137,6 +137,22 @@ class TestSaveLedgerEntryValidation:
         assert "UUID" in response.error
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("deployment_id", ["", "   ", "\t", "\n  "])
+    async def test_blank_or_whitespace_deployment_id_rejected(self, state_service, mock_context, deployment_id):
+        """Blank / whitespace-only deployment_id is rejected at the boundary.
+
+        Symmetric with GetAccountingEvents -- a row written with no
+        deployment_id can never be returned by the new replay RPC, which
+        would silently break restart reconstruction and snapshot enrichment.
+        """
+        request = _base_request(deployment_id=deployment_id)
+        response = await state_service.SaveLedgerEntry(request, mock_context)
+
+        assert response.success is False
+        assert "deployment_id is required" in response.error
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+
 
 class TestSaveLedgerEntrySqliteDelegate:
     """SQLite mode delegates to the warm backend's ``save_ledger_entry``."""
@@ -251,3 +267,118 @@ class TestSaveLedgerEntrySqliteDelegate:
         assert first.success is True
         assert second.success is True
         assert warm.save_ledger_entry.await_count == 2
+
+
+class TestSaveLedgerEntryPostgresJsonbColumns:
+    """VIB-3503 Part 2b: the 4 audit-grade replay JSONB columns are persisted
+    to Postgres in deployed mode. Empty bytes from the wire bind to NULL so
+    pre-VIB-3503 rows and rows where the SDK chose not to capture replay
+    inputs both store NULL rather than the JSON-invalid empty string.
+
+    These tests pin the positional argument layout of the INSERT — slots 21
+    (extracted_data_json) through 24 (post_state_json) — so a future column
+    re-order or insertion is caught immediately.
+    """
+
+    @pytest.fixture
+    def pg_service(self, settings: GatewaySettings) -> StateServiceServicer:
+        svc = StateServiceServicer(settings)
+        svc._initialized = True
+        svc._snapshot_pool_initialized = True
+        svc._snapshot_pool = MagicMock()  # truthy => Postgres branch
+        svc._snapshot_execute = AsyncMock(return_value="INSERT 0 1")
+        svc._ensure_snapshot_pool = AsyncMock()
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_all_four_jsonb_fields_populated(self, pg_service, mock_context):
+        """All 4 JSON fields populated → bound as JSON strings at slots 21-24."""
+        request = _base_request(
+            extracted_data_json=b'{"foo": 1}',
+            price_inputs_json=b'{"USDC": "1.00"}',
+            pre_state_json=b'{"hf": "1.5"}',
+            post_state_json=b'{"hf": "1.4"}',
+        )
+
+        response = await pg_service.SaveLedgerEntry(request, mock_context)
+
+        assert response.success is True
+        pg_service._snapshot_execute.assert_awaited_once()
+        args = pg_service._snapshot_execute.call_args.args
+        # args[0] is SQL, then 24 positional values
+        assert args[21] == '{"foo": 1}'
+        assert args[22] == '{"USDC": "1.00"}'
+        assert args[23] == '{"hf": "1.5"}'
+        assert args[24] == '{"hf": "1.4"}'
+
+    @pytest.mark.asyncio
+    async def test_all_four_jsonb_fields_empty_bind_none(self, pg_service, mock_context):
+        """Empty bytes for each → bound as None so PG stores NULL (not '')."""
+        request = _base_request()  # extracted_data_json defaults to b""; others default to b""
+
+        response = await pg_service.SaveLedgerEntry(request, mock_context)
+
+        assert response.success is True
+        args = pg_service._snapshot_execute.call_args.args
+        assert args[21] is None
+        assert args[22] is None
+        assert args[23] is None
+        assert args[24] is None
+
+    @pytest.mark.asyncio
+    async def test_mixed_populated_and_empty_jsonb_fields(self, pg_service, mock_context):
+        """Mixed: 2 populated, 2 empty → mix of JSON strings and None at slots 21-24."""
+        request = _base_request(
+            extracted_data_json=b'{"a": 1}',
+            pre_state_json=b'{"b": 2}',
+            # price_inputs_json and post_state_json default to b""
+        )
+
+        response = await pg_service.SaveLedgerEntry(request, mock_context)
+
+        assert response.success is True
+        args = pg_service._snapshot_execute.call_args.args
+        assert args[21] == '{"a": 1}'
+        assert args[22] is None
+        assert args[23] == '{"b": 2}'
+        assert args[24] is None
+
+    @pytest.mark.asyncio
+    async def test_insert_uses_jsonb_cast(self, pg_service, mock_context):
+        """SQL string contains explicit ::jsonb cast on the 4 column placeholders."""
+        request = _base_request(extracted_data_json=b'{"a": 1}')
+
+        await pg_service.SaveLedgerEntry(request, mock_context)
+
+        sql = pg_service._snapshot_execute.call_args.args[0]
+        assert "$21::jsonb" in sql
+        assert "$22::jsonb" in sql
+        assert "$23::jsonb" in sql
+        assert "$24::jsonb" in sql
+        assert "extracted_data_json" in sql
+        assert "price_inputs_json" in sql
+        assert "pre_state_json" in sql
+        assert "post_state_json" in sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "field",
+        ["extracted_data_json", "price_inputs_json", "pre_state_json", "post_state_json"],
+    )
+    async def test_malformed_json_rejected_with_invalid_argument(self, pg_service, mock_context, field):
+        """Non-JSON bytes in any of the 4 replay fields must be rejected at the
+        gateway boundary with INVALID_ARGUMENT, BEFORE the PG INSERT runs.
+
+        Without this check the PG ::jsonb cast would surface as INTERNAL while
+        the SQLite path would silently persist the raw string -- a cross-backend
+        divergence the gateway boundary is responsible for closing.
+        """
+        request = _base_request(**{field: b"not json at all {"})
+
+        response = await pg_service.SaveLedgerEntry(request, mock_context)
+
+        assert response.success is False
+        assert "valid JSON" in response.error
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+        # Validation runs before the INSERT -- no PG round trip on bad input.
+        pg_service._snapshot_execute.assert_not_called()

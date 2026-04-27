@@ -640,3 +640,90 @@ class GatewayStateManager:
         except Exception as e:
             logger.warning("Failed to save position event via gateway: %s", e)
             return False
+
+    def get_accounting_events_sync(
+        self,
+        deployment_id: str,
+        position_key: str | None = None,
+    ) -> list[dict]:
+        """Read typed accounting events via gateway gRPC → Postgres / SQLite.
+
+        Mirrors :meth:`SQLiteStore.get_accounting_events_sync` so callers
+        (``PortfolioValuer`` cost-basis enrichment, ``_run_loop_helpers``
+        FIFO basis-store reconstruction at startup) can swap backends
+        without code changes.
+
+        Read-side fail-quiet: on gRPC error returns ``[]`` rather than
+        raising. Stale PnL is preferred over halting snapshot building.
+
+        Note on ``strategy_id`` over the wire: the gRPC contract requires a
+        strategy_id field for format validation, but in hosted mode the
+        gateway always prefers the platform-injected ``AGENT_ID`` env var
+        when filtering, and in local SQLite mode the value is unused for
+        filtering. We pass ``deployment_id`` as the wire value because it
+        follows the same alphanumeric format and is always available at
+        the call site.
+
+        Args:
+            deployment_id: Strategy deployment identifier.
+            position_key: Optional filter by position_key.
+
+        Returns:
+            List of dicts shaped like ``SQLiteStore.get_accounting_events_sync``
+            so PortfolioValuer's duck-typed access (``e.get("event_type")``,
+            ``e.get("payload_json")`` etc.) is unchanged.
+        """
+        try:
+            request = gateway_pb2.GetAccountingEventsRequest(
+                strategy_id=deployment_id,
+                deployment_id=deployment_id,
+                position_key=position_key or "",
+            )
+            response = self._client.state.GetAccountingEvents(request, timeout=self._timeout)
+            return [_proto_event_to_dict(e) for e in response.events]
+        except Exception as e:
+            logger.debug("GetAccountingEvents via gateway failed: %s", e)
+            return []
+
+
+def _proto_event_to_dict(event: "gateway_pb2.AccountingEvent") -> dict:
+    """Convert proto AccountingEvent → dict matching SQLiteStore return shape.
+
+    Keys mirror the SQLite ``accounting_events`` row dict so callers like
+    ``PortfolioValuer._enrich_lending_pnl`` and ``FIFOBasisStore.
+    reconstruct_from_events`` can read both backends identically.
+
+    The proto carries ``timestamp`` as an int (epoch seconds); the SQLite
+    contract is an ISO string. ``FIFOBasisStore.reconstruct_from_events``
+    parses the ISO string with ``datetime.fromisoformat``, so we convert
+    epoch → tz-aware ISO unconditionally. Even epoch=0 must yield a parseable
+    ISO string (``1970-01-01T00:00:00+00:00``); returning an empty string
+    here would crash downstream ISO parsing on any defaulted-zero proto field.
+
+    ``payload_json`` defaults to ``"{}"`` (not ``""``) so consumers that
+    parse it with ``json.loads`` never see a JSONDecodeError on an empty
+    payload. The SQLite store uses the same ``"{}"`` default.
+    """
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    payload_bytes = event.payload_json or b""
+    timestamp_iso = _dt.fromtimestamp(event.timestamp or 0, tz=UTC).isoformat()
+    return {
+        "id": event.id,
+        "deployment_id": event.deployment_id,
+        "strategy_id": event.strategy_id,
+        "cycle_id": event.cycle_id,
+        "execution_mode": event.execution_mode,
+        "timestamp": timestamp_iso,
+        "chain": event.chain,
+        "protocol": event.protocol,
+        "wallet_address": event.wallet_address,
+        "event_type": event.event_type,
+        "position_key": event.position_key,
+        "ledger_entry_id": event.ledger_entry_id,
+        "tx_hash": event.tx_hash,
+        "confidence": event.confidence,
+        "payload_json": payload_bytes.decode("utf-8") if payload_bytes else "{}",
+        "schema_version": event.schema_version,
+    }

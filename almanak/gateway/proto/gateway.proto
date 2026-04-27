@@ -175,6 +175,13 @@ service StateService {
   // Persists LP / perp position events to the position_events table.
   // Non-blocking writes; logs warnings on failure.
   rpc SavePositionEvent(SavePositionEventRequest) returns (SavePositionEventResponse);
+
+  // Read accounting events (VIB-3503 Part 2c).
+  // Used by FIFO basis store reconstruction at runner startup and by
+  // PortfolioValuer cost-basis enrichment per snapshot. Read-side is
+  // fail-quiet: on error returns an empty list rather than raising,
+  // since stale PnL is preferred over halting snapshot building.
+  rpc GetAccountingEvents(GetAccountingEventsRequest) returns (GetAccountingEventsResponse);
 }
 
 message LoadStateRequest {
@@ -412,6 +419,42 @@ message SavePositionEventRequest {
 message SavePositionEventResponse {
   bool success = 1;
   string error = 2;
+}
+
+// Read accounting events (VIB-3503 Part 2c) -- mirrors SaveAccountingEventRequest
+// field-for-field so the wire shape is symmetric between writers and readers.
+// Empty-string filters mean "no filter on this field" (matches the convention
+// established by other Save* RPCs that treat "" as the unset sentinel).
+message GetAccountingEventsRequest {
+  string strategy_id = 1;     // resolved to agent_id at the gateway via resolve_agent_id
+  string deployment_id = 2;   // required
+  string position_key = 3;    // "" = no filter
+  string event_type = 4;      // "" = no filter
+  int64 since_timestamp = 5;  // Unix epoch seconds; 0 = no lower bound
+  int32 limit = 6;            // 0 = no limit (FIFO basis-store reconstruction needs full history)
+}
+
+message AccountingEvent {
+  string id = 1;                    // UUIDv5, deterministic from (deployment, cycle, intent_type, tx, position)
+  string deployment_id = 2;
+  string strategy_id = 3;           // PG `agent_id` mapped back to strategy_id on the wire
+  string cycle_id = 4;
+  string execution_mode = 5;
+  int64 timestamp = 6;              // Unix epoch seconds
+  string chain = 7;
+  string protocol = 8;
+  string wallet_address = 9;
+  string event_type = 10;
+  string position_key = 11;
+  string ledger_entry_id = 12;
+  string tx_hash = 13;
+  string confidence = 14;
+  bytes payload_json = 15;          // JSON-serialised typed payload
+  int32 schema_version = 16;
+}
+
+message GetAccountingEventsResponse {
+  repeated AccountingEvent events = 1;
 }
 
 // =============================================================================

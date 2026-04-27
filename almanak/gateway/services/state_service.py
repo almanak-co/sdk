@@ -97,6 +97,81 @@ class _RawAccountingEvent:
         return self._payload_json
 
 
+def _row_timestamp_epoch(row: dict[str, Any]) -> int:
+    """Best-effort epoch extraction from a SQLite accounting_events row.
+
+    SQLite stores timestamps as ISO strings; the GetAccountingEvents handler
+    needs them as Unix seconds for the wire and for the ``since_timestamp``
+    filter pushdown done in Python.
+    """
+    ts = row.get("timestamp")
+    if ts is None:
+        return 0
+    if isinstance(ts, int | float):
+        return int(ts)
+    try:
+        return int(datetime.fromisoformat(str(ts)).timestamp())
+    except (ValueError, TypeError):
+        return 0
+
+
+def _pg_row_to_accounting_event(row: Any) -> gateway_pb2.AccountingEvent:
+    """Convert one Postgres asyncpg.Record to the proto wire shape.
+
+    The PG SELECT casts ``payload_json::text`` so we get a str (not a dict)
+    and re-encode as UTF-8 bytes to match the SaveAccountingEventRequest
+    contract. ``agent_id`` is mapped back to wire field ``strategy_id``.
+    """
+    payload_text = row["payload_text"] or "{}"
+    return gateway_pb2.AccountingEvent(
+        id=row["id"] or "",
+        deployment_id=row["deployment_id"] or "",
+        strategy_id=row["agent_id"] or "",
+        cycle_id=row["cycle_id"] or "",
+        execution_mode=row["execution_mode"] or "",
+        timestamp=int(row["ts_epoch"] or 0),
+        chain=row["chain"] or "",
+        protocol=row["protocol"] or "",
+        wallet_address=row["wallet_address"] or "",
+        event_type=row["event_type"] or "",
+        position_key=row["position_key"] or "",
+        ledger_entry_id=row["ledger_entry_id"] or "",
+        tx_hash=row["tx_hash"] or "",
+        confidence=row["confidence"] or "",
+        payload_json=payload_text.encode("utf-8"),
+        schema_version=int(row["schema_version"] or 1),
+    )
+
+
+def _sqlite_row_to_accounting_event(row: dict[str, Any]) -> gateway_pb2.AccountingEvent:
+    """Convert one SQLite row dict to the proto wire shape.
+
+    SQLite uses ``strategy_id`` as the column name (not ``agent_id``) per
+    the convention in sqlite.py. Timestamps are ISO strings.
+    """
+    payload_text = row.get("payload_json") or "{}"
+    if isinstance(payload_text, bytes):
+        payload_text = payload_text.decode("utf-8")
+    return gateway_pb2.AccountingEvent(
+        id=row.get("id") or "",
+        deployment_id=row.get("deployment_id") or "",
+        strategy_id=row.get("strategy_id") or row.get("agent_id") or "",
+        cycle_id=row.get("cycle_id") or "",
+        execution_mode=row.get("execution_mode") or "",
+        timestamp=_row_timestamp_epoch(row),
+        chain=row.get("chain") or "",
+        protocol=row.get("protocol") or "",
+        wallet_address=row.get("wallet_address") or "",
+        event_type=row.get("event_type") or "",
+        position_key=row.get("position_key") or "",
+        ledger_entry_id=row.get("ledger_entry_id") or "",
+        tx_hash=row.get("tx_hash") or "",
+        confidence=row.get("confidence") or "",
+        payload_json=payload_text.encode("utf-8"),
+        schema_version=int(row.get("schema_version") or 1),
+    )
+
+
 class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     """Implements StateService gRPC interface.
 
@@ -907,11 +982,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         ``AccountingPersistenceError`` and the runner halts with
         ``ACCOUNTING_FAILED``.
 
-        Note: ``extracted_data_json`` is accepted over the wire but is not
-        written to the deployed ``transaction_ledger`` Postgres table yet --
-        the column lives in the SQLite reference DDL and the metrics-database
-        migration that adds it to Postgres is tracked separately. SQLite
-        (local dev) persists the full payload via the warm backend.
+        VIB-3503 Part 2b: the audit-grade replay JSONB columns
+        (``extracted_data_json``, ``price_inputs_json``, ``pre_state_json``,
+        ``post_state_json``) are now persisted in PostgreSQL. Empty bytes
+        from the wire bind to NULL.
         """
         try:
             strategy_id = validate_strategy_id(request.strategy_id)
@@ -919,6 +993,17 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.SaveLedgerEntryResponse(success=False, error=str(e))
+
+        # Reject blank / whitespace-only deployment_id at the boundary.
+        # Symmetric with the GetAccountingEvents read path: rows persisted
+        # with an empty deployment_id are unrecoverable by the new replay
+        # RPC (which requires deployment_id to be set), so accepting them
+        # would silently break restart reconstruction and snapshot enrichment.
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.SaveLedgerEntryResponse(success=False, error="deployment_id is required")
 
         entry_id = (request.id or "").strip()
         if not entry_id:
@@ -962,12 +1047,52 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         slippage_bps = request.slippage_bps if request.HasField("slippage_bps") else None
 
         if self._snapshot_pool is not None:
-            # PostgreSQL mode (deployed) -- columns match the transaction_ledger
-            # reference DDL in almanak/gateway/database.py.
-            # Forward-compat-only fields intentionally excluded pending VIB-3481/3482
-            # metrics-database migration: extracted_data_json, price_inputs_json,
-            # pre_state_json, post_state_json. Proto carries them so the wire format
-            # is stable once the columns land.
+            # PostgreSQL mode (deployed). VIB-3503 Part 2b: the 4 audit-grade
+            # replay JSONB columns (extracted_data_json, price_inputs_json,
+            # pre_state_json, post_state_json) are now persisted. Empty bytes
+            # from the wire bind to NULL so pre-VIB-3503 rows and rows where
+            # the SDK chose not to capture replay inputs both store NULL
+            # rather than the JSON-invalid empty string.
+
+            def _decode_jsonb_or_none(field_name: str, raw: bytes) -> str | None:
+                """UTF-8 + JSON validate at the gateway boundary.
+
+                The PG ::jsonb cast would surface malformed JSON as INTERNAL,
+                while the SQLite path would persist the raw string -- a
+                cross-backend divergence. Validate here so both backends
+                reject the same inputs with INVALID_ARGUMENT.
+                """
+                if not raw:
+                    return None
+                try:
+                    decoded = raw.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(f"{field_name} must be valid UTF-8") from exc
+                try:
+                    json.loads(decoded)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"{field_name} must be valid JSON") from exc
+                return decoded
+
+            try:
+                price_inputs_json = _decode_jsonb_or_none("price_inputs_json", request.price_inputs_json)
+                pre_state_json = _decode_jsonb_or_none("pre_state_json", request.pre_state_json)
+                post_state_json = _decode_jsonb_or_none("post_state_json", request.post_state_json)
+                # extracted_data_json was UTF-8 decoded earlier (line 950) but
+                # never JSON-validated; the PG ::jsonb cast would silently
+                # diverge from SQLite for malformed inputs. Validate here.
+                if extracted_json:
+                    try:
+                        json.loads(extracted_json)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError("extracted_data_json must be valid JSON") from exc
+            except ValueError as exc:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(str(exc))
+                return gateway_pb2.SaveLedgerEntryResponse(success=False, error=str(exc))
+
+            extracted_data_for_pg: str | None = extracted_json or None
+
             try:
                 await self._snapshot_execute(
                     """
@@ -976,10 +1101,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         timestamp, intent_type,
                         token_in, amount_in, token_out, amount_out,
                         effective_price, slippage_bps, gas_used, gas_usd,
-                        tx_hash, chain, protocol, success, error
+                        tx_hash, chain, protocol, success, error,
+                        extracted_data_json, price_inputs_json, pre_state_json, post_state_json
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                        $21::jsonb, $22::jsonb, $23::jsonb, $24::jsonb
                     )
                     ON CONFLICT (id) DO UPDATE SET
                         cycle_id = EXCLUDED.cycle_id,
@@ -999,12 +1126,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         chain = EXCLUDED.chain,
                         protocol = EXCLUDED.protocol,
                         success = EXCLUDED.success,
-                        error = EXCLUDED.error
+                        error = EXCLUDED.error,
+                        extracted_data_json = EXCLUDED.extracted_data_json,
+                        price_inputs_json = EXCLUDED.price_inputs_json,
+                        pre_state_json = EXCLUDED.pre_state_json,
+                        post_state_json = EXCLUDED.post_state_json
                     """,
                     entry_id,
                     request.cycle_id,
                     strategy_id,
-                    request.deployment_id,
+                    deployment_id,
                     request.execution_mode,
                     ts,
                     request.intent_type,
@@ -1021,6 +1152,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     request.protocol,
                     request.success,
                     request.error,
+                    extracted_data_for_pg,
+                    price_inputs_json,
+                    pre_state_json,
+                    post_state_json,
                 )
                 return gateway_pb2.SaveLedgerEntryResponse(success=True)
             except Exception as e:
@@ -1067,7 +1202,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     id=entry_id,
                     cycle_id=request.cycle_id,
                     strategy_id=strategy_id,
-                    deployment_id=request.deployment_id,
+                    deployment_id=deployment_id,
                     execution_mode=request.execution_mode,
                     timestamp=ts,
                     intent_type=request.intent_type,
@@ -1120,6 +1255,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.SaveAccountingEventResponse(success=False, error=str(e))
 
+        # Reject blank / whitespace-only deployment_id at the boundary --
+        # symmetric with GetAccountingEvents. Persisting a row with a blank
+        # deployment_id would make it unrecoverable by the new replay RPC,
+        # which silently breaks restart reconstruction and PnL enrichment.
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="deployment_id is required")
+
         event_id = (request.id or "").strip()
         if not event_id:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -1167,7 +1312,95 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("payload_json must be valid JSON")
             return gateway_pb2.SaveAccountingEventResponse(success=False, error="payload_json must be valid JSON")
 
-        strategy_id = resolve_agent_id(strategy_id)
+        try:
+            ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
+        except (ValueError, OSError, OverflowError):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp out of range")
+            return gateway_pb2.SaveAccountingEventResponse(success=False, error="timestamp out of range")
+
+        from almanak.framework.accounting.models import AccountingConfidence
+
+        raw_confidence = AccountingConfidence.ESTIMATED
+        if request.confidence:
+            try:
+                raw_confidence = AccountingConfidence(request.confidence)
+            except ValueError:
+                err = f"invalid confidence: {request.confidence!r}"
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(err)
+                return gateway_pb2.SaveAccountingEventResponse(success=False, error=err)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            # PostgreSQL mode (deployed). VIB-3503 Part 2a: persist the typed
+            # accounting event row to the metrics-database accounting_events
+            # table. The PG schema column is `agent_id` (resolved above via
+            # resolve_agent_id); the wire field stays `strategy_id`. UPSERT
+            # by `id` is exercised by retries -- the UUIDv5 id is deterministic
+            # in (deployment, cycle, intent_type, tx, position) so re-delivery
+            # of the same event collapses to one row. Per ticket spec
+            # corrections are welcome: ON CONFLICT DO UPDATE refreshes all
+            # non-id columns so the latest write wins.
+            try:
+                await self._snapshot_execute(
+                    """
+                    INSERT INTO accounting_events (
+                        id, deployment_id, agent_id, cycle_id, execution_mode,
+                        timestamp, chain, protocol, wallet_address, event_type,
+                        position_key, ledger_entry_id, tx_hash, confidence,
+                        payload_json, schema_version
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15::jsonb, $16
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        deployment_id   = EXCLUDED.deployment_id,
+                        agent_id        = EXCLUDED.agent_id,
+                        cycle_id        = EXCLUDED.cycle_id,
+                        execution_mode  = EXCLUDED.execution_mode,
+                        timestamp       = EXCLUDED.timestamp,
+                        chain           = EXCLUDED.chain,
+                        protocol        = EXCLUDED.protocol,
+                        wallet_address  = EXCLUDED.wallet_address,
+                        event_type      = EXCLUDED.event_type,
+                        position_key    = EXCLUDED.position_key,
+                        ledger_entry_id = EXCLUDED.ledger_entry_id,
+                        tx_hash         = EXCLUDED.tx_hash,
+                        confidence      = EXCLUDED.confidence,
+                        payload_json    = EXCLUDED.payload_json,
+                        schema_version  = EXCLUDED.schema_version
+                    """,
+                    event_id,
+                    deployment_id,
+                    strategy_id,
+                    request.cycle_id,
+                    request.execution_mode,
+                    ts,
+                    request.chain,
+                    request.protocol,
+                    request.wallet_address,
+                    request.event_type,
+                    request.position_key,
+                    request.ledger_entry_id,
+                    request.tx_hash,
+                    str(raw_confidence),
+                    payload_str,
+                    request.schema_version or 1,
+                )
+                logger.debug(
+                    "Accounting event saved (Postgres) id=%s, type=%s, agent=%s",
+                    event_id,
+                    request.event_type,
+                    strategy_id,
+                )
+                return gateway_pb2.SaveAccountingEventResponse(success=True)
+            except Exception as e:
+                logger.error("SaveAccountingEvent PG failed for id=%s: %s", event_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
+                return gateway_pb2.SaveAccountingEventResponse(success=False, error="internal server error")
 
         try:
             await self._ensure_initialized()
@@ -1180,13 +1413,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 context.set_details(error)
                 return gateway_pb2.SaveAccountingEventResponse(success=False, error=error)
 
-            try:
-                ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
-            except (ValueError, OSError, OverflowError):
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("timestamp out of range")
-                return gateway_pb2.SaveAccountingEventResponse(success=False, error="timestamp out of range")
-
             from almanak.framework.accounting.models import (
                 AccountingIdentity,
                 LendingAccountingEvent,
@@ -1195,7 +1421,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
             identity = AccountingIdentity(
                 id=event_id,
-                deployment_id=request.deployment_id,
+                deployment_id=deployment_id,
                 strategy_id=strategy_id,
                 cycle_id=request.cycle_id,
                 execution_mode=request.execution_mode,
@@ -1214,17 +1440,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # Known typed deserializers exist for Lending and Pendle; all other valid
             # categories (LP, Perp, Vault, Swap) use a pass-through wrapper until
             # their handler models are added in VIB-3470–3473.
-            from almanak.framework.accounting.models import AccountingConfidence
-
-            raw_confidence = AccountingConfidence.ESTIMATED
-            if request.confidence:
-                try:
-                    raw_confidence = AccountingConfidence(request.confidence)
-                except ValueError:
-                    err = f"invalid confidence: {request.confidence!r}"
-                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details(err)
-                    return gateway_pb2.SaveAccountingEventResponse(success=False, error=err)
 
             try:
                 accounting_event: LendingAccountingEvent | PendleAccountingEvent | _RawAccountingEvent
@@ -1278,6 +1493,15 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         writes to the ``position_events`` table. Non-blocking: on DB failure
         logs a warning and returns success=false rather than raising.
         """
+        # Reject blank / whitespace-only deployment_id at the boundary --
+        # symmetric with the other Save*/Get* paths so position rows can
+        # always be correlated back to the deployment that wrote them.
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.SavePositionEventResponse(success=False, error="deployment_id is required")
+
         event_id = (request.id or "").strip()
         if not event_id:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -1337,7 +1561,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
             event = PositionEvent(
                 id=event_id,
-                deployment_id=request.deployment_id,
+                deployment_id=deployment_id,
                 cycle_id=request.cycle_id,
                 execution_mode=request.execution_mode,
                 position_id=request.position_id,
@@ -1384,3 +1608,124 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SavePositionEventResponse(success=False, error="internal server error")
+
+    # =========================================================================
+    # Read accounting events RPC (VIB-3503 Part 2c)
+    # =========================================================================
+
+    async def GetAccountingEvents(
+        self,
+        request: gateway_pb2.GetAccountingEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetAccountingEventsResponse:
+        """Read accounting events for FIFO basis reconstruction and PnL enrichment.
+
+        Two readers depend on this RPC in deployed mode:
+        - Runner startup ``_run_loop_helpers`` reconstructs the lending FIFO
+          basis store so REPAY / PT_REDEEM realized-PnL is correct after a
+          restart (see VIB-3484).
+        - ``PortfolioValuer`` per-snapshot prefetch enriches lending and
+          vault positions with cost_basis_usd / unrealized_pnl_usd /
+          realized_pnl_usd at snapshot time.
+
+        Read-side fail-quiet: on backend error returns an empty list rather
+        than raising, since stale PnL is preferred over halting snapshot
+        building. The write paths stay fail-closed.
+
+        Empty-string filters mean "no filter on this field." ``limit=0``
+        means "no limit" -- FIFO reconstruction needs the full history
+        from the opening event forward.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+        # Reject negative limit / since_timestamp at the boundary so PG and
+        # SQLite paths never disagree on what they accept. limit=0 is the
+        # documented sentinel for "no limit"; negatives have no defined
+        # meaning and would silently fall through to backend-specific
+        # behaviour (PG: empty result for limit=-1; SQLite: list[:negative]
+        # slices from the end).
+        if request.limit < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("limit must be >= 0")
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+        if request.since_timestamp < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("since_timestamp must be >= 0")
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+        strategy_id = resolve_agent_id(strategy_id)
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                rows = await self._snapshot_fetch(
+                    """
+                    SELECT id, deployment_id, agent_id, cycle_id, execution_mode,
+                           EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
+                           chain, protocol, wallet_address, event_type,
+                           position_key, ledger_entry_id, tx_hash, confidence,
+                           payload_json::text AS payload_text, schema_version
+                    FROM accounting_events
+                    WHERE agent_id = $1
+                      AND deployment_id = $2
+                      AND ($3 = '' OR position_key = $3)
+                      AND ($4 = '' OR event_type = $4)
+                      AND ($5 = 0 OR timestamp >= to_timestamp($5))
+                    ORDER BY timestamp ASC
+                    LIMIT NULLIF($6, 0)
+                    """,
+                    strategy_id,
+                    deployment_id,
+                    request.position_key,
+                    request.event_type,
+                    request.since_timestamp,
+                    request.limit,
+                )
+                events = [_pg_row_to_accounting_event(r) for r in rows]
+                return gateway_pb2.GetAccountingEventsResponse(events=events)
+            except Exception as e:
+                logger.warning("GetAccountingEvents PG failed for agent=%s: %s", strategy_id, e)
+                return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+        # SQLite mode (local dev) — delegate to the warm backend's sync primitive.
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_accounting_events_sync"):
+                return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+            position_key_filter = request.position_key or None
+            rows = warm.get_accounting_events_sync(
+                deployment_id=deployment_id,
+                position_key=position_key_filter,
+            )
+
+            # Apply event_type / since_timestamp / limit in Python -- the SQLite
+            # primitive only supports deployment_id + position_key. Pushing the
+            # other filters into SQLite is a separate concern; doing them in
+            # Python is fine because local-mode datasets are small.
+            if request.event_type:
+                rows = [r for r in rows if r.get("event_type") == request.event_type]
+            if request.since_timestamp > 0:
+                rows = [r for r in rows if _row_timestamp_epoch(r) >= request.since_timestamp]
+            if request.limit > 0:
+                rows = rows[: request.limit]
+
+            events = [_sqlite_row_to_accounting_event(r) for r in rows]
+            return gateway_pb2.GetAccountingEventsResponse(events=events)
+        except Exception as e:
+            logger.warning("GetAccountingEvents SQLite failed: %s", e)
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
