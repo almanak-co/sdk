@@ -122,6 +122,14 @@ class AnvilManager:
             "60000",
         ]
 
+        # CI exports ANVIL_FORK_BLOCK to pin Anvil to a stable per-week block
+        # so Foundry's RPC disk cache (keyed by (chain_id, block)) hits across
+        # runs. Local dev runs without it forks `latest`, unchanged.
+        fork_block_env = os.environ.get("ANVIL_FORK_BLOCK")
+        if fork_block_env:
+            cmd.extend(["--fork-block-number", fork_block_env])
+            print(f"Pinning fork block to {fork_block_env}")
+
         try:
             self.process = subprocess.Popen(
                 cmd,
