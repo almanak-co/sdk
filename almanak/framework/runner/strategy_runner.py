@@ -2141,8 +2141,11 @@ class StrategyRunner:
         VIB-3488: price_oracle is forwarded to build_pendle_lp_accounting_event so that
         SY/PT amounts are scaled with verified decimals and USD prices are populated.
 
-        Best-effort: any exception is logged at WARNING and swallowed.
+        Fail-closed in live mode (VIB-3485): LP_OPEN and LP_CLOSE are mandatory events
+        for Pendle LP strategies — they track position entry and exit and must be durable.
+        In paper/backtest mode the write remains best-effort (log WARNING, continue).
         """
+        is_mandatory_live = False
         try:
             from ..accounting.pendle_accounting import _PENDLE_LP_INTENT_TYPES, build_pendle_lp_accounting_event
             from ..accounting.writer import AccountingWriter
@@ -2180,6 +2183,9 @@ class StrategyRunner:
             if event is None:
                 return
 
+            # Event built — mandatory from this point on in live mode.
+            is_mandatory_live = self._is_live_mode()
+
             writer = AccountingWriter(self.state_manager)
             ok = await writer.write(event)
             if ok:
@@ -2188,13 +2194,32 @@ class StrategyRunner:
                     event.event_type,
                     event.market_id,
                 )
+            elif is_mandatory_live:
+                from ..state.exceptions import AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message=f"Mandatory Pendle LP accounting event not persisted — backend unsupported ({intent_type_str})",
+                )
             else:
-                logger.debug(
+                logger.warning(
                     "Pendle LP accounting event not persisted (backend unsupported): %s market=%s",
                     event.event_type,
                     event.market_id,
                 )
-        except Exception:
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            if is_mandatory_live:
+                from ..state.exceptions import AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message=f"Mandatory Pendle LP accounting write failed in live mode ({intent_type_str})",
+                    cause=e,
+                ) from e
             logger.warning("Pendle LP accounting write failed (non-blocking)", exc_info=True)
 
     async def _try_write_pendle_pt_buy_accounting(
@@ -2316,17 +2341,19 @@ class StrategyRunner:
     ) -> None:
         """Write a PendleAccountingEvent(PT_SELL) + reduce FIFO lot after a Pendle PT pre-maturity sale (VIB-3492).
 
-        Best-effort: any exception is logged at WARNING and swallowed.
+        Fail-closed in live mode (VIB-3485): PT_SELL reduces the open FIFO lot so that a
+        subsequent PT_REDEEM matches only the remaining quantity. A dropped record would
+        leave the basis store inconsistent with accounting_events on restart.
+        In paper/backtest mode the write remains best-effort (log WARNING, continue).
         Only fires when from_token is a PT token on a SWAP intent.
-        Calls basis_store.match_pt_redeem to reduce remaining_pt on the open lot
-        so a subsequent PT_REDEEM correctly matches only the remaining quantity.
         """
+        is_mandatory_live = False
+        intent_type_str = ""
         try:
             from ..accounting.pendle_pt_sell_accounting import build_pendle_pt_sell_accounting_event
             from ..accounting.writer import AccountingWriter
             from ..observability.context import get_cycle_id
 
-            intent_type_str = ""
             it = getattr(intent, "intent_type", None)
             if it is not None:
                 intent_type_str = it.value if hasattr(it, "value") else str(it)
@@ -2358,6 +2385,9 @@ class StrategyRunner:
             if event is None:
                 return
 
+            # Event built — mandatory from this point on in live mode.
+            is_mandatory_live = self._is_live_mode()
+
             writer = AccountingWriter(self.state_manager)
             ok = await writer.write(event)
             if ok:
@@ -2366,7 +2396,32 @@ class StrategyRunner:
                     event.pt_token,
                     event.pt_price,
                 )
-        except Exception:
+            elif is_mandatory_live:
+                from ..state.exceptions import AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message="Mandatory Pendle PT_SELL accounting event not persisted — backend unsupported",
+                )
+            else:
+                logger.warning(
+                    "Pendle PT_SELL accounting event not persisted (backend unsupported): %s market=%s",
+                    event.event_type,
+                    event.market_id,
+                )
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            if is_mandatory_live:
+                from ..state.exceptions import AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message="Mandatory Pendle PT_SELL accounting write failed in live mode",
+                    cause=e,
+                ) from e
             logger.warning("Pendle PT sell accounting write failed (non-blocking)", exc_info=True)
 
     async def _try_write_pendle_pt_redeem_accounting(
@@ -2379,10 +2434,12 @@ class StrategyRunner:
     ) -> None:
         """Write a PendleAccountingEvent(PT_REDEEM) after a Pendle PT redemption (VIB-3423).
 
-        Best-effort: any exception is logged at WARNING and swallowed.
+        Fail-closed in live mode (VIB-3485): PT_REDEEM records realized yield computed
+        from the FIFO basis store — a terminal financial event whose loss is unrecoverable.
+        In paper/backtest mode the write remains best-effort (log WARNING, continue).
         Only fires when a RedeemPY event is present in the execution result.
-        Uses the FIFO basis store to compute realized yield vs original cost basis.
         """
+        is_mandatory_live = False
         try:
             from ..accounting.pendle_redeem_accounting import build_pendle_pt_redeem_accounting_event
             from ..accounting.writer import AccountingWriter
@@ -2421,6 +2478,9 @@ class StrategyRunner:
             if event is None:
                 return
 
+            # Event built — mandatory from this point on in live mode.
+            is_mandatory_live = self._is_live_mode()
+
             writer = AccountingWriter(self.state_manager)
             ok = await writer.write(event)
             if ok:
@@ -2429,7 +2489,32 @@ class StrategyRunner:
                     event.market_id,
                     event.realized_yield_usd,
                 )
-        except Exception:
+            elif is_mandatory_live:
+                from ..state.exceptions import AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message="Mandatory Pendle PT_REDEEM accounting event not persisted — backend unsupported",
+                )
+            else:
+                logger.warning(
+                    "Pendle PT_REDEEM accounting event not persisted (backend unsupported): %s market=%s",
+                    event.event_type,
+                    event.market_id,
+                )
+        except AccountingPersistenceError:
+            raise
+        except Exception as e:
+            if is_mandatory_live:
+                from ..state.exceptions import AccountingWriteKind
+
+                raise AccountingPersistenceError(
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message="Mandatory Pendle PT_REDEEM accounting write failed in live mode",
+                    cause=e,
+                ) from e
             logger.warning("Pendle PT redeem accounting write failed (non-blocking)", exc_info=True)
 
     def _accounting_context(self, strategy: "StrategyProtocol") -> tuple[str, str, str, str, str]:
