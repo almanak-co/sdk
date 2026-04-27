@@ -93,6 +93,65 @@ class TestDriftReceiptParser:
         fill = self.parser.extract_perp_fill(receipt)
         assert fill is None
 
+    # -----------------------------------------------------------------
+    # Stub extraction methods (VIB-3204, VIB-3520)
+    # -----------------------------------------------------------------
+
+    def test_extract_protocol_fees_returns_none(self):
+        """extract_protocol_fees is a no-op stub (VIB-3204) — always returns None."""
+        assert self.parser.extract_protocol_fees({}) is None
+        assert self.parser.extract_protocol_fees({"meta": {"err": None}}) is None
+
+    def test_extract_funding_fee_usd_returns_none(self):
+        """extract_funding_fee_usd is a no-op stub (VIB-3520) — always returns None."""
+        assert self.parser.extract_funding_fee_usd({}) is None
+        assert self.parser.extract_funding_fee_usd({"meta": {"err": None}}) is None
+
+    def test_extract_position_id_returns_none(self):
+        assert self.parser.extract_position_id({}) is None
+
+    def test_extract_size_delta_returns_none(self):
+        assert self.parser.extract_size_delta({}) is None
+
+    def test_extract_collateral_returns_none(self):
+        assert self.parser.extract_collateral({}) is None
+
+    def test_extract_entry_price_returns_none(self):
+        assert self.parser.extract_entry_price({}) is None
+
+    def test_extract_leverage_returns_none(self):
+        assert self.parser.extract_leverage({}) is None
+
+    def test_extract_exit_price_returns_none(self):
+        assert self.parser.extract_exit_price({}) is None
+
+    def test_extract_realized_pnl_returns_none(self):
+        assert self.parser.extract_realized_pnl({}) is None
+
+    def test_extract_fees_paid_returns_none(self):
+        assert self.parser.extract_fees_paid({}) is None
+
+    def test_extract_collateral_returned_returns_none(self):
+        assert self.parser.extract_collateral_returned({}) is None
+
+    def test_supported_extractions_contains_all_perp_fields(self):
+        """All PERP_OPEN and PERP_CLOSE fields must be declared so ResultEnricher
+        doesn't emit warnings for any of them (VIB-3520 regression guard)."""
+        required = {
+            "position_id",
+            "size_delta",
+            "collateral",
+            "entry_price",
+            "leverage",
+            "exit_price",
+            "realized_pnl",
+            "fees_paid",
+            "collateral_returned",
+            "protocol_fees",
+            "funding_fee_usd",
+        }
+        assert required <= self.parser.SUPPORTED_EXTRACTIONS
+
     def test_balance_changes_empty_when_no_change(self):
         receipt = {
             "meta": {

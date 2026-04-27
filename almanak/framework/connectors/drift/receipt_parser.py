@@ -25,6 +25,37 @@ class DriftReceiptParser:
     from Solana transaction receipts.
     """
 
+    # Declared capabilities consumed by ResultEnricher (_extract_field).
+    # Fields listed here suppress "unsupported field" warnings. Fields that
+    # are not yet implemented return None (no-op stubs below).
+    #
+    # All PERP_OPEN and PERP_CLOSE fields must be declared here so that
+    # ResultEnricher does not emit warnings for any of them. Drift uses a
+    # balance-delta approach rather than discrete on-chain events, so most
+    # fields are deferred no-ops until full parsing is implemented.
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            # PERP_OPEN
+            "position_id",
+            "size_delta",
+            "collateral",
+            "entry_price",
+            "leverage",
+            # PERP_CLOSE
+            "exit_price",
+            "realized_pnl",
+            "fees_paid",
+            "collateral_returned",
+            # VIB-3204 — placeholder returning None; Drift fee extraction
+            # via balance-delta or log parsing is deferred.
+            "protocol_fees",
+            # VIB-3520 — no-op stub; Drift does not surface funding fee in
+            # USD form in its Solana transaction receipts. Declaring the field
+            # suppresses the ResultEnricher extraction warning for PERP_CLOSE.
+            "funding_fee_usd",
+        }
+    )
+
     def parse_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
         """Parse a Drift transaction receipt.
 
@@ -144,4 +175,77 @@ class DriftReceiptParser:
                 "data": fill_data,
             }
 
+        return None
+
+    # =============================================================================
+    # PERP_OPEN / PERP_CLOSE Field Stubs (VIB-3520)
+    # =============================================================================
+    # Drift uses vAMM account-state deltas rather than discrete receipt events.
+    # The per-field extractors below are no-op stubs that suppress ResultEnricher
+    # warnings. Full extraction requires querying account state before/after
+    # settlement and is deferred to a follow-up ticket.
+
+    def extract_position_id(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift position IDs require account-state queries."""
+        return None
+
+    def extract_size_delta(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift size delta requires account-state diff."""
+        return None
+
+    def extract_collateral(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift collateral requires account-state diff."""
+        return None
+
+    def extract_entry_price(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift entry price is not surfaced in receipt logs."""
+        return None
+
+    def extract_leverage(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift leverage is not surfaced in receipt logs."""
+        return None
+
+    def extract_exit_price(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift exit price requires log parsing (deferred)."""
+        return None
+
+    def extract_realized_pnl(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift PnL requires account-state diff (deferred)."""
+        return None
+
+    def extract_fees_paid(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift fees require log/account-state parsing (deferred)."""
+        return None
+
+    def extract_collateral_returned(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub — Drift collateral returned requires account-state diff."""
+        return None
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
+        """Placeholder for Drift protocol-fee extraction (VIB-3204).
+
+        Drift fees (taker fee, filler reward) are embedded in program log
+        messages and account-state deltas that are non-trivial to parse.
+        Full extraction is deferred to a follow-up ticket.
+        """
+        return None
+
+    # =============================================================================
+    # Funding Fee USD Extraction (VIB-3520)
+    # =============================================================================
+
+    def extract_funding_fee_usd(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub for funding fee USD extraction (VIB-3520).
+
+        Drift accrues funding payments through vAMM account-state changes
+        rather than discrete receipt events. Extracting the USD-denominated
+        funding cost at close time requires querying the user's PerpPosition
+        account before and after settlement, which is out of scope for a
+        receipt parser. This stub suppresses the extraction warning that
+        ResultEnricher emits when processing PERP_CLOSE intents.
+        """
         return None

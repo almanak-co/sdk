@@ -159,6 +159,14 @@ class AsterPerpsReceiptParser:
             "realized_pnl",
             "fees_paid",
             "collateral_returned",
+            # VIB-3204 — placeholder returning None; Aster Perps fee extraction
+            # via PositionFeesCollected equivalent is deferred.
+            "protocol_fees",
+            # VIB-3520 — no-op stub; Aster Perps does not emit a funding-fee
+            # USD amount in a form that can be reconciled to USD at close time.
+            # Declaring the field suppresses the extraction warning emitted by
+            # ResultEnricher when it processes PERP_CLOSE intents.
+            "funding_fee_usd",
         }
     )
 
@@ -298,6 +306,37 @@ class AsterPerpsReceiptParser:
         if not parsed.close_trade_received:
             return None
         return Decimal(sum(e.amount for e in parsed.close_trade_received))
+
+    # =============================================================================
+    # Protocol Fee Extraction (VIB-3204)
+    # =============================================================================
+
+    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
+        """Placeholder for Aster Perps protocol-fee extraction (VIB-3204).
+
+        Aster Perps encodes open fee and close fee in on-chain events
+        (``OpenMarketTrade.open_fee`` and ``CloseTradeSuccessful.close_fee``),
+        but translating those raw token amounts to a USD ProtocolFees struct
+        requires token-price context that is not available in the parser.
+        Full extraction is deferred to a follow-up ticket.
+        """
+        return None
+
+    # =============================================================================
+    # Funding Fee USD Extraction (VIB-3520)
+    # =============================================================================
+
+    def extract_funding_fee_usd(self, _receipt: dict[str, Any]) -> None:
+        """No-op stub for funding fee USD extraction (VIB-3520).
+
+        Aster Perps emits ``CloseTradeSuccessful.funding_fee`` as a raw
+        signed token amount (int96), not a USD value. Converting it to USD
+        requires the collateral token's price at close time, which is not
+        available in the parser. This stub suppresses the extraction warning
+        that ResultEnricher emits when processing PERP_CLOSE intents; a
+        follow-up ticket will implement the full conversion.
+        """
+        return None
 
     # -----------------------------------------------------------------
     # Individual event decoders
