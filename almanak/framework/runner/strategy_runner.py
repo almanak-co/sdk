@@ -1900,6 +1900,8 @@ class StrategyRunner:
         failed) or on unexpected exceptions, so run_iteration routes to
         ACCOUNTING_FAILED and alerts operators.
         In non-live modes: logs a warning and continues (best-effort).
+        NotImplementedError from write_outbox_entry is always non-fatal (VIB-3482:
+        gateway backend not yet deployed); handled inline, strategy continues.
         The async drain task is always fire-and-forget — durability is provided by
         the outbox row, not the task. The processor is the sole accounting write path
         (VIB-3478 removed the legacy _try_write_* inline writers).
@@ -1929,17 +1931,26 @@ class StrategyRunner:
             if self._accounting_processor._deployment_id != deployment_id:
                 self._accounting_processor._deployment_id = deployment_id
 
-            outbox_id = await write_outbox_entry(
-                self.state_manager,
-                deployment_id=deployment_id,
-                strategy_id=strategy.strategy_id,
-                cycle_id=cycle_id,
-                ledger_entry_id=ledger_entry_id,
-                intent_type=intent_type_str,
-                wallet_address=wallet_address,
-                position_key=position_key,
-                market_id=market_id,
-            )
+            try:
+                outbox_id = await write_outbox_entry(
+                    self.state_manager,
+                    deployment_id=deployment_id,
+                    strategy_id=strategy.strategy_id,
+                    cycle_id=cycle_id,
+                    ledger_entry_id=ledger_entry_id,
+                    intent_type=intent_type_str,
+                    wallet_address=wallet_address,
+                    position_key=position_key,
+                    market_id=market_id,
+                )
+            except NotImplementedError:
+                # GatewayStateManager.save_outbox_entry not yet deployed (VIB-3482).
+                # Non-fatal: strategy continues normally.
+                logger.warning(
+                    "_write_outbox_and_fire_processor: gateway outbox not yet available for %s (VIB-3482) — drain skipped",
+                    ledger_entry_id,
+                )
+                return
 
             if outbox_id:
                 task = asyncio.create_task(

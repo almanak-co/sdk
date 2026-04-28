@@ -313,6 +313,10 @@ async def write_outbox_entry(
         if asyncio.iscoroutine(result):
             await result
         return outbox_id
+    except NotImplementedError:
+        # Re-raise so _write_outbox_and_fire_processor can distinguish
+        # "backend not yet deployed" (VIB-3482) from a real write failure.
+        raise
     except Exception:
         logger.warning("write_outbox_entry: failed to persist outbox row", exc_info=True)
         return None

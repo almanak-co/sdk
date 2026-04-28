@@ -1,13 +1,15 @@
 """Unit tests for StrategyRunner._write_outbox_and_fire_processor (VIB-3614).
 
-Four behaviors are verified:
+Five behaviors are verified:
 1. write_outbox_entry returns None in non-live mode → warning logged, no asyncio
    task created, _pending_drain_tasks unchanged.
 2. write_outbox_entry returns None in live mode → AccountingPersistenceError
    raised with write_kind == AccountingWriteKind.ACCOUNTING.
-3. Unexpected Exception raised + _is_live_mode() True → AccountingPersistenceError
+3. write_outbox_entry raises NotImplementedError (VIB-3482: backend not deployed)
+   → warning logged, strategy continues, no exception in any mode.
+4. Unexpected Exception raised + _is_live_mode() True → AccountingPersistenceError
    raised with write_kind == AccountingWriteKind.ACCOUNTING.
-4. Unexpected Exception raised + _is_live_mode() False → warning logged, no
+5. Unexpected Exception raised + _is_live_mode() False → warning logged, no
    exception raised, no drain task.
 """
 
@@ -138,6 +140,40 @@ class TestWriteOutboxAndFireProcessor:
                 )
 
         assert exc_info.value.write_kind == AccountingWriteKind.ACCOUNTING
+
+    @pytest.mark.asyncio
+    async def test_not_implemented_error_is_always_non_fatal(self, caplog):
+        """NotImplementedError (VIB-3482: gateway not deployed) → warning, no raise in any mode."""
+        import logging
+
+        runner = _make_runner()
+        strategy = _make_strategy()
+        intent = _make_intent()
+
+        for live_mode in (True, False):
+            caplog.clear()
+            with (
+                patch(
+                    "almanak.framework.accounting.processor.write_outbox_entry",
+                    new=AsyncMock(side_effect=NotImplementedError("save_outbox_entry not deployed")),
+                ),
+                patch(
+                    "almanak.framework.observability.context.get_cycle_id",
+                    return_value="cycle-nie",
+                ),
+                patch.object(runner, "_is_live_mode", return_value=live_mode),
+                caplog.at_level(logging.WARNING),
+            ):
+                # Must not raise regardless of live/non-live
+                await runner._write_outbox_and_fire_processor(
+                    strategy, intent, f"ledger-nie-{live_mode}"
+                )
+
+            assert any(
+                "gateway outbox not yet available" in r.message or "VIB-3482" in r.message
+                for r in caplog.records
+            ), f"expected VIB-3482 warning in live_mode={live_mode}"
+            assert len(runner._pending_drain_tasks) == 0
 
     @pytest.mark.asyncio
     async def test_exception_live_mode_raises_accounting_error(self):

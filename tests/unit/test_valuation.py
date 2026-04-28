@@ -858,8 +858,7 @@ class TestDeployedCapitalUsd:
             f"expected $34000 wallet_total_value_usd but got ${snapshot.wallet_total_value_usd}"
         )
 
-        # deployed_capital_usd must reflect only the $1,000 that was deployed,
-        # NOT the $34,000 total wallet.  This is the VIB-3452 fix.
+        # deployed_capital_usd must reflect only the $1,000 that was deployed.  VIB-3452.
         assert snapshot.deployed_capital_usd == Decimal("1000"), (
             f"expected $1000 deployed_capital_usd but got ${snapshot.deployed_capital_usd}; "
             "VIB-3452 regression: full wallet value is being used as PnL denominator"
