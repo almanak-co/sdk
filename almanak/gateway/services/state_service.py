@@ -1738,10 +1738,19 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     def _pg_outbox_row_to_proto(self, row: Any) -> gateway_pb2.OutboxEntry:
         """Convert a PG asyncpg.Record from accounting_outbox to the proto shape.
 
-        PG schema uses ledger_entry_id as primary key and retry_count / last_error
-        for the attempt counter and error string.  We map these to the SQLite-
-        compatible names (id = ledger_entry_id, attempts = retry_count, error = last_error)
-        so AccountingProcessor.drain_one works identically on both backends.
+        PG schema uses ledger_entry_id as primary key, retry_count/last_error for
+        the attempt counter and error.  We map these to SQLite-compatible names
+        (id = ledger_entry_id, attempts = retry_count, error = last_error) so
+        AccountingProcessor.drain_one works identically on both backends.
+
+        KNOWN SCHEMA GAP: the metrics-database accounting_outbox table (PR #24)
+        does not store cycle_id, wallet_address, position_key, or market_id.
+        The category handlers fall back to _derive_position_key when these are
+        empty, which produces protocol+chain-scoped keys without wallet isolation.
+        This is acceptable in the 1:1 gateway:strategy model (each deployment has
+        one wallet) but loses per-wallet scoping in any future multi-wallet
+        scenario.  The permanent fix is a metrics-database migration to add these
+        four columns; tracked in the Infra ticket filed alongside this PR.
         """
         ledger_id = row["ledger_entry_id"] or ""
         created = row.get("created_at")
@@ -1752,12 +1761,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             id=ledger_id,
             deployment_id=row.get("deployment_id") or "",
             strategy_id=row.get("strategy_id") or "",
-            cycle_id="",
+            cycle_id="",  # not stored in PG schema (see gap note above)
             ledger_entry_id=ledger_id,
             intent_type=row.get("intent_type") or "",
-            wallet_address="",
-            position_key="",
-            market_id="",
+            wallet_address="",  # not stored in PG schema (see gap note above)
+            position_key="",  # not stored in PG schema (see gap note above)
+            market_id="",  # not stored in PG schema (see gap note above)
             status=row.get("status") or "pending",
             attempts=int(row.get("retry_count") or 0),
             error=row.get("last_error") or "",
@@ -2051,6 +2060,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         """
         ledger_entry_id = (request.ledger_entry_id or "").strip()
         if not ledger_entry_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("ledger_entry_id is required")
             return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
 
         await self._ensure_snapshot_pool()
@@ -2063,7 +2074,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 )
                 return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=row is not None)
             except Exception as e:
-                logger.warning("HasAccountingEventsForLedger PG failed: %s", e)
+                # Propagate as gRPC INTERNAL so the client raises instead of receiving
+                # has_events=False.  Returning False on a DB failure would conflate
+                # "no row" with "lookup failed" and risk re-processing an already-written
+                # ledger entry (the client now raises on any gRPC exception).
+                logger.error("HasAccountingEventsForLedger PG failed for ledger_id=%s: %s", ledger_entry_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
                 return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
 
         # SQLite path
@@ -2076,7 +2093,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             result = await warm.has_accounting_events_for_ledger(ledger_entry_id)
             return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=bool(result))
         except Exception as e:
-            logger.warning("HasAccountingEventsForLedger SQLite failed: %s", e)
+            logger.error("HasAccountingEventsForLedger SQLite failed for ledger_id=%s: %s", ledger_entry_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
             return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
 
     async def GetLedgerEntry(
@@ -2152,7 +2171,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     entry.slippage_bps = float(slippage_raw)
                 return gateway_pb2.GetLedgerEntryResponse(found=True, entry=entry)
             except Exception as e:
-                logger.warning("GetLedgerEntry PG failed for id=%s: %s", ledger_entry_id, e)
+                logger.error("GetLedgerEntry PG failed for id=%s: %s", ledger_entry_id, e)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("internal server error")
                 return gateway_pb2.GetLedgerEntryResponse(found=False)
 
         # SQLite path
@@ -2212,5 +2233,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 entry.slippage_bps = float(slippage_raw)
             return gateway_pb2.GetLedgerEntryResponse(found=True, entry=entry)
         except Exception as e:
-            logger.warning("GetLedgerEntry SQLite failed: %s", e)
+            logger.error("GetLedgerEntry SQLite failed: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
             return gateway_pb2.GetLedgerEntryResponse(found=False)

@@ -502,6 +502,14 @@ async def _build_metrics_for_snapshot(
             # baseline reflects the strategy's starting capital rather than zero —
             # a zero baseline makes every future PnL computation return zero.
             initial = snapshot.total_value_usd or snapshot.available_cash_usd
+            if initial == 0:
+                logger.warning(
+                    "Portfolio baseline is zero for %s — both total_value_usd and available_cash_usd "
+                    "are zero on the first snapshot. PnL will be computed relative to zero until "
+                    "a non-zero snapshot is taken. Check that the wallet is funded before the "
+                    "first strategy iteration.",
+                    strategy_id,
+                )
             metrics = PortfolioMetrics(
                 strategy_id=strategy_id,
                 timestamp=snapshot.timestamp,

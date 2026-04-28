@@ -1825,7 +1825,22 @@ class StrategyRunner:
                         if not saved:
                             # Position events are the cost-basis and IL attribution source
                             # for LP/perp. A failed save means close-time PnL enrichment
-                            # will silently produce None. Escalate so operators notice.
+                            # will silently produce None.
+                            # In live mode this is a fatal accounting gap — raise so the
+                            # cycle halts and operators are alerted, symmetric with the
+                            # ledger-write fail-closed behaviour.
+                            if self._is_live_mode():
+                                from ..state.exceptions import AccountingWriteKind
+
+                                raise AccountingPersistenceError(
+                                    write_kind=AccountingWriteKind.ACCOUNTING,
+                                    strategy_id=getattr(strategy, "strategy_id", ""),
+                                    message=(
+                                        f"Position event save failed for {pos_event.event_type} "
+                                        f"{pos_event.position_type} position={pos_event.position_id} "
+                                        "— IL/PnL enrichment lost"
+                                    ),
+                                )
                             logger.error(
                                 "Position event save returned False for %s %s (position=%s) "
                                 "— IL/PnL enrichment for this position will be incomplete",
@@ -1865,6 +1880,9 @@ class StrategyRunner:
                                 await run_attribution_on_close(self.state_manager, pos_event)
                             except Exception as attr_err:  # noqa: BLE001
                                 logger.debug("Attribution failed (non-blocking): %s", attr_err)
+                except AccountingPersistenceError:
+                    # Fail-closed: re-raise so run_iteration routes to ACCOUNTING_FAILED.
+                    raise
                 except Exception as pe:  # noqa: BLE001
                     logger.error(
                         "Failed to emit position event for %s (position PnL enrichment lost): %s",

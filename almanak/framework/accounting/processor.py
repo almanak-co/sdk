@@ -315,8 +315,15 @@ async def write_outbox_entry(
         return outbox_id
     except NotImplementedError:
         # Re-raise so _write_outbox_and_fire_processor can distinguish
-        # "backend not yet deployed" (VIB-3482) from a real write failure.
+        # "backend not yet deployed" from a real write failure.
         raise
-    except Exception:
+    except Exception as _e:
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+
+        if isinstance(_e, AccountingPersistenceError):
+            # Propagate with original error details so the runner can surface
+            # the gRPC error code and server-side message to the operator.
+            # Swallowing here would replace the cause with a generic synthetic message.
+            raise
         logger.warning("write_outbox_entry: failed to persist outbox row", exc_info=True)
         return None

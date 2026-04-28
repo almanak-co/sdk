@@ -768,14 +768,16 @@ class GatewayStateManager:
             logger.warning("update_outbox_entry failed for outbox_id=%s: %s", outbox_id, exc)
 
     async def has_accounting_events_for_ledger(self, ledger_entry_id: str) -> bool:
-        """Return True if accounting_events already has a row for this ledger entry."""
-        try:
-            request = gateway_pb2.HasAccountingEventsForLedgerRequest(ledger_entry_id=ledger_entry_id)
-            response = self._client.state.HasAccountingEventsForLedger(request, timeout=self._timeout)
-            return bool(response.has_events)
-        except Exception as exc:
-            logger.warning("has_accounting_events_for_ledger failed: %s", exc)
-            return False
+        """Return True if accounting_events already has a row for this ledger entry.
+
+        Raises on RPC failure rather than returning False. Returning False on error
+        would conflate "no row" with "lookup failed" and risk re-processing an already
+        written ledger entry (duplicate accounting events). The caller (drain_one) leaves
+        the outbox row in 'processing' status so the retry loop can attempt again.
+        """
+        request = gateway_pb2.HasAccountingEventsForLedgerRequest(ledger_entry_id=ledger_entry_id)
+        response = self._client.state.HasAccountingEventsForLedger(request, timeout=self._timeout)
+        return bool(response.has_events)
 
     async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict | None:
         """Fetch a transaction_ledger row by id via gateway gRPC for AccountingProcessor."""
@@ -795,7 +797,10 @@ class GatewayStateManager:
                 "strategy_id": e.strategy_id,
                 "deployment_id": e.deployment_id,
                 "execution_mode": e.execution_mode,
-                "timestamp": (datetime.fromtimestamp(e.timestamp, tz=UTC).isoformat() if e.timestamp else ""),
+                # Category handlers parse timestamp as ISO string (ts_str.replace(...)).
+                # The proto carries epoch seconds (0 when unset); always return ISO so
+                # handlers never fall through to datetime.now(UTC) and corrupt timestamps.
+                "timestamp": datetime.fromtimestamp(e.timestamp or 0, UTC).isoformat(),
                 "intent_type": e.intent_type,
                 "token_in": e.token_in,
                 "amount_in": e.amount_in,

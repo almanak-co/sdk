@@ -292,3 +292,42 @@ class TestWriteOutboxAndFireProcessor:
             "non-blocking" in record.message or "_write_outbox_and_fire_processor" in record.message
             for record in caplog.records
         )
+
+
+class TestWriteOutboxEntryAPEPassthrough:
+    """write_outbox_entry propagates AccountingPersistenceError with original details."""
+
+    @pytest.mark.asyncio
+    async def test_ape_propagates_from_save_outbox_entry(self):
+        """AccountingPersistenceError raised by save_outbox_entry propagates unchanged.
+
+        Previously the generic `except Exception` swallowed it, replacing
+        the original gRPC error with a synthetic message.
+        """
+        from almanak.framework.accounting.processor import write_outbox_entry
+
+        original_cause = RuntimeError("gRPC UNAVAILABLE: connection refused")
+        original_ape = AccountingPersistenceError(
+            write_kind=AccountingWriteKind.OUTBOX,
+            strategy_id="test-strategy",
+            cause=original_cause,
+        )
+
+        state_manager = MagicMock()
+        state_manager.save_outbox_entry = AsyncMock(side_effect=original_ape)
+
+        with pytest.raises(AccountingPersistenceError) as exc_info:
+            await write_outbox_entry(
+                state_manager,
+                deployment_id="dep-1",
+                strategy_id="test-strategy",
+                cycle_id="cycle-1",
+                ledger_entry_id="ledger-abc",
+                intent_type="SWAP",
+                wallet_address="0xabc",
+            )
+
+        raised = exc_info.value
+        assert raised is original_ape, "must be the exact same exception, not a re-wrapped one"
+        assert raised.write_kind == AccountingWriteKind.OUTBOX
+        assert raised.cause is original_cause
