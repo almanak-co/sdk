@@ -125,6 +125,8 @@ class CompilationResult:
         transactions: List of transaction data
         total_gas_estimate: Sum of all gas estimates
         error: Error message (if failed)
+        is_transient: Whether the failure is retryable orchestration-level I/O
+        retry_after_seconds: Optional retry delay hinted by the failing backend
         warnings: List of warnings encountered during compilation
         intent_id: ID of the intent that was compiled
         compiled_at: Timestamp of compilation
@@ -135,6 +137,8 @@ class CompilationResult:
     transactions: list[TransactionData] = field(default_factory=list)
     total_gas_estimate: int = 0
     error: str | None = None
+    is_transient: bool = False
+    retry_after_seconds: float | None = None
     warnings: list[str] = field(default_factory=list)
     intent_id: str = ""
     compiled_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -147,6 +151,8 @@ class CompilationResult:
             "transactions": [t.to_dict() for t in self.transactions],
             "total_gas_estimate": self.total_gas_estimate,
             "error": self.error,
+            "is_transient": self.is_transient,
+            "retry_after_seconds": self.retry_after_seconds,
             "warnings": self.warnings,
             "intent_id": self.intent_id,
             "compiled_at": self.compiled_at.isoformat(),

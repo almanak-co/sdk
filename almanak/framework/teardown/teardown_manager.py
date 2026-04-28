@@ -793,7 +793,8 @@ class TeardownManager:
                             slippage_used=slippage,
                             actual_slippage=Decimal("0"),
                             error=f"Compilation failed: {compilation_result.error}",
-                            retryable=False,
+                            retryable=compilation_result.is_transient,
+                            retry_after_seconds=compilation_result.retry_after_seconds,
                         )
 
                     if not compilation_result.action_bundle:

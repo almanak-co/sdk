@@ -350,6 +350,65 @@ class TestBridgeWaitVerifySourceTx:
         assert state.failed_step == "step-1"
         assert "Timeout" in (state.error_message or "") or "receipt" in (state.error_message or "")
 
+    @pytest.mark.asyncio
+    async def test_permanent_grpc_code_fast_fails_without_retry(self) -> None:
+        """A permanent gRPC status code propagates immediately on the first attempt.
+
+        Permanent codes (PERMISSION_DENIED, UNAUTHENTICATED, INVALID_ARGUMENT, …)
+        indicate a config/auth defect that will not resolve with more attempts.
+        The loop must re-raise rather than silently consuming the full 60-second
+        retry budget. See PR #1676 review feedback.
+        """
+        import grpc
+
+        runner = _make_runner()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state(intents=[intent])
+        state.current_intent = intent
+
+        class _PermanentRpcError(grpc.RpcError):
+            def code(self) -> grpc.StatusCode:
+                return grpc.StatusCode.PERMISSION_DENIED
+
+        gw = MagicMock()
+        gw.execution.GetTransactionStatus = MagicMock(side_effect=_PermanentRpcError())
+        state.gateway_client = gw
+
+        with patch("almanak.framework.runner.strategy_runner.asyncio.sleep", new=AsyncMock()):
+            result = await runner._bridge_wait_verify_source_tx(state, tx_hash="0xabc", chain="arbitrum", step_num=1)
+        # The permanent error escapes the inner retry loop and is caught by the outer
+        # except-Exception guard, which sets failed_step and returns False immediately.
+        assert result is False
+        assert gw.execution.GetTransactionStatus.call_count == 1
+        assert state.failed_step == "step-1"
+
+    @pytest.mark.asyncio
+    async def test_unknown_grpc_code_retries_all_attempts(self) -> None:
+        """A bare grpc.RpcError with no .code() is treated as transient → all retries used.
+
+        Per PR #1676: when the status code cannot be determined, retry rather
+        than crash to preserve pre-change behaviour for unknown-code edge cases.
+        """
+        import grpc
+
+        runner = _make_runner()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state(intents=[intent])
+        state.current_intent = intent
+
+        class _NoCodeRpcError(grpc.RpcError):
+            pass  # no .code() method
+
+        gw = MagicMock()
+        gw.execution.GetTransactionStatus = MagicMock(side_effect=_NoCodeRpcError("no code"))
+        state.gateway_client = gw
+
+        with patch("almanak.framework.runner.strategy_runner.asyncio.sleep", new=AsyncMock()):
+            result = await runner._bridge_wait_verify_source_tx(state, tx_hash="0xabc", chain="arbitrum", step_num=1)
+        # All 30 attempts retried (not fast-failed)
+        assert gw.execution.GetTransactionStatus.call_count == 30
+        assert result is False
+
 
 # =============================================================================
 # _bridge_wait_poll_completion - extended

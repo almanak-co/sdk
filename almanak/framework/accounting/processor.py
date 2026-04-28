@@ -285,10 +285,10 @@ async def write_outbox_entry(
 ) -> str | None:
     """Write a row to accounting_outbox and return the outbox row id.
 
-    Best-effort: logs and returns None on failure so the execution path is not
-    interrupted.  Durability is provided by the outbox itself — if this write
-    fails, the accounting event is still written by the legacy inline writer
-    (dual-write period) or is lost (after VIB-3477 removes the inline writers).
+    Best-effort: logs and returns None on all failures (including gateway not
+    yet supporting save_outbox_entry — VIB-3482) so the execution path is not
+    interrupted. No legacy _try_write_* fallback exists (removed in VIB-3478),
+    so a None return means the accounting event will be lost until VIB-3482 ships.
     """
     if not state_manager or not ledger_entry_id:
         return None
@@ -313,10 +313,6 @@ async def write_outbox_entry(
         if asyncio.iscoroutine(result):
             await result
         return outbox_id
-    except NotImplementedError:
-        # Re-raise so callers can distinguish "not yet deployed" (VIB-3482)
-        # from a real persistence failure and handle each appropriately.
-        raise
     except Exception:
         logger.warning("write_outbox_entry: failed to persist outbox row", exc_info=True)
         return None

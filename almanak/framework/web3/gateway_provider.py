@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any
 
+import grpc
 from web3 import Web3
 from web3.providers.async_base import AsyncJSONBaseProvider
 from web3.providers.base import JSONBaseProvider
@@ -128,6 +129,8 @@ class GatewayWeb3Provider(JSONBaseProvider):
                     "error": error,  # type: ignore[typeddict-item]
                 }
 
+        except grpc.RpcError:
+            raise
         except Exception as e:
             logger.error("Gateway RPC call failed: %s", e)
             return {
@@ -228,6 +231,8 @@ class AsyncGatewayWeb3Provider(AsyncJSONBaseProvider):
                     "error": error,  # type: ignore[typeddict-item]
                 }
 
+        except grpc.RpcError:
+            raise
         except Exception as e:
             logger.error("Gateway RPC call failed: %s", e)
             return {

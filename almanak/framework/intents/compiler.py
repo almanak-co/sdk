@@ -27,12 +27,19 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import grpc
+
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
 # Note: PolymarketAdapter import is done lazily in __init__ to avoid circular import and allow optional usage
 # Note: MorphoBlueAdapter is imported lazily in _compile_* methods to avoid circular import
 # Note: TokenNotFoundError and get_token_resolver are imported lazily to avoid circular import
 # (compiler -> data/__init__ -> prediction_provider -> connectors/__init__ -> ... -> compiler)
 from ..models.reproduction_bundle import ActionBundle
+from ..utils.grpc_utils import (
+    get_grpc_retry_after_seconds,
+    get_grpc_status_code,
+    is_transient_grpc_error,
+)
 from ..utils.log_formatters import (
     _emojis_enabled,
     format_percentage,
@@ -748,6 +755,25 @@ class IntentCompiler:
                     intent_id=intent.intent_id,
                 )
 
+        except grpc.RpcError as e:
+            status_code = get_grpc_status_code(e)
+            is_transient = is_transient_grpc_error(e)
+            retry_after_seconds = get_grpc_retry_after_seconds(e)
+            log = logger.warning if is_transient else logger.error
+            log(
+                "Failed to compile intent due to gRPC error (code=%s transient=%s retry_after=%s): %s",
+                status_code,
+                is_transient,
+                retry_after_seconds,
+                e,
+            )
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=str(e),
+                intent_id=intent.intent_id,
+                is_transient=is_transient,
+                retry_after_seconds=retry_after_seconds,
+            )
         except Exception as e:
             logger.exception(f"Failed to compile intent: {e}")
             return CompilationResult(

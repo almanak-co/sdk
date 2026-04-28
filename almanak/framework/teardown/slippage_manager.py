@@ -59,6 +59,7 @@ class ExecutionAttempt:
     error: str | None = None
     retry_count: int = 0
     retryable: bool = True
+    retry_after_seconds: float | None = None
 
 
 @dataclass
@@ -363,7 +364,15 @@ class EscalatingSlippageManager:
                     )
 
                 if retry < level_config.retries - 1:
-                    await asyncio.sleep(self.config.retry_delay_seconds)
+                    retry_delay: float = float(self.config.retry_delay_seconds)
+                    if attempt.retry_after_seconds is not None:
+                        retry_delay = max(retry_delay, attempt.retry_after_seconds)
+                        logger.info("Retryable failure requested %.2fs backoff before retry.", retry_delay)
+                    await asyncio.sleep(retry_delay)
+                elif attempt.retry_after_seconds is not None:
+                    retry_delay = max(self.config.retry_delay_seconds, attempt.retry_after_seconds)
+                    logger.info("Retryable failure requested %.2fs backoff before escalation.", retry_delay)
+                    await asyncio.sleep(retry_delay)
 
         # All levels exhausted
         return ExecutionResult(

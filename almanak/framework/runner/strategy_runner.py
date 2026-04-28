@@ -90,6 +90,7 @@ from ..models.operator_card import EventType, OperatorCard, PositionSummary, Sev
 from ..models.stuck_reason import StuckReason
 from ..state.exceptions import AccountingPersistenceError
 from ..state.state_manager import StateManager
+from ..utils.grpc_utils import TRANSIENT_GRPC_CODES, get_grpc_status_code
 from ..utils.log_formatters import (
     _emojis_enabled,
 )
@@ -111,24 +112,6 @@ from .runner_models import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
-
-
-# Transient gRPC status codes that are worth retrying during the
-# ``GetTransactionStatus`` poll loop in ``_bridge_wait_verify_source_tx``.
-# Permanent codes (UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT,
-# UNIMPLEMENTED, ...) indicate a config or auth defect that will not
-# resolve with more attempts, so they must propagate immediately rather
-# than silently consume the full 60-second retry budget. See PR #1676.
-_TRANSIENT_GRPC_CODES: frozenset[grpc.StatusCode] = frozenset(
-    {
-        grpc.StatusCode.UNAVAILABLE,
-        grpc.StatusCode.DEADLINE_EXCEEDED,
-        grpc.StatusCode.RESOURCE_EXHAUSTED,
-        grpc.StatusCode.ABORTED,
-        grpc.StatusCode.INTERNAL,
-        grpc.StatusCode.UNKNOWN,
-    }
-)
 
 
 # =============================================================================
@@ -1913,12 +1896,10 @@ class StrategyRunner:
     ) -> None:
         """Write accounting_outbox row and fire asyncio task to drain it (VIB-3467).
 
-        In live mode: raises AccountingPersistenceError on outbox write failure so
-        run_iteration routes to ACCOUNTING_FAILED and alerts operators.
-        In non-live modes: logs a warning and continues (best-effort).
-        The async drain task is always fire-and-forget — durability is provided by
-        the outbox row, not the task. The processor is the sole accounting write path
-        (VIB-3478 removed the legacy _try_write_* inline writers).
+        Best-effort: logs a warning and continues when write_outbox_entry returns None
+        (covers gateway not yet supporting save_outbox_entry — VIB-3482). No legacy
+        _try_write_* fallback exists (removed in VIB-3478). The async drain task is
+        always fire-and-forget — durability is provided by the outbox row, not the task.
         """
         try:
             from ..accounting.processor import write_outbox_entry
@@ -1965,31 +1946,17 @@ class StrategyRunner:
                 self._pending_drain_tasks.add(task)
                 task.add_done_callback(self._pending_drain_tasks.discard)
             else:
-                # outbox_id is None: write failed. In live mode this is a
-                # data-loss risk; raise so run_iteration routes to
-                # ACCOUNTING_FAILED and alerts operators.
-                if self._is_live_mode():
-                    from ..state.exceptions import AccountingWriteKind
-
-                    raise AccountingPersistenceError(
-                        write_kind=AccountingWriteKind.ACCOUNTING,
-                        strategy_id=getattr(strategy, "strategy_id", ""),
-                        message=f"Outbox write failed for {ledger_entry_id!r} — accounting event will be lost",
-                    )
+                # write_outbox_entry() is best-effort and returns None on all
+                # failures (including gateway not yet supporting save_outbox_entry
+                # — VIB-3482). No legacy _try_write_* fallback exists (removed in
+                # VIB-3478), so accounting for this event will be lost until the
+                # gateway outbox extension ships. Non-fatal: strategy continues.
                 logger.warning(
                     "_write_outbox_and_fire_processor: outbox write returned None for %s — drain skipped",
                     ledger_entry_id,
                 )
         except AccountingPersistenceError:
             raise
-        except NotImplementedError:
-            # GatewayStateManager.save_outbox_entry not yet deployed (VIB-3482).
-            # Non-fatal: strategy continues; accounting coverage provided by the
-            # legacy inline writers during the dual-write transition period.
-            logger.warning(
-                "_write_outbox_and_fire_processor: gateway outbox not yet available for %s (VIB-3482) — drain skipped",
-                ledger_entry_id,
-            )
         except Exception as e:
             if self._is_live_mode():
                 from ..state.exceptions import AccountingWriteKind
@@ -3991,14 +3958,8 @@ class StrategyRunner:
                     # is unknown we retry rather than crash, matching the
                     # pre-change "retry all RpcError" behaviour for the
                     # unknown-code edge case.
-                    exc_code: grpc.StatusCode | None = None
-                    code_fn = getattr(exc, "code", None)
-                    if callable(code_fn):
-                        try:
-                            exc_code = code_fn()
-                        except Exception:  # noqa: BLE001 - defensive: code() should never raise
-                            exc_code = None
-                    if exc_code is not None and exc_code not in _TRANSIENT_GRPC_CODES:
+                    exc_code = get_grpc_status_code(exc)
+                    if exc_code is not None and exc_code not in TRANSIENT_GRPC_CODES:
                         raise
                     logger.debug(
                         "GetTransactionStatus attempt %s failed for %s on %s (code=%s): %s",

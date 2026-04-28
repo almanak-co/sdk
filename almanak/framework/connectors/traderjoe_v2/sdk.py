@@ -818,20 +818,41 @@ class TraderJoeV2SDK:
         logger.debug(f"LBPair.getActiveId: {time.perf_counter() - t0:.2f}s")
 
         wallet = Web3.to_checksum_address(wallet_address)
-        total_bins = bin_range * 2 + 1
+        candidate_bins = list(range(active_id - bin_range, active_id + bin_range + 1))
         balances: dict[int, int] = {}
 
         t0 = time.perf_counter()
-        for delta in range(-bin_range, bin_range + 1):
-            bin_id = active_id + delta
-            try:
-                balance = pair.functions.balanceOf(wallet, bin_id).call()
+        accounts = [wallet] * len(candidate_bins)
+        try:
+            raw_balances = pair.functions.balanceOfBatch(accounts, candidate_bins).call()
+            for bin_id, balance in zip(candidate_bins, raw_balances, strict=True):
                 if balance > 0:
                     balances[bin_id] = balance
-            except Exception:
-                continue
+        except Exception:
+            logger.warning("balanceOfBatch unavailable on %s, falling back to per-bin scan", pool_address)
+            failed_bins = 0
+            for bin_id in candidate_bins:
+                try:
+                    balance = pair.functions.balanceOf(wallet, bin_id).call()
+                    if balance > 0:
+                        balances[bin_id] = balance
+                except Exception:
+                    failed_bins += 1
+                    continue
+            if failed_bins == len(candidate_bins) and not balances:
+                logger.error(
+                    "All per-bin balanceOf calls failed for %s (wallet=%s, bins=%d) — balance unknown",
+                    pool_address,
+                    wallet,
+                    failed_bins,
+                )
+            elif failed_bins:
+                logger.debug("Per-bin fallback: %d/%d bins failed", failed_bins, len(candidate_bins))
         logger.debug(
-            f"Position balance scan ({total_bins} bins, {len(balances)} with balance): {time.perf_counter() - t0:.2f}s"
+            "Position balance batch scan (%s bins, %s with balance): %.2fs",
+            len(candidate_bins),
+            len(balances),
+            time.perf_counter() - t0,
         )
 
         return balances
@@ -857,35 +878,41 @@ class TraderJoeV2SDK:
         """
         pair = self.get_pair_contract(pool_address)
         wallet = Web3.to_checksum_address(wallet_address)
+        candidate_bins = [int(raw_bin_id) for raw_bin_id in bin_ids]
         balances: dict[int, int] = {}
 
         t0 = time.perf_counter()
-        failed_queries = 0
-        for raw_bin_id in bin_ids:
-            bin_id = int(raw_bin_id)
-            try:
-                balance = pair.functions.balanceOf(wallet, bin_id).call()
+        if not candidate_bins:
+            return balances
+        accounts = [wallet] * len(candidate_bins)
+        try:
+            raw_balances = pair.functions.balanceOfBatch(accounts, candidate_bins).call()
+            for bin_id, balance in zip(candidate_bins, raw_balances, strict=True):
                 if balance > 0:
                     balances[bin_id] = balance
-            except Exception as exc:
-                # Log RPC/transport failures so they are not silently treated
-                # as "no position" by the caller. We keep the loop going
-                # because a single bin failure should not abort a teardown.
-                failed_queries += 1
-                logger.debug("balanceOf failed for bin_id=%s: %s", bin_id, exc)
-                continue
-        if failed_queries:
-            logger.warning(
-                "Targeted bin balance scan had %s/%s RPC failures (pool=%s wallet=%s); "
-                "empty balances may not mean 'no position'",
-                failed_queries,
-                len(bin_ids),
-                pool_address,
-                wallet_address,
-            )
+        except Exception:
+            logger.warning("balanceOfBatch unavailable on %s, falling back to per-bin scan", pool_address)
+            failed_bins = 0
+            for bin_id in candidate_bins:
+                try:
+                    balance = pair.functions.balanceOf(wallet, bin_id).call()
+                    if balance > 0:
+                        balances[bin_id] = balance
+                except Exception:
+                    failed_bins += 1
+                    continue
+            if failed_bins == len(candidate_bins) and not balances:
+                logger.error(
+                    "All per-bin balanceOf calls failed for %s (wallet=%s, bins=%d) — balance unknown",
+                    pool_address,
+                    wallet,
+                    failed_bins,
+                )
+            elif failed_bins:
+                logger.debug("Per-bin fallback: %d/%d bins failed", failed_bins, len(candidate_bins))
         logger.debug(
-            "Position balance targeted scan (%s bins, %s with balance): %.2fs",
-            len(bin_ids),
+            "Position balance targeted batch scan (%s bins, %s with balance): %.2fs",
+            len(candidate_bins),
             len(balances),
             time.perf_counter() - t0,
         )
