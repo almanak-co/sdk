@@ -308,7 +308,15 @@ class PositionHealthProvider:
         try:
             from almanak.framework.connectors.morpho_blue.sdk import MorphoBlueSDK
 
-            sdk = MorphoBlueSDK(rpc_url=self._rpc_url, chain=self._chain)
+            if self._gateway_client is not None and not self._gateway_client.is_connected:
+                raise ValueError(
+                    f"GatewayClient is not connected; cannot fetch Morpho Blue health for market {market_id[:10]}..."
+                )
+            sdk = MorphoBlueSDK(
+                rpc_url=self._rpc_url,
+                chain=self._chain,
+                gateway_client=self._gateway_client,
+            )
             position = sdk.get_position(market_id, user_address)
             market_params = sdk.get_market_params(market_id)
 
@@ -386,7 +394,14 @@ class PositionHealthProvider:
         try:
             from web3 import Web3
 
-            w3 = Web3(Web3.HTTPProvider(self._rpc_url))
+            if self._gateway_client is not None:
+                from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+                if not self._gateway_client.is_connected:
+                    raise ValueError(f"GatewayClient is not connected; cannot fetch Aave V3 health on {self._chain}.")
+                w3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self._chain))
+            else:
+                w3 = Web3(Web3.HTTPProvider(self._rpc_url))
 
             # Aave V3 Pool addresses by chain
             aave_pool_addresses = {
@@ -577,7 +592,16 @@ class PositionHealthProvider:
                     f"Available: {sorted(chain_markets.keys())}"
                 )
 
-            w3 = Web3(Web3.HTTPProvider(self._rpc_url))
+            if self._gateway_client is not None:
+                from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+                if not self._gateway_client.is_connected:
+                    raise ValueError(
+                        f"GatewayClient is not connected; cannot fetch Compound V3 health on {self._chain}."
+                    )
+                w3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self._chain))
+            else:
+                w3 = Web3(Web3.HTTPProvider(self._rpc_url))
 
             # Minimal Comet ABI for HF computation.
             abi = [

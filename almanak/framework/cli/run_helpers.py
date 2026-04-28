@@ -1694,6 +1694,11 @@ def _build_orchestrator_and_providers(
             # indicators=False: wire price/balance directly without OHLCV or indicator calculators
             _wire_core_providers(strategy_instance, price_oracle, balance_provider)
 
+        # MarketSnapshot needs the gateway client to do gateway-routed eth_calls
+        # (e.g. position_health). Wire it unconditionally; methods that need it
+        # check for None at call time.
+        strategy_instance._gateway_client = gateway_client
+
         rate_monitor_wired = False
         if requirements.lending_rates:
             try:
@@ -1832,6 +1837,11 @@ def _build_orchestrator_and_providers(
         # entirely (including Polygon runs) to avoid irrelevant warnings.
         if hasattr(strategy_instance, "_prediction_provider"):
             _init_prediction_provider(strategy_instance, chain=runtime_config.chain, gateway_client=gateway_client)
+
+        # MarketSnapshot needs the gateway client to do gateway-routed eth_calls
+        # (e.g. position_health). Wire it unconditionally; methods that need it
+        # check for None at call time.
+        strategy_instance._gateway_client = gateway_client
 
         rate_monitor_wired = False
         if requirements.lending_rates:

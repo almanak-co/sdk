@@ -205,6 +205,7 @@ class MarketSnapshot:
         multi_dex_service: Any | None = None,
         rate_monitor: Any | None = None,
         funding_rate_provider: Any | None = None,
+        gateway_client: Any | None = None,
         default_timeframe: str | None = None,
     ) -> None:
         """Initialize market snapshot.
@@ -222,6 +223,8 @@ class MarketSnapshot:
             multi_dex_service: MultiDexService for cross-DEX price comparison
             rate_monitor: RateMonitor instance for lending rate queries
             funding_rate_provider: FundingRateProvider for perpetual funding rate queries
+            gateway_client: Connected GatewayClient for gateway-routed on-chain reads
+                (used by position_health and other methods that need eth_call).
             default_timeframe: Default OHLCV timeframe from strategy config (e.g., "15m", "1h").
                 Used as the default for all indicator methods (rsi, macd, sma, etc.)
                 when no explicit timeframe is passed. Falls back to DEFAULT_TIMEFRAME if not set.
@@ -239,6 +242,7 @@ class MarketSnapshot:
         self._multi_dex_service = multi_dex_service
         self._rate_monitor = rate_monitor
         self._funding_rate_provider = funding_rate_provider
+        self._gateway_client = gateway_client
 
         # Cache for fetched data
         self._price_cache: dict[str, PriceData] = {}
@@ -258,6 +262,10 @@ class MarketSnapshot:
 
         # Lending rate cache (populated by lending_rate() or set_lending_rate())
         self._lending_rate_cache: dict[str, Any] = {}
+
+        # Position health cache (populated by position_health() or set_position_health())
+        # Keyed by (protocol, market_id) — per-iteration memo, not a TTL cache.
+        self._position_health_cache: dict[tuple[str, str], Any] = {}
 
         # Pre-populated data (can be set directly)
         self._prices: dict[str, Decimal] = {}
@@ -1716,6 +1724,82 @@ class MarketSnapshot:
         cache_key = self._lending_cache_key(protocol, token, side)
         self._lending_rate_cache[cache_key] = rate
 
+    def position_health(
+        self,
+        protocol: str,
+        market_id: str,
+        rpc_url: str | None = None,
+        collateral_price_usd: Decimal | None = None,
+        debt_price_usd: Decimal | None = None,
+    ) -> Any:
+        """Get health factor for a lending position.
+
+        Reads on-chain position data and computes the health factor for
+        Aave V3, Morpho Blue, or Compound V3 positions. Uses gateway-routed
+        eth_calls when a gateway_client was wired into this MarketSnapshot.
+
+        Args:
+            protocol: "aave_v3", "morpho_blue", or "compound_v3"
+            market_id: Protocol-specific market identifier. For Aave V3 this is
+                informational (one pool per chain). For Morpho Blue this is the
+                bytes32 market id. For Compound V3 this is the Comet market key
+                (e.g. "usdc", "weth").
+            rpc_url: Optional explicit RPC URL. Strategies should leave this None
+                so the gateway-routed path is used. Paper-trading code may pass
+                a local anvil URL.
+            collateral_price_usd: Optional override for collateral price (Morpho
+                cross-asset markets require this).
+            debt_price_usd: Optional override for debt-token price (same).
+
+        Returns:
+            PositionHealth with .health_factor (Decimal), .collateral_value_usd,
+            .debt_value_usd, .max_borrow_usd, .protocol, .market_id.
+
+        Raises:
+            ValueError: If health data cannot be retrieved.
+        """
+        cache_key = (protocol, market_id)
+        if cache_key in self._position_health_cache:
+            return self._position_health_cache[cache_key]
+
+        from almanak.framework.data.market_snapshot import HealthUnavailableError
+        from almanak.framework.data.position_health import PositionHealthProvider
+
+        provider = PositionHealthProvider(
+            rpc_url=rpc_url or "",
+            chain=self._chain,
+            price_oracle=self._price_oracle,
+            gateway_client=self._gateway_client,
+        )
+        try:
+            health = provider.get_health(
+                protocol=protocol,
+                market_id=market_id,
+                user_address=self._wallet_address,
+                collateral_price_usd=collateral_price_usd,
+                debt_price_usd=debt_price_usd,
+            )
+        except HealthUnavailableError:
+            raise
+        except Exception as e:
+            raise HealthUnavailableError(f"Position health unavailable: {e}") from e
+
+        self._position_health_cache[cache_key] = health
+        return health
+
+    def set_position_health(self, protocol: str, market_id: str, health: Any) -> None:
+        """Pre-populate position health for tests and backtesting.
+
+        Useful where you want to inject a known PositionHealth without needing
+        a live gateway_client. Mirrors set_lending_rate.
+
+        Args:
+            protocol: Protocol identifier (e.g., "aave_v3")
+            market_id: Protocol-specific market identifier
+            health: PositionHealth dataclass instance
+        """
+        self._position_health_cache[(protocol, market_id)] = health
+
     def funding_rate(self, venue: str, market: str) -> "FundingRate":
         """Get the current funding rate for a perpetual market on a specific venue.
 
@@ -1990,6 +2074,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._multi_dex_service: Any | None = None
         self._rate_monitor: Any | None = None
         self._funding_rate_provider: Any | None = None
+        self._gateway_client: Any | None = None
 
         # Multi-chain providers (set by set_multi_chain_providers)
         self._multi_chain_price_oracle: MultiChainPriceOracle | None = None
@@ -2490,6 +2575,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             multi_dex_service=self._multi_dex_service,
             rate_monitor=self._rate_monitor,
             funding_rate_provider=self._funding_rate_provider,
+            gateway_client=self._gateway_client,
             default_timeframe=self.get_config("data_granularity"),
         )
 
