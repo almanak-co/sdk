@@ -2,6 +2,7 @@
 
 Covers:
 - Path resolution: sidecar lands in ~/.almanak/accounting/<strategy_id>.jsonl
+- ALMANAK_ACCOUNTING_DIR env var overrides the sidecar directory path
 - Parent directories are created when they don't exist
 - Appended line is valid JSON with the correct schema fields
 - Two successive appends both appear in the file (append, not overwrite)
@@ -130,6 +131,28 @@ def test_sidecar_path_uses_strategy_id_as_stem() -> None:
     path = _sidecar_path("arb_lp_v2")
     assert path.stem == "arb_lp_v2"
     assert path.suffix == ".jsonl"
+
+
+def test_almanak_accounting_dir_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ALMANAK_ACCOUNTING_DIR env var directs sidecar files to a custom directory."""
+    custom_dir = tmp_path / "custom_accounting"
+    monkeypatch.setenv("ALMANAK_ACCOUNTING_DIR", str(custom_dir))
+
+    resolved = _sidecar_dir()
+    assert resolved == custom_dir
+
+    # Verify the writer actually uses the override end-to-end
+    writer = AccountingSidecarWriter()
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    writer.append(
+        strategy_id="test_strat",
+        intent=_swap_intent(),
+        result=_execution_result(),
+        chain="arbitrum",
+    )
+    assert (custom_dir / "test_strat.jsonl").exists()
 
 
 # ---------------------------------------------------------------------------
