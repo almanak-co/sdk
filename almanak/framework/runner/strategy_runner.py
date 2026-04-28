@@ -1965,24 +1965,39 @@ class StrategyRunner:
                 self._pending_drain_tasks.add(task)
                 task.add_done_callback(self._pending_drain_tasks.discard)
             else:
-                # outbox_id is None — write_outbox_entry returned without persisting.
-                # In live mode this is a data-loss event; raise AccountingPersistenceError
-                # so run_iteration routes to ACCOUNTING_FAILED and alerts operators.
+                # outbox_id is None: write failed. In live mode this is a
+                # data-loss risk; raise so run_iteration routes to
+                # ACCOUNTING_FAILED and alerts operators.
                 if self._is_live_mode():
+                    from ..state.exceptions import AccountingWriteKind
+
                     raise AccountingPersistenceError(
-                        f"write_outbox_entry returned None for ledger_entry_id={ledger_entry_id!r} "
-                        f"— accounting event will be lost"
+                        write_kind=AccountingWriteKind.ACCOUNTING,
+                        strategy_id=getattr(strategy, "strategy_id", ""),
+                        message=f"Outbox write failed for {ledger_entry_id!r} — accounting event will be lost",
                     )
                 logger.warning(
-                    "_write_outbox_and_fire_processor: outbox write returned None for %s (non-live — continuing)",
+                    "_write_outbox_and_fire_processor: outbox write returned None for %s — drain skipped",
                     ledger_entry_id,
                 )
         except AccountingPersistenceError:
             raise
+        except NotImplementedError:
+            # GatewayStateManager.save_outbox_entry not yet deployed (VIB-3482).
+            # Non-fatal: strategy continues; accounting coverage provided by the
+            # legacy inline writers during the dual-write transition period.
+            logger.warning(
+                "_write_outbox_and_fire_processor: gateway outbox not yet available for %s (VIB-3482) — drain skipped",
+                ledger_entry_id,
+            )
         except Exception:
             if self._is_live_mode():
+                from ..state.exceptions import AccountingWriteKind
+
                 raise AccountingPersistenceError(
-                    f"_write_outbox_and_fire_processor failed for {ledger_entry_id!r}"
+                    write_kind=AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(strategy, "strategy_id", ""),
+                    message=f"_write_outbox_and_fire_processor failed for {ledger_entry_id!r}",
                 ) from None
             logger.warning("_write_outbox_and_fire_processor failed (non-blocking)", exc_info=True)
 
@@ -2037,6 +2052,31 @@ class StrategyRunner:
                     else ""
                 )
                 return position_key, ""
+
+            # Non-Pendle LP (LP_OPEN / LP_CLOSE / LP_COLLECT_FEES)
+            if t in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"} and "pendle" not in protocol:
+                from ..accounting.lp_accounting import _get_pool_address as _lp_pool_addr
+
+                pool_address = _lp_pool_addr(intent)
+                if pool_address:
+                    position_key = f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}"
+                return position_key, pool_address
+
+            # Perp (PERP_OPEN / PERP_CLOSE / PERP_INCREASE / PERP_DECREASE / PERP_LIQUIDATE)
+            if t in {"PERP_OPEN", "PERP_CLOSE", "PERP_INCREASE", "PERP_DECREASE", "PERP_LIQUIDATE"}:
+                market = str(getattr(intent, "market", "") or "").lower().replace(" ", "_")
+                position_key = f"perp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{market}" if market else ""
+                return position_key, market
+
+            # Vault (VAULT_DEPOSIT / VAULT_WITHDRAW / VAULT_REDEEM / VAULT_HARVEST / VAULT_REALLOCATE)
+            if t in {"VAULT_DEPOSIT", "VAULT_WITHDRAW", "VAULT_REDEEM", "VAULT_HARVEST", "VAULT_REALLOCATE"}:
+                vault_address = (getattr(intent, "vault_address", "") or "").lower()
+                position_key = (
+                    f"vault:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}"
+                    if vault_address
+                    else ""
+                )
+                return position_key, vault_address
 
         except Exception:
             logger.debug("_compute_outbox_position_key failed", exc_info=True)

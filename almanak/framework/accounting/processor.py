@@ -313,6 +313,10 @@ async def write_outbox_entry(
         if asyncio.iscoroutine(result):
             await result
         return outbox_id
+    except NotImplementedError:
+        # Re-raise so callers can distinguish "not yet deployed" (VIB-3482)
+        # from a real persistence failure and handle each appropriately.
+        raise
     except Exception:
         logger.warning("write_outbox_entry: failed to persist outbox row", exc_info=True)
         return None
