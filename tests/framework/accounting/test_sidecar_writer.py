@@ -7,21 +7,23 @@ Covers:
 - Two successive appends both appear in the file (append, not overwrite)
 - Failures (e.g. unwritable directory) are swallowed and logged at WARNING
 - None / missing fields on intent/result produce null values, not crashes
+- _sidecar_dir() resolution: env override, HOME=/ fallback, normal HOME
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.accounting.sidecar import AccountingSidecarWriter, _sidecar_path
+from almanak.framework.accounting.sidecar import AccountingSidecarWriter, _sidecar_dir, _sidecar_path
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +85,39 @@ def _execution_result(
 
 
 # ---------------------------------------------------------------------------
-# Path resolution
+# _sidecar_dir() resolution: three behaviors
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_dir_respects_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """When ALMANAK_ACCOUNTING_DIR is set, _sidecar_dir() returns that path."""
+    monkeypatch.setenv("ALMANAK_ACCOUNTING_DIR", str(tmp_path))
+    assert _sidecar_dir() == tmp_path
+
+
+def test_sidecar_dir_fallback_when_home_is_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When HOME resolves to '/', _sidecar_dir() falls back to <tempdir>/.almanak/accounting."""
+    monkeypatch.delenv("ALMANAK_ACCOUNTING_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/")))
+    result = _sidecar_dir()
+    assert result == Path(tempfile.gettempdir()) / ".almanak" / "accounting"
+
+
+def test_sidecar_dir_normal_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When HOME is a normal path, _sidecar_dir() returns ~/.almanak/accounting."""
+    monkeypatch.delenv("ALMANAK_ACCOUNTING_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert _sidecar_dir() == Path("/home/user") / ".almanak" / "accounting"
+
+
+def test_sidecar_path_uses_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """When ALMANAK_ACCOUNTING_DIR is set, _sidecar_path() appends '<id>.jsonl'."""
+    monkeypatch.setenv("ALMANAK_ACCOUNTING_DIR", str(tmp_path))
+    assert _sidecar_path("my_strategy") == tmp_path / "my_strategy.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Path resolution (normal HOME)
 # ---------------------------------------------------------------------------
 
 
@@ -105,7 +139,7 @@ def test_sidecar_path_uses_strategy_id_as_stem() -> None:
 
 def test_append_creates_file_with_valid_json(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
             strategy_id="strat1",
             intent=_swap_intent(),
@@ -133,7 +167,7 @@ def test_append_creates_file_with_valid_json(tmp_path: Path) -> None:
 
 def test_append_two_lines_both_appear(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
             strategy_id="strat2",
             intent=_swap_intent(),
@@ -157,7 +191,7 @@ def test_append_two_lines_both_appear(tmp_path: Path) -> None:
 def test_append_creates_parent_dirs_if_missing(tmp_path: Path) -> None:
     deep_dir = tmp_path / "a" / "b" / "c"
     writer = AccountingSidecarWriter()
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", deep_dir):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=deep_dir):
         writer.append(
             strategy_id="s",
             intent=_swap_intent(),
@@ -175,7 +209,7 @@ def test_append_creates_parent_dirs_if_missing(tmp_path: Path) -> None:
 
 def test_append_null_fields_when_result_is_none(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
             strategy_id="s_null",
             intent=_swap_intent(),
@@ -195,7 +229,7 @@ def test_append_null_fields_when_result_is_none(tmp_path: Path) -> None:
 def test_append_no_swap_amounts_uses_intent_fallback(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
     result = _execution_result(with_swap_amounts=False)
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
             strategy_id="s_fallback",
             intent=_swap_intent(from_token="DAI", amount_usd=Decimal("50")),
@@ -211,7 +245,7 @@ def test_append_no_swap_amounts_uses_intent_fallback(tmp_path: Path) -> None:
 
 def test_append_position_id_populated(tmp_path: Path) -> None:
     writer = AccountingSidecarWriter()
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
             strategy_id="s_pos",
             intent=_swap_intent(),
@@ -228,12 +262,10 @@ def test_append_position_id_populated(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_append_swallows_io_error_and_logs_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_append_swallows_io_error_and_logs_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     writer = AccountingSidecarWriter()
     # Patch mkdir to raise so we trigger an I/O error
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         with patch("pathlib.Path.mkdir", side_effect=OSError("disk full")):
             with caplog.at_level(logging.WARNING, logger="almanak.framework.accounting.sidecar"):
                 # Must not raise
@@ -251,7 +283,7 @@ def test_append_timestamp_is_iso8601(tmp_path: Path) -> None:
     from datetime import datetime
 
     writer = AccountingSidecarWriter()
-    with patch("almanak.framework.accounting.sidecar._SIDECAR_DIR", tmp_path):
+    with patch("almanak.framework.accounting.sidecar._sidecar_dir", return_value=tmp_path):
         writer.append(
             strategy_id="s_ts",
             intent=_swap_intent(),

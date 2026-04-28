@@ -270,15 +270,15 @@ class TraderJoeV2ReceiptParser:
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(gas_used)
 
-            if swap_result and swap_result.success:
-                logger.info(
-                    f"🔍 Parsed TraderJoe V2 swap: {swap_result.amount_in:,} → {swap_result.amount_out:,}, "
-                    f"tx={tx_fmt}, {gas_fmt}"
-                )
-            elif liquidity_result and liquidity_result.success:
+            if liquidity_result and liquidity_result.success:
                 action = "ADD" if liquidity_result.is_add else "REMOVE"
                 logger.info(
                     f"🔍 Parsed TraderJoe V2 {action} liquidity: bins={len(liquidity_result.bin_ids)}, "
+                    f"tx={tx_fmt}, {gas_fmt}"
+                )
+            elif swap_result and swap_result.success:
+                logger.info(
+                    f"🔍 Parsed TraderJoe V2 swap: {swap_result.amount_in:,} → {swap_result.amount_out:,}, "
                     f"tx={tx_fmt}, {gas_fmt}"
                 )
             else:
@@ -495,20 +495,26 @@ class TraderJoeV2ReceiptParser:
 
         if deposit_events:
             event = deposit_events[0]
+            raw_data = event.data.get("raw_data", "")
+            bin_ids = self._parse_bin_ids_from_data(raw_data) or [] if raw_data else []
             return ParsedLiquidityResult(
                 success=True,
                 is_add=True,
                 pool_address=event.contract_address,
+                bin_ids=bin_ids,
                 gas_used=gas_used,
                 block_number=block_number,
             )
 
         if withdraw_events:
             event = withdraw_events[0]
+            raw_data = event.data.get("raw_data", "")
+            bin_ids = self._parse_bin_ids_from_data(raw_data) or [] if raw_data else []
             return ParsedLiquidityResult(
                 success=True,
                 is_add=False,
                 pool_address=event.contract_address,
+                bin_ids=bin_ids,
                 gas_used=gas_used,
                 block_number=block_number,
             )

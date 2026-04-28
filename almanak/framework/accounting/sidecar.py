@@ -26,19 +26,43 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ~/.almanak/accounting/<strategy_id>.jsonl
-_SIDECAR_DIR = Path.home() / ".almanak" / "accounting"
+
+def _sidecar_dir() -> Path:
+    """Return the directory used to store per-strategy sidecar files.
+
+    Resolution order:
+
+    1. ``ALMANAK_ACCOUNTING_DIR`` env var — explicit override, useful in containers.
+    2. ``~/.almanak/accounting`` — default for interactive / local use.
+    3. ``<tempdir>/.almanak/accounting`` — fallback when HOME is unset (``/``), as
+       happens in some container runtimes; uses :func:`tempfile.gettempdir` rather
+       than a hardcoded ``/tmp`` so the OS-appropriate temp directory is used.
+
+    Callers must still call ``path.parent.mkdir(parents=True, exist_ok=True)`` before
+    writing; this function only returns the *intended* directory path.
+    """
+    # Explicit override wins (useful in containers where HOME may be /).
+    override = os.environ.get("ALMANAK_ACCOUNTING_DIR")
+    if override:
+        return Path(override)
+    home = Path.home()
+    # Path.home() returns "/" when no HOME is set — not a writable user dir.
+    if home == Path("/"):
+        return Path(tempfile.gettempdir()) / ".almanak" / "accounting"
+    return home / ".almanak" / "accounting"
 
 
 def _sidecar_path(strategy_id: str) -> Path:
     """Return the absolute path for *strategy_id*'s sidecar file."""
-    return _SIDECAR_DIR / f"{strategy_id}.jsonl"
+    return _sidecar_dir() / f"{strategy_id}.jsonl"
 
 
 def _or_none(value: Any) -> str | None:
