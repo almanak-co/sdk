@@ -40,6 +40,41 @@ def format_pnl(value: Decimal) -> str:
         return f"-${abs(value):,.2f}"
 
 
+def pnl_color(value: Decimal, is_stale: bool = False) -> str:
+    """Return a CSS hex color for a PnL value.
+
+    Stale/no-data state (is_stale=True) always returns grey regardless of value.
+    Zero maps to grey so it is visually distinct from a genuine profit.
+    """
+    if is_stale or value == 0:
+        return "#9e9e9e"
+    return "#00c853" if value > 0 else "#f44336"
+
+
+def format_pnl_display(value: Decimal, is_stale: bool = False) -> str:
+    """Return display string for PnL — '--' when stale, otherwise formatted value."""
+    if is_stale:
+        return "--"
+    return format_pnl(value)
+
+
+def maybe_auto_select_strategy(strategies: list) -> None:
+    """Auto-select the sole RUNNING strategy if no strategy_id query param is set.
+
+    Imported by detail, timeline, config, and teardown pages to avoid duplicating
+    the same three-line pattern across four files.  Mutates st.query_params and
+    calls st.rerun() when it fires — the calling page's execution is aborted.
+    """
+    import streamlit as st
+
+    if st.query_params.get("strategy_id"):
+        return
+    running = [s for s in strategies if s.status == StrategyStatus.RUNNING]
+    if len(running) == 1:
+        st.query_params["strategy_id"] = running[0].id
+        st.rerun()
+
+
 def get_status_icon(status: StrategyStatus) -> str:
     """Get icon for strategy status."""
     icons = {

@@ -20,7 +20,7 @@ import streamlit as st
 
 from almanak.framework.dashboard.config import API_BASE_URL, API_TIMEOUT, check_system_health
 from almanak.framework.dashboard.models import Strategy
-from almanak.framework.dashboard.utils import format_usd
+from almanak.framework.dashboard.utils import format_usd, maybe_auto_select_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -837,6 +837,7 @@ def page(strategies: list[Strategy]) -> None:
     strategy_id = st.query_params.get("strategy_id")
 
     if not strategy_id:
+        maybe_auto_select_strategy(strategies)
         st.info("👈 Please select a strategy from the sidebar to initiate teardown.")
         st.markdown("### Or select a strategy here:")
         if strategies:

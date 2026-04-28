@@ -61,6 +61,8 @@ def _drive_no_strategy_id() -> None:
     if "strategy_id" in st.query_params:
         del st.query_params["strategy_id"]
 
+    # Two RUNNING strategies: auto-select only fires when exactly one is running,
+    # so the empty-state selectbox still renders here.
     strategies = [
         Strategy(
             id="strat-abc-1234567890",
@@ -74,7 +76,7 @@ def _drive_no_strategy_id() -> None:
         Strategy(
             id="strat-def-0987654321",
             name="Beta",
-            status=StrategyStatus.PAUSED,
+            status=StrategyStatus.RUNNING,
             pnl_24h_usd=Decimal("0"),
             total_value_usd=Decimal("2000"),
             chain="base",

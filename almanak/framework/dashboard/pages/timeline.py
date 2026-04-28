@@ -17,6 +17,7 @@ from almanak.framework.dashboard.utils import (
     get_block_explorer_url,
     get_event_type_category,
     get_timeline_event_icon,
+    maybe_auto_select_strategy,
 )
 
 # from almanak.framework.dashboard.mock_data import generate_extended_timeline_events
@@ -32,6 +33,7 @@ def page(strategies: list[Strategy]) -> None:
     strategy_id = st.query_params.get("strategy_id")
 
     if not strategy_id:
+        maybe_auto_select_strategy(strategies)
         st.info("👈 Please select a strategy from the sidebar to view its timeline.")
         st.markdown("### Or select a strategy here:")
         if strategies:

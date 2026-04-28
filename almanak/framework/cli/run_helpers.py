@@ -463,6 +463,75 @@ def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
         return ResumeInfo(is_resume=False, version=None, state_keys=[])
 
 
+# Tables with a strategy_id column cleared by --fresh.
+_FRESH_STRATEGY_ID_TABLES = [
+    "strategy_state",
+    "teardown_requests",
+    "portfolio_snapshots",
+    "portfolio_metrics",
+    "transaction_ledger",
+    "accounting_events",
+    "accounting_outbox",
+]
+
+
+def _fresh_clear_state(conn: Any, strategy_id: str, is_anvil: bool) -> int:
+    """Delete all state rows for a strategy (or all strategies on Anvil).
+
+    position_events is keyed only by deployment_id.  On mainnet we first collect
+    the relevant deployment_ids from accounting_events (which carries both keys),
+    then delete in a single IN-clause query for efficiency.
+
+    Returns the total number of rows deleted.
+    """
+    import sqlite3
+
+    total = 0
+    with conn:
+        if is_anvil:
+            for table in [*_FRESH_STRATEGY_ID_TABLES, "position_events"]:
+                try:
+                    total += conn.execute(f"DELETE FROM {table}").rowcount  # noqa: S608
+                except sqlite3.OperationalError:
+                    pass
+        else:
+            # Collect deployment_ids from both accounting_events and accounting_outbox
+            # before wiping either table.  accounting_outbox rows that haven't been
+            # drained yet won't appear in accounting_events, so querying only the
+            # latter would miss the associated position_events rows.
+            dep_id_set: set[str] = set()
+            for table in ("accounting_events", "accounting_outbox"):
+                try:
+                    rows = conn.execute(
+                        f"SELECT DISTINCT deployment_id FROM {table} WHERE strategy_id = ?",  # noqa: S608
+                        (strategy_id,),
+                    ).fetchall()
+                    dep_id_set.update(r[0] for r in rows if r[0])
+                except sqlite3.OperationalError:
+                    pass
+            dep_ids = list(dep_id_set)
+
+            for table in _FRESH_STRATEGY_ID_TABLES:
+                try:
+                    total += conn.execute(
+                        f"DELETE FROM {table} WHERE strategy_id = ?",  # noqa: S608
+                        (strategy_id,),
+                    ).rowcount
+                except sqlite3.OperationalError:
+                    pass
+
+            if dep_ids:
+                placeholders = ",".join("?" * len(dep_ids))
+                try:
+                    total += conn.execute(
+                        f"DELETE FROM position_events WHERE deployment_id IN ({placeholders})",  # noqa: S608
+                        dep_ids,
+                    ).rowcount
+                except sqlite3.OperationalError:
+                    pass
+    return total
+
+
 def _resolve_identity(
     *,
     strategy_config: dict[str, Any],
@@ -564,44 +633,19 @@ def _resolve_identity(
                 import sqlite3
 
                 is_anvil = gateway_network == "anvil"
-                with sqlite3.connect(str(state_db_path)) as conn:
-                    if is_anvil:
-                        # Clear ALL state on Anvil — previous strategy runs on
-                        # different chains leave state that can contaminate the gateway
-                        cursor = conn.execute("DELETE FROM strategy_state")
-                    else:
-                        cursor = conn.execute(
-                            "DELETE FROM strategy_state WHERE strategy_id = ?",
-                            (strategy_id,),
-                        )
-                    deleted = cursor.rowcount
-                    # Also clear teardown requests
-                    try:
-                        if is_anvil:
-                            teardown_cursor = conn.execute("DELETE FROM teardown_requests")
-                        else:
-                            teardown_cursor = conn.execute(
-                                "DELETE FROM teardown_requests WHERE strategy_id = ?",
-                                (strategy_id,),
-                            )
-                        teardown_deleted = teardown_cursor.rowcount
-                    except sqlite3.OperationalError:
-                        teardown_deleted = 0  # Table may not exist
-                if deleted > 0 or teardown_deleted > 0:
-                    parts = []
-                    if deleted > 0:
-                        parts.append("state")
-                    if teardown_deleted > 0:
-                        parts.append("teardown requests")
-                    scope = "all strategies" if is_anvil else f"strategy '{strategy_id}'"
+                total_deleted = _fresh_clear_state(sqlite3.connect(str(state_db_path)), strategy_id, is_anvil)
+                scope = "all strategies" if is_anvil else f"strategy '{strategy_id}'"
+                if total_deleted > 0:
                     click.secho(
-                        f"Cleared {' and '.join(parts)} for {scope} (--fresh flag)",
+                        f"Cleared all state for {scope} (--fresh flag)",
                         fg="yellow",
                     )
                 else:
-                    click.echo(f"No existing state for strategy '{strategy_id}' (--fresh flag)")
-            except sqlite3.Error as e:
-                click.echo(f"Failed to clear strategy state: {e}", err=True)
+                    click.echo(f"No existing state for {scope} (--fresh flag)")
+            except Exception as e:
+                raise click.ClickException(
+                    f"--fresh cleanup failed; refusing to start with potentially dirty state: {e}"
+                ) from e
         else:
             click.echo("No existing state to clear (--fresh flag)")
 

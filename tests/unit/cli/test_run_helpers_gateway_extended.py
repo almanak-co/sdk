@@ -13,7 +13,7 @@ Focuses on gaps left by `test_run_helpers_gateway.py`:
         * fresh mainnet clears teardown_requests alongside strategy_state
         * fresh mainnet handles missing teardown_requests table gracefully
         * fresh prints "No existing state" when nothing to clear
-        * sqlite3.Error during clear is reported on stderr
+        * sqlite3.Error during clear raises ClickException (fail fast)
         * Backfill "0 migrated rows" does not set migrated=True
 """
 
@@ -472,7 +472,7 @@ class TestResolveIdentityFreshExtended:
             remaining = conn.execute("SELECT strategy_id FROM teardown_requests").fetchall()
         assert [r[0] for r in remaining] == ["other-strat"]
         text = out.getvalue().decode()
-        assert "teardown requests" in text.lower() or "teardown" in text.lower()
+        assert "cleared all state for strategy" in text.lower()
 
     def test_fresh_anvil_clears_all_teardown_requests(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -571,10 +571,10 @@ class TestResolveIdentityFreshExtended:
             )
         assert "No existing state for strategy" in out.getvalue().decode()
 
-    def test_fresh_reports_sqlite_error_on_stderr(
+    def test_fresh_raises_click_exception_on_sqlite_error(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A malformed sqlite DB triggers the sqlite3.Error branch (584-585)."""
+        """A malformed sqlite DB causes --fresh to raise ClickException (fail fast)."""
         monkeypatch.chdir(tmp_path)
         _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
         # Write a non-sqlite file but non-empty so .exists() passes and sqlite3 bails.
@@ -584,7 +584,7 @@ class TestResolveIdentityFreshExtended:
 
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         cli = CliRunner(mix_stderr=False)
-        with cli.isolation() as (_out, err):
+        with cli.isolation(), pytest.raises(click.ClickException, match="--fresh cleanup failed"):
             run_helpers._resolve_identity(
                 strategy_config=strategy_config,
                 fresh=True,
@@ -594,7 +594,6 @@ class TestResolveIdentityFreshExtended:
                 cli_id_override=None,
                 gateway_network="mainnet",
             )
-        assert "Failed to clear strategy state" in err.getvalue().decode()
 
     def test_backfill_with_zero_rows_migrated_does_not_flag_migrated(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

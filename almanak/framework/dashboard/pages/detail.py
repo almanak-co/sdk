@@ -35,6 +35,7 @@ from almanak.framework.dashboard.utils import (
     get_chain_health_icon,
     get_chain_icon,
     get_timeline_event_icon,
+    maybe_auto_select_strategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -966,6 +967,7 @@ def page(strategies: list[Strategy]) -> None:
     strategy_id = st.query_params.get("strategy_id")
 
     if not strategy_id:
+        maybe_auto_select_strategy(strategies)
         st.info("👈 Please select a strategy from the sidebar to view details.")
         st.markdown("### Or select a strategy here:")
         if strategies:

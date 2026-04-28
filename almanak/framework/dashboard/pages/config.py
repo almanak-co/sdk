@@ -19,6 +19,7 @@ from almanak.framework.dashboard.config import (
     CONFIG_PARAM_DEFINITIONS,
 )
 from almanak.framework.dashboard.models import Strategy, StrategyConfig
+from almanak.framework.dashboard.utils import maybe_auto_select_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -324,10 +325,8 @@ def page(strategies: list[Strategy]) -> None:
         # Get strategy ID from query params
         strategy_id = st.query_params.get("strategy_id")
 
-        # Get strategy ID from query params
-        strategy_id = st.query_params.get("strategy_id")
-
         if not strategy_id:
+            maybe_auto_select_strategy(strategies)
             st.info("👈 Please select a strategy from the sidebar to edit its configuration.")
             st.markdown("### Or select a strategy here:")
             if strategies:

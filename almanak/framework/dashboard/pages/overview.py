@@ -19,11 +19,12 @@ from almanak.framework.dashboard.models import Strategy, StrategyStatus
 from almanak.framework.dashboard.theme import get_chain_color, get_status_color
 from almanak.framework.dashboard.utils import (
     format_chain_badge,
-    format_pnl,
+    format_pnl_display,
     format_usd,
     get_chain_health_icon,
     get_chain_icon,
     get_status_icon,
+    pnl_color,
 )
 
 
@@ -36,7 +37,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
     active = [s for s in strategies if s.status in _ACTIVE_STATUSES]
     total_value = sum((s.total_value_usd for s in active), Decimal("0"))
     total_pnl_24h = sum((s.pnl_24h_usd for s in active), Decimal("0"))
-    strategy_count = len(strategies)
+    strategy_count = sum(1 for s in strategies if s.status != StrategyStatus.ARCHIVED)
     running_count = len(active)
 
     # Calculate multi-chain stats
@@ -84,7 +85,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
         )
 
     with col4:
-        attention_count = sum(1 for s in active if s.attention_required)
+        attention_count = sum(1 for s in strategies if s.attention_required and s.status != StrategyStatus.ARCHIVED)
         st.metric(
             label="Needs Attention",
             value=attention_count,
@@ -155,7 +156,7 @@ def render_chain_breakdown(
 @st.fragment
 def render_attention_required(strategies: list[Strategy]) -> None:
     """Render the attention required section."""
-    attention_strategies = [s for s in strategies if s.attention_required]
+    attention_strategies = [s for s in strategies if s.attention_required and s.status != StrategyStatus.ARCHIVED]
 
     if not attention_strategies:
         return
@@ -183,8 +184,8 @@ def render_attention_required(strategies: list[Strategy]) -> None:
                             <span style="color: #666;">{strategy.attention_reason}</span>
                         </div>
                         <div style="text-align: right;">
-                            <span style="font-size: 1.2rem; color: {"#f44336" if strategy.pnl_24h_usd < 0 else "#00c853"};">
-                                {format_pnl(strategy.pnl_24h_usd)}
+                            <span style="font-size: 1.2rem; color: {pnl_color(strategy.pnl_24h_usd, is_stale=strategy.status == StrategyStatus.STALE)};">
+                                {format_pnl_display(strategy.pnl_24h_usd, is_stale=strategy.status == StrategyStatus.STALE)}
                             </span>
                             <br/>
                             <span style="color: #666;">24h PnL</span>
@@ -226,7 +227,7 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
     pnl_value = strategy.pnl_24h_usd
     if is_paper and strategy.paper_metrics:
         pnl_value = strategy.paper_metrics.simulated_pnl_usd
-    pnl_color = "#00c853" if pnl_value >= 0 else "#f44336"
+    _pnl_color = pnl_color(pnl_value, is_stale=strategy.status == StrategyStatus.STALE)
 
     # Build chain display - for multi-chain strategies, show badges
     if strategy.is_multi_chain and strategy.chains:
@@ -302,7 +303,7 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
 </div>
 <div style="text-align: right;">
 <div style="color: #888; font-size: 0.75rem;">{pnl_label}</div>
-<div style="font-size: 1.1rem; color: {pnl_color};">{format_pnl(pnl_value)}</div>
+<div style="font-size: 1.1rem; color: {_pnl_color};">{format_pnl_display(pnl_value, is_stale=strategy.status == StrategyStatus.STALE)}</div>
 </div>
 </div>
 </div>"""
@@ -450,6 +451,25 @@ def render_strategy_grid(strategies: list[Strategy]) -> None:
                     st.error("No strategies were purged")
         with bulk_col3:
             st.caption("Bulk purge is permanent. Use archive when you only want to hide instances.")
+
+        # One-click: archive every STALE strategy with no heartbeat in the last 7 days.
+        stale_strategies = [s for s in filtered_strategies if s.status == StrategyStatus.STALE]
+        if stale_strategies:
+            st.divider()
+            if st.button(
+                f"Archive All Stale ({len(stale_strategies)})",
+                use_container_width=True,
+                help="Archive all strategies with Heartbeat stale status",
+            ):
+                successes = 0
+                for s in stale_strategies:
+                    if archive_strategy_instance(s.id, reason="Auto-archived from manage mode (stale)"):
+                        successes += 1
+                if successes:
+                    st.success(f"Archived {successes} stale strategies")
+                    st.rerun()
+                else:
+                    st.error("No stale strategies could be archived")
 
     # Render grid (3 columns)
     cols = st.columns(3)
