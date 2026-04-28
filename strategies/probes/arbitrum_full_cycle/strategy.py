@@ -155,11 +155,11 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
         # Check Base ETH for gas
         base_eth = market.balance("ETH", "base")
         base_eth_raw = Decimal(str(base_eth.balance)) if base_eth and base_eth.balance else Decimal("0")
-        if base_eth_raw < Decimal("0.003"):
-            logger.error(f"BRIDGE_IN: insufficient Base ETH for gas ({base_eth_raw} < 0.003)")
+        if base_eth_raw < Decimal("0.0005"):
+            logger.error(f"BRIDGE_IN: insufficient Base ETH for gas ({base_eth_raw} < 0.0005)")
             self._phase = "DONE"
             self._had_failures = True
-            return Intent.hold(reason=f"PROBE_FAIL: Base ETH {base_eth_raw} < 0.003 for bridge gas")
+            return Intent.hold(reason=f"PROBE_FAIL: Base ETH {base_eth_raw} < 0.0005 for bridge gas")
 
         logger.info(f"Phase BRIDGE_IN: bridging ${self.budget_usd} USDC Base -> {self.target_chain}")
         return Intent.bridge(
