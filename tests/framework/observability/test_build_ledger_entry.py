@@ -1460,3 +1460,40 @@ class TestLedgerEntryGoldenKeyset:
         d = e.to_dict()
         assert isinstance(d["timestamp"], str)
         assert d["timestamp"] == ts.isoformat()
+
+
+class TestPerpOpenExtraction:
+    """VIB-3587: PERP_OPEN collateral fields extracted into token_in/amount_in."""
+
+    def test_perp_open_collateral_token_extracted(self):
+        """PERP_OPEN: token_in comes from collateral_token, amount_in from collateral_amount."""
+        intent = _Attrs(intent_type=_Attrs(value="PERP_OPEN"), protocol="gmx_v2")
+        intent.collateral_token = "WETH"
+        intent.collateral_amount = "0.005"
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.intent_type == "PERP_OPEN"
+        assert entry.token_in == "WETH"
+        assert entry.amount_in == "0.005"
+
+    def test_perp_open_empty_collateral_falls_back_to_empty(self):
+        """PERP_OPEN without collateral fields records empty strings (not crash)."""
+        intent = _Attrs(intent_type=_Attrs(value="PERP_OPEN"), protocol="gmx_v2")
+        # No collateral_token / collateral_amount attributes
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.intent_type == "PERP_OPEN"
+        assert entry.token_in == ""
+        assert entry.amount_in == ""

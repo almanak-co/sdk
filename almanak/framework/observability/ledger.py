@@ -277,20 +277,27 @@ def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
 
 
 def _extract_tokens_and_amounts(intent: Any, result: Any) -> _TokensAndAmounts:
-    """Phase beta -- dispatch between SwapAmounts, LP_OPEN, and intent-attr fallback.
+    """Phase beta -- dispatch between SwapAmounts, LP_OPEN, PERP_OPEN, and intent-attr fallback.
 
     A truthy ``result.swap_amounts`` drives every field (used by SWAP,
     LP_CLOSE, and anything whose receipt parser emits SwapAmounts). LP_OPEN
-    intents carry amounts in ``LPOpenData`` (``result.extracted_data
-    ["lp_open_data"]``) and have no ``from_token`` / ``to_token``, so they
-    get a dedicated extraction path.  Everything else walks the intent-attr
+    intents carry amounts in ``LPOpenData`` and have no ``from_token`` /
+    ``to_token``, so they get a dedicated extraction path. PERP_OPEN collateral
+    lives at ``intent.collateral_token`` / ``intent.collateral_amount``, not the
+    standard from_token/to_token chain. Everything else walks the intent-attr
     precedence chain.
     """
     swap_amounts = getattr(result, "swap_amounts", None) if result else None
     if swap_amounts:
         return _extract_from_swap_amounts(swap_amounts, intent)
-    if _extract_intent_type(intent) == "LP_OPEN":
+    intent_type = _extract_intent_type(intent)
+    if intent_type == "LP_OPEN":
         return _extract_from_lp_open(intent, result)
+    if intent_type == "PERP_OPEN":
+        token_in = getattr(intent, "collateral_token", "") or ""
+        collateral_amount = getattr(intent, "collateral_amount", None)
+        amount_in = str(collateral_amount) if collateral_amount is not None else ""
+        return (token_in, "", amount_in, "", "", None)
     return _extract_from_intent_fallback(intent)
 
 

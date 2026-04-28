@@ -53,6 +53,14 @@ _MORPHO_POSITION_SELECTOR = "0x93c52062"
 _MORPHO_MARKET_SELECTOR = "0x5c60e39a"
 _MORPHO_LLTV_SCALE = Decimal("1e18")  # lltv is 1e18-scaled
 
+# ─── Compound V3 selectors ────────────────────────────────────────────────────
+# userCollateral(address account, address asset) → (uint128 balance, uint128 reserved)
+_COMPOUND_V3_USER_COLLATERAL_SELECTOR = "0x2b92a07d"
+# borrowBalanceOf(address account) → uint256
+_COMPOUND_V3_BORROW_BALANCE_SELECTOR = "0x374c49b4"
+# balanceOf(address account) → uint256  (base-asset supplied balance on the Comet)
+_COMPOUND_V3_BALANCE_OF_SELECTOR = "0x70a08231"
+
 # ─── Lending intent types ──────────────────────────────────────────────────────
 _LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DELEVERAGE"})
 
@@ -283,8 +291,16 @@ def read_morpho_blue_account_state(
         collateral_price = None
         loan_price = None
         if price_oracle is not None:
-            collateral_price = price_oracle.get(collateral_token.upper()) or price_oracle.get(collateral_token.lower())
-            loan_price = price_oracle.get(loan_token.upper()) or price_oracle.get(loan_token.lower())
+            collateral_price = price_oracle.get(collateral_token)
+            if collateral_price is None:
+                collateral_price = price_oracle.get(collateral_token.upper())
+            if collateral_price is None:
+                collateral_price = price_oracle.get(collateral_token.lower())
+            loan_price = price_oracle.get(loan_token)
+            if loan_price is None:
+                loan_price = price_oracle.get(loan_token.upper())
+            if loan_price is None:
+                loan_price = price_oracle.get(loan_token.lower())
 
         if collateral_price is None or loan_price is None:
             logger.debug(
@@ -321,6 +337,252 @@ def read_morpho_blue_account_state(
         return None
 
 
+@dataclass
+class CompoundV3AccountState:
+    """Post-execution account summary from Compound V3 Comet userCollateral + borrowBalanceOf."""
+
+    collateral_usd: Decimal
+    debt_usd: Decimal
+    health_factor: Decimal | None
+
+
+def read_compound_v3_account_state(
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+    collateral_token: str,
+    borrow_token: str,
+    price_oracle: dict | None,
+    market_id: str | None = None,
+) -> CompoundV3AccountState | None:
+    """Read Compound V3 account state via gateway eth_call.
+
+    Resolves the Comet address and makes two reads.  The first call differs
+    depending on whether collateral_token is the market's base asset:
+
+    - Base-asset SUPPLY/WITHDRAW (collateral_token == market base_token, e.g.
+      supplying USDC to the USDC Comet):
+        balanceOf(wallet) → uint256  (supplied base balance)
+        borrowBalanceOf(wallet) → uint256  (net borrow; usually 0 for pure supply)
+      health_factor is set to the no-risk sentinel (999999) because base-asset
+      supply positions have no liquidation threshold.
+
+    - Collateral SUPPLY/WITHDRAW and BORROW/REPAY (collateral_token ≠ base_token):
+        userCollateral(wallet, collateralTokenAddress) → (uint128 balance, uint128 reserved)
+        borrowBalanceOf(wallet) → uint256
+      health_factor is computed as (collateral_usd × LCF) / debt_usd.
+
+    market_id (e.g. "usdc", "weth") is the preferred way to select the Comet.
+    When provided it is used directly for the COMPOUND_V3_COMET_ADDRESSES lookup
+    and the actual base asset is derived from COMPOUND_V3_MARKETS so that
+    SUPPLY/WITHDRAW callers (which pass the collateral as borrow_token) still read
+    the correct market's debt balance.  When omitted, borrow_token is used as the
+    market key (original BORROW/REPAY behaviour).
+
+    Returns None on any failure (missing prices, gateway unavailable, etc.).
+    """
+    try:
+        from almanak.framework.connectors.compound_v3.adapter import (
+            COMPOUND_V3_COMET_ADDRESSES,
+            COMPOUND_V3_MARKETS,
+        )
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        # ── Comet address ─────────────────────────────────────────────────────
+        # Prefer market_id (exact market key like "usdc", "weth") over borrow_token.
+        # For SUPPLY/WITHDRAW intents borrow_token is the collateral asset being
+        # supplied — not the market base asset — so it would select the wrong Comet.
+        chain_lower = chain.lower()
+        chain_markets = COMPOUND_V3_COMET_ADDRESSES.get(chain_lower, {})
+        resolved_market_key = (market_id or borrow_token).lower()
+        comet_address = chain_markets.get(resolved_market_key)
+        if not comet_address:
+            logger.debug(
+                "read_compound_v3_account_state: no Comet for chain=%s market=%s",
+                chain,
+                resolved_market_key,
+            )
+            return None
+
+        # ── Derive effective borrow token from registry ───────────────────────
+        # When market_id is known, look up the market's base_token so the debt
+        # balance and price are decoded against the correct asset regardless of
+        # what the caller passed as borrow_token.
+        effective_borrow_token = borrow_token
+        market_registry = COMPOUND_V3_MARKETS.get(chain_lower, {}).get(resolved_market_key)
+        if market_id:
+            registry_base = market_registry.get("base_token") if market_registry else None
+            if not registry_base:
+                logger.debug(
+                    "read_compound_v3_account_state: missing market registry/base_token for chain=%s market=%s",
+                    chain,
+                    resolved_market_key,
+                )
+                return None
+            effective_borrow_token = registry_base
+
+        resolver = get_token_resolver()
+
+        # ── Collateral token address ────────────────────────────────────────
+        try:
+            collateral_info = resolver.resolve(collateral_token, chain=chain)
+        except TokenNotFoundError:
+            logger.debug("read_compound_v3_account_state: can't resolve collateral=%s", collateral_token)
+            return None
+        collateral_address = collateral_info.address
+        collateral_decimals = collateral_info.decimals
+
+        # ── Borrow token decimals ───────────────────────────────────────────
+        try:
+            borrow_info = resolver.resolve(effective_borrow_token, chain=chain)
+        except TokenNotFoundError:
+            logger.debug("read_compound_v3_account_state: can't resolve borrow=%s", effective_borrow_token)
+            return None
+        borrow_decimals = borrow_info.decimals
+
+        # ── Prices ─────────────────────────────────────────────────────────
+        if not price_oracle:
+            return None
+        collateral_price = price_oracle.get(collateral_token)
+        if collateral_price is None:
+            collateral_price = price_oracle.get(collateral_token.upper())
+        if collateral_price is None:
+            collateral_price = price_oracle.get(collateral_token.lower())
+        borrow_price = price_oracle.get(effective_borrow_token)
+        if borrow_price is None:
+            borrow_price = price_oracle.get(effective_borrow_token.upper())
+        if borrow_price is None:
+            borrow_price = price_oracle.get(effective_borrow_token.lower())
+        if collateral_price is None or borrow_price is None:
+            logger.debug(
+                "read_compound_v3_account_state: price missing for collateral=%s borrow=%s",
+                collateral_token,
+                effective_borrow_token,
+            )
+            return None
+
+        # ── Detect base-asset SUPPLY/WITHDRAW ──────────────────────────────
+        # In Compound V3, supplying the market's base asset (e.g. USDC in the
+        # USDC Comet) is tracked via balanceOf(wallet), NOT userCollateral().
+        # userCollateral() always returns zero for the base asset because Comet
+        # stores supplied base amounts in its internal accounting, not the
+        # collateral mapping.  We detect this by comparing collateral_token
+        # against the registry base_token.
+        registry_base_token = market_registry.get("base_token", "") if market_registry else ""
+        is_base_asset_supply = collateral_token.upper() == registry_base_token.upper()
+
+        account_hex = _pad_address(wallet_address)
+
+        if is_base_asset_supply:
+            # ── Call 1 (base): balanceOf(wallet) → uint256 ──────────────────
+            # Returns the supplied base-asset balance.  Expressed in base-token
+            # decimals (same as borrow_decimals since base==collateral here).
+            balance_of_calldata = _COMPOUND_V3_BALANCE_OF_SELECTOR + account_hex
+            balance_of_raw = _gateway_eth_call(gateway_client, chain, comet_address, balance_of_calldata)
+            if not balance_of_raw:
+                logger.debug("read_compound_v3_account_state: balanceOf() call failed for base asset")
+                return None
+            balance_of_hex = balance_of_raw.replace("0x", "")
+            if len(balance_of_hex) < 64:
+                return None
+            collateral_balance_raw = int(balance_of_hex[:64], 16)
+
+            # ── Call 2 (base): borrowBalanceOf(wallet) → always zero ─────────
+            # Base-asset suppliers cannot have borrow debt at the same time in
+            # Compound V3 — a non-zero borrow would net against the supply.
+            # We still call borrowBalanceOf() for correctness (net position).
+            borrow_calldata = _COMPOUND_V3_BORROW_BALANCE_SELECTOR + account_hex
+            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata)
+            if not borrow_raw:
+                logger.debug("read_compound_v3_account_state: borrowBalanceOf() call failed")
+                return None
+            borrow_hex_data = borrow_raw.replace("0x", "")
+            if len(borrow_hex_data) < 64:
+                return None
+            borrow_balance_raw = int(borrow_hex_data[:64], 16)
+
+            # ── USD values (base asset) ─────────────────────────────────────
+            # collateral == base asset, so both use borrow_decimals / borrow_price
+            supplied_amount = Decimal(collateral_balance_raw) / Decimal(10**borrow_decimals)
+            borrow_amount = Decimal(borrow_balance_raw) / Decimal(10**borrow_decimals)
+            collateral_usd = supplied_amount * Decimal(str(borrow_price))
+            debt_usd = borrow_amount * Decimal(str(borrow_price))
+
+            # Pure base-asset supply has no liquidation risk — sentinel HF.
+            health_factor: Decimal | None = Decimal("999999")
+        else:
+            # ── Call 1: userCollateral(wallet, collateralTokenAddress) ──────
+            collateral_hex = _pad_address(collateral_address)
+            collateral_calldata = _COMPOUND_V3_USER_COLLATERAL_SELECTOR + account_hex + collateral_hex
+            collateral_raw = _gateway_eth_call(gateway_client, chain, comet_address, collateral_calldata)
+            if not collateral_raw:
+                logger.debug("read_compound_v3_account_state: userCollateral() call failed")
+                return None
+            collateral_hex_data = collateral_raw.replace("0x", "")
+            if len(collateral_hex_data) < 128:  # (uint128 balance, uint128 reserved) = 2 words
+                logger.debug(
+                    "read_compound_v3_account_state: userCollateral() response too short (%d chars)",
+                    len(collateral_hex_data),
+                )
+                return None
+            collateral_balance_raw = int(collateral_hex_data[:64], 16)
+
+            # ── Call 2: borrowBalanceOf(wallet) ─────────────────────────────
+            borrow_calldata = _COMPOUND_V3_BORROW_BALANCE_SELECTOR + account_hex
+            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata)
+            if not borrow_raw:
+                logger.debug("read_compound_v3_account_state: borrowBalanceOf() call failed")
+                return None
+            borrow_hex_data = borrow_raw.replace("0x", "")
+            if len(borrow_hex_data) < 64:
+                return None
+            borrow_balance_raw = int(borrow_hex_data[:64], 16)
+
+            # ── USD values ──────────────────────────────────────────────────
+            collateral_amount = Decimal(collateral_balance_raw) / Decimal(10**collateral_decimals)
+            borrow_amount = Decimal(borrow_balance_raw) / Decimal(10**borrow_decimals)
+            collateral_usd = collateral_amount * Decimal(str(collateral_price))
+            debt_usd = borrow_amount * Decimal(str(borrow_price))
+
+            # ── Health factor via per-asset liquidation_collateral_factor ────
+            # HF = (collateral_usd * LCF) / debt_usd where LCF < 1.
+            # Raw collateral_usd / debt_usd overstates safety; we use the static
+            # registry value rather than a live on-chain read to avoid extra calls.
+            if debt_usd == 0:
+                health_factor = Decimal("999999")
+            else:
+                market_data = COMPOUND_V3_MARKETS.get(chain_lower, {}).get(resolved_market_key, {})
+                collateral_upper = collateral_token.upper()
+                col_entry = market_data.get("collaterals", {}).get(collateral_upper)
+                if col_entry is None:
+                    # Case-insensitive fallback for mixed-case symbols like wstETH
+                    for k, v in market_data.get("collaterals", {}).items():
+                        if k.upper() == collateral_upper:
+                            col_entry = v
+                            break
+                lcf: Decimal | None = col_entry.get("liquidation_collateral_factor") if col_entry else None
+                if lcf is None:
+                    logger.debug(
+                        "read_compound_v3_account_state: LCF not found for collateral=%s market=%s",
+                        collateral_token,
+                        resolved_market_key,
+                    )
+                    health_factor = None
+                else:
+                    health_factor = min((collateral_usd * lcf) / debt_usd, Decimal("999999"))
+
+        return CompoundV3AccountState(
+            collateral_usd=collateral_usd,
+            debt_usd=debt_usd,
+            health_factor=health_factor,
+        )
+
+    except Exception:
+        logger.debug("read_compound_v3_account_state failed", exc_info=True)
+        return None
+
+
 def capture_lending_pre_state(
     *,
     intent: Any,
@@ -328,7 +590,7 @@ def capture_lending_pre_state(
     wallet_address: str,
     gateway_client: Any | None,
     price_oracle: dict | None,
-) -> AaveAccountState | MorphoBlueAccountState | None:
+) -> AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None:
     """Read on-chain lending state BEFORE the transaction is submitted (VIB-3489).
 
     Called by the strategy runner before executing the intent bundle.  The
@@ -338,7 +600,7 @@ def capture_lending_pre_state(
 
     Returns None (silently, with a debug log) when:
     - The gateway client is not available.
-    - The intent is not a supported lending protocol (Aave V3 / Morpho Blue).
+    - The intent is not a supported lending protocol (Aave V3 / Morpho Blue / Compound V3).
     - Any gateway eth_call fails.
 
     Never raises; never substitutes stale data on failure.
@@ -437,6 +699,42 @@ def capture_lending_pre_state(
             )
         return morpho_state
 
+    # ── Compound V3 ──────────────────────────────────────────────────────────
+    if protocol == "compound_v3":
+        intent_market_id_c3: str | None = getattr(intent, "market_id", None)
+        if intent_type_str in ("SUPPLY", "WITHDRAW"):
+            # market_id is required for SUPPLY/WITHDRAW: without it we cannot
+            # determine which Comet to query — falling back to the collateral token
+            # symbol would select the wrong market on chains with multiple Comets.
+            if not intent_market_id_c3:
+                logger.debug(
+                    "capture_lending_pre_state: Compound V3 pre-state skipped"
+                    " (market_id required for SUPPLY/WITHDRAW but not set)"
+                )
+                return None
+            # intent.token is the collateral asset; market_id identifies the Comet and
+            # its base asset (used for borrowBalanceOf and debt pricing).
+            collateral_token_sym_c3: str | None = getattr(intent, "token", None)
+            borrow_token_sym_c3: str | None = getattr(intent, "token", None)  # overridden by market_id
+        else:
+            collateral_token_sym_c3 = getattr(intent, "collateral_token", None)
+            borrow_token_sym_c3 = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+        if not collateral_token_sym_c3:
+            logger.debug("capture_lending_pre_state: Compound V3 pre-state skipped (missing collateral token)")
+            return None
+        compound_pre_state: CompoundV3AccountState | None = read_compound_v3_account_state(
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            collateral_token=collateral_token_sym_c3,
+            borrow_token=borrow_token_sym_c3 or "",
+            price_oracle=price_oracle,
+            market_id=intent_market_id_c3,
+        )
+        if compound_pre_state is None:
+            logger.debug("capture_lending_pre_state: Compound V3 read returned None for chain=%s", chain)
+        return compound_pre_state
+
     return None
 
 
@@ -513,7 +811,11 @@ def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asse
     """Convert a human-readable token amount to USD using the price_oracle dict."""
     if amount_human is None or price_oracle is None:
         return None
-    price = price_oracle.get(asset.upper()) or price_oracle.get(asset.lower())
+    price = price_oracle.get(asset)
+    if price is None:
+        price = price_oracle.get(asset.upper())
+    if price is None:
+        price = price_oracle.get(asset.lower())
     if price is None:
         return None
     try:
@@ -536,7 +838,7 @@ def build_lending_accounting_event(
     basis_store: FIFOBasisStore,
     price_oracle: dict | None,
     ledger_entry_id: str | None = None,
-    pre_execution_state: AaveAccountState | MorphoBlueAccountState | None = None,
+    pre_execution_state: AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None = None,
 ) -> Any | None:
     """Build a LendingAccountingEvent for a completed lending intent.
 
@@ -669,6 +971,8 @@ def build_lending_accounting_event(
     # confidence. Add their addresses to a separate registry when ready.
     is_aave = protocol.lower() in ("aave_v3", "aave")
     is_morpho = protocol.lower() == "morpho_blue"
+    is_compound_v3 = protocol.lower() == "compound_v3"
+    compound_v3_state: CompoundV3AccountState | None = None
 
     if is_aave and gateway_client is not None:
         aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
@@ -763,9 +1067,51 @@ def build_lending_accounting_event(
                 )
                 logger.debug("read_morpho_blue_account_state skipped: %s", morpho_unavailable_reason)
 
+    if (
+        is_compound_v3
+        and gateway_client is not None
+        and intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
+    ):
+        intent_market_id_c3 = getattr(intent, "market_id", None)
+        if intent_type_str in ("SUPPLY", "WITHDRAW"):
+            # market_id is required for SUPPLY/WITHDRAW: without it we cannot
+            # determine which Comet to query — falling back to the collateral token
+            # symbol would select the wrong market on chains with multiple Comets.
+            if not intent_market_id_c3:
+                logger.debug(
+                    "capture_lending_post_state: Compound V3 post-state skipped"
+                    " (market_id required for SUPPLY/WITHDRAW but not set)"
+                )
+            else:
+                collateral_token_sym_c3 = getattr(intent, "token", None)
+                borrow_token_sym_c3 = getattr(intent, "token", None)  # overridden by market_id
+                if collateral_token_sym_c3:
+                    compound_v3_state = read_compound_v3_account_state(
+                        gateway_client=gateway_client,
+                        chain=chain,
+                        wallet_address=wallet_address,
+                        collateral_token=collateral_token_sym_c3,
+                        borrow_token=borrow_token_sym_c3 or "",
+                        price_oracle=price_oracle,
+                        market_id=intent_market_id_c3,
+                    )
+        else:
+            collateral_token_sym_c3 = getattr(intent, "collateral_token", None)
+            borrow_token_sym_c3 = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+            if collateral_token_sym_c3:
+                compound_v3_state = read_compound_v3_account_state(
+                    gateway_client=gateway_client,
+                    chain=chain,
+                    wallet_address=wallet_address,
+                    collateral_token=collateral_token_sym_c3,
+                    borrow_token=borrow_token_sym_c3 or "",
+                    price_oracle=price_oracle,
+                    market_id=intent_market_id_c3,
+                )
+
     # ── Unify after-state fields from whichever protocol provided data ────────
-    # Priority: Aave state > Morpho state > None
-    got_after_state = aave_state is not None or morpho_state is not None
+    # Priority: Aave state > Morpho state > Compound V3 state > None
+    got_after_state = aave_state is not None or morpho_state is not None or compound_v3_state is not None
 
     if aave_state is not None:
         collateral_after: Decimal | None = aave_state.collateral_usd
@@ -783,6 +1129,13 @@ def build_lending_accounting_event(
         lt_bps = None  # Morpho Blue uses lltv directly, not lt_bps
         liquidation_threshold = morpho_state.lltv  # LLTV serves as liquidation_threshold
         lltv_after = morpho_state.lltv
+    elif compound_v3_state is not None:
+        collateral_after = compound_v3_state.collateral_usd
+        debt_after = compound_v3_state.debt_usd
+        hf_after = compound_v3_state.health_factor
+        lt_bps = None  # Compound V3 uses per-asset collateral factors, not a single threshold
+        liquidation_threshold = None
+        lltv_after = None
     else:
         collateral_after = None
         debt_after = None

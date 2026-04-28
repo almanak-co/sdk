@@ -137,6 +137,121 @@ class TestLPAccountingBuilder:
         assert event.identity.strategy_id == "strat-1"
         assert event.identity.chain == "base"
 
+    def test_token0_token1_parsed_from_pool_string_when_bare_attrs_missing(self) -> None:
+        """VIB-3584: token0/token1 are parsed from pool string when intent lacks bare attrs."""
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        intent = MagicMock()
+        it = MagicMock()
+        it.value = "LP_OPEN"
+        intent.intent_type = it
+        intent.protocol = "uniswap_v3"
+        intent.pool = "WETH/USDC/500"
+        # Simulate LP intents that don't expose bare token0/token1 (returns None)
+        del intent.token0
+        del intent.token1
+        del intent.token_a
+        del intent.token_b
+        intent.token0_decimals = None
+        intent.token1_decimals = None
+
+        event = build_lp_accounting_event(intent=intent, result=_make_result(), **_COMMON_KWARGS)
+        assert event is not None
+        assert event.token0 == "WETH"
+        assert event.token1 == "USDC"
+
+    def test_cost_basis_usd_computed_from_price_oracle(self) -> None:
+        """VIB-3583: cost_basis_usd is computed when price_oracle is provided."""
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        lp_open = MagicMock()
+        lp_open.amount0 = 1_000_000  # 1 USDC (6 decimals)
+        lp_open.amount1 = 1 * 10**18  # 1 WETH (18 decimals)
+
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            pool="USDC/WETH/3000",
+            token0="USDC",
+            token1="WETH",
+            token0_decimals=6,
+            token1_decimals=18,
+        )
+        result_obj = _make_result(lp_open_data=lp_open)
+
+        price_oracle = {"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")}
+        event = build_lp_accounting_event(intent=intent, result=result_obj, price_oracle=price_oracle, **_COMMON_KWARGS)
+
+        assert event is not None
+        # 1 USDC * 1.0 + 1 WETH * 2500.0 = 2501.0
+        assert event.cost_basis_usd == Decimal("2501.0")
+
+    def test_cost_basis_usd_none_without_price_oracle(self) -> None:
+        """VIB-3583: cost_basis_usd stays None when no price_oracle provided."""
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        intent = _make_intent("LP_OPEN", protocol="aerodrome", pool="USDC/DAI/0xpool")
+        event = build_lp_accounting_event(intent=intent, result=_make_result(), **_COMMON_KWARGS)
+
+        assert event is not None
+        assert event.cost_basis_usd is None
+
+    def test_cost_basis_usd_none_when_one_leg_price_missing(self) -> None:
+        """Partial cost basis silently undercounts — must return None if any leg lacks a price."""
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        lp_open = MagicMock()
+        lp_open.amount0 = 1_000_000  # 1 USDC
+        lp_open.amount1 = 1 * 10**18  # 1 LONGTOKEN
+
+        intent = _make_intent(
+            "LP_OPEN",
+            protocol="uniswap_v3",
+            pool="USDC/LONGTOKEN/3000",
+            token0="USDC",
+            token1="LONGTOKEN",
+            token0_decimals=6,
+            token1_decimals=18,
+        )
+        result_obj = _make_result(lp_open_data=lp_open)
+
+        # Only USDC has a price; LONGTOKEN is unlisted
+        price_oracle = {"USDC": Decimal("1.0")}
+        event = build_lp_accounting_event(intent=intent, result=result_obj, price_oracle=price_oracle, **_COMMON_KWARGS)
+
+        assert event is not None
+        assert event.cost_basis_usd is None  # partial total would mislead PnL math
+
+    def test_cost_basis_usd_none_when_decimals_assumed(self) -> None:
+        """cost_basis_usd must be None when token decimals are assumed (18) — amounts may be off 1e12."""
+        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
+
+        lp_open = MagicMock()
+        lp_open.amount0 = 1_000_000  # Would be 1 USDC at 6 dec, but 0.000001 at assumed 18
+        lp_open.amount1 = 1 * 10**18
+
+        intent = MagicMock()
+        it = MagicMock()
+        it.value = "LP_OPEN"
+        intent.intent_type = it
+        intent.protocol = "uniswap_v3"
+        intent.pool = "USDC/WETH/3000"
+        del intent.token0
+        del intent.token1
+        del intent.token_a
+        del intent.token_b
+        # Simulate no decimal info — all decimal attrs must be explicitly None to trigger assumed_decimals
+        intent.token0_decimals = None
+        intent.token1_decimals = None
+        intent.token_a_decimals = None
+        intent.token_b_decimals = None
+
+        price_oracle = {"USDC": Decimal("1.0"), "WETH": Decimal("2500.0")}
+        event = build_lp_accounting_event(intent=intent, result=_make_result(lp_open_data=lp_open), price_oracle=price_oracle, **_COMMON_KWARGS)
+
+        assert event is not None
+        assert event.cost_basis_usd is None  # assumed decimals → skip cost basis
+
 
 # ---------------------------------------------------------------------------
 # Perp accounting builder

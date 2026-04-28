@@ -1990,7 +1990,7 @@ class StrategyRunner:
                 "_write_outbox_and_fire_processor: gateway outbox not yet available for %s (VIB-3482) — drain skipped",
                 ledger_entry_id,
             )
-        except Exception:
+        except Exception as e:
             if self._is_live_mode():
                 from ..state.exceptions import AccountingWriteKind
 
@@ -1998,7 +1998,8 @@ class StrategyRunner:
                     write_kind=AccountingWriteKind.ACCOUNTING,
                     strategy_id=getattr(strategy, "strategy_id", ""),
                     message=f"_write_outbox_and_fire_processor failed for {ledger_entry_id!r}",
-                ) from None
+                    cause=e,
+                ) from e
             logger.warning("_write_outbox_and_fire_processor failed (non-blocking)", exc_info=True)
 
     def _compute_outbox_position_key(

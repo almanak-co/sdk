@@ -295,12 +295,24 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.amount0 = str(amount0)
     if amount1 is not None:
         event.amount1 = str(amount1)
-    # Token addresses: LPOpenData doesn't carry them directly, so fall
-    # back to the intent's from_token / to_token (LP intents expose these
-    # as the two sides of the pair) before the swap-based fallback below.
+    # Token addresses: LPOpenData doesn't carry them directly. Try intent attrs,
+    # then parse from the pool string (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
     intent = ctx.intent
     t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
     t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
+    if not t0 or not t1:
+        pool_str = (getattr(intent, "pool", "") or "").strip()
+        if "/" in pool_str:
+            parts = [p.strip() for p in pool_str.split("/") if p.strip()]
+            normalized = [
+                p.split("(")[0].split(" ")[0].strip()
+                for p in parts
+                if not p.strip().isdigit() and not p.strip().lower().startswith("0x")
+            ]
+            if not t0 and normalized:
+                t0 = normalized[0].upper()
+            if not t1 and len(normalized) > 1:
+                t1 = normalized[1].upper()
     if t0:
         event.token0 = str(t0)
     if t1:

@@ -136,6 +136,37 @@ def _to_human(raw: int | None, decimals: int) -> Decimal | None:
     return Decimal(str(raw)) / scale
 
 
+def _compute_cost_basis(
+    amount0: Decimal | None,
+    amount1: Decimal | None,
+    token0: str,
+    token1: str,
+    price_oracle: dict[str, Any] | None,
+) -> Decimal | None:
+    """Compute LP entry cost basis as amount0*price0 + amount1*price1.
+
+    Returns None when price_oracle is unavailable, any non-None amount lacks a price,
+    or both amounts are None (no legs contributed — not a concrete zero basis).
+    price_oracle keys are uppercase token symbols (e.g. "WETH", "USDC").
+    """
+    if not price_oracle:
+        return None
+    total = Decimal(0)
+    has_any = False
+    for amt, sym in ((amount0, token0.upper()), (amount1, token1.upper())):
+        if amt is None:
+            continue
+        price = price_oracle.get(sym)
+        if price is None:
+            return None
+        try:
+            total += amt * Decimal(str(price))
+            has_any = True
+        except Exception:  # noqa: BLE001
+            return None
+    return total if has_any else None
+
+
 def build_lp_accounting_event(
     *,
     intent: Any,
@@ -147,6 +178,7 @@ def build_lp_accounting_event(
     chain: str,
     wallet_address: str,
     ledger_entry_id: str | None = None,
+    price_oracle: dict[str, Any] | None = None,
 ) -> LPAccountingEvent | None:
     """Build an LPAccountingEvent for a completed LP_OPEN or LP_CLOSE intent.
 
@@ -157,6 +189,7 @@ def build_lp_accounting_event(
 
     Amounts are sourced from result.lp_open_data / result.lp_close_data when
     available, with token decimals from the intent (fallback: 18 → ESTIMATED).
+    cost_basis_usd is computed from price_oracle when provided.
     """
     intent_type_str = _intent_type_str(intent)
     if intent_type_str not in _LP_INTENT_TYPES:
@@ -185,6 +218,21 @@ def build_lp_accounting_event(
 
     token0 = str(getattr(intent, "token0", None) or getattr(intent, "token_a", None) or "")
     token1 = str(getattr(intent, "token1", None) or getattr(intent, "token_b", None) or "")
+    # LP intents store tokens in the pool string (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
+    # Bare token0/token1 attributes are not set on LP intents, so parse from pool string.
+    if not token0 or not token1:
+        pool_str = (getattr(intent, "pool", "") or "").strip()
+        if "/" in pool_str:
+            parts = [p.strip() for p in pool_str.split("/") if p.strip()]
+            normalized = [
+                p.split("(")[0].split(" ")[0].strip()
+                for p in parts
+                if not p.strip().isdigit() and not p.strip().lower().startswith("0x")
+            ]
+            if not token0 and normalized:
+                token0 = normalized[0].upper()
+            if not token1 and len(normalized) > 1:
+                token1 = normalized[1].upper()
 
     # Prefer explicit decimal fields; fall back to 18 with ESTIMATED confidence.
     # Use `is None` checks — `or` would treat decimals=0 as missing (valid for some tokens).
@@ -244,6 +292,11 @@ def build_lp_accounting_event(
         ledger_entry_id=ledger_entry_id or "",
     )
 
+    # Skip cost basis when decimals were assumed: amounts may be off by 1e12 for 6-decimal tokens.
+    cost_basis_usd = _compute_cost_basis(
+        amount0, amount1, token0, token1, price_oracle if not assumed_decimals else None
+    )
+
     return LPAccountingEvent(
         identity=identity,
         event_type=event_type,
@@ -254,7 +307,7 @@ def build_lp_accounting_event(
         amount0=amount0,
         amount1=amount1,
         lp_token_amount=lp_token_amount,
-        cost_basis_usd=None,
+        cost_basis_usd=cost_basis_usd,
         realized_pnl_usd=None,
         fees0_collected=fees0_collected,
         fees1_collected=fees1_collected,
