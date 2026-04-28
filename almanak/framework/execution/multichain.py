@@ -613,6 +613,16 @@ class MultiChainOrchestrator:
             )
 
         if not result.action_bundle or not result.action_bundle.transactions:
+            meta = result.action_bundle.metadata if result.action_bundle else None
+            if meta and meta.get("no_op"):
+                no_op_reason = meta.get("reason", "position already closed")
+                logger.info(
+                    "No-op intent on %s: %s (intent_id=%s)",
+                    chain,
+                    no_op_reason,
+                    intent.intent_id,
+                )
+                return TransactionExecutionResult(success=True, tx_hash="")
             raise ExecutionError(f"Compilation produced no transactions (intent_id={intent.intent_id}, chain={chain})")
 
         transactions = result.action_bundle.transactions

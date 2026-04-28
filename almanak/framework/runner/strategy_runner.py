@@ -1945,11 +1945,45 @@ class StrategyRunner:
                 )
             except NotImplementedError:
                 # GatewayStateManager.save_outbox_entry not yet deployed (VIB-3482).
-                # Non-fatal: strategy continues normally.
-                logger.warning(
-                    "_write_outbox_and_fire_processor: gateway outbox not yet available for %s (VIB-3482) — drain skipped",
+                # Fall back to direct save_accounting_event() so events are not dropped.
+                logger.debug(
+                    "_write_outbox_and_fire_processor: gateway outbox not yet available (VIB-3482) — using direct fallback for %s",
                     ledger_entry_id,
                 )
+                task = asyncio.create_task(
+                    self._accounting_processor.drain_one_direct(
+                        ledger_entry_id,
+                        intent_type=intent_type_str,
+                        wallet_address=wallet_address,
+                        position_key=position_key,
+                        market_id=market_id,
+                        deployment_id=deployment_id,
+                        strategy_id=strategy.strategy_id,
+                        cycle_id=cycle_id,
+                    ),
+                    name=f"accounting_direct_{ledger_entry_id[:8]}",
+                )
+                self._pending_drain_tasks.add(task)
+                _led_id = ledger_entry_id
+
+                def _on_direct_done(t: asyncio.Task) -> None:
+                    self._pending_drain_tasks.discard(t)
+                    if t.cancelled():
+                        return
+                    exc = t.exception()
+                    if exc is not None:
+                        logger.error(
+                            "_write_outbox_and_fire_processor: direct fallback crashed for %s",
+                            _led_id,
+                            exc_info=exc,
+                        )
+                    elif not t.result():
+                        logger.warning(
+                            "_write_outbox_and_fire_processor: direct fallback returned False for %s — accounting event dropped",
+                            _led_id,
+                        )
+
+                task.add_done_callback(_on_direct_done)
                 return
 
             if outbox_id:

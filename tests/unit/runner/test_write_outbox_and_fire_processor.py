@@ -6,7 +6,7 @@ Five behaviors are verified:
 2. write_outbox_entry returns None in live mode → AccountingPersistenceError
    raised with write_kind == AccountingWriteKind.ACCOUNTING.
 3. write_outbox_entry raises NotImplementedError (VIB-3482: backend not deployed)
-   → warning logged, strategy continues, no exception in any mode.
+   → falls back to drain_one_direct, strategy continues, no exception in any mode.
 4. Unexpected Exception raised + _is_live_mode() True → AccountingPersistenceError
    raised with write_kind == AccountingWriteKind.ACCOUNTING.
 5. Unexpected Exception raised + _is_live_mode() False → warning logged, no
@@ -52,10 +52,11 @@ def _make_runner() -> StrategyRunner:
         alert_manager=MagicMock(),
         config=config,
     )
-    # Stub accounting processor — drain_one must be an AsyncMock so
-    # asyncio.create_task can wrap it without complaining.
+    # Stub accounting processor — drain_one and drain_one_direct must be
+    # AsyncMocks so asyncio.create_task can wrap them without complaining.
     runner._accounting_processor = MagicMock()
     runner._accounting_processor.drain_one = AsyncMock()
+    runner._accounting_processor.drain_one_direct = AsyncMock()
     runner._accounting_processor._deployment_id = ""
     return runner
 
@@ -143,7 +144,7 @@ class TestWriteOutboxAndFireProcessor:
 
     @pytest.mark.asyncio
     async def test_not_implemented_error_is_always_non_fatal(self, caplog):
-        """NotImplementedError (VIB-3482: gateway not deployed) → warning, no raise in any mode."""
+        """NotImplementedError (VIB-3482: gateway not deployed) → direct fallback, no raise in any mode."""
         import logging
 
         runner = _make_runner()
@@ -151,6 +152,7 @@ class TestWriteOutboxAndFireProcessor:
         intent = _make_intent()
 
         for live_mode in (True, False):
+            runner._pending_drain_tasks.clear()
             caplog.clear()
             with (
                 patch(
@@ -162,7 +164,7 @@ class TestWriteOutboxAndFireProcessor:
                     return_value="cycle-nie",
                 ),
                 patch.object(runner, "_is_live_mode", return_value=live_mode),
-                caplog.at_level(logging.WARNING),
+                caplog.at_level(logging.DEBUG),
             ):
                 # Must not raise regardless of live/non-live
                 await runner._write_outbox_and_fire_processor(
@@ -172,8 +174,11 @@ class TestWriteOutboxAndFireProcessor:
             assert any(
                 "gateway outbox not yet available" in r.message or "VIB-3482" in r.message
                 for r in caplog.records
-            ), f"expected VIB-3482 warning in live_mode={live_mode}"
-            assert len(runner._pending_drain_tasks) == 0
+            ), f"expected VIB-3482 message in live_mode={live_mode}"
+            # Fallback path creates a drain_one_direct task instead of dropping
+            assert len(runner._pending_drain_tasks) == 1, (
+                f"expected 1 fallback drain task in live_mode={live_mode}"
+            )
 
     @pytest.mark.asyncio
     async def test_exception_live_mode_raises_accounting_error(self):

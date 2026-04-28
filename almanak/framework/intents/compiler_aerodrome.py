@@ -390,7 +390,8 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
                     "stable": stable,
                     "protocol": "aerodrome",
                     "collect_fees": intent.collect_fees,
-                    "warning": "No LP tokens found; LP_CLOSE no-op",
+                    "no_op": True,
+                    "reason": "No LP tokens found; LP_CLOSE no-op",
                 },
             )
             result.transactions = []
@@ -967,7 +968,8 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
                     "token_id": token_id,
                     "protocol": "aerodrome_slipstream",
                     "collect_fees": intent.collect_fees,
-                    "warning": "Zero liquidity; LP_CLOSE no-op",
+                    "no_op": True,
+                    "reason": "Zero liquidity; LP_CLOSE no-op",
                 },
             )
             result.transactions = []

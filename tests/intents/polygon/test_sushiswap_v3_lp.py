@@ -462,8 +462,10 @@ class TestSushiSwapV3LPCloseIntent:
         assert compilation_result.action_bundle is not None
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
-        assert not execution_result.success, "LP Close on empty position should report failure (VIB-234)"
-        assert "Empty ActionBundle" in execution_result.error
+        assert execution_result.success, "LP Close on empty position is a no-op success (VIB-3644)"
+        assert compilation_result.action_bundle.metadata.get("no_op") is True, "Empty LP_CLOSE must carry no_op metadata"
+        assert compilation_result.action_bundle.transactions == [], "No-op bundle must have 0 transactions"
+        assert len(execution_result.transaction_results) == 0, "No-op execution must produce 0 executed transactions"
 
         usdc_after_close = get_token_balance(web3, usdc_addr, funded_wallet)
         weth_after_close = get_token_balance(web3, weth_addr, funded_wallet)

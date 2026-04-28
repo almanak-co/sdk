@@ -3868,19 +3868,25 @@ class IntentCompiler:
 
             # Step 5: Assemble ActionBundle
             total_gas = sum_transaction_gas(transactions)
+            no_op = not transactions
+            metadata: dict[str, Any] = {
+                "position_id": intent.position_id,
+                "token_id": token_id,
+                "pool": intent.pool,
+                "collect_fees": intent.collect_fees,
+                "protocol": protocol,
+                "position_manager": position_manager,
+                "deadline": deadline,
+                "chain": self.chain,
+            }
+            if no_op:
+                metadata["no_op"] = True
+                metadata["reason"] = f"Position #{token_id} already closed (0 liquidity, 0 tokens owed); LP_CLOSE no-op"
+
             action_bundle = assemble_action_bundle(
                 intent_type=IntentType.LP_CLOSE.value,
                 transactions=transactions,
-                metadata={
-                    "position_id": intent.position_id,
-                    "token_id": token_id,
-                    "pool": intent.pool,
-                    "collect_fees": intent.collect_fees,
-                    "protocol": protocol,
-                    "position_manager": position_manager,
-                    "deadline": deadline,
-                    "chain": self.chain,
-                },
+                metadata=metadata,
             )
 
             result.action_bundle = action_bundle

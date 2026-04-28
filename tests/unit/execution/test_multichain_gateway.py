@@ -210,3 +210,84 @@ class TestGatewayGetBalances:
         assert "base" in balances
         # Should query both chains
         assert mock_gateway_client.market.GetBalance.call_count == 2
+
+
+class TestCompileAndExecuteNoOp:
+    """Tests for _compile_and_execute_intent no-op bundle handling (multichain.py:615-626)."""
+
+    def _make_mco(self):
+        """Build a config-mode MCO with injected mock compiler and config."""
+        from almanak.framework.execution.multichain import MultiChainOrchestrator
+        # Use a MagicMock config so _compile_and_execute_intent's `self._config is not None` passes
+        mock_config = MagicMock()
+        mco = MultiChainOrchestrator(config=mock_config)
+        # Inject mock compiler + lock so compilation doesn't touch the network
+        mock_compiler = MagicMock()
+        mock_compiler.price_oracle = None
+        mock_compiler._using_placeholders = False
+        compiler_lock = MagicMock()
+        compiler_lock.__aenter__ = AsyncMock(return_value=None)
+        compiler_lock.__aexit__ = AsyncMock(return_value=False)
+        mco._compilers = {"arbitrum": mock_compiler}
+        mco._compiler_locks = {"arbitrum": compiler_lock}
+        return mco, mock_compiler
+
+    @pytest.mark.asyncio
+    async def test_no_op_metadata_returns_success_without_executing(self):
+        """Empty-transaction bundle with no_op=True returns success, does not call executor."""
+        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
+        from almanak.framework.models.reproduction_bundle import ActionBundle
+
+        mco, mock_compiler = self._make_mco()
+
+        no_op_bundle = ActionBundle(
+            intent_type="LP_CLOSE",
+            transactions=[],
+            metadata={"no_op": True, "reason": "position already closed"},
+        )
+        mock_compiler.compile.return_value = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id="intent-abc",
+            action_bundle=no_op_bundle,
+        )
+
+        intent = MagicMock()
+        intent.intent_id = "intent-abc"
+
+        executor = MagicMock()
+        executor._chain = "arbitrum"
+
+        result = await mco._compile_and_execute_intent(intent, executor)
+
+        assert result.success is True
+        assert result.tx_hash == ""
+        executor.execute_transaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_bundle_without_no_op_raises(self):
+        """Empty-transaction bundle without no_op metadata raises ExecutionError."""
+        from almanak.framework.execution.multichain import ExecutionError
+        from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
+        from almanak.framework.models.reproduction_bundle import ActionBundle
+
+        mco, mock_compiler = self._make_mco()
+
+        empty_bundle = ActionBundle(
+            intent_type="LP_CLOSE",
+            transactions=[],
+            metadata={},
+        )
+        mock_compiler.compile.return_value = CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id="intent-xyz",
+            action_bundle=empty_bundle,
+        )
+
+        intent = MagicMock()
+        intent.intent_id = "intent-xyz"
+
+        executor = MagicMock()
+        executor._chain = "arbitrum"
+
+        with pytest.raises(ExecutionError, match="Compilation produced no transactions"):
+            await mco._compile_and_execute_intent(intent, executor)
