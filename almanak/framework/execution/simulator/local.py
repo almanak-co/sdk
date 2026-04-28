@@ -61,6 +61,10 @@ _STATE_SETUP_TX_TIMEOUT = 30
 # _STATE_SETUP_TX_TIMEOUT envelope so a single tx can never hang the caller
 # past the combined timeout budget.
 _ESTIMATE_GAS_TIMEOUT = 30
+# Sentinel prefix emitted by _estimate_gas on TimeoutError. Used by the timeout
+# fallback check to distinguish eth_estimateGas timeouts from transport-layer
+# "timed out" strings (e.g. urllib ReadTimeout) that should NOT trigger the fallback.
+_ESTIMATE_GAS_TIMEOUT_MARKER = "eth_estimateGas timed out after"
 
 # Gas buffer multiplier for state-setup transaction execution.
 # eth_estimateGas returns the minimum gas needed at the current block state,
@@ -203,7 +207,7 @@ class LocalSimulator(Simulator):
             return gas_estimate, None
 
         except TimeoutError:
-            timeout_msg = f"eth_estimateGas timed out after {_ESTIMATE_GAS_TIMEOUT}s"
+            timeout_msg = f"{_ESTIMATE_GAS_TIMEOUT_MARKER} {_ESTIMATE_GAS_TIMEOUT}s"
             logger.warning(
                 f"Gas estimation timeout: {timeout_msg}",
                 extra={"to": tx.to, "timeout_seconds": _ESTIMATE_GAS_TIMEOUT},
@@ -508,6 +512,19 @@ class LocalSimulator(Simulator):
                         f"using connector-provided gas_limit={gas_estimate}",
                         extra={"tx_index": i, "to": tx.to},
                     )
+
+                # Timeout fallback: when eth_estimateGas times out (not a real revert), use the
+                # compiler-provided gas_limit instead of failing the simulation. Mirrors the
+                # approve fallback above. Uses the sentinel prefix from _ESTIMATE_GAS_TIMEOUT_MARKER
+                # to distinguish this from transport-layer timeouts (e.g. urllib ReadTimeout).
+                if error and error.startswith(_ESTIMATE_GAS_TIMEOUT_MARKER) and tx.gas_limit and tx.gas_limit > 0:
+                    logger.warning(
+                        f"Transaction {i + 1}/{tx_count}: eth_estimateGas timed out, "
+                        f"falling back to compiler gas_limit={tx.gas_limit}",
+                        extra={"tx_index": i, "to": tx.to},
+                    )
+                    gas_estimate = tx.gas_limit
+                    error = None
 
                 if error:
                     logger.warning(

@@ -114,6 +114,48 @@ class TestBuildAnvilCommand:
         assert "--retries" in cmd
         assert "--silent" in cmd
 
+    def test_block_gas_limit_included_for_mantle_when_supported(self):
+        """Mantle gets --block-gas-limit when Anvil supports the flag (VIB-3666)."""
+        _clear_flags_cache()
+        mgr = RollingForkManager(
+            rpc_url="https://mantle.example.com",
+            chain="mantle",
+            anvil_port=8545,
+        )
+        with patch(
+            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
+            return_value={"--block-gas-limit", "--cache-path", "--block-base-fee-per-gas"},
+        ):
+            cmd = mgr._build_anvil_command()
+        assert "--block-gas-limit" in cmd
+        idx = cmd.index("--block-gas-limit")
+        assert cmd[idx + 1] == "1000000000"
+
+    def test_block_gas_limit_skipped_for_mantle_when_unsupported(self):
+        """No --block-gas-limit when Anvil doesn't advertise support (older versions)."""
+        _clear_flags_cache()
+        mgr = RollingForkManager(
+            rpc_url="https://mantle.example.com",
+            chain="mantle",
+            anvil_port=8545,
+        )
+        with patch(
+            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
+            return_value={"--cache-path", "--block-base-fee-per-gas"},
+        ):
+            cmd = mgr._build_anvil_command()
+        assert "--block-gas-limit" not in cmd
+
+    def test_block_gas_limit_not_included_for_non_override_chains(self):
+        """Ethereum (no entry in _CHAIN_BLOCK_GAS_LIMITS) never gets --block-gas-limit."""
+        mgr = self._make_manager()  # chain="ethereum"
+        with patch(
+            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
+            return_value={"--block-gas-limit", "--cache-path", "--block-base-fee-per-gas"},
+        ):
+            cmd = mgr._build_anvil_command()
+        assert "--block-gas-limit" not in cmd
+
 
 class TestGetTokenBalance:
     """Fix #2: _get_token_balance must handle empty hex '0x' responses."""

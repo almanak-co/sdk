@@ -496,9 +496,20 @@ def compile_lp_close_curve(compiler, intent: LPCloseIntent) -> CompilationResult
                     intent_id=intent.intent_id,
                 )
             if raw_balance == 0:
+                # No LP balance — no position to close. Return no_op so the orchestrator
+                # marks teardown as successful rather than failed (matches Aerodrome/UniV3
+                # behavior fixed in VIB-3644/3645).
+                logger.info("Curve LP_CLOSE: zero LP balance for %s — no_op", pool_name)
                 return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Wallet has zero LP token balance for {pool_name} ({lp_token_for_pool})",
+                    status=CompilationStatus.SUCCESS,
+                    action_bundle=ActionBundle(
+                        intent_type=IntentType.LP_CLOSE.value,
+                        transactions=[],
+                        metadata={
+                            "no_op": True,
+                            "reason": f"zero LP token balance for {pool_name} ({lp_token_for_pool})",
+                        },
+                    ),
                     intent_id=intent.intent_id,
                 )
             lp_token_info = compiler._resolve_token(lp_token_for_pool)

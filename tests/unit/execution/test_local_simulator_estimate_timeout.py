@@ -18,6 +18,7 @@ from almanak.framework.execution.interfaces import (
 )
 from almanak.framework.execution.simulator.local import (
     _ESTIMATE_GAS_TIMEOUT,
+    _ESTIMATE_GAS_TIMEOUT_MARKER,
     LocalSimulator,
 )
 
@@ -43,12 +44,16 @@ class TestEstimateGasTimeout:
     """eth_estimateGas must be wrapped in asyncio.wait_for so it cannot hang."""
 
     @pytest.mark.asyncio
-    async def test_estimate_gas_timeout_is_reported_as_error(self, monkeypatch):
-        """A hanging estimate_gas must surface as a timeout error, not block forever."""
+    async def test_estimate_gas_timeout_falls_back_to_compiler_gas_limit(self, monkeypatch):
+        """A hanging estimate_gas falls back to the compiler gas_limit (VIB-3667).
+
+        When eth_estimateGas times out AND the TX has a compiler-provided gas_limit,
+        the simulation succeeds using that fallback rather than failing. This prevents
+        SushiSwap/Enso timeouts from blocking strategy execution on chains where the
+        router contract triggers deep storage reads under Anvil's fork simulation.
+        """
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
-        # Shrink the timeout for fast test execution; the production value is
-        # exercised by the presence of the asyncio.wait_for wrapper below.
         monkeypatch.setattr(
             "almanak.framework.execution.simulator.local._ESTIMATE_GAS_TIMEOUT",
             0.1,
@@ -57,7 +62,6 @@ class TestEstimateGasTimeout:
         hung = asyncio.Event()
 
         async def _hang(*_args, **_kwargs):
-            # Never completes — simulates a slow/hung RPC endpoint.
             hung.set()
             await asyncio.Event().wait()
 
@@ -68,15 +72,12 @@ class TestEstimateGasTimeout:
 
         tx = _make_vault_deposit_tx(gas_limit=450_000)
 
-        # Run with an outer watchdog so a regression that removes the timeout
-        # fails the test in bounded time instead of hanging CI.
         result = await asyncio.wait_for(sim.simulate([tx], chain="base"), timeout=5.0)
 
-        # estimate_gas was called and hung, but the simulator surfaced the timeout.
         assert hung.is_set()
-        assert not result.success
-        assert result.revert_reason is not None
-        assert "timed out" in result.revert_reason.lower()
+        # Timeout with compiler gas_limit present → fallback → simulation succeeds
+        assert result.success
+        assert result.gas_estimates == [450_000]
 
     @pytest.mark.asyncio
     async def test_estimate_gas_timeout_constant_matches_state_setup_budget(self):

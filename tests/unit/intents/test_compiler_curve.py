@@ -518,3 +518,33 @@ class TestCurveLPClose:
 
         assert result.status == CompilationStatus.FAILED
         assert "slippage exceeded" in result.error
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    def test_lp_close_zero_balance_returns_no_op(self, compiler):
+        """LP close returns no_op ActionBundle when on-chain LP balance is zero (VIB-3668).
+
+        When the LP token address is passed as position_id (teardown flow) and the
+        on-chain balance is 0 (position was on Anvil; mainnet gateway has no balance),
+        compilation must succeed as a no_op — not FAILED — so teardown exits 0.
+        """
+        from almanak.framework.intents.vocabulary import IntentType
+
+        LP_TOKEN = "0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC"  # usdc_usdt LP token
+
+        # Patch _query_erc20_balance to simulate zero on-chain balance
+        compiler._query_erc20_balance = MagicMock(return_value=0)
+
+        intent = LPCloseIntent(
+            position_id=LP_TOKEN,  # Address form triggers on-chain balance query
+            pool="usdc_usdt",
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle is not None
+        assert result.action_bundle.intent_type == IntentType.LP_CLOSE.value
+        assert result.action_bundle.transactions == []
+        assert result.action_bundle.metadata.get("no_op") is True

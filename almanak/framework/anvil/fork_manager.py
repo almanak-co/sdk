@@ -102,6 +102,14 @@ CHAIN_IDS: dict[str, int] = {
     "zerog": 16661,
 }
 
+# Per-chain Anvil block gas limit overrides. When set, --block-gas-limit is passed to
+# the Anvil fork so transactions are never rejected for exceeding the block gas limit.
+# Mantle uses a non-standard gas accounting system (L1 calldata overhead included in
+# tx.gasLimit), so a generous block gas limit prevents false "intrinsic gas too high" errors.
+_CHAIN_BLOCK_GAS_LIMITS: dict[str, int] = {
+    "mantle": 1_000_000_000,  # 1B — Mantle L2 non-standard gas accounting (VIB-3666)
+}
+
 
 # Common ERC-20 token addresses per chain
 TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
@@ -1300,6 +1308,20 @@ class RollingForkManager:
         # This replaces the old --no-gas-cap flag which only existed in Anvil 0.4.x
         # and was removed in Foundry 1.x. Gas is always fake/free on Anvil forks.
         cmd.extend(["--block-base-fee-per-gas", "0"])
+
+        # Override block gas limit for chains with non-standard gas accounting (VIB-3666).
+        # Without this, some chains (e.g. Mantle) cause "intrinsic gas too high" rejections
+        # because the forked block.gas_limit is too low for the SDK's computed tx.gas_limit.
+        # Guarded by _get_anvil_supported_flags() (same pattern as --cache-path) to avoid
+        # startup failures on Anvil versions that don't support the flag.
+        if self.chain in _CHAIN_BLOCK_GAS_LIMITS:
+            if "--block-gas-limit" in _get_anvil_supported_flags():
+                cmd.extend(["--block-gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
+            else:
+                logger.warning(
+                    "Anvil does not support --block-gas-limit; skipping gas limit override for chain=%s",
+                    self.chain,
+                )
 
         # Cache upstream RPC responses to reduce Alchemy/RPC calls
         if self.cache_path:
