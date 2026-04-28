@@ -1120,7 +1120,7 @@ def _make_vault_deposit_event(value_usd="500", timestamp="2026-01-03T10:00:00", 
         "protocol": "morpho",
         "chain": "arbitrum",
         "ledger_entry_id": ledger_entry_id,
-        "payload_json": json.dumps({"deposit_usd": value_usd, "schema_version": 1}),
+        "payload_json": json.dumps({"cost_basis_usd": value_usd, "schema_version": 1}),
         "confidence": "HIGH",
         "schema_version": 1,
     }

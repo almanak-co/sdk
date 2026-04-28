@@ -642,12 +642,9 @@ class GatewayStateManager:
             return False
 
     # -------------------------------------------------------------------------
-    # Accounting outbox (VIB-3467) — gateway gRPC extension pending VIB-3482
+    # Accounting outbox — gateway gRPC layer (SaveOutboxEntry / GetOutboxEntry /
+    # GetOutboxPending / UpdateOutboxEntry). DDL landed in metrics-database PR #24.
     # -------------------------------------------------------------------------
-    # Write methods raise NotImplementedError so VIB-3477 (which removes the
-    # legacy inline writers) cannot merge before VIB-3482 ships the gateway
-    # extension.  Read methods return empty/False so drain_pending is a no-op
-    # on the gateway path (safe during dual-write: legacy writers still fire).
 
     async def save_outbox_entry(
         self,
@@ -662,36 +659,167 @@ class GatewayStateManager:
         market_id: str,
         created_at: str,
     ) -> None:
-        """Gateway gRPC outbox write not yet supported (VIB-3482).
+        """Write one accounting_outbox row via gateway gRPC (idempotent INSERT OR IGNORE).
 
-        Raises NotImplementedError so callers can detect the missing backend.
-        write_outbox_entry() catches this and returns None — outbox write is
-        skipped on the gateway path during the dual-write period.
+        Raises AccountingPersistenceError on RPC failure so write_outbox_entry()
+        can propagate it as a fail-closed error in live mode.
         """
-        raise NotImplementedError(
-            "GatewayStateManager.save_outbox_entry not implemented — gateway gRPC extension required (VIB-3482)."
+        request = gateway_pb2.SaveOutboxEntryRequest(
+            outbox_id=outbox_id,
+            deployment_id=deployment_id,
+            strategy_id=strategy_id,
+            cycle_id=cycle_id,
+            ledger_entry_id=ledger_entry_id,
+            intent_type=intent_type,
+            wallet_address=wallet_address,
+            position_key=position_key,
+            market_id=market_id,
+            created_at=created_at,
         )
+        try:
+            response = self._client.state.SaveOutboxEntry(request, timeout=self._timeout)
+        except Exception as e:
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.OUTBOX,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
+        if not response.success:
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.OUTBOX,
+                strategy_id=strategy_id,
+                cause=Exception(response.error),
+            )
 
     async def get_outbox_by_ledger_id(self, ledger_entry_id: str) -> dict | None:
-        """Return None — gateway gRPC outbox read not yet supported (VIB-3482)."""
-        return None
+        """Fetch the outbox row for a ledger entry via gateway gRPC, or None."""
+        try:
+            request = gateway_pb2.GetOutboxEntryRequest(ledger_entry_id=ledger_entry_id)
+            response = self._client.state.GetOutboxEntry(request, timeout=self._timeout)
+            if not response.found:
+                return None
+            e = response.entry
+            return {
+                "id": e.id,
+                "deployment_id": e.deployment_id,
+                "strategy_id": e.strategy_id,
+                "cycle_id": e.cycle_id,
+                "ledger_entry_id": e.ledger_entry_id,
+                "intent_type": e.intent_type,
+                "wallet_address": e.wallet_address,
+                "position_key": e.position_key,
+                "market_id": e.market_id,
+                "status": e.status,
+                "attempts": e.attempts,
+                "error": e.error,
+                "created_at": e.created_at,
+                "updated_at": e.updated_at,
+            }
+        except Exception as exc:
+            logger.warning("get_outbox_by_ledger_id failed: %s", exc)
+            return None
 
     async def get_outbox_pending(self, deployment_id: str, max_retries: int = 3) -> list[dict]:
-        """Return empty list — gateway gRPC outbox read not yet supported (VIB-3482)."""
-        return []
+        """Return pending/failed/stuck-processing outbox rows via gateway gRPC."""
+        try:
+            request = gateway_pb2.GetOutboxPendingRequest(deployment_id=deployment_id, max_retries=max_retries)
+            response = self._client.state.GetOutboxPending(request, timeout=self._timeout)
+            result = []
+            for e in response.entries:
+                result.append(
+                    {
+                        "id": e.id,
+                        "deployment_id": e.deployment_id,
+                        "strategy_id": e.strategy_id,
+                        "cycle_id": e.cycle_id,
+                        "ledger_entry_id": e.ledger_entry_id,
+                        "intent_type": e.intent_type,
+                        "wallet_address": e.wallet_address,
+                        "position_key": e.position_key,
+                        "market_id": e.market_id,
+                        "status": e.status,
+                        "attempts": e.attempts,
+                        "error": e.error,
+                        "created_at": e.created_at,
+                        "updated_at": e.updated_at,
+                    }
+                )
+            return result
+        except Exception as exc:
+            logger.warning("get_outbox_pending failed: %s", exc)
+            return []
 
     async def update_outbox_entry(
         self, outbox_id: str, status: str, error: str = "", attempts: int | None = None
     ) -> None:
-        """No-op — gateway gRPC outbox update not yet supported (VIB-3482)."""
+        """Update outbox row status via gateway gRPC. Logs on failure (non-blocking)."""
+        try:
+            request = gateway_pb2.UpdateOutboxEntryRequest(
+                outbox_id=outbox_id,
+                status=status,
+                error=error,
+            )
+            if attempts is not None:
+                request.attempts = attempts
+            response = self._client.state.UpdateOutboxEntry(request, timeout=self._timeout)
+            if not response.success:
+                logger.warning("UpdateOutboxEntry failed for outbox_id=%s: %s", outbox_id, response.error)
+        except Exception as exc:
+            logger.warning("update_outbox_entry failed for outbox_id=%s: %s", outbox_id, exc)
 
     async def has_accounting_events_for_ledger(self, ledger_entry_id: str) -> bool:
-        """Return False — gateway gRPC outbox query not yet supported (VIB-3482)."""
-        return False
+        """Return True if accounting_events already has a row for this ledger entry."""
+        try:
+            request = gateway_pb2.HasAccountingEventsForLedgerRequest(ledger_entry_id=ledger_entry_id)
+            response = self._client.state.HasAccountingEventsForLedger(request, timeout=self._timeout)
+            return bool(response.has_events)
+        except Exception as exc:
+            logger.warning("has_accounting_events_for_ledger failed: %s", exc)
+            return False
 
     async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict | None:
-        """Return None — gateway gRPC ledger read not yet supported (VIB-3482)."""
-        return None
+        """Fetch a transaction_ledger row by id via gateway gRPC for AccountingProcessor."""
+        try:
+            request = gateway_pb2.GetLedgerEntryRequest(ledger_entry_id=ledger_entry_id)
+            response = self._client.state.GetLedgerEntry(request, timeout=self._timeout)
+            if not response.found:
+                return None
+            e = response.entry
+
+            def _decode(b: bytes) -> str:
+                return b.decode("utf-8") if b else ""
+
+            row: dict = {
+                "id": e.id,
+                "cycle_id": e.cycle_id,
+                "strategy_id": e.strategy_id,
+                "deployment_id": e.deployment_id,
+                "execution_mode": e.execution_mode,
+                "timestamp": (datetime.fromtimestamp(e.timestamp, tz=UTC).isoformat() if e.timestamp else ""),
+                "intent_type": e.intent_type,
+                "token_in": e.token_in,
+                "amount_in": e.amount_in,
+                "token_out": e.token_out,
+                "amount_out": e.amount_out,
+                "effective_price": e.effective_price,
+                "gas_used": e.gas_used,
+                "gas_usd": e.gas_usd,
+                "tx_hash": e.tx_hash,
+                "chain": e.chain,
+                "protocol": e.protocol,
+                "success": e.success,
+                "error": e.error,
+                "extracted_data_json": _decode(e.extracted_data_json),
+                "price_inputs_json": _decode(e.price_inputs_json),
+                "pre_state_json": _decode(e.pre_state_json),
+                "post_state_json": _decode(e.post_state_json),
+            }
+            if e.HasField("slippage_bps"):
+                row["slippage_bps"] = e.slippage_bps
+            return row
+        except Exception as exc:
+            logger.warning("get_ledger_entry_by_id failed for %s: %s", ledger_entry_id, exc)
+            return None
 
     def get_accounting_events_sync(
         self,

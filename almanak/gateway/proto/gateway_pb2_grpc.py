@@ -494,6 +494,36 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.GetAccountingEventsRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetAccountingEventsResponse.FromString,
                 _registered_method=True)
+        self.SaveOutboxEntry = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SaveOutboxEntry',
+                request_serializer=gateway__pb2.SaveOutboxEntryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveOutboxEntryResponse.FromString,
+                _registered_method=True)
+        self.GetOutboxEntry = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetOutboxEntry',
+                request_serializer=gateway__pb2.GetOutboxEntryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetOutboxEntryResponse.FromString,
+                _registered_method=True)
+        self.GetOutboxPending = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetOutboxPending',
+                request_serializer=gateway__pb2.GetOutboxPendingRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetOutboxPendingResponse.FromString,
+                _registered_method=True)
+        self.UpdateOutboxEntry = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/UpdateOutboxEntry',
+                request_serializer=gateway__pb2.UpdateOutboxEntryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.UpdateOutboxEntryResponse.FromString,
+                _registered_method=True)
+        self.HasAccountingEventsForLedger = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/HasAccountingEventsForLedger',
+                request_serializer=gateway__pb2.HasAccountingEventsForLedgerRequest.SerializeToString,
+                response_deserializer=gateway__pb2.HasAccountingEventsForLedgerResponse.FromString,
+                _registered_method=True)
+        self.GetLedgerEntry = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetLedgerEntry',
+                request_serializer=gateway__pb2.GetLedgerEntryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetLedgerEntryResponse.FromString,
+                _registered_method=True)
 
 
 class StateServiceServicer(object):
@@ -599,6 +629,50 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SaveOutboxEntry(self, request, context):
+        """Accounting outbox RPCs — crash-safe durability layer for the async
+        AccountingProcessor. DDL landed in metrics-database PR #24 (VIB-3503).
+        Without these, save_outbox_entry raises NotImplementedError and the
+        processor never fires in hosted mode (no typed accounting events reach PG).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetOutboxEntry(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetOutboxPending(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateOutboxEntry(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def HasAccountingEventsForLedger(self, request, context):
+        """Idempotency check: does accounting_events already have a row for this ledger entry?
+        Used by AccountingProcessor.drain_one before re-processing a row.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLedgerEntry(self, request, context):
+        """Ledger entry read — used by AccountingProcessor.drain_one to fetch the
+        transaction_ledger row for category-handler processing in hosted mode.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -661,6 +735,36 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.GetAccountingEvents,
                     request_deserializer=gateway__pb2.GetAccountingEventsRequest.FromString,
                     response_serializer=gateway__pb2.GetAccountingEventsResponse.SerializeToString,
+            ),
+            'SaveOutboxEntry': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveOutboxEntry,
+                    request_deserializer=gateway__pb2.SaveOutboxEntryRequest.FromString,
+                    response_serializer=gateway__pb2.SaveOutboxEntryResponse.SerializeToString,
+            ),
+            'GetOutboxEntry': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOutboxEntry,
+                    request_deserializer=gateway__pb2.GetOutboxEntryRequest.FromString,
+                    response_serializer=gateway__pb2.GetOutboxEntryResponse.SerializeToString,
+            ),
+            'GetOutboxPending': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOutboxPending,
+                    request_deserializer=gateway__pb2.GetOutboxPendingRequest.FromString,
+                    response_serializer=gateway__pb2.GetOutboxPendingResponse.SerializeToString,
+            ),
+            'UpdateOutboxEntry': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateOutboxEntry,
+                    request_deserializer=gateway__pb2.UpdateOutboxEntryRequest.FromString,
+                    response_serializer=gateway__pb2.UpdateOutboxEntryResponse.SerializeToString,
+            ),
+            'HasAccountingEventsForLedger': grpc.unary_unary_rpc_method_handler(
+                    servicer.HasAccountingEventsForLedger,
+                    request_deserializer=gateway__pb2.HasAccountingEventsForLedgerRequest.FromString,
+                    response_serializer=gateway__pb2.HasAccountingEventsForLedgerResponse.SerializeToString,
+            ),
+            'GetLedgerEntry': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLedgerEntry,
+                    request_deserializer=gateway__pb2.GetLedgerEntryRequest.FromString,
+                    response_serializer=gateway__pb2.GetLedgerEntryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -991,6 +1095,168 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/GetAccountingEvents',
             gateway__pb2.GetAccountingEventsRequest.SerializeToString,
             gateway__pb2.GetAccountingEventsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveOutboxEntry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SaveOutboxEntry',
+            gateway__pb2.SaveOutboxEntryRequest.SerializeToString,
+            gateway__pb2.SaveOutboxEntryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetOutboxEntry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetOutboxEntry',
+            gateway__pb2.GetOutboxEntryRequest.SerializeToString,
+            gateway__pb2.GetOutboxEntryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetOutboxPending(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetOutboxPending',
+            gateway__pb2.GetOutboxPendingRequest.SerializeToString,
+            gateway__pb2.GetOutboxPendingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateOutboxEntry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/UpdateOutboxEntry',
+            gateway__pb2.UpdateOutboxEntryRequest.SerializeToString,
+            gateway__pb2.UpdateOutboxEntryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def HasAccountingEventsForLedger(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/HasAccountingEventsForLedger',
+            gateway__pb2.HasAccountingEventsForLedgerRequest.SerializeToString,
+            gateway__pb2.HasAccountingEventsForLedgerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLedgerEntry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetLedgerEntry',
+            gateway__pb2.GetLedgerEntryRequest.SerializeToString,
+            gateway__pb2.GetLedgerEntryResponse.FromString,
             options,
             channel_credentials,
             insecure,

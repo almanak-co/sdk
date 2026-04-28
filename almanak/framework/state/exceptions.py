@@ -22,6 +22,7 @@ class AccountingWriteKind(StrEnum):
     SNAPSHOT = "snapshot"
     METRICS = "metrics"
     ACCOUNTING = "accounting"
+    OUTBOX = "outbox"
 
 
 class AccountingPersistenceError(Exception):

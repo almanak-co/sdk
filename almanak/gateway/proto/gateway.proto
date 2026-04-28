@@ -182,6 +182,23 @@ service StateService {
   // fail-quiet: on error returns an empty list rather than raising,
   // since stale PnL is preferred over halting snapshot building.
   rpc GetAccountingEvents(GetAccountingEventsRequest) returns (GetAccountingEventsResponse);
+
+  // Accounting outbox RPCs — crash-safe durability layer for the async
+  // AccountingProcessor. DDL landed in metrics-database PR #24 (VIB-3503).
+  // Without these, save_outbox_entry raises NotImplementedError and the
+  // processor never fires in hosted mode (no typed accounting events reach PG).
+  rpc SaveOutboxEntry(SaveOutboxEntryRequest) returns (SaveOutboxEntryResponse);
+  rpc GetOutboxEntry(GetOutboxEntryRequest) returns (GetOutboxEntryResponse);
+  rpc GetOutboxPending(GetOutboxPendingRequest) returns (GetOutboxPendingResponse);
+  rpc UpdateOutboxEntry(UpdateOutboxEntryRequest) returns (UpdateOutboxEntryResponse);
+
+  // Idempotency check: does accounting_events already have a row for this ledger entry?
+  // Used by AccountingProcessor.drain_one before re-processing a row.
+  rpc HasAccountingEventsForLedger(HasAccountingEventsForLedgerRequest) returns (HasAccountingEventsForLedgerResponse);
+
+  // Ledger entry read — used by AccountingProcessor.drain_one to fetch the
+  // transaction_ledger row for category-handler processing in hosted mode.
+  rpc GetLedgerEntry(GetLedgerEntryRequest) returns (GetLedgerEntryResponse);
 }
 
 message LoadStateRequest {
@@ -455,6 +472,113 @@ message AccountingEvent {
 
 message GetAccountingEventsResponse {
   repeated AccountingEvent events = 1;
+}
+
+// Accounting outbox messages — mirrors the accounting_outbox table in
+// metrics-database (PR #24). PG primary key is ledger_entry_id; the proto
+// also exposes it as "id" so drain_one stays compatible with the SQLite path.
+message SaveOutboxEntryRequest {
+  string outbox_id = 1;        // UUID (INSERT OR IGNORE; ignored on PG where PK = ledger_entry_id)
+  string deployment_id = 2;
+  string strategy_id = 3;      // resolved to agent_id at the gateway
+  string cycle_id = 4;
+  string ledger_entry_id = 5;  // FK to transaction_ledger (PG primary key)
+  string intent_type = 6;
+  string wallet_address = 7;
+  string position_key = 8;
+  string market_id = 9;
+  string created_at = 10;      // ISO 8601 timestamp
+}
+message SaveOutboxEntryResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message OutboxEntry {
+  string id = 1;               // = ledger_entry_id on PG, UUID on SQLite
+  string deployment_id = 2;
+  string strategy_id = 3;
+  string cycle_id = 4;
+  string ledger_entry_id = 5;
+  string intent_type = 6;
+  string wallet_address = 7;
+  string position_key = 8;
+  string market_id = 9;
+  string status = 10;          // "pending" | "processing" | "processed" | "failed"
+  int32 attempts = 11;         // maps to retry_count in PG
+  string error = 12;           // maps to last_error in PG
+  string created_at = 13;
+  string updated_at = 14;
+}
+
+message GetOutboxEntryRequest {
+  string ledger_entry_id = 1;
+}
+message GetOutboxEntryResponse {
+  bool found = 1;
+  OutboxEntry entry = 2;
+}
+
+message GetOutboxPendingRequest {
+  string deployment_id = 1;
+  int32 max_retries = 2;       // 0 = server default (3); rows with attempts >= max_retries excluded
+}
+message GetOutboxPendingResponse {
+  repeated OutboxEntry entries = 1;
+}
+
+message UpdateOutboxEntryRequest {
+  string outbox_id = 1;        // ledger_entry_id on PG
+  string status = 2;
+  string error = 3;
+  optional int32 attempts = 4; // maps to retry_count in PG; omit to leave unchanged
+}
+message UpdateOutboxEntryResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message HasAccountingEventsForLedgerRequest {
+  string ledger_entry_id = 1;
+}
+message HasAccountingEventsForLedgerResponse {
+  bool has_events = 1;
+}
+
+message GetLedgerEntryRequest {
+  string ledger_entry_id = 1;
+}
+// LedgerEntryData mirrors transaction_ledger columns so AccountingProcessor
+// can reconstruct a dict-shaped row identical to what SQLiteStore returns.
+message LedgerEntryData {
+  string id = 1;
+  string cycle_id = 2;
+  string strategy_id = 3;         // agent_id in PG, mapped to strategy_id on the wire
+  string deployment_id = 4;
+  string execution_mode = 5;
+  int64 timestamp = 6;            // Unix epoch seconds
+  string intent_type = 7;
+  string token_in = 8;
+  string amount_in = 9;
+  string token_out = 10;
+  string amount_out = 11;
+  string effective_price = 12;
+  optional double slippage_bps = 13;
+  int64 gas_used = 14;
+  string gas_usd = 15;
+  string tx_hash = 16;
+  string chain = 17;
+  string protocol = 18;
+  bool success = 19;
+  string error = 20;
+  bytes extracted_data_json = 21;
+  bytes price_inputs_json = 22;
+  bytes pre_state_json = 23;
+  bytes post_state_json = 24;
+}
+message GetLedgerEntryResponse {
+  bool found = 1;
+  LedgerEntryData entry = 2;
 }
 
 // =============================================================================

@@ -496,20 +496,26 @@ async def _build_metrics_for_snapshot(
         existing = await runner.state_manager.get_portfolio_metrics(strategy_id)
 
         if existing is None:
+            # VIB-3614: total_value_usd is now strategy-scoped (positive positions only).
+            # On the very first snapshot the strategy may have no open positions yet
+            # (capital still in wallet). Fall back to available_cash_usd so the
+            # baseline reflects the strategy's starting capital rather than zero —
+            # a zero baseline makes every future PnL computation return zero.
+            initial = snapshot.total_value_usd or snapshot.available_cash_usd
             metrics = PortfolioMetrics(
                 strategy_id=strategy_id,
                 timestamp=snapshot.timestamp,
-                total_value_usd=snapshot.total_value_usd,
-                initial_value_usd=snapshot.total_value_usd,
+                total_value_usd=initial,
+                initial_value_usd=initial,
                 deployment_id=deployment_id,
                 execution_mode=execution_mode,
                 cycle_id=cycle_id,
             )
-            logger.info(f"Portfolio baseline established for {strategy_id}: ${snapshot.total_value_usd:.2f}")
+            logger.info(f"Portfolio baseline established for {strategy_id}: ${initial:.2f}")
             return metrics
 
         existing.timestamp = snapshot.timestamp
-        existing.total_value_usd = snapshot.total_value_usd
+        existing.total_value_usd = snapshot.total_value_usd or snapshot.available_cash_usd
         # Phase 4: always refresh execution_mode, deployment_id, and cycle_id
         existing.execution_mode = execution_mode
         existing.cycle_id = cycle_id

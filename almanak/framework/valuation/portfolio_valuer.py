@@ -1982,7 +1982,8 @@ class PortfolioValuer:
                 payload = json.loads(ev.get("payload_json") or "{}")
             except Exception:
                 continue
-            deposit_raw = payload.get("deposit_usd")
+            # vault_accounting serialises cost_basis_usd; older rows used deposit_usd
+            deposit_raw = payload.get("cost_basis_usd") or payload.get("deposit_usd")
             if deposit_raw is None:
                 continue
             try:

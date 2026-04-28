@@ -1729,3 +1729,488 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         except Exception as e:
             logger.warning("GetAccountingEvents SQLite failed: %s", e)
             return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+    # =========================================================================
+    # Accounting Outbox RPCs — crash-safe durability for AccountingProcessor
+    # DDL: metrics-database PR #24 (VIB-3503).  PG primary key = ledger_entry_id.
+    # =========================================================================
+
+    def _pg_outbox_row_to_proto(self, row: Any) -> gateway_pb2.OutboxEntry:
+        """Convert a PG asyncpg.Record from accounting_outbox to the proto shape.
+
+        PG schema uses ledger_entry_id as primary key and retry_count / last_error
+        for the attempt counter and error string.  We map these to the SQLite-
+        compatible names (id = ledger_entry_id, attempts = retry_count, error = last_error)
+        so AccountingProcessor.drain_one works identically on both backends.
+        """
+        ledger_id = row["ledger_entry_id"] or ""
+        created = row.get("created_at")
+        created_str = created.isoformat() if hasattr(created, "isoformat") else str(created or "")
+        processed = row.get("processed_at")
+        updated_str = processed.isoformat() if hasattr(processed, "isoformat") else created_str
+        return gateway_pb2.OutboxEntry(
+            id=ledger_id,
+            deployment_id=row.get("deployment_id") or "",
+            strategy_id=row.get("strategy_id") or "",
+            cycle_id="",
+            ledger_entry_id=ledger_id,
+            intent_type=row.get("intent_type") or "",
+            wallet_address="",
+            position_key="",
+            market_id="",
+            status=row.get("status") or "pending",
+            attempts=int(row.get("retry_count") or 0),
+            error=row.get("last_error") or "",
+            created_at=created_str,
+            updated_at=updated_str,
+        )
+
+    def _sqlite_outbox_row_to_proto(self, row: dict[str, Any]) -> gateway_pb2.OutboxEntry:
+        return gateway_pb2.OutboxEntry(
+            id=row.get("id") or "",
+            deployment_id=row.get("deployment_id") or "",
+            strategy_id=row.get("strategy_id") or "",
+            cycle_id=row.get("cycle_id") or "",
+            ledger_entry_id=row.get("ledger_entry_id") or "",
+            intent_type=row.get("intent_type") or "",
+            wallet_address=row.get("wallet_address") or "",
+            position_key=row.get("position_key") or "",
+            market_id=row.get("market_id") or "",
+            status=row.get("status") or "pending",
+            attempts=int(row.get("attempts") or 0),
+            error=row.get("error") or "",
+            created_at=row.get("created_at") or "",
+            updated_at=row.get("updated_at") or "",
+        )
+
+    async def SaveOutboxEntry(
+        self,
+        request: gateway_pb2.SaveOutboxEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveOutboxEntryResponse:
+        """Write one accounting_outbox row (INSERT OR IGNORE — idempotent).
+
+        Fail-closed in live mode: if the PG write fails the runner raises
+        AccountingPersistenceError so the cycle halts rather than continuing
+        without a durable outbox record.
+        """
+        ledger_entry_id = (request.ledger_entry_id or "").strip()
+        deployment_id = (request.deployment_id or "").strip()
+        if not ledger_entry_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("ledger_entry_id is required")
+            return gateway_pb2.SaveOutboxEntryResponse(success=False, error="ledger_entry_id is required")
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.SaveOutboxEntryResponse(success=False, error="deployment_id is required")
+
+        strategy_id_raw = (request.strategy_id or "").strip()
+        try:
+            strategy_id = validate_strategy_id(strategy_id_raw)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.SaveOutboxEntryResponse(success=False, error=str(e))
+        strategy_id = resolve_agent_id(strategy_id)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                await self._snapshot_execute(
+                    """
+                    INSERT INTO accounting_outbox
+                        (ledger_entry_id, strategy_id, deployment_id, intent_type,
+                         status, retry_count)
+                    VALUES ($1, $2, $3, $4, 'pending', 0)
+                    ON CONFLICT (ledger_entry_id) DO NOTHING
+                    """,
+                    ledger_entry_id,
+                    strategy_id,
+                    deployment_id,
+                    request.intent_type or "",
+                )
+                return gateway_pb2.SaveOutboxEntryResponse(success=True)
+            except Exception as e:
+                logger.error("SaveOutboxEntry PG failed for ledger_id=%s: %s", ledger_entry_id, e)
+                return gateway_pb2.SaveOutboxEntryResponse(success=False, error="internal server error")
+
+        # SQLite path
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "save_outbox_entry"):
+                return gateway_pb2.SaveOutboxEntryResponse(
+                    success=False, error="warm backend does not support save_outbox_entry"
+                )
+            await warm.save_outbox_entry(
+                outbox_id=request.outbox_id or ledger_entry_id,
+                deployment_id=deployment_id,
+                strategy_id=strategy_id,
+                cycle_id=request.cycle_id or "",
+                ledger_entry_id=ledger_entry_id,
+                intent_type=request.intent_type or "",
+                wallet_address=request.wallet_address or "",
+                position_key=request.position_key or "",
+                market_id=request.market_id or "",
+                created_at=request.created_at or datetime.now(UTC).isoformat(),
+            )
+            return gateway_pb2.SaveOutboxEntryResponse(success=True)
+        except Exception as e:
+            logger.error("SaveOutboxEntry SQLite failed for ledger_id=%s: %s", ledger_entry_id, e)
+            return gateway_pb2.SaveOutboxEntryResponse(success=False, error="internal server error")
+
+    async def GetOutboxEntry(
+        self,
+        request: gateway_pb2.GetOutboxEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetOutboxEntryResponse:
+        """Fetch the outbox row for a given ledger_entry_id, or found=False."""
+        ledger_entry_id = (request.ledger_entry_id or "").strip()
+        if not ledger_entry_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("ledger_entry_id is required")
+            return gateway_pb2.GetOutboxEntryResponse(found=False)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                row = await self._snapshot_fetchrow(
+                    """
+                    SELECT ledger_entry_id, strategy_id, deployment_id, intent_type,
+                           status, retry_count, last_error, created_at, processed_at
+                    FROM accounting_outbox
+                    WHERE ledger_entry_id = $1
+                    """,
+                    ledger_entry_id,
+                )
+                if row is None:
+                    return gateway_pb2.GetOutboxEntryResponse(found=False)
+                return gateway_pb2.GetOutboxEntryResponse(found=True, entry=self._pg_outbox_row_to_proto(row))
+            except Exception as e:
+                logger.warning("GetOutboxEntry PG failed for ledger_id=%s: %s", ledger_entry_id, e)
+                return gateway_pb2.GetOutboxEntryResponse(found=False)
+
+        # SQLite path
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_outbox_by_ledger_id"):
+                return gateway_pb2.GetOutboxEntryResponse(found=False)
+            row = await warm.get_outbox_by_ledger_id(ledger_entry_id)
+            if row is None:
+                return gateway_pb2.GetOutboxEntryResponse(found=False)
+            return gateway_pb2.GetOutboxEntryResponse(found=True, entry=self._sqlite_outbox_row_to_proto(row))
+        except Exception as e:
+            logger.warning("GetOutboxEntry SQLite failed: %s", e)
+            return gateway_pb2.GetOutboxEntryResponse(found=False)
+
+    async def GetOutboxPending(
+        self,
+        request: gateway_pb2.GetOutboxPendingRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetOutboxPendingResponse:
+        """Return pending/failed/stuck-processing outbox rows for a deployment.
+
+        Used by AccountingProcessor.drain_pending() on runner startup to recover
+        any rows that were in-flight when the container last restarted.
+        """
+        deployment_id = (request.deployment_id or "").strip()
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.GetOutboxPendingResponse(entries=[])
+        max_retries = request.max_retries if request.max_retries > 0 else 3
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                rows = await self._snapshot_fetch(
+                    """
+                    SELECT ledger_entry_id, strategy_id, deployment_id, intent_type,
+                           status, retry_count, last_error, created_at, processed_at
+                    FROM accounting_outbox
+                    WHERE deployment_id = $1
+                      AND status IN ('pending', 'failed', 'processing')
+                      AND retry_count < $2
+                    ORDER BY created_at ASC
+                    """,
+                    deployment_id,
+                    max_retries,
+                )
+                return gateway_pb2.GetOutboxPendingResponse(entries=[self._pg_outbox_row_to_proto(r) for r in rows])
+            except Exception as e:
+                logger.warning("GetOutboxPending PG failed for deployment=%s: %s", deployment_id, e)
+                return gateway_pb2.GetOutboxPendingResponse(entries=[])
+
+        # SQLite path
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_outbox_pending"):
+                return gateway_pb2.GetOutboxPendingResponse(entries=[])
+            rows = await warm.get_outbox_pending(deployment_id, max_retries=max_retries)
+            return gateway_pb2.GetOutboxPendingResponse(entries=[self._sqlite_outbox_row_to_proto(r) for r in rows])
+        except Exception as e:
+            logger.warning("GetOutboxPending SQLite failed: %s", e)
+            return gateway_pb2.GetOutboxPendingResponse(entries=[])
+
+    async def UpdateOutboxEntry(
+        self,
+        request: gateway_pb2.UpdateOutboxEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.UpdateOutboxEntryResponse:
+        """Update the status (and optionally retry_count) of an outbox row.
+
+        Fail-closed: used to mark rows as 'processing', 'processed', or 'failed'.
+        On PG, outbox_id == ledger_entry_id (the table's primary key).
+        """
+        outbox_id = (request.outbox_id or "").strip()
+        if not outbox_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("outbox_id is required")
+            return gateway_pb2.UpdateOutboxEntryResponse(success=False, error="outbox_id is required")
+        status = (request.status or "").strip()
+        if status not in ("pending", "processing", "processed", "failed"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"invalid status: {status!r}")
+            return gateway_pb2.UpdateOutboxEntryResponse(success=False, error=f"invalid status: {status!r}")
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                has_attempts = request.HasField("attempts")
+                if has_attempts:
+                    await self._snapshot_execute(
+                        """
+                        UPDATE accounting_outbox
+                        SET status = $1, last_error = $2, retry_count = $3,
+                            processed_at = CASE WHEN $1 = 'processed' THEN NOW() ELSE processed_at END
+                        WHERE ledger_entry_id = $4
+                        """,
+                        status,
+                        request.error or "",
+                        request.attempts,
+                        outbox_id,
+                    )
+                else:
+                    await self._snapshot_execute(
+                        """
+                        UPDATE accounting_outbox
+                        SET status = $1, last_error = $2,
+                            processed_at = CASE WHEN $1 = 'processed' THEN NOW() ELSE processed_at END
+                        WHERE ledger_entry_id = $3
+                        """,
+                        status,
+                        request.error or "",
+                        outbox_id,
+                    )
+                return gateway_pb2.UpdateOutboxEntryResponse(success=True)
+            except Exception as e:
+                logger.error("UpdateOutboxEntry PG failed for outbox_id=%s: %s", outbox_id, e)
+                return gateway_pb2.UpdateOutboxEntryResponse(success=False, error="internal server error")
+
+        # SQLite path
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "update_outbox_entry"):
+                return gateway_pb2.UpdateOutboxEntryResponse(
+                    success=False, error="warm backend does not support update_outbox_entry"
+                )
+            attempts_val = request.attempts if request.HasField("attempts") else None
+            await warm.update_outbox_entry(
+                outbox_id=outbox_id,
+                status=status,
+                error=request.error or "",
+                attempts=attempts_val,
+            )
+            return gateway_pb2.UpdateOutboxEntryResponse(success=True)
+        except Exception as e:
+            logger.error("UpdateOutboxEntry SQLite failed for outbox_id=%s: %s", outbox_id, e)
+            return gateway_pb2.UpdateOutboxEntryResponse(success=False, error="internal server error")
+
+    async def HasAccountingEventsForLedger(
+        self,
+        request: gateway_pb2.HasAccountingEventsForLedgerRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.HasAccountingEventsForLedgerResponse:
+        """Return True if accounting_events already has a row for this ledger entry.
+
+        Used by AccountingProcessor.drain_one as an idempotency guard: if we
+        already produced an accounting event for this trade, skip re-processing.
+        Uses the idx_ae_ledger index so the query is a single index seek.
+        """
+        ledger_entry_id = (request.ledger_entry_id or "").strip()
+        if not ledger_entry_id:
+            return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                row = await self._snapshot_fetchrow(
+                    "SELECT 1 FROM accounting_events WHERE ledger_entry_id = $1 LIMIT 1",
+                    ledger_entry_id,
+                )
+                return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=row is not None)
+            except Exception as e:
+                logger.warning("HasAccountingEventsForLedger PG failed: %s", e)
+                return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
+
+        # SQLite path
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "has_accounting_events_for_ledger"):
+                return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
+            result = await warm.has_accounting_events_for_ledger(ledger_entry_id)
+            return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=bool(result))
+        except Exception as e:
+            logger.warning("HasAccountingEventsForLedger SQLite failed: %s", e)
+            return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
+
+    async def GetLedgerEntry(
+        self,
+        request: gateway_pb2.GetLedgerEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetLedgerEntryResponse:
+        """Fetch a transaction_ledger row by id for AccountingProcessor.drain_one.
+
+        Returns the full row as LedgerEntryData so the category handler can
+        compute cost basis, PnL, and confidence without a SQLite fallback.
+        """
+        ledger_entry_id = (request.ledger_entry_id or "").strip()
+        if not ledger_entry_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("ledger_entry_id is required")
+            return gateway_pb2.GetLedgerEntryResponse(found=False)
+
+        await self._ensure_snapshot_pool()
+
+        if self._snapshot_pool is not None:
+            try:
+                row = await self._snapshot_fetchrow(
+                    """
+                    SELECT id, cycle_id, agent_id, deployment_id, execution_mode,
+                           EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
+                           intent_type, token_in, amount_in, token_out, amount_out,
+                           effective_price, slippage_bps, gas_used, gas_usd,
+                           tx_hash, chain, protocol, success, error,
+                           extracted_data_json::text AS extracted_data_text,
+                           price_inputs_json::text  AS price_inputs_text,
+                           pre_state_json::text      AS pre_state_text,
+                           post_state_json::text     AS post_state_text
+                    FROM transaction_ledger
+                    WHERE id = $1
+                    LIMIT 1
+                    """,
+                    ledger_entry_id,
+                )
+                if row is None:
+                    return gateway_pb2.GetLedgerEntryResponse(found=False)
+
+                def _opt_bytes(text: str | None) -> bytes:
+                    return text.encode("utf-8") if text else b""
+
+                slippage_raw = row.get("slippage_bps")
+                entry = gateway_pb2.LedgerEntryData(
+                    id=row["id"] or "",
+                    cycle_id=row["cycle_id"] or "",
+                    strategy_id=row["agent_id"] or "",
+                    deployment_id=row["deployment_id"] or "",
+                    execution_mode=row["execution_mode"] or "",
+                    timestamp=int(row["ts_epoch"] or 0),
+                    intent_type=row["intent_type"] or "",
+                    token_in=row["token_in"] or "",
+                    amount_in=row["amount_in"] or "",
+                    token_out=row["token_out"] or "",
+                    amount_out=row["amount_out"] or "",
+                    effective_price=row["effective_price"] or "",
+                    gas_used=int(row["gas_used"] or 0),
+                    gas_usd=row["gas_usd"] or "",
+                    tx_hash=row["tx_hash"] or "",
+                    chain=row["chain"] or "",
+                    protocol=row["protocol"] or "",
+                    success=bool(row["success"]),
+                    error=row["error"] or "",
+                    extracted_data_json=_opt_bytes(row.get("extracted_data_text")),
+                    price_inputs_json=_opt_bytes(row.get("price_inputs_text")),
+                    pre_state_json=_opt_bytes(row.get("pre_state_text")),
+                    post_state_json=_opt_bytes(row.get("post_state_text")),
+                )
+                if slippage_raw is not None:
+                    entry.slippage_bps = float(slippage_raw)
+                return gateway_pb2.GetLedgerEntryResponse(found=True, entry=entry)
+            except Exception as e:
+                logger.warning("GetLedgerEntry PG failed for id=%s: %s", ledger_entry_id, e)
+                return gateway_pb2.GetLedgerEntryResponse(found=False)
+
+        # SQLite path
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_ledger_entry_by_id"):
+                return gateway_pb2.GetLedgerEntryResponse(found=False)
+            row = await warm.get_ledger_entry_by_id(ledger_entry_id)
+            if row is None:
+                return gateway_pb2.GetLedgerEntryResponse(found=False)
+
+            def _opt_bytes_sqlite(val: str | bytes | None) -> bytes:
+                if not val:
+                    return b""
+                return val if isinstance(val, bytes) else val.encode("utf-8")
+
+            ts_raw = row.get("timestamp")
+            if isinstance(ts_raw, str):
+                try:
+                    from datetime import datetime as _dt
+
+                    ts_epoch = int(_dt.fromisoformat(ts_raw).timestamp())
+                except Exception:
+                    ts_epoch = 0
+            else:
+                ts_epoch = int(ts_raw or 0)
+
+            entry = gateway_pb2.LedgerEntryData(
+                id=row.get("id") or "",
+                cycle_id=row.get("cycle_id") or "",
+                strategy_id=row.get("strategy_id") or row.get("agent_id") or "",
+                deployment_id=row.get("deployment_id") or "",
+                execution_mode=row.get("execution_mode") or "",
+                timestamp=ts_epoch,
+                intent_type=row.get("intent_type") or "",
+                token_in=row.get("token_in") or "",
+                amount_in=row.get("amount_in") or "",
+                token_out=row.get("token_out") or "",
+                amount_out=row.get("amount_out") or "",
+                effective_price=row.get("effective_price") or "",
+                gas_used=int(row.get("gas_used") or 0),
+                gas_usd=row.get("gas_usd") or "",
+                tx_hash=row.get("tx_hash") or "",
+                chain=row.get("chain") or "",
+                protocol=row.get("protocol") or "",
+                success=bool(row.get("success")),
+                error=row.get("error") or "",
+                extracted_data_json=_opt_bytes_sqlite(row.get("extracted_data_json")),
+                price_inputs_json=_opt_bytes_sqlite(row.get("price_inputs_json")),
+                pre_state_json=_opt_bytes_sqlite(row.get("pre_state_json")),
+                post_state_json=_opt_bytes_sqlite(row.get("post_state_json")),
+            )
+            slippage_raw = row.get("slippage_bps")
+            if slippage_raw is not None:
+                entry.slippage_bps = float(slippage_raw)
+            return gateway_pb2.GetLedgerEntryResponse(found=True, entry=entry)
+        except Exception as e:
+            logger.warning("GetLedgerEntry SQLite failed: %s", e)
+            return gateway_pb2.GetLedgerEntryResponse(found=False)

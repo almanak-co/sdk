@@ -1383,6 +1383,428 @@ class GetAccountingEventsResponse(_message.Message):
 Global___GetAccountingEventsResponse: _TypeAlias = GetAccountingEventsResponse  # noqa: Y015
 
 @_typing.final
+class SaveOutboxEntryRequest(_message.Message):
+    """Accounting outbox messages — mirrors the accounting_outbox table in
+    metrics-database (PR #24). PG primary key is ledger_entry_id; the proto
+    exposes it as outbox_id so drain_one stays compatible with the SQLite path.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    OUTBOX_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    POSITION_KEY_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    CREATED_AT_FIELD_NUMBER: _builtins.int
+    outbox_id: _builtins.str
+    """UUID (INSERT OR IGNORE; ignored on PG where PK = ledger_entry_id)"""
+    deployment_id: _builtins.str
+    strategy_id: _builtins.str
+    """resolved to agent_id at the gateway"""
+    cycle_id: _builtins.str
+    ledger_entry_id: _builtins.str
+    """FK to transaction_ledger (PG primary key)"""
+    intent_type: _builtins.str
+    wallet_address: _builtins.str
+    position_key: _builtins.str
+    market_id: _builtins.str
+    created_at: _builtins.str
+    """ISO 8601 timestamp"""
+    def __init__(
+        self,
+        *,
+        outbox_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        ledger_entry_id: _builtins.str = ...,
+        intent_type: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        position_key: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+        created_at: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "outbox_id", b"outbox_id", "position_key", b"position_key", "strategy_id", b"strategy_id", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveOutboxEntryRequest: _TypeAlias = SaveOutboxEntryRequest  # noqa: Y015
+
+@_typing.final
+class SaveOutboxEntryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveOutboxEntryResponse: _TypeAlias = SaveOutboxEntryResponse  # noqa: Y015
+
+@_typing.final
+class OutboxEntry(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    POSITION_KEY_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    STATUS_FIELD_NUMBER: _builtins.int
+    ATTEMPTS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    CREATED_AT_FIELD_NUMBER: _builtins.int
+    UPDATED_AT_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """= ledger_entry_id on PG, UUID on SQLite"""
+    deployment_id: _builtins.str
+    strategy_id: _builtins.str
+    cycle_id: _builtins.str
+    ledger_entry_id: _builtins.str
+    intent_type: _builtins.str
+    wallet_address: _builtins.str
+    position_key: _builtins.str
+    market_id: _builtins.str
+    status: _builtins.str
+    """"pending" | "processing" | "processed" | "failed" """
+    attempts: _builtins.int
+    """maps to retry_count in PG"""
+    error: _builtins.str
+    """maps to last_error in PG"""
+    created_at: _builtins.str
+    updated_at: _builtins.str
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        ledger_entry_id: _builtins.str = ...,
+        intent_type: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        position_key: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+        status: _builtins.str = ...,
+        attempts: _builtins.int = ...,
+        error: _builtins.str = ...,
+        created_at: _builtins.str = ...,
+        updated_at: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["attempts", b"attempts", "created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "error", b"error", "id", b"id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "position_key", b"position_key", "status", b"status", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___OutboxEntry: _TypeAlias = OutboxEntry  # noqa: Y015
+
+@_typing.final
+class GetOutboxEntryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    ledger_entry_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        ledger_entry_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["ledger_entry_id", b"ledger_entry_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetOutboxEntryRequest: _TypeAlias = GetOutboxEntryRequest  # noqa: Y015
+
+@_typing.final
+class GetOutboxEntryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    ENTRY_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    @_builtins.property
+    def entry(self) -> Global___OutboxEntry: ...
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        entry: Global___OutboxEntry | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["entry", b"entry"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entry", b"entry", "found", b"found"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetOutboxEntryResponse: _TypeAlias = GetOutboxEntryResponse  # noqa: Y015
+
+@_typing.final
+class GetOutboxPendingRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    MAX_RETRIES_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    max_retries: _builtins.int
+    """0 = server default (3); rows with attempts >= max_retries excluded"""
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        max_retries: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "max_retries", b"max_retries"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetOutboxPendingRequest: _TypeAlias = GetOutboxPendingRequest  # noqa: Y015
+
+@_typing.final
+class GetOutboxPendingResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ENTRIES_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def entries(self) -> _containers.RepeatedCompositeFieldContainer[Global___OutboxEntry]: ...
+    def __init__(
+        self,
+        *,
+        entries: _abc.Iterable[Global___OutboxEntry] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entries", b"entries"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetOutboxPendingResponse: _TypeAlias = GetOutboxPendingResponse  # noqa: Y015
+
+@_typing.final
+class UpdateOutboxEntryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    OUTBOX_ID_FIELD_NUMBER: _builtins.int
+    STATUS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    ATTEMPTS_FIELD_NUMBER: _builtins.int
+    outbox_id: _builtins.str
+    """ledger_entry_id on PG"""
+    status: _builtins.str
+    error: _builtins.str
+    attempts: _builtins.int
+    """maps to retry_count in PG; omit to leave unchanged"""
+    def __init__(
+        self,
+        *,
+        outbox_id: _builtins.str = ...,
+        status: _builtins.str = ...,
+        error: _builtins.str = ...,
+        attempts: _builtins.int | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_attempts", b"_attempts", "attempts", b"attempts"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_attempts", b"_attempts", "attempts", b"attempts", "error", b"error", "outbox_id", b"outbox_id", "status", b"status"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__attempts: _TypeAlias = _typing.Literal["attempts"]  # noqa: Y015
+    _WhichOneofArgType__attempts: _TypeAlias = _typing.Literal["_attempts", b"_attempts"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__attempts) -> _WhichOneofReturnType__attempts | None: ...
+
+Global___UpdateOutboxEntryRequest: _TypeAlias = UpdateOutboxEntryRequest  # noqa: Y015
+
+@_typing.final
+class UpdateOutboxEntryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpdateOutboxEntryResponse: _TypeAlias = UpdateOutboxEntryResponse  # noqa: Y015
+
+@_typing.final
+class HasAccountingEventsForLedgerRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    ledger_entry_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        ledger_entry_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["ledger_entry_id", b"ledger_entry_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___HasAccountingEventsForLedgerRequest: _TypeAlias = HasAccountingEventsForLedgerRequest  # noqa: Y015
+
+@_typing.final
+class HasAccountingEventsForLedgerResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    HAS_EVENTS_FIELD_NUMBER: _builtins.int
+    has_events: _builtins.bool
+    def __init__(
+        self,
+        *,
+        has_events: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["has_events", b"has_events"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___HasAccountingEventsForLedgerResponse: _TypeAlias = HasAccountingEventsForLedgerResponse  # noqa: Y015
+
+@_typing.final
+class GetLedgerEntryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
+    ledger_entry_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        ledger_entry_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["ledger_entry_id", b"ledger_entry_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLedgerEntryRequest: _TypeAlias = GetLedgerEntryRequest  # noqa: Y015
+
+@_typing.final
+class LedgerEntryData(_message.Message):
+    """LedgerEntryData mirrors transaction_ledger columns so AccountingProcessor
+    can reconstruct a dict-shaped row identical to what SQLiteStore returns.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    TOKEN_IN_FIELD_NUMBER: _builtins.int
+    AMOUNT_IN_FIELD_NUMBER: _builtins.int
+    TOKEN_OUT_FIELD_NUMBER: _builtins.int
+    AMOUNT_OUT_FIELD_NUMBER: _builtins.int
+    EFFECTIVE_PRICE_FIELD_NUMBER: _builtins.int
+    SLIPPAGE_BPS_FIELD_NUMBER: _builtins.int
+    GAS_USED_FIELD_NUMBER: _builtins.int
+    GAS_USD_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    EXTRACTED_DATA_JSON_FIELD_NUMBER: _builtins.int
+    PRICE_INPUTS_JSON_FIELD_NUMBER: _builtins.int
+    PRE_STATE_JSON_FIELD_NUMBER: _builtins.int
+    POST_STATE_JSON_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    cycle_id: _builtins.str
+    strategy_id: _builtins.str
+    """agent_id in PG, mapped to strategy_id on the wire"""
+    deployment_id: _builtins.str
+    execution_mode: _builtins.str
+    timestamp: _builtins.int
+    """Unix epoch seconds"""
+    intent_type: _builtins.str
+    token_in: _builtins.str
+    amount_in: _builtins.str
+    token_out: _builtins.str
+    amount_out: _builtins.str
+    effective_price: _builtins.str
+    slippage_bps: _builtins.float
+    gas_used: _builtins.int
+    gas_usd: _builtins.str
+    tx_hash: _builtins.str
+    chain: _builtins.str
+    protocol: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    extracted_data_json: _builtins.bytes
+    price_inputs_json: _builtins.bytes
+    pre_state_json: _builtins.bytes
+    post_state_json: _builtins.bytes
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        intent_type: _builtins.str = ...,
+        token_in: _builtins.str = ...,
+        amount_in: _builtins.str = ...,
+        token_out: _builtins.str = ...,
+        amount_out: _builtins.str = ...,
+        effective_price: _builtins.str = ...,
+        slippage_bps: _builtins.float | None = ...,
+        gas_used: _builtins.int = ...,
+        gas_usd: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        extracted_data_json: _builtins.bytes = ...,
+        price_inputs_json: _builtins.bytes = ...,
+        pre_state_json: _builtins.bytes = ...,
+        post_state_json: _builtins.bytes = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "slippage_bps", b"slippage_bps"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__slippage_bps: _TypeAlias = _typing.Literal["slippage_bps"]  # noqa: Y015
+    _WhichOneofArgType__slippage_bps: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__slippage_bps) -> _WhichOneofReturnType__slippage_bps | None: ...
+
+Global___LedgerEntryData: _TypeAlias = LedgerEntryData  # noqa: Y015
+
+@_typing.final
+class GetLedgerEntryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    ENTRY_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    @_builtins.property
+    def entry(self) -> Global___LedgerEntryData: ...
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        entry: Global___LedgerEntryData | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["entry", b"entry"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entry", b"entry", "found", b"found"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLedgerEntryResponse: _TypeAlias = GetLedgerEntryResponse  # noqa: Y015
+
+@_typing.final
 class CompileIntentRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

@@ -1821,13 +1821,25 @@ class StrategyRunner:
                         # Phase 4: stamp cycle_id and execution_mode (VIB-2835/2837)
                         pos_event.cycle_id = cycle_id
                         pos_event.execution_mode = execution_mode
-                        await self.state_manager.save_position_event(pos_event)
-                        logger.debug(
-                            "Position event %s emitted for %s (position=%s)",
-                            pos_event.event_type,
-                            pos_event.position_type,
-                            pos_event.position_id,
-                        )
+                        saved = await self.state_manager.save_position_event(pos_event)
+                        if not saved:
+                            # Position events are the cost-basis and IL attribution source
+                            # for LP/perp. A failed save means close-time PnL enrichment
+                            # will silently produce None. Escalate so operators notice.
+                            logger.error(
+                                "Position event save returned False for %s %s (position=%s) "
+                                "— IL/PnL enrichment for this position will be incomplete",
+                                pos_event.event_type,
+                                pos_event.position_type,
+                                pos_event.position_id,
+                            )
+                        else:
+                            logger.debug(
+                                "Position event %s emitted for %s (position=%s)",
+                                pos_event.event_type,
+                                pos_event.position_type,
+                                pos_event.position_id,
+                            )
                         # VIB-3205: stamp entry_state on OPEN events so subsequent
                         # CLOSE-time IL attribution can evaluate HODL value.
                         if pos_event.event_type == "OPEN" and pos_event.position_id:
@@ -1840,11 +1852,6 @@ class StrategyRunner:
                                     price_oracle=self.price_oracle,
                                 )
                             except Exception:  # noqa: BLE001
-                                # Entry-state stamping is best-effort but NOT trivial: if it
-                                # silently drops, close-time IL attribution later short-circuits
-                                # to None with no hint as to why. Escalate to WARNING with a
-                                # traceback so operators notice the first time a class of
-                                # position fails to record its entry price basis.
                                 logger.warning(
                                     "Entry-state stamp failed (non-blocking) for position=%s",
                                     pos_event.position_id,
@@ -1859,7 +1866,11 @@ class StrategyRunner:
                             except Exception as attr_err:  # noqa: BLE001
                                 logger.debug("Attribution failed (non-blocking): %s", attr_err)
                 except Exception as pe:  # noqa: BLE001
-                    logger.debug("Failed to emit position event: %s", pe)
+                    logger.error(
+                        "Failed to emit position event for %s (position PnL enrichment lost): %s",
+                        getattr(intent, "intent_type", "unknown"),
+                        pe,
+                    )
 
             # Signal that this iteration executed a trade — forces snapshot
             if success:
@@ -1931,60 +1942,17 @@ class StrategyRunner:
             if self._accounting_processor._deployment_id != deployment_id:
                 self._accounting_processor._deployment_id = deployment_id
 
-            try:
-                outbox_id = await write_outbox_entry(
-                    self.state_manager,
-                    deployment_id=deployment_id,
-                    strategy_id=strategy.strategy_id,
-                    cycle_id=cycle_id,
-                    ledger_entry_id=ledger_entry_id,
-                    intent_type=intent_type_str,
-                    wallet_address=wallet_address,
-                    position_key=position_key,
-                    market_id=market_id,
-                )
-            except NotImplementedError:
-                # GatewayStateManager.save_outbox_entry not yet deployed (VIB-3482).
-                # Fall back to direct save_accounting_event() so events are not dropped.
-                logger.debug(
-                    "_write_outbox_and_fire_processor: gateway outbox not yet available (VIB-3482) — using direct fallback for %s",
-                    ledger_entry_id,
-                )
-                task = asyncio.create_task(
-                    self._accounting_processor.drain_one_direct(
-                        ledger_entry_id,
-                        intent_type=intent_type_str,
-                        wallet_address=wallet_address,
-                        position_key=position_key,
-                        market_id=market_id,
-                        deployment_id=deployment_id,
-                        strategy_id=strategy.strategy_id,
-                        cycle_id=cycle_id,
-                    ),
-                    name=f"accounting_direct_{ledger_entry_id[:8]}",
-                )
-                self._pending_drain_tasks.add(task)
-                _led_id = ledger_entry_id
-
-                def _on_direct_done(t: asyncio.Task) -> None:
-                    self._pending_drain_tasks.discard(t)
-                    if t.cancelled():
-                        return
-                    exc = t.exception()
-                    if exc is not None:
-                        logger.error(
-                            "_write_outbox_and_fire_processor: direct fallback crashed for %s",
-                            _led_id,
-                            exc_info=exc,
-                        )
-                    elif not t.result():
-                        logger.warning(
-                            "_write_outbox_and_fire_processor: direct fallback returned False for %s — accounting event dropped",
-                            _led_id,
-                        )
-
-                task.add_done_callback(_on_direct_done)
-                return
+            outbox_id = await write_outbox_entry(
+                self.state_manager,
+                deployment_id=deployment_id,
+                strategy_id=strategy.strategy_id,
+                cycle_id=cycle_id,
+                ledger_entry_id=ledger_entry_id,
+                intent_type=intent_type_str,
+                wallet_address=wallet_address,
+                position_key=position_key,
+                market_id=market_id,
+            )
 
             if outbox_id:
                 task = asyncio.create_task(

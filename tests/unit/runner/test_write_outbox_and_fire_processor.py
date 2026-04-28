@@ -1,15 +1,18 @@
 """Unit tests for StrategyRunner._write_outbox_and_fire_processor (VIB-3614).
 
-Five behaviors are verified:
-1. write_outbox_entry returns None in non-live mode → warning logged, no asyncio
+Six behaviors are verified:
+1. write_outbox_entry returns a valid outbox_id → asyncio.Task for drain_one is
+   created and tracked in _pending_drain_tasks (core VIB-3652 fix).
+2. write_outbox_entry returns None in non-live mode → warning logged, no asyncio
    task created, _pending_drain_tasks unchanged.
-2. write_outbox_entry returns None in live mode → AccountingPersistenceError
+3. write_outbox_entry returns None in live mode → AccountingPersistenceError
    raised with write_kind == AccountingWriteKind.ACCOUNTING.
-3. write_outbox_entry raises NotImplementedError (VIB-3482: backend not deployed)
-   → falls back to drain_one_direct, strategy continues, no exception in any mode.
-4. Unexpected Exception raised + _is_live_mode() True → AccountingPersistenceError
+4. write_outbox_entry raises NotImplementedError (VIB-3482: stale gateway without
+   outbox RPC) → warning logged in non-live mode; AccountingPersistenceError in
+   live mode (runner wraps all non-APE exceptions in live mode).
+5. Unexpected Exception raised + _is_live_mode() True → AccountingPersistenceError
    raised with write_kind == AccountingWriteKind.ACCOUNTING.
-5. Unexpected Exception raised + _is_live_mode() False → warning logged, no
+6. Unexpected Exception raised + _is_live_mode() False → warning logged, no
    exception raised, no drain task.
 """
 
@@ -52,11 +55,10 @@ def _make_runner() -> StrategyRunner:
         alert_manager=MagicMock(),
         config=config,
     )
-    # Stub accounting processor — drain_one and drain_one_direct must be
-    # AsyncMocks so asyncio.create_task can wrap them without complaining.
+    # Stub accounting processor — drain_one must be an AsyncMock so
+    # asyncio.create_task can wrap it without complaining.
     runner._accounting_processor = MagicMock()
     runner._accounting_processor.drain_one = AsyncMock()
-    runner._accounting_processor.drain_one_direct = AsyncMock()
     runner._accounting_processor._deployment_id = ""
     return runner
 
@@ -84,6 +86,38 @@ def _make_intent() -> MagicMock:
 
 class TestWriteOutboxAndFireProcessor:
     """_write_outbox_and_fire_processor unit tests."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_schedules_drain_one(self):
+        """Core VIB-3652 fix: outbox_id returned → drain_one task created and tracked.
+
+        This is the primary regression guard for the fix: before VIB-3652
+        the outbox write raised NotImplementedError which was caught and silently
+        returned, never scheduling drain_one.  This test verifies the full
+        happy-path: write succeeds → drain_one is scheduled as an asyncio.Task
+        → task is tracked in _pending_drain_tasks.
+        """
+        runner = _make_runner()
+        strategy = _make_strategy()
+        intent = _make_intent()
+        assert len(runner._pending_drain_tasks) == 0
+
+        with (
+            patch(
+                "almanak.framework.accounting.processor.write_outbox_entry",
+                new=AsyncMock(return_value="outbox-id-abc"),
+            ),
+            patch(
+                "almanak.framework.observability.context.get_cycle_id",
+                return_value="cycle-happy",
+            ),
+            patch.object(runner, "_is_live_mode", return_value=True),
+        ):
+            await runner._write_outbox_and_fire_processor(strategy, intent, "ledger-happy-001")
+
+        # drain_one must have been scheduled — it creates an asyncio.Task
+        runner._accounting_processor.drain_one.assert_called_once_with("ledger-happy-001")
+        assert len(runner._pending_drain_tasks) == 1
 
     @pytest.mark.asyncio
     async def test_none_return_non_live_logs_warning_no_task(self, caplog):
@@ -143,42 +177,62 @@ class TestWriteOutboxAndFireProcessor:
         assert exc_info.value.write_kind == AccountingWriteKind.ACCOUNTING
 
     @pytest.mark.asyncio
-    async def test_not_implemented_error_is_always_non_fatal(self, caplog):
-        """NotImplementedError (VIB-3482: gateway not deployed) → direct fallback, no raise in any mode."""
+    async def test_not_implemented_error_is_non_fatal_in_non_live_mode(self, caplog):
+        """NotImplementedError (stale gateway without outbox RPC) → warning, no raise in non-live."""
         import logging
 
         runner = _make_runner()
         strategy = _make_strategy()
         intent = _make_intent()
 
-        for live_mode in (True, False):
-            runner._pending_drain_tasks.clear()
-            caplog.clear()
-            with (
-                patch(
-                    "almanak.framework.accounting.processor.write_outbox_entry",
-                    new=AsyncMock(side_effect=NotImplementedError("save_outbox_entry not deployed")),
-                ),
-                patch(
-                    "almanak.framework.observability.context.get_cycle_id",
-                    return_value="cycle-nie",
-                ),
-                patch.object(runner, "_is_live_mode", return_value=live_mode),
-                caplog.at_level(logging.DEBUG),
-            ):
-                # Must not raise regardless of live/non-live
-                await runner._write_outbox_and_fire_processor(
-                    strategy, intent, f"ledger-nie-{live_mode}"
-                )
+        caplog.clear()
+        with (
+            patch(
+                "almanak.framework.accounting.processor.write_outbox_entry",
+                new=AsyncMock(side_effect=NotImplementedError("save_outbox_entry not deployed")),
+            ),
+            patch(
+                "almanak.framework.observability.context.get_cycle_id",
+                return_value="cycle-nie",
+            ),
+            patch.object(runner, "_is_live_mode", return_value=False),
+            caplog.at_level(logging.WARNING),
+        ):
+            # Must not raise in non-live mode
+            await runner._write_outbox_and_fire_processor(strategy, intent, "ledger-nie-false")
 
-            assert any(
-                "gateway outbox not yet available" in r.message or "VIB-3482" in r.message
-                for r in caplog.records
-            ), f"expected VIB-3482 message in live_mode={live_mode}"
-            # Fallback path creates a drain_one_direct task instead of dropping
-            assert len(runner._pending_drain_tasks) == 1, (
-                f"expected 1 fallback drain task in live_mode={live_mode}"
-            )
+        assert any(
+            "failed" in r.message.lower() or "non-blocking" in r.message.lower()
+            for r in caplog.records
+        ), f"expected a warning log; got: {[r.message for r in caplog.records]}"
+        assert len(runner._pending_drain_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_not_implemented_error_raises_in_live_mode(self):
+        """NotImplementedError (stale gateway without outbox RPC) → AccountingPersistenceError in live.
+
+        GatewayStateManager.save_outbox_entry no longer raises NotImplementedError normally.
+        If it does (old gateway version deployed), live mode must treat it as fatal.
+        """
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+
+        runner = _make_runner()
+        strategy = _make_strategy()
+        intent = _make_intent()
+
+        with (
+            patch(
+                "almanak.framework.accounting.processor.write_outbox_entry",
+                new=AsyncMock(side_effect=NotImplementedError("save_outbox_entry not deployed")),
+            ),
+            patch(
+                "almanak.framework.observability.context.get_cycle_id",
+                return_value="cycle-nie-live",
+            ),
+            patch.object(runner, "_is_live_mode", return_value=True),
+        ):
+            with pytest.raises(AccountingPersistenceError):
+                await runner._write_outbox_and_fire_processor(strategy, intent, "ledger-nie-live")
 
     @pytest.mark.asyncio
     async def test_exception_live_mode_raises_accounting_error(self):
