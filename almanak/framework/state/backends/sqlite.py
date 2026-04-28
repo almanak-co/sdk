@@ -280,8 +280,10 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
     timestamp TEXT NOT NULL,
     iteration_number INTEGER DEFAULT 0,
-    total_value_usd TEXT NOT NULL,  -- Decimal as string
+    total_value_usd TEXT NOT NULL,  -- Decimal as string; strategy-scoped (VIB-3614)
     available_cash_usd TEXT NOT NULL,  -- Decimal as string
+    deployed_capital_usd TEXT DEFAULT '0',  -- sum of cost_basis_usd for open positions (VIB-3614)
+    wallet_total_value_usd TEXT DEFAULT '0',  -- full wallet value, debugging only (VIB-3614)
     value_confidence TEXT DEFAULT 'HIGH',  -- HIGH, ESTIMATED, STALE, UNAVAILABLE
     positions_json TEXT NOT NULL,  -- JSON array of positions
     token_prices_json TEXT DEFAULT '{}',  -- {chain:address: {price_usd, symbol, decimals}}
@@ -623,13 +625,18 @@ class SQLiteStore:
         if conn is None:
             return
 
-        def _add_column_if_missing(table: str, column: str, col_type: str) -> None:
-            """Add a column to a table if it doesn't already exist."""
+        def _add_column_if_missing(table: str, column: str, col_type: str) -> bool:
+            """Add a column to a table if it doesn't already exist.
+
+            Returns True if the column was newly added, False if it already existed.
+            """
             cursor = conn.execute(f"PRAGMA table_info({table})")
             existing = {row["name"] for row in cursor.fetchall()}
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
                 logger.info(f"Migration: added {table}.{column}")
+                return True
+            return False
 
         # Phase 1a: total_value_usd, positions_json, cycle_id on portfolio_metrics (VIB-2765)
         _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT '0'")
@@ -647,6 +654,28 @@ class SQLiteStore:
         # Phase 1c: token_prices_json and wallet_balances_json on portfolio_snapshots
         _add_column_if_missing("portfolio_snapshots", "token_prices_json", "TEXT DEFAULT '{}'")
         _add_column_if_missing("portfolio_snapshots", "wallet_balances_json", "TEXT DEFAULT '[]'")
+
+        # VIB-3614: strategy-scoped valuation columns — wrapped in an explicit
+        # transaction so the ALTER TABLE and backfill UPDATE are atomic.
+        # isolation_level=None means autocommit; without BEGIN/COMMIT a crash
+        # between ALTER and UPDATE leaves legacy rows permanently at '0'.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _add_column_if_missing("portfolio_snapshots", "deployed_capital_usd", "TEXT DEFAULT '0'")
+            if _add_column_if_missing("portfolio_snapshots", "wallet_total_value_usd", "TEXT DEFAULT '0'"):
+                # Backfill legacy rows: pre-VIB-3614 total_value_usd was the full wallet
+                # value, so it's the best available proxy for wallet_total_value_usd.
+                conn.execute(
+                    """
+                    UPDATE portfolio_snapshots
+                    SET wallet_total_value_usd = total_value_usd
+                    WHERE wallet_total_value_usd IS NULL OR wallet_total_value_usd = '0'
+                    """
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
         # Phase 4: deployment_id, cycle_id, execution_mode across all tables (VIB-2835, VIB-2837)
         _add_column_if_missing("portfolio_snapshots", "deployment_id", "TEXT DEFAULT ''")
@@ -1696,10 +1725,11 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO portfolio_snapshots (
                     strategy_id, timestamp, iteration_number, total_value_usd,
-                    available_cash_usd, value_confidence, positions_json,
+                    available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                    value_confidence, positions_json,
                     token_prices_json, wallet_balances_json,
                     chain, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.strategy_id,
@@ -1707,6 +1737,8 @@ class SQLiteStore:
                     snapshot.iteration_number,
                     str(snapshot.total_value_usd),
                     str(snapshot.available_cash_usd),
+                    str(snapshot.deployed_capital_usd),
+                    str(snapshot.wallet_total_value_usd),
                     snapshot.value_confidence.value,
                     json.dumps(snapshot.to_positions_payload()),
                     json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
@@ -1776,10 +1808,11 @@ class SQLiteStore:
                         INSERT OR REPLACE INTO portfolio_snapshots (
                             strategy_id, deployment_id, cycle_id, execution_mode,
                             timestamp, iteration_number, total_value_usd,
-                            available_cash_usd, value_confidence, positions_json,
+                            available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                            value_confidence, positions_json,
                             token_prices_json, wallet_balances_json,
                             chain, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             snapshot.strategy_id,
@@ -1790,6 +1823,8 @@ class SQLiteStore:
                             snapshot.iteration_number,
                             str(snapshot.total_value_usd),
                             str(snapshot.available_cash_usd),
+                            str(snapshot.deployed_capital_usd),
+                            str(snapshot.wallet_total_value_usd),
                             snapshot.value_confidence.value,
                             json.dumps(snapshot.to_positions_payload()),
                             json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
@@ -1866,7 +1901,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
-                       available_cash_usd, value_confidence, positions_json,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json,
                        token_prices_json, wallet_balances_json, chain
                 FROM portfolio_snapshots
                 WHERE strategy_id = ?
@@ -1909,7 +1945,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
-                       available_cash_usd, value_confidence, positions_json,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json,
                        token_prices_json, wallet_balances_json, chain
                 FROM portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp >= ?
@@ -1948,7 +1985,8 @@ class SQLiteStore:
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 """
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
-                       available_cash_usd, value_confidence, positions_json,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json,
                        token_prices_json, wallet_balances_json, chain
                 FROM portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp <= ?
@@ -2003,12 +2041,26 @@ class SQLiteStore:
         except (KeyError, json.JSONDecodeError):
             pass
 
+        # Read VIB-3614 columns defensively (may not exist in older DBs)
+        deployed_capital_usd = "0"
+        wallet_total_value_usd = "0"
+        try:
+            deployed_capital_usd = str(row["deployed_capital_usd"] or "0")
+        except (KeyError, IndexError):
+            pass
+        try:
+            wallet_total_value_usd = str(row["wallet_total_value_usd"] or "0")
+        except (KeyError, IndexError):
+            pass
+
         return PortfolioSnapshot.from_dict(
             {
                 "timestamp": timestamp.isoformat(),
                 "strategy_id": row["strategy_id"],
                 "total_value_usd": str(row["total_value_usd"]),
                 "available_cash_usd": str(row["available_cash_usd"]),
+                "deployed_capital_usd": deployed_capital_usd,
+                "wallet_total_value_usd": wallet_total_value_usd,
                 "value_confidence": row["value_confidence"],
                 "positions": positions,
                 "wallet_balances": wallet_balances_raw,

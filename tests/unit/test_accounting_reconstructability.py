@@ -487,3 +487,171 @@ async def test_migration_adds_new_columns():
     assert "execution_mode" in pe_cols
 
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# VIB-3614: migration backfill and snapshot round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_vib3614_migration_backfill():
+    """Legacy rows get wallet_total_value_usd backfilled from total_value_usd.
+
+    Simulates a pre-VIB-3614 database where wallet_total_value_usd does not
+    exist. After running _run_migrations(), existing rows should have
+    wallet_total_value_usd set to the value of total_value_usd.
+    """
+    # Minimal pre-VIB-3614 schema — all tables _run_migrations() touches,
+    # but portfolio_snapshots without the new VIB-3614 columns.
+    OLD_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS strategy_state (
+        strategy_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1,
+        state_data TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+        checksum TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_id TEXT NOT NULL, timestamp TEXT NOT NULL,
+        iteration_number INTEGER DEFAULT 0, total_value_usd TEXT NOT NULL,
+        available_cash_usd TEXT NOT NULL, value_confidence TEXT DEFAULT 'HIGH',
+        positions_json TEXT NOT NULL, chain TEXT, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS portfolio_metrics (
+        strategy_id TEXT PRIMARY KEY, initial_value_usd TEXT NOT NULL,
+        initial_timestamp TEXT NOT NULL, deposits_usd TEXT DEFAULT '0',
+        withdrawals_usd TEXT DEFAULT '0', gas_spent_usd TEXT DEFAULT '0',
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS transaction_ledger (
+        id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, strategy_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL, intent_type TEXT NOT NULL, chain TEXT, success BOOLEAN NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS position_events (
+        id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL, position_id TEXT NOT NULL,
+        position_type TEXT NOT NULL, event_type TEXT NOT NULL, timestamp TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS accounting_outbox (
+        id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    """
+
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(OLD_SCHEMA)
+
+    # Insert a legacy row with a known total_value_usd
+    conn.execute(
+        """
+        INSERT INTO portfolio_snapshots
+            (strategy_id, timestamp, total_value_usd, available_cash_usd,
+             positions_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("strat-legacy", "2026-01-01T00:00:00", "12345.00", "500.00", "[]", "2026-01-01T00:00:00"),
+    )
+
+    # Inject into a SQLiteStore and run migrations
+    store = SQLiteStore(SQLiteConfig(db_path=":memory:"))
+    store._conn = conn
+    store._run_migrations()
+
+    # wallet_total_value_usd should now equal the old total_value_usd
+    row = conn.execute(
+        "SELECT wallet_total_value_usd FROM portfolio_snapshots WHERE strategy_id = ?",
+        ("strat-legacy",),
+    ).fetchone()
+    assert row is not None
+    assert row["wallet_total_value_usd"] == "12345.00"
+
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_vib3614_snapshot_roundtrip(store: SQLiteStore):
+    """deployed_capital_usd and wallet_total_value_usd survive all three read paths."""
+    ts = datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC)
+    snapshot = PortfolioSnapshot(
+        timestamp=ts,
+        strategy_id=STRATEGY_ID,
+        total_value_usd=Decimal("5000"),
+        available_cash_usd=Decimal("1000"),
+        deployed_capital_usd=Decimal("3750"),
+        wallet_total_value_usd=Decimal("9999"),
+        value_confidence=ValueConfidence.HIGH,
+        positions=[],
+        chain="arbitrum",
+        iteration_number=42,
+    )
+
+    await store.save_portfolio_snapshot(snapshot)
+
+    # get_latest_snapshot
+    latest = await store.get_latest_snapshot(STRATEGY_ID)
+    assert latest is not None
+    assert latest.deployed_capital_usd == Decimal("3750")
+    assert latest.wallet_total_value_usd == Decimal("9999")
+
+    # get_snapshots_since
+    from datetime import timedelta
+    since_results = await store.get_snapshots_since(STRATEGY_ID, ts - timedelta(seconds=1))
+    assert len(since_results) == 1
+    assert since_results[0].deployed_capital_usd == Decimal("3750")
+    assert since_results[0].wallet_total_value_usd == Decimal("9999")
+
+    # get_snapshot_at
+    at_result = await store.get_snapshot_at(STRATEGY_ID, ts)
+    assert at_result is not None
+    assert at_result.deployed_capital_usd == Decimal("3750")
+    assert at_result.wallet_total_value_usd == Decimal("9999")
+
+
+@pytest.mark.asyncio
+async def test_vib3614_snapshot_and_metrics_roundtrip(store: SQLiteStore):
+    """deployed_capital_usd and wallet_total_value_usd survive save_snapshot_and_metrics."""
+    from datetime import timedelta
+
+    ts = datetime(2026, 4, 28, 11, 0, 0, tzinfo=UTC)
+    snapshot = PortfolioSnapshot(
+        timestamp=ts,
+        strategy_id=STRATEGY_ID,
+        total_value_usd=Decimal("8000"),
+        available_cash_usd=Decimal("2000"),
+        deployed_capital_usd=Decimal("6500"),
+        wallet_total_value_usd=Decimal("11111"),
+        value_confidence=ValueConfidence.HIGH,
+        positions=[],
+        chain="arbitrum",
+        iteration_number=99,
+    )
+    metrics = PortfolioMetrics(
+        strategy_id=STRATEGY_ID,
+        timestamp=ts,
+        total_value_usd=Decimal("8000"),
+        initial_value_usd=Decimal("7500"),
+        deposits_usd=Decimal("0"),
+        withdrawals_usd=Decimal("0"),
+        gas_spent_usd=Decimal("2.00"),
+        positions_json="[]",
+        cycle_id=CYCLE_ID,
+        deployment_id=DEPLOYMENT_ID,
+        execution_mode=EXECUTION_MODE,
+        is_complete=True,
+    )
+
+    await store.save_snapshot_and_metrics(snapshot, metrics)
+
+    # All three read paths must return the new fields correctly.
+    latest = await store.get_latest_snapshot(STRATEGY_ID)
+    assert latest is not None
+    assert latest.deployed_capital_usd == Decimal("6500")
+    assert latest.wallet_total_value_usd == Decimal("11111")
+
+    since_results = await store.get_snapshots_since(STRATEGY_ID, ts - timedelta(seconds=1))
+    assert len(since_results) == 1
+    assert since_results[0].deployed_capital_usd == Decimal("6500")
+    assert since_results[0].wallet_total_value_usd == Decimal("11111")
+
+    at_result = await store.get_snapshot_at(STRATEGY_ID, ts)
+    assert at_result is not None
+    assert at_result.deployed_capital_usd == Decimal("6500")
+    assert at_result.wallet_total_value_usd == Decimal("11111")

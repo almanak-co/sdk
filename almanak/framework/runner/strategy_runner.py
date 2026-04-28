@@ -1896,10 +1896,13 @@ class StrategyRunner:
     ) -> None:
         """Write accounting_outbox row and fire asyncio task to drain it (VIB-3467).
 
-        Best-effort: logs a warning and continues when write_outbox_entry returns None
-        (covers gateway not yet supporting save_outbox_entry — VIB-3482). No legacy
-        _try_write_* fallback exists (removed in VIB-3478). The async drain task is
-        always fire-and-forget — durability is provided by the outbox row, not the task.
+        In live mode: raises AccountingPersistenceError if outbox_id is None (write
+        failed) or on unexpected exceptions, so run_iteration routes to
+        ACCOUNTING_FAILED and alerts operators.
+        In non-live modes: logs a warning and continues (best-effort).
+        The async drain task is always fire-and-forget — durability is provided by
+        the outbox row, not the task. The processor is the sole accounting write path
+        (VIB-3478 removed the legacy _try_write_* inline writers).
         """
         try:
             from ..accounting.processor import write_outbox_entry
@@ -1946,11 +1949,17 @@ class StrategyRunner:
                 self._pending_drain_tasks.add(task)
                 task.add_done_callback(self._pending_drain_tasks.discard)
             else:
-                # write_outbox_entry() is best-effort and returns None on all
-                # failures (including gateway not yet supporting save_outbox_entry
-                # — VIB-3482). No legacy _try_write_* fallback exists (removed in
-                # VIB-3478), so accounting for this event will be lost until the
-                # gateway outbox extension ships. Non-fatal: strategy continues.
+                # outbox_id is None: write failed. In live mode this is a
+                # data-loss risk; raise so run_iteration routes to
+                # ACCOUNTING_FAILED and alerts operators.
+                if self._is_live_mode():
+                    from ..state.exceptions import AccountingWriteKind
+
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.ACCOUNTING,
+                        strategy_id=getattr(strategy, "strategy_id", ""),
+                        message=f"Outbox write failed for {ledger_entry_id!r} — accounting event will be lost",
+                    )
                 logger.warning(
                     "_write_outbox_and_fire_processor: outbox write returned None for %s — drain skipped",
                     ledger_entry_id,

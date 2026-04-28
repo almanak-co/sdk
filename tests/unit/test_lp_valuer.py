@@ -574,10 +574,11 @@ class TestPortfolioValuerLPRepricing:
         valuer = PortfolioValuer()
         snapshot = valuer.value(strategy, market)
 
-        # Wallet: 1 ETH * $3000 + 500 USDC * $1 = $3500
-        # Position: $5000 (fallback)
-        assert snapshot.total_value_usd == Decimal("8500")
+        # Wallet: 1 ETH * $3000 + 500 USDC * $1 = $3500; Position: $5000 (fallback)
+        # VIB-3614: total_value_usd is position-scoped
+        assert snapshot.total_value_usd == Decimal("5000")
         assert snapshot.available_cash_usd == Decimal("3500")
+        assert snapshot.wallet_total_value_usd == Decimal("8500")
 
     def test_lp_repricing_with_mocked_on_chain_data(self):
         """End-to-end test: mock gateway returns position data, V3 math re-prices."""

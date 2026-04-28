@@ -732,6 +732,9 @@ class TestPortfolioValuerFullIntegration:
         with patch.object(valuer._discovery, "discover", return_value=DiscoveryResult(positions=[supply_pos])):
             snapshot = valuer.value(strategy, market)
 
-        # Wallet: $100 + at least one position attempted
-        assert snapshot.total_value_usd >= Decimal("100")
+        # VIB-3614: total_value_usd is position-scoped (position has value_usd=0 here)
+        # Wallet $100 shows in available_cash_usd / wallet_total_value_usd
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.available_cash_usd == Decimal("100")
+        assert snapshot.wallet_total_value_usd == Decimal("100")
         assert snapshot.strategy_id == "test-lending"

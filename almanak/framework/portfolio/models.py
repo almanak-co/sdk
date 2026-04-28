@@ -163,11 +163,17 @@ class PortfolioSnapshot:
 
     # Deployed capital: sum of cost_basis_usd across all positions.
     # Populated by PortfolioValuer after _enrich_position_pnl() enriches each
-    # PositionValue.  Distinct from total_value_usd (full wallet) so callers can
+    # PositionValue.  Distinct from total_value_usd (strategy-scoped) so callers can
     # compute strategy-level PnL without conflating uninvested wallet funds.
     # Defaults to Decimal("0") when no accounting events exist (e.g. dry-run or
     # a strategy with no open positions).
     deployed_capital_usd: Decimal = Decimal("0")
+
+    # Full wallet total (tracked tokens + all positions, including borrows).
+    # This is the pre-VIB-3614 behaviour: sum of all token balances for tracked
+    # tokens plus all position values.  Kept for operator debugging / alerting;
+    # NOT used for PnL calculations.  Stored in DB but not shown in the dashboard.
+    wallet_total_value_usd: Decimal = Decimal("0")
 
     # Metadata
     chain: str = ""
@@ -182,6 +188,8 @@ class PortfolioSnapshot:
             self.available_cash_usd = Decimal(str(self.available_cash_usd))
         if isinstance(self.deployed_capital_usd, int | float | str):
             self.deployed_capital_usd = Decimal(str(self.deployed_capital_usd))
+        if isinstance(self.wallet_total_value_usd, int | float | str):
+            self.wallet_total_value_usd = Decimal(str(self.wallet_total_value_usd))
 
     @property
     def position_value_usd(self) -> Decimal:
@@ -201,6 +209,7 @@ class PortfolioSnapshot:
             "total_value_usd": str(self.total_value_usd),
             "available_cash_usd": str(self.available_cash_usd),
             "deployed_capital_usd": str(self.deployed_capital_usd),
+            "wallet_total_value_usd": str(self.wallet_total_value_usd),
             "value_confidence": self.value_confidence.value,
             "error": self.error,
             "positions": [_position_to_dict(p) for p in self.positions],
@@ -280,6 +289,7 @@ class PortfolioSnapshot:
             total_value_usd=Decimal(data["total_value_usd"]),
             available_cash_usd=Decimal(data["available_cash_usd"]),
             deployed_capital_usd=Decimal(data.get("deployed_capital_usd", "0")),
+            wallet_total_value_usd=Decimal(data.get("wallet_total_value_usd", "0")),
             value_confidence=ValueConfidence(data.get("value_confidence", "HIGH")),
             error=data.get("error"),
             positions=positions,

@@ -279,8 +279,10 @@ class TestPortfolioValuer:
 
         snapshot = valuer.value(strategy, market, iteration_number=5)
 
-        assert snapshot.total_value_usd == Decimal("12000")  # 2*3500 + 5000*1
+        # VIB-3614: total_value_usd is position-scoped; wallet-only → 0
+        assert snapshot.total_value_usd == Decimal("0")
         assert snapshot.available_cash_usd == Decimal("12000")
+        assert snapshot.wallet_total_value_usd == Decimal("12000")  # 2*3500 + 5000*1
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.strategy_id == "test-strat"
         assert snapshot.chain == "arbitrum"
@@ -304,7 +306,9 @@ class TestPortfolioValuer:
         snapshot = valuer.value(strategy, market)
 
         # Only USDC gets valued; ETH/ARB have balances but no prices -> ESTIMATED
-        assert snapshot.total_value_usd == Decimal("5000")
+        # VIB-3614: wallet-only → total_value_usd == 0; full value in wallet_total_value_usd
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("5000")
         assert len(snapshot.wallet_balances) == 1
         assert snapshot.wallet_balances[0].symbol == "USDC"
         assert snapshot.value_confidence == ValueConfidence.ESTIMATED
@@ -347,8 +351,10 @@ class TestPortfolioValuer:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("15000")  # 5000 wallet + 10000 LP
+        # VIB-3614: total_value_usd is position-scoped (LP value only)
+        assert snapshot.total_value_usd == Decimal("10000")  # LP position only
         assert snapshot.available_cash_usd == Decimal("5000")  # wallet only
+        assert snapshot.wallet_total_value_usd == Decimal("15000")  # 5000 wallet + 10000 LP
         assert len(snapshot.positions) == 1
         assert snapshot.positions[0].value_usd == Decimal("10000")
         assert snapshot.value_confidence == ValueConfidence.HIGH
@@ -366,7 +372,9 @@ class TestPortfolioValuer:
         snapshot = valuer.value(strategy, market)
 
         # Wallet values succeed, positions fail -> ESTIMATED
-        assert snapshot.total_value_usd == Decimal("4500")
+        # VIB-3614: positions failed so total_value_usd == 0; wallet in wallet_total_value_usd
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("4500")
         assert snapshot.value_confidence == ValueConfidence.ESTIMATED
 
     def test_only_positions_no_wallet_gives_estimated(self):
@@ -422,7 +430,9 @@ class TestPortfolioValuer:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("4500")
+        # VIB-3614: no positions method → wallet-only → total_value_usd == 0
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("4500")
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.positions == []
 
@@ -437,7 +447,9 @@ class TestPortfolioValuer:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("8750")
+        # VIB-3614: wallet-only → total_value_usd == 0
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("8750")
 
     def test_iteration_number_passed_through(self):
         valuer = PortfolioValuer()
@@ -522,7 +534,9 @@ class TestPortfolioValuer:
         assert request.wallet_address == "0x1234567890123456789012345678901234567890"
         assert request.chain == "arbitrum"
 
-        assert snapshot.total_value_usd == Decimal("4500")
+        # VIB-3614: no positions → total_value_usd == 0; framework wallet in wallet_total_value_usd
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("4500")  # framework wallet (1 ETH + 1000 USDC)
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_close_agreement"
         assert snapshot.snapshot_metadata["external_total_value_usd"] == "4700"
@@ -594,7 +608,9 @@ class TestPortfolioValuer:
         snapshot = valuer.value(strategy, market)
 
         # Framework on-chain value is authoritative; external is advisory
-        assert snapshot.total_value_usd == Decimal("10")
+        # VIB-3614: wallet-only → total_value_usd == 0; framework wallet in wallet_total_value_usd
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("10")  # framework wallet (10 USDC)
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_large_divergence"
         assert snapshot.snapshot_metadata["external_total_value_usd"] == "15"
@@ -616,7 +632,9 @@ class TestPortfolioValuer:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("100")
+        # VIB-3614: wallet-only → total_value_usd == 0; framework wallet in wallet_total_value_usd
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("100")  # framework wallet (100 USDC)
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_moderate_divergence"
 
@@ -630,7 +648,9 @@ class TestPortfolioValuer:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("10")
+        # VIB-3614: RPC failure falls back to framework snapshot; wallet-only → total == 0
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("10")
         assert snapshot.snapshot_metadata == {}
 
 
@@ -673,7 +693,9 @@ class TestPortfolioValuerEdgeCases:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("10500")
+        # VIB-3614: wallet-only → total_value_usd == 0
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("10500")
 
     def test_empty_tracked_tokens(self):
         """Strategy with no tracked tokens produces empty but valid snapshot."""
@@ -706,7 +728,9 @@ class TestPortfolioValuerEdgeCases:
 
         snapshot = valuer.value(strategy, market)
 
-        assert snapshot.total_value_usd == Decimal("1000")
+        # VIB-3614: wallet-only (partial) → total_value_usd == 0
+        assert snapshot.total_value_usd == Decimal("0")
+        assert snapshot.wallet_total_value_usd == Decimal("1000")
         assert snapshot.value_confidence == ValueConfidence.ESTIMATED
 
     def test_strategy_accessor_failure_returns_unavailable(self):
@@ -763,8 +787,9 @@ class TestDeployedCapitalUsd:
 
         # deployed_capital_usd must be 0 — no accounting events means no cost basis
         assert snapshot.deployed_capital_usd == Decimal("0")
-        # total_value_usd still reflects full wallet (ETH + supply position)
-        assert snapshot.total_value_usd > Decimal("1000")
+        # VIB-3614: total_value_usd is position-scoped ($1000 supply), not full wallet
+        assert snapshot.total_value_usd == Decimal("1000")
+        assert snapshot.wallet_total_value_usd == Decimal("34000")  # 10 ETH@$3300 + $1000 supply
 
     def test_deployed_capital_populated_from_position_cost_basis(self):
         """When positions have cost_basis_usd set, deployed_capital_usd sums them.
@@ -824,12 +849,13 @@ class TestDeployedCapitalUsd:
 
         snapshot = valuer.value(strategy, market)
 
-        # total_value_usd is the full wallet value — unchanged semantics.
-        # 10 ETH @ $3300 = $33,000 wallet + $1,000 USDC supply position = $34,000.
-        # (Supply position passes through as strategy-reported value_usd when on-chain
-        # re-pricing cannot resolve it without a real gateway connection.)
-        assert snapshot.total_value_usd == Decimal("34000"), (
-            f"expected $34000 total_value_usd but got ${snapshot.total_value_usd}"
+        # VIB-3614: total_value_usd is position-scoped (supply $1000 only).
+        # Full wallet (10 ETH@$3300 + $1000 supply = $34,000) is in wallet_total_value_usd.
+        assert snapshot.total_value_usd == Decimal("1000"), (
+            f"expected $1000 total_value_usd (position only) but got ${snapshot.total_value_usd}"
+        )
+        assert snapshot.wallet_total_value_usd == Decimal("34000"), (
+            f"expected $34000 wallet_total_value_usd but got ${snapshot.wallet_total_value_usd}"
         )
 
         # deployed_capital_usd must reflect only the $1,000 that was deployed,
@@ -985,8 +1011,10 @@ class TestDeployedCapitalUsd:
             f"expected deployed_capital_usd=$1000 but got ${reconciled.deployed_capital_usd}; "
             "deployed_capital_usd was not forwarded through _build_external_reconciled_snapshot"
         )
-        # Sanity: total_value_usd comes from external
-        assert reconciled.total_value_usd == Decimal("1050")
+        # VIB-3614: total_value_usd is position-scoped; no positions → 0
+        # Full external total is in wallet_total_value_usd
+        assert reconciled.total_value_usd == Decimal("0")
+        assert reconciled.wallet_total_value_usd == Decimal("1050")
 
 
 # ---------------------------------------------------------------------------

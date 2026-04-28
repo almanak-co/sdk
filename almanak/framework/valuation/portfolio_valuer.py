@@ -238,12 +238,21 @@ class PortfolioValuer:
             # Step 6: Build audit-safe token price map (chain:address keyed)
             token_price_records = self._build_token_price_records(chain, prices, tracked_tokens)
 
+            # VIB-3614: total_value_usd is now strategy-scoped (positive position
+            # values only).  Undeployed wallet balance is tracked separately via
+            # available_cash_usd and wallet_total_value_usd.
+            position_value_positive = sum(
+                (p.value_usd for p in positions if p.value_usd > 0),
+                Decimal("0"),
+            )
+
             framework_snapshot = PortfolioSnapshot(
                 timestamp=now,
                 strategy_id=strategy_id,
-                total_value_usd=wallet_value + position_value,
+                total_value_usd=position_value_positive,
                 available_cash_usd=wallet_value,
                 deployed_capital_usd=deployed_capital_usd,
+                wallet_total_value_usd=wallet_value + position_value,
                 value_confidence=confidence,
                 positions=positions,
                 wallet_balances=wallet_balances,
@@ -345,7 +354,10 @@ class PortfolioValuer:
             return framework_snapshot
 
         external_total = external["total_value_usd"]
-        framework_total = framework_snapshot.total_value_usd
+        # VIB-3614: total_value_usd is position-scoped; use wallet_total_value_usd
+        # (which mirrors the pre-VIB-3614 full-wallet value) for the divergence
+        # comparison so that wallet-only strategies still reconcile correctly.
+        framework_total = framework_snapshot.wallet_total_value_usd
 
         metadata = {
             "valuation_source": "framework",
@@ -456,17 +468,20 @@ class PortfolioValuer:
         merged_positions = self._merge_external_positions(framework_snapshot.positions, external_positions)
         external_total = external["total_value_usd"]
 
-        # Derive cash as remainder to ensure consistency: total = positions + cash.
-        # If positions already exceed the external total, cash is zero.
-        pos_total = sum((p.value_usd for p in merged_positions), Decimal("0"))
-        available_cash_usd = max(Decimal("0"), external_total - pos_total)
+        # VIB-3614: use position-scoped sum as total_value_usd, consistent with
+        # the framework path.  external_total (full wallet from Zerion) goes to
+        # wallet_total_value_usd for operator debugging.
+        pos_total = sum((p.value_usd for p in merged_positions if p.value_usd > 0), Decimal("0"))
+        gross_position_total = sum((p.value_usd for p in merged_positions), Decimal("0"))
+        available_cash_usd = max(Decimal("0"), external_total - gross_position_total)
 
         return PortfolioSnapshot(
             timestamp=framework_snapshot.timestamp,
             strategy_id=framework_snapshot.strategy_id,
-            total_value_usd=external_total,
+            total_value_usd=pos_total,
             available_cash_usd=available_cash_usd,
             deployed_capital_usd=framework_snapshot.deployed_capital_usd,
+            wallet_total_value_usd=external_total,
             value_confidence=ValueConfidence.ESTIMATED,
             error=framework_snapshot.error,
             positions=merged_positions,
