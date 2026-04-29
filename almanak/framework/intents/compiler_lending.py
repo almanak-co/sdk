@@ -7,9 +7,12 @@ repay, supply, withdraw).
 
 from __future__ import annotations
 
+import json
 import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+
+from almanak.core.contracts import AAVE_V3
 
 from ..models.reproduction_bundle import ActionBundle
 from ..utils.log_formatters import format_token_amount
@@ -27,6 +30,142 @@ logger = logging.getLogger("almanak.framework.intents.compiler")
 AAVE_COMPATIBLE_PROTOCOLS = compiler_constants.AAVE_COMPATIBLE_PROTOCOLS
 AAVE_VARIABLE_RATE_MODE = compiler_constants.AAVE_VARIABLE_RATE_MODE
 MAX_UINT256 = compiler_constants.MAX_UINT256
+
+# Aave V3 PoolDataProvider.getReserveConfigurationData(address) selector.
+# keccak256("getReserveConfigurationData(address)")[:4]
+_AAVE_GET_RESERVE_CONFIG_SELECTOR = "0x3e150141"
+
+
+class AssetNotCollateralEligibleError(ValueError):
+    """An asset cannot be enabled as collateral on the target Aave V3 market.
+
+    Raised at intent compile time when a pre-flight reserve-config query shows
+    `usageAsCollateralEnabled == false` or `ltv == 0`. Surfacing this as a
+    typed error spares strategy authors from learning the on-chain
+    `0x0cafc072 UnderlyingCannotBeUsedAsCollateral` revert through trial-and-error.
+    """
+
+
+def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, asset_symbol: str) -> str | None:
+    """Verify an asset is collateral-eligible on the compiler's Aave V3 market.
+
+    Calls `getReserveConfigurationData(asset)` on the chain's PoolDataProvider
+    via the compiler's gateway client. Caches results on the compiler so a
+    multi-iteration strategy doesn't re-query the same reserve config.
+
+    Returns:
+        None when the asset is eligible (or the check could not be performed —
+        we fail-open here so an offline / placeholder-mode compile still yields
+        calldata; the on-chain revert remains the final guard).
+        A human-readable error string when the asset is conclusively
+        ineligible (`usageAsCollateralEnabled == false` or `ltv == 0`).
+    """
+    if compiler.chain not in AAVE_V3:
+        return None
+
+    # Use isinstance(dict) rather than `is None` so MagicMock-based test
+    # compilers (which return MagicMock for any attr access) re-init cleanly.
+    cache = getattr(compiler, "_aave_collateral_eligibility_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._aave_collateral_eligibility_cache = cache
+
+    cache_key = (compiler.chain, asset_address.lower())
+    if cache_key in cache:
+        return cache[cache_key]
+
+    gateway = getattr(compiler, "_gateway_client", None)
+    if gateway is None or not getattr(gateway, "is_connected", False):
+        return None
+
+    pool_data_provider = AAVE_V3[compiler.chain]["pool_data_provider"]
+    selector_no_prefix = _AAVE_GET_RESERVE_CONFIG_SELECTOR[2:]
+    asset_padded = asset_address.lower().replace("0x", "").zfill(64)
+    call_data = "0x" + selector_no_prefix + asset_padded
+
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=compiler.chain,
+                method="eth_call",
+                params=json.dumps([{"to": pool_data_provider, "data": call_data}, "latest"]),
+                id=f"aave_v3_reserve_config:{compiler.chain}:{asset_address.lower()}",
+            ),
+            timeout=getattr(compiler, "rpc_timeout", 5.0),
+        )
+    except Exception as exc:
+        # Network / gateway problems shouldn't block compilation — the on-chain
+        # tx will revert with the clear selector if eligibility is wrong.
+        # Do NOT cache the miss: a transient failure on iteration N must not
+        # permanently disable the pre-flight on iteration N+1.
+        logger.warning(
+            "Aave V3 collateral pre-flight skipped for %s on %s: gateway call failed (%s)",
+            asset_symbol,
+            compiler.chain,
+            exc,
+        )
+        return None
+
+    if not response.success or not response.result:
+        logger.warning(
+            "Aave V3 collateral pre-flight: PoolDataProvider returned empty for "
+            "asset=%s chain=%s — assuming eligible (will revert on-chain if not)",
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+
+    # gateway.rpc.Call wraps eth_call's hex result in json.dumps (see
+    # almanak/gateway/services/rpc_service.py), so response.result arrives as a
+    # JSON-encoded string like '"0x..."'. Decode before slicing or the ABI
+    # word offsets are off-by-one and the pre-flight silently fails-open.
+    try:
+        decoded = json.loads(response.result) if response.result.startswith('"') else response.result
+    except (ValueError, json.JSONDecodeError):
+        logger.warning(
+            "Aave V3 collateral pre-flight: cannot JSON-decode RPC result for asset=%s chain=%s",
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+    if not isinstance(decoded, str):
+        return None
+    raw = decoded.removeprefix("0x") if decoded.startswith("0x") else decoded
+
+    # getReserveConfigurationData returns 10 uint256/bool words, ABI-encoded
+    # as 10 * 32 bytes = 640 hex chars. Word layout:
+    # 0: decimals, 1: ltv, 2: liquidationThreshold, 3: liquidationBonus,
+    # 4: reserveFactor, 5: usageAsCollateralEnabled (bool),
+    # 6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
+    # 8: isActive (bool), 9: isFrozen (bool).
+    if len(raw) < 640:
+        logger.warning(
+            "Aave V3 collateral pre-flight: unexpected response length %d for asset=%s chain=%s",
+            len(raw),
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+
+    try:
+        ltv = int(raw[64:128], 16)
+        usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
+    except ValueError:
+        return None
+
+    if not usage_as_collateral_enabled or ltv == 0:
+        reason = (
+            f"Asset {asset_symbol} on Aave V3 {compiler.chain} is not collateral-eligible "
+            f"(usageAsCollateralEnabled={usage_as_collateral_enabled}, ltv={ltv}). "
+            "Use as supply-only (omit use_as_collateral) or pick a different asset."
+        )
+        cache[cache_key] = reason
+        return reason
+
+    cache[cache_key] = None
+    return None
 
 
 def _validate_curvance_market_tokens(
@@ -3462,6 +3601,24 @@ def _compile_supply_aave_compatible(
 
     # Build setUserUseReserveAsCollateral TX if requested
     if intent.use_as_collateral:
+        # Pre-flight: confirm asset can actually be used as collateral on this
+        # market. Surfaces a typed error instead of the opaque on-chain
+        # 0x0cafc072 (UnderlyingCannotBeUsedAsCollateral) revert. Aave-only;
+        # V2 forks (Radiant) skip this check because they expose a different
+        # PoolDataProvider interface. VIB-3701.
+        if not adapter._is_v2_fork and protocol_lower == "aave_v3":
+            ineligible_reason = _check_aave_v3_collateral_eligibility(
+                compiler,
+                asset_address=actual_supply_address,
+                asset_symbol=supply_token.symbol,
+            )
+            if ineligible_reason is not None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=ineligible_reason,
+                    intent_id=intent.intent_id,
+                )
+
         set_collateral_calldata = adapter.get_set_collateral_calldata(
             asset=actual_supply_address,
             use_as_collateral=True,

@@ -237,20 +237,30 @@ class TestGMXv2AdapterNonArbitrumPath:
         return adapter
 
     def _run_with_mocked_web3(self, adapter, mock_reader):
-        """Run get_positions_onchain with a mocked Web3 and reader contract."""
+        """Run get_positions_onchain forcing the direct-Web3 fallback path.
+
+        VIB-1720: GMXV2SDK now supports avalanche, so by default get_positions_onchain
+        takes the SDK path. These tests cover the direct-Web3 fallback that runs
+        when the SDK path is unavailable, so we explicitly stub SDK construction to
+        raise, which is exactly the situation the fallback is for.
+        """
         mock_w3 = MagicMock()
         mock_w3.to_checksum_address = lambda x: x
         mock_w3.eth.contract.return_value = mock_reader
 
-        with patch("web3.Web3", return_value=mock_w3) as MockWeb3:
-            MockWeb3.HTTPProvider = MagicMock()
-            MockWeb3.return_value = mock_w3
-            # Mock _parse_raw_positions to avoid needing full adapter context
-            # (token resolver, markets, etc.) — we're testing query/fallback logic
-            with patch.object(adapter, "_parse_raw_positions", side_effect=lambda rp: [{"mock": True}] * len(rp)):
-                with patch("builtins.open", MagicMock()):
-                    with patch("json.load", return_value=[]):
-                        return adapter.get_positions_onchain("http://rpc")
+        with patch(
+            "almanak.framework.connectors.gmx_v2.sdk.GMXV2SDK",
+            side_effect=ValueError("forced SDK fallback for test"),
+        ):
+            with patch("web3.Web3", return_value=mock_w3) as MockWeb3:
+                MockWeb3.HTTPProvider = MagicMock()
+                MockWeb3.return_value = mock_w3
+                # Mock _parse_raw_positions to avoid needing full adapter context
+                # (token resolver, markets, etc.) — we're testing query/fallback logic
+                with patch.object(adapter, "_parse_raw_positions", side_effect=lambda rp: [{"mock": True}] * len(rp)):
+                    with patch("builtins.open", MagicMock()):
+                        with patch("json.load", return_value=[]):
+                            return adapter.get_positions_onchain("http://rpc")
 
     def test_non_arb_count_positive_returns_positions(self):
         """Non-Arbitrum: count > 0, fetches exact range."""

@@ -1030,8 +1030,14 @@ class GMXv2Adapter:
         Raises:
             ValueError: If the chain is not supported for on-chain reads
         """
-        if self.chain not in ("arbitrum", "avalanche"):
-            raise ValueError(f"On-chain position reads not supported for chain: {self.chain}")
+        # Drive supported chains from the address registry — same single
+        # source of truth the SDK uses, so adding a chain to GMX_V2_ADDRESSES
+        # automatically lights up on-chain position reads. VIB-1720.
+        if self.chain not in GMX_V2_ADDRESSES:
+            raise ValueError(
+                f"On-chain position reads not supported for chain: {self.chain}. "
+                f"Supported: {sorted(GMX_V2_ADDRESSES.keys())}"
+            )
 
         reader_address = self.addresses.get("synthetics_reader")
         data_store_address = self.addresses.get("data_store")
@@ -1045,13 +1051,23 @@ class GMXv2Adapter:
         if rpc_url is None and gateway_client is None:
             raise ValueError("get_positions_onchain requires either rpc_url (deprecated) or gateway_client")
 
-        if self.chain == "arbitrum":
-            # SDK handles fallback logic internally
-            sdk = GMXV2SDK(rpc_url=rpc_url, chain="arbitrum", gateway_client=gateway_client)
+        # SDK now handles every chain in GMX_V2_SDK_ADDRESSES (VIB-1720). Try
+        # it first so multi-method fallback (count-first, range-fallback, REST
+        # fallback) runs uniformly. Drop to the direct-Web3 path below only on
+        # SDK construction failure (e.g. brand-new chain not yet wired).
+        # Treat a disconnected gateway as unavailable so we don't hand a dead
+        # client to the SDK and starve a working rpc_url fallback.
+        sdk_gateway = gateway_client if gateway_client is not None and gateway_client.is_connected else None
+        try:
+            sdk = GMXV2SDK(rpc_url=rpc_url, chain=self.chain, gateway_client=sdk_gateway)
+        except ValueError:
+            sdk = None
+        if sdk is not None:
             raw_positions_dicts = sdk.get_account_positions(self.wallet_address)
             return self._parse_position_dicts(raw_positions_dicts)
 
-        # For non-arbitrum chains, use direct Web3 with the reader ABI
+        # Fallback: direct Web3 reads with the reader ABI for chains not yet
+        # supported by the SDK helper.
         import json
         import os
 

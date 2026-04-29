@@ -90,25 +90,49 @@ class DecreasePositionSwapType(IntEnum):
     SWAP_COLLATERAL_TOKEN_TO_PNL_TOKEN = 2
 
 
-# GMX V2 Arbitrum Contract Addresses (verified from Arbiscan - Jan 2026)
-# Note: GMX upgraded the Exchange Router in Oct 2025
-GMX_V2_SDK_ADDRESSES = {
-    "arbitrum": {
-        "EXCHANGE_ROUTER": GMX_V2["arbitrum"]["exchange_router"],
-        "ROUTER": GMX_V2["arbitrum"]["router"],
-        "DATA_STORE": GMX_V2["arbitrum"]["data_store"],
-        "ORDER_VAULT": GMX_V2["arbitrum"]["order_vault"],
-        "READER": GMX_V2["arbitrum"]["reader"],
-        # Markets
-        "ETH_USD_MARKET": GMX_V2["arbitrum"]["eth_usd_market"],
-        "BTC_USD_MARKET": GMX_V2["arbitrum"]["btc_usd_market"],
-        # Tokens
-        "WETH": GMX_V2_TOKENS["arbitrum"]["WETH"],
-        "WBTC": GMX_V2_TOKENS["arbitrum"]["WBTC"],
-        "USDC": GMX_V2_TOKENS["arbitrum"]["USDC"],
-        "USDT": GMX_V2_TOKENS["arbitrum"]["USDT"],
+# GMX V2 Contract Addresses derived from the central registry in
+# almanak.core.contracts. Each chain entry maps the registry's lowercase
+# keys to the historical UPPERCASE keys this SDK's call sites expect.
+# Adding a new chain: ensure (a) `GMX_V2[<chain>]` and `GMX_V2_TOKENS[<chain>]`
+# are populated in core.contracts and (b) every key referenced below exists
+# for that chain — otherwise initialisation will KeyError on the new chain.
+def _build_chain_address_map(chain: str) -> dict[str, str]:
+    contracts = GMX_V2[chain]
+    tokens = GMX_V2_TOKENS[chain]
+    addr_map: dict[str, str] = {
+        "EXCHANGE_ROUTER": contracts["exchange_router"],
+        "ROUTER": contracts["router"],
+        "DATA_STORE": contracts["data_store"],
+        "ORDER_VAULT": contracts["order_vault"],
+        "READER": contracts["reader"],
+        "ETH_USD_MARKET": contracts["eth_usd_market"],
+        "BTC_USD_MARKET": contracts["btc_usd_market"],
     }
-}
+    # Avalanche exposes a native AVAX/USD market; Arbitrum doesn't list one
+    # under that key so it stays absent.
+    if "avax_usd_market" in contracts:
+        addr_map["AVAX_USD_MARKET"] = contracts["avax_usd_market"]
+    # Per-chain wrapped-native tracked under the historical "WETH" key so
+    # existing call sites keep working. Avalanche uses WAVAX as the native
+    # wrapper; the strategy still references it via this same SDK attribute.
+    addr_map["WETH"] = tokens.get("WETH") or tokens["WAVAX"]
+    # Wrapped-BTC variants (WBTC on Arbitrum, BTC.b on Avalanche).
+    if "WBTC" in tokens:
+        addr_map["WBTC"] = tokens["WBTC"]
+    elif "BTC.b" in tokens:
+        addr_map["WBTC"] = tokens["BTC.b"]
+    addr_map["USDC"] = tokens["USDC"]
+    addr_map["USDT"] = tokens["USDT"]
+    if "WAVAX" in tokens:
+        addr_map["WAVAX"] = tokens["WAVAX"]
+    if "WETH.e" in tokens:
+        addr_map["WETH.e"] = tokens["WETH.e"]
+    if "BTC.b" in tokens:
+        addr_map["BTC.b"] = tokens["BTC.b"]
+    return addr_map
+
+
+GMX_V2_SDK_ADDRESSES = {chain: _build_chain_address_map(chain) for chain in GMX_V2}
 
 # Minimum execution fee (in wei) - keepers need this to execute orders
 # GMX V2 validates: executionFee >= gasLimit * tx.gasprice
@@ -179,12 +203,18 @@ class GMXV2SDK:
         Args:
             rpc_url: DEPRECATED — direct RPC URL. Prefer gateway_client for
                 any code path running in a strategy container.
-            chain: Target chain (only 'arbitrum' supported currently)
+            chain: Target chain — any key in GMX_V2_SDK_ADDRESSES (currently
+                arbitrum and avalanche; see almanak/core/contracts.py:GMX_V2).
             gateway_client: Gateway client for routing eth_call through the
                 gateway. Preferred over rpc_url.
         """
-        if chain != "arbitrum":
-            raise ValueError(f"GMX V2 SDK only supports Arbitrum, got {chain}")
+        if chain not in GMX_V2_SDK_ADDRESSES:
+            raise ValueError(
+                f"GMX V2 is not configured for chain {chain!r}. "
+                f"Supported chains: {sorted(GMX_V2_SDK_ADDRESSES.keys())}. "
+                "Add an entry to almanak/core/contracts.py:GMX_V2 / GMX_V2_TOKENS "
+                "and a REST endpoint to GMX_API_URLS to enable a new chain."
+            )
         if rpc_url is None and gateway_client is None:
             raise ValueError("GMXV2SDK requires either rpc_url (deprecated) or gateway_client")
 
@@ -520,9 +550,20 @@ class GMXV2SDK:
             "ETH/USD": self.addresses["ETH_USD_MARKET"],
             "BTC/USD": self.addresses["BTC_USD_MARKET"],
         }
+        # Native AVAX market is exposed only on chains that wire it (currently
+        # avalanche). Same alias surface as ETH/BTC. VIB-1720.
+        if "AVAX_USD_MARKET" in self.addresses:
+            avax_market = self.addresses["AVAX_USD_MARKET"]
+            markets.update(
+                {
+                    "AVAX": avax_market,
+                    "WAVAX": avax_market,
+                    "AVAX/USD": avax_market,
+                }
+            )
         market = markets.get(index_token_symbol.upper())
         if not market:
-            raise ValueError(f"Unsupported market: {index_token_symbol}. Supported: ETH, BTC")
+            raise ValueError(f"Unsupported market: {index_token_symbol}. Supported: {sorted(markets.keys())}")
         return market
 
     def get_execution_fee(

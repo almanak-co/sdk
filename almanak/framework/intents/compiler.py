@@ -5507,9 +5507,16 @@ class IntentCompiler:
                         intent_id=intent.intent_id,
                     )
 
-            # Resolve collateral token address
+            # Resolve collateral token address. Case-insensitive against the
+            # GMX_V2_TOKENS registry — Avalanche uses mixed-case keys
+            # (WETH.e, BTC.b) that would never match if we just upper-cased
+            # the user input. VIB-1720.
             collateral_token_upper = intent.collateral_token.upper()
-            collateral_address = GMX_V2_TOKENS.get(self.chain, {}).get(collateral_token_upper)
+            chain_tokens = GMX_V2_TOKENS.get(self.chain, {})
+            collateral_address = next(
+                (addr for sym, addr in chain_tokens.items() if sym.upper() == collateral_token_upper),
+                None,
+            )
             if not collateral_address:
                 if intent.collateral_token.startswith("0x"):
                     collateral_address = intent.collateral_token
@@ -5520,8 +5527,33 @@ class IntentCompiler:
                         intent_id=intent.intent_id,
                     )
 
-            # Calculate collateral in wei
-            collateral_decimals = 18 if collateral_token_upper in ["WETH", "ETH"] else 6
+            # Calculate collateral in wei. Resolve real decimals via TokenResolver
+            # (USDC=6, WETH=18, WAVAX=18, BTC.b=8, ...) — the previous "WETH/ETH=18 else 6"
+            # heuristic underfunded WAVAX longs by 12 orders of magnitude on Avalanche.
+            collateral_token_info = None
+            if getattr(self, "_token_resolver", None) is not None:
+                # The resolver returns None on a clean lookup miss; only
+                # AttributeError happens when test compilers strip the
+                # resolver. Don't swallow other exceptions — they signal a
+                # genuine resolver bug we want to surface, not silently fall
+                # back to a 6-decimal guess that mis-sizes the order.
+                try:
+                    collateral_token_info = self._resolve_token(intent.collateral_token)
+                except AttributeError:
+                    collateral_token_info = None
+            if collateral_token_info is not None:
+                collateral_decimals = collateral_token_info.decimals
+            elif collateral_token_upper in ("WETH", "WETH.E", "ETH", "WAVAX", "AVAX"):
+                # Native-wrapped fallback when the resolver can't map the symbol.
+                # WETH.e on Avalanche is the bridged 18-decimal WETH variant —
+                # missing it would underfund a WETH.e long by 12 orders of magnitude.
+                collateral_decimals = 18
+            elif collateral_token_upper in ("WBTC", "BTC.B", "WBTC.E"):
+                # GMX V2 BTC variants are 8-decimal; do not silently default to 6.
+                collateral_decimals = 8
+            else:
+                # Stablecoin default — USDC/USDT and their bridged variants are 6.
+                collateral_decimals = 6
             collateral_amount_decimal: Decimal = intent.collateral_amount  # type: ignore[assignment]
             collateral_wei = int(collateral_amount_decimal * Decimal(10**collateral_decimals))
 
@@ -5734,9 +5766,14 @@ class IntentCompiler:
                         intent_id=intent.intent_id,
                     )
 
-            # Resolve collateral token address
+            # Resolve collateral token address — same case-insensitive policy
+            # as the open path so WETH.e / BTC.b match on Avalanche. VIB-1720.
             collateral_token_upper = intent.collateral_token.upper()
-            collateral_address = GMX_V2_TOKENS.get(self.chain, {}).get(collateral_token_upper)
+            chain_tokens = GMX_V2_TOKENS.get(self.chain, {})
+            collateral_address = next(
+                (addr for sym, addr in chain_tokens.items() if sym.upper() == collateral_token_upper),
+                None,
+            )
             if not collateral_address:
                 if intent.collateral_token.startswith("0x"):
                     collateral_address = intent.collateral_token

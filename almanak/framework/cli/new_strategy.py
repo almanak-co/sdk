@@ -31,6 +31,108 @@ class StrategyTemplate(StrEnum):
     STAKING = "staking"
 
 
+# Aliases accepted in addition to canonical StrategyTemplate values.
+# Edge sends semantic names that don't exactly match the SDK enum;
+# rather than push translation into every Edge consumer (AlmanakCode,
+# the future Portfolio Manager, etc.), absorb the mapping here. VIB-3703.
+TEMPLATE_ALIASES: dict[str, "StrategyTemplate"] = {
+    "swap": StrategyTemplate.TA_SWAP,
+    "bridge": StrategyTemplate.MULTI_STEP,
+}
+
+
+class UnknownTemplateError(ValueError):
+    """Raised when a template string matches neither a StrategyTemplate value nor an alias."""
+
+
+def parse_template(value: str) -> StrategyTemplate:
+    """Resolve a user/Edge-supplied template string to a StrategyTemplate.
+
+    Accepts canonical enum values (`ta_swap`, `dynamic_lp`, ...) and the
+    aliases in TEMPLATE_ALIASES. Comparison is case-insensitive and tolerant
+    of leading/trailing whitespace.
+
+    Raises UnknownTemplateError with a message that lists every valid value
+    and alias when the input matches nothing.
+    """
+    if not isinstance(value, str):
+        raise UnknownTemplateError(
+            f"Template must be a string, got {type(value).__name__}. "
+            f"Valid: {', '.join(t.value for t in StrategyTemplate)}. "
+            f"Aliases: {', '.join(f'{a} -> {t.value}' for a, t in TEMPLATE_ALIASES.items())}."
+        )
+    normalized = value.strip().lower()
+    try:
+        return StrategyTemplate(normalized)
+    except ValueError:
+        pass
+    if normalized in TEMPLATE_ALIASES:
+        return TEMPLATE_ALIASES[normalized]
+    raise UnknownTemplateError(
+        f"{value!r} is not a known SDK template. "
+        f"Valid: {', '.join(t.value for t in StrategyTemplate)}. "
+        f"Aliases: {', '.join(f'{a} -> {t.value}' for a, t in TEMPLATE_ALIASES.items())}."
+    )
+
+
+# Structured warning codes emitted by validate_lending_loop_template.
+# AlmanakCode's scaffold planner greps for these prefixes to surface the
+# message in its own telemetry, so the strings are part of the public
+# contract — do not rename without notifying the AlmanakCode owners.
+LENDING_LOOP_INCOMPLETE = "LENDING_LOOP_INCOMPLETE"
+LENDING_LOOP_CROSS_PROTOCOL = "LENDING_LOOP_CROSS_PROTOCOL"
+
+
+def validate_lending_loop_template(supply_protocol: str, borrow_protocol: str | None = None) -> list[str]:
+    """Validate a `lending_loop` scaffold input and return human-readable warnings.
+
+    The lending_loop SDK template loops supply + borrow on a *single* protocol.
+    Edge signals frequently describe a cross-protocol arb (supply on aave_v3,
+    borrow on morpho-blue) and AlmanakCode silently drops the borrow leg when it
+    forces the signal into the lending_loop mold. The result is a supply-only
+    strategy whose declared "arb" is unrealisable — the QA tester sees no error,
+    but the alpha is gone.
+
+    Returns:
+        A list of warning strings (empty when configuration is consistent).
+        Each string starts with a structured prefix from
+        ``LENDING_LOOP_INCOMPLETE`` / ``LENDING_LOOP_CROSS_PROTOCOL`` so callers
+        (CLI banner, AlmanakCode planner) can route them.
+
+    Args:
+        supply_protocol: protocol resolved from sdkSpec.protocol (always set).
+        borrow_protocol: protocol intended for the borrow leg, or None when the
+            Edge signal omits it / buries it in `metadata` only.
+    """
+    warnings: list[str] = []
+    normalized_supply = (supply_protocol or "").strip()
+    if not normalized_supply:
+        warnings.append(
+            f"{LENDING_LOOP_INCOMPLETE}: lending_loop scaffold received empty supply_protocol; cannot validate."
+        )
+        return warnings
+
+    normalized_borrow = (borrow_protocol or "").strip() or None
+    if normalized_borrow is None:
+        warnings.append(
+            f"{LENDING_LOOP_INCOMPLETE}: Strategy declares lending_loop template but "
+            "no borrow leg is configured. Resulting strategy is supply-only and "
+            "will not realize the arb spread. "
+            f"supply_protocol={normalized_supply}, borrow_protocol=<unset>."
+        )
+    elif normalized_borrow.lower() != normalized_supply.lower():
+        # Case-insensitive equality so "AAVE_V3" and "aave_v3" don't trip the
+        # cross-protocol warning (CodeRabbit-flagged regression).
+        warnings.append(
+            f"{LENDING_LOOP_CROSS_PROTOCOL}: lending_loop template loops supply "
+            "and borrow on a single protocol, but the scaffold input asks for a "
+            f"cross-protocol pair (supply_protocol={normalized_supply}, "
+            f"borrow_protocol={normalized_borrow}). Use the multi_step template "
+            "to express cross-protocol lending arbitrage."
+        )
+    return warnings
+
+
 class SupportedChain(StrEnum):
     """Supported blockchain networks."""
 
@@ -4223,9 +4325,18 @@ def list_strategies() -> list[str]:
 @click.option(
     "--template",
     "-t",
-    type=click.Choice([t.value for t in StrategyTemplate]),
+    # Accept both canonical enum values and aliases. parse_template() does the
+    # final resolution and raises UnknownTemplateError when neither matches —
+    # we don't use click.Choice because it would reject aliases up-front before
+    # the helper can translate them.
     default=StrategyTemplate.BLANK.value,
-    help="Strategy template to use",
+    help=(
+        "Strategy template: "
+        + ", ".join(t.value for t in StrategyTemplate)
+        + " (aliases: "
+        + ", ".join(f"{a}->{t.value}" for a, t in TEMPLATE_ALIASES.items())
+        + ")"
+    ),
 )
 @click.option(
     "--name",
@@ -4252,11 +4363,32 @@ def list_strategies() -> list[str]:
         "otherwise ./<name> in the current working directory."
     ),
 )
+@click.option(
+    "--supply-protocol",
+    default=None,
+    help=(
+        "Lending supply leg protocol (only used with --template lending_loop). "
+        "Triggers a scaffold-input check that warns when the borrow leg is "
+        "missing or when supply/borrow are different protocols (lending_loop "
+        "is single-protocol; cross-protocol pairs need --template multi_step)."
+    ),
+)
+@click.option(
+    "--borrow-protocol",
+    default=None,
+    help=(
+        "Lending borrow leg protocol (only used with --template lending_loop). "
+        "See --supply-protocol; passing both makes the scaffold input "
+        "explicit and surfaces an early warning if the pair is cross-protocol."
+    ),
+)
 def new_strategy(
     template: str,
     name: str,
     chain: str,
     output_dir: str | None,
+    supply_protocol: str | None,
+    borrow_protocol: str | None,
 ) -> None:
     """
     Scaffold a new Almanak strategy from a template.
@@ -4275,7 +4407,11 @@ def new_strategy(
 
         almanak new-strategy -t ta_swap -n my_strat --output-dir /path/to/output
     """
-    template_enum = StrategyTemplate(template)
+    try:
+        template_enum = parse_template(template)
+    except UnknownTemplateError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise click.Abort() from exc
     chain_enum = SupportedChain(chain)
     snake_name = to_snake_case(name)
 
@@ -4287,6 +4423,16 @@ def new_strategy(
             err=True,
         )
         raise click.Abort()
+
+    # Surface lending_loop scaffold warnings (single-leg / cross-protocol) when
+    # the user passes --supply-protocol or --borrow-protocol. VIB-3702 — keeps
+    # the SDK CLI in sync with the structured warnings AlmanakCode emits.
+    if template_enum == StrategyTemplate.LENDING_LOOP and (supply_protocol or borrow_protocol):
+        for warning in validate_lending_loop_template(
+            supply_protocol=supply_protocol or "",
+            borrow_protocol=borrow_protocol,
+        ):
+            click.echo(f"warning: {warning}", err=True)
 
     # Determine output directory
     if output_dir:

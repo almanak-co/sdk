@@ -1,0 +1,364 @@
+"""Unit tests for VIB-3701: Aave V3 collateral eligibility pre-flight check.
+
+Confirms `_compile_supply_aave_compatible` consults the on-chain reserve
+configuration (`PoolDataProvider.getReserveConfigurationData`) before emitting
+a `setUserUseReserveAsCollateral` TX. Asset-level reverts like
+`0x0cafc072 UnderlyingCannotBeUsedAsCollateral` (USDE on Aave V3 Ethereum,
+DAI on Polygon V3, ...) now surface as a typed compile-time error instead of
+an opaque on-chain revert.
+"""
+
+from __future__ import annotations
+
+import json
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
+
+from almanak.framework.intents import SupplyIntent
+from almanak.framework.intents import compiler_lending as cl
+from almanak.framework.intents.compiler_models import CompilationStatus
+
+TEST_WALLET = "0x1234567890123456789012345678901234567890"
+TEST_POOL = "0xpooladdress000000000000000000000000000001"
+TEST_ASSET_ADDR = "0x" + "ab" * 20
+
+AAVE_ADAPTER_CLS = "almanak.framework.intents.compiler_adapters.AaveV3Adapter"
+
+
+def _word(value: int) -> str:
+    """ABI-encode a uint256 / bool word as 64 hex chars."""
+    return f"{value:064x}"
+
+
+def _encode_reserve_config(
+    *,
+    decimals: int = 6,
+    ltv: int = 7500,
+    liquidation_threshold: int = 8000,
+    liquidation_bonus: int = 10500,
+    reserve_factor: int = 1000,
+    usage_as_collateral_enabled: bool = True,
+    borrowing_enabled: bool = True,
+    stable_borrow_rate_enabled: bool = False,
+    is_active: bool = True,
+    is_frozen: bool = False,
+) -> str:
+    """Mimic the ABI-encoded return of `getReserveConfigurationData(address)`."""
+    words = [
+        decimals,
+        ltv,
+        liquidation_threshold,
+        liquidation_bonus,
+        reserve_factor,
+        1 if usage_as_collateral_enabled else 0,
+        1 if borrowing_enabled else 0,
+        1 if stable_borrow_rate_enabled else 0,
+        1 if is_active else 0,
+        1 if is_frozen else 0,
+    ]
+    return "0x" + "".join(_word(w) for w in words)
+
+
+def _mock_token(symbol: str = "USDC", decimals: int = 6) -> MagicMock:
+    tok = MagicMock()
+    tok.symbol = symbol
+    tok.address = TEST_ASSET_ADDR
+    tok.decimals = decimals
+    tok.is_native = False
+    tok.to_dict.return_value = {
+        "symbol": symbol,
+        "address": tok.address,
+        "decimals": decimals,
+        "is_native": False,
+    }
+    return tok
+
+
+def _mock_compiler(*, gateway_response: str | None, chain: str = "ethereum") -> MagicMock:
+    """Build a compiler mock with an optional gateway client reply."""
+    compiler = MagicMock()
+    compiler.chain = chain
+    compiler.wallet_address = TEST_WALLET
+    compiler.rpc_timeout = 5.0
+    compiler._is_solana_chain.return_value = False
+    compiler._format_amount.side_effect = lambda amount, decimals: str(amount)
+    compiler._get_wrapped_native_address.return_value = "0x" + "ee" * 20
+
+    approve_tx = cl.TransactionData(
+        to="0x" + "cc" * 20,
+        value=0,
+        data="0x0000",
+        gas_estimate=60_000,
+        description="approve",
+        tx_type="approve",
+    )
+    compiler._build_approve_tx.return_value = [approve_tx]
+
+    if gateway_response is None:
+        compiler._gateway_client = None
+    else:
+        gateway = MagicMock()
+        gateway.is_connected = True
+        rpc_resp = MagicMock()
+        rpc_resp.success = True
+        # Match the wire contract: gateway.rpc.Call wraps eth_call hex results
+        # in json.dumps (see almanak/gateway/services/rpc_service.py), so a real
+        # response.result looks like '"0x..."'. Tests that hand-feed bare hex
+        # would mask a JSON-decode regression in the eligibility parser.
+        rpc_resp.result = json.dumps(gateway_response)
+        rpc_resp.error = ""
+        gateway.rpc.Call.return_value = rpc_resp
+        compiler._gateway_client = gateway
+
+    return compiler
+
+
+def _supply_intent(*, use_as_collateral: bool = True, protocol: str = "aave_v3") -> SupplyIntent:
+    return SupplyIntent(
+        protocol=protocol,
+        token="USDC",
+        amount=Decimal("100"),
+        use_as_collateral=use_as_collateral,
+    )
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_collateral_blocked_when_usage_disabled(mock_adapter_cls):
+    compiler = _mock_compiler(
+        gateway_response=_encode_reserve_config(
+            usage_as_collateral_enabled=False, ltv=0
+        )
+    )
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.FAILED
+    assert "not collateral-eligible" in result.error
+    assert "USDC" in result.error
+    assert "ethereum" in result.error
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_collateral_blocked_when_ltv_zero(mock_adapter_cls):
+    """Polygon DAI / USDC.e style: usage flag stays True but LTV got zeroed out."""
+    compiler = _mock_compiler(
+        gateway_response=_encode_reserve_config(
+            usage_as_collateral_enabled=True, ltv=0
+        )
+    )
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.FAILED
+    assert "ltv=0" in result.error.lower()
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_eligible_asset_compiles_with_collateral_tx(mock_adapter_cls):
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=7500))
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+    mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.SUCCESS
+    assert "lending_set_collateral" in [tx.tx_type for tx in result.transactions]
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_check_skipped_when_use_as_collateral_false(mock_adapter_cls):
+    """Supply-only flows must not waste an RPC on the eligibility check."""
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=7500))
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=False)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.SUCCESS
+    # The collateral check must not have hit the gateway since we never asked
+    # for setUserUseReserveAsCollateral.
+    compiler._gateway_client.rpc.Call.assert_not_called()
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_check_skipped_for_v2_forks(mock_adapter_cls):
+    """Radiant V2 (V2 fork) uses a different PoolDataProvider — skip the check."""
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=0))
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = True  # Radiant V2 sets this
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+    mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True, protocol="radiant_v2")
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.SUCCESS
+    # Eligibility cache should not have been hit for V2 forks.
+    compiler._gateway_client.rpc.Call.assert_not_called()
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_fails_open_when_gateway_unavailable(mock_adapter_cls):
+    """No gateway → can't pre-flight; rely on on-chain revert as final guard."""
+    compiler = _mock_compiler(gateway_response=None)
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+    mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    # Must still produce calldata; we must not block compilation when the
+    # pre-flight cannot run. The user gets the on-chain revert if they
+    # picked an ineligible asset, which is the same as the pre-VIB-3701
+    # behavior.
+    assert result.status == CompilationStatus.SUCCESS
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_fails_open_on_rpc_success_false(mock_adapter_cls):
+    """response.success=False — same fail-open as gateway exception."""
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=7500))
+    compiler._gateway_client.rpc.Call.return_value.success = False
+    compiler._gateway_client.rpc.Call.return_value.result = ""
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+    mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.SUCCESS
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_fails_open_on_gateway_error(mock_adapter_cls):
+    """Gateway connected but RPC errored — same fail-open as no gateway."""
+    compiler = _mock_compiler(gateway_response="0x")  # short response → unparseable
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+    mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    result = cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert result.status == CompilationStatus.SUCCESS
+
+
+@patch(AAVE_ADAPTER_CLS)
+def test_eligibility_result_is_cached(mock_adapter_cls):
+    """Two compiles in a row must only hit the gateway once."""
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=7500))
+    mock_adapter = MagicMock()
+    mock_adapter._is_v2_fork = False
+    mock_adapter.get_pool_address.return_value = TEST_POOL
+    mock_adapter.get_supply_calldata.return_value = b"\x01"
+    mock_adapter.estimate_supply_gas.return_value = 150_000
+    mock_adapter.get_set_collateral_calldata.return_value = b"\x02"
+    mock_adapter.estimate_set_collateral_gas.return_value = 70_000
+    mock_adapter_cls.return_value = mock_adapter
+
+    intent = _supply_intent(use_as_collateral=True)
+    cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+    cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+    cl._compile_supply_aave_compatible(compiler, intent, _mock_token(), Decimal("100"))
+
+    assert compiler._gateway_client.rpc.Call.call_count == 1
+
+
+def test_helper_returns_none_for_unsupported_chain():
+    """The chain table has no Aave V3 deployment for berachain → no-op."""
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=0), chain="berachain")
+    result = cl._check_aave_v3_collateral_eligibility(
+        compiler, asset_address=TEST_ASSET_ADDR, asset_symbol="USDC"
+    )
+    assert result is None
+    compiler._gateway_client.rpc.Call.assert_not_called()
+
+
+def test_asset_not_collateral_eligible_error_subclasses_value_error() -> None:
+    assert issubclass(cl.AssetNotCollateralEligibleError, ValueError)
+
+
+def test_helper_decodes_json_wrapped_gateway_result() -> None:
+    """Production wire contract: gateway.rpc.Call wraps eth_call results in
+    json.dumps (see almanak/gateway/services/rpc_service.py). A bare hex string
+    bypassing json.dumps would shift the ABI word offsets and silently
+    fail-open the eligibility check — that regression must trip this test.
+    """
+    compiler = _mock_compiler(
+        gateway_response=_encode_reserve_config(usage_as_collateral_enabled=False, ltv=0)
+    )
+    # Sanity-check the fixture: result must arrive json-encoded, not bare hex.
+    assert compiler._gateway_client.rpc.Call.return_value.result.startswith('"0x')
+
+    reason = cl._check_aave_v3_collateral_eligibility(
+        compiler, asset_address=TEST_ASSET_ADDR, asset_symbol="USDC"
+    )
+    assert reason is not None
+    assert "not collateral-eligible" in reason
+
+
+def test_helper_does_not_cache_transient_gateway_failure() -> None:
+    """A transient gateway exception on iteration N must not permanently
+    suppress the pre-flight on iteration N+1 (CodeRabbit-flagged regression)."""
+    compiler = _mock_compiler(gateway_response=_encode_reserve_config(ltv=7500))
+    boom_then_ok = compiler._gateway_client.rpc.Call
+    boom_then_ok.side_effect = [
+        RuntimeError("network blip"),
+        boom_then_ok.return_value,
+    ]
+
+    first = cl._check_aave_v3_collateral_eligibility(
+        compiler, asset_address=TEST_ASSET_ADDR, asset_symbol="USDC"
+    )
+    second = cl._check_aave_v3_collateral_eligibility(
+        compiler, asset_address=TEST_ASSET_ADDR, asset_symbol="USDC"
+    )
+    # First call fails open (no cached miss); second call retries and resolves.
+    assert first is None
+    assert second is None  # eligible (LTV=7500), so still None — but via a real RPC call
+    assert boom_then_ok.call_count == 2
