@@ -1732,25 +1732,22 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
     # =========================================================================
     # Accounting Outbox RPCs — crash-safe durability for AccountingProcessor
-    # DDL: metrics-database PR #24 (VIB-3503).  PG primary key = ledger_entry_id.
+    # DDL: metrics-database PR #24 (VIB-3503) + per-position columns added in
+    # VIB-3658.  PG primary key = ledger_entry_id.
     # =========================================================================
 
     def _pg_outbox_row_to_proto(self, row: Any) -> gateway_pb2.OutboxEntry:
         """Convert a PG asyncpg.Record from accounting_outbox to the proto shape.
 
-        PG schema uses ledger_entry_id as primary key, retry_count/last_error for
-        the attempt counter and error.  We map these to SQLite-compatible names
-        (id = ledger_entry_id, attempts = retry_count, error = last_error) so
-        AccountingProcessor.drain_one works identically on both backends.
-
-        KNOWN SCHEMA GAP: the metrics-database accounting_outbox table (PR #24)
-        does not store cycle_id, wallet_address, position_key, or market_id.
-        The category handlers fall back to _derive_position_key when these are
-        empty, which produces protocol+chain-scoped keys without wallet isolation.
-        This is acceptable in the 1:1 gateway:strategy model (each deployment has
-        one wallet) but loses per-wallet scoping in any future multi-wallet
-        scenario.  The permanent fix is a metrics-database migration to add these
-        four columns; tracked in the Infra ticket filed alongside this PR.
+        Column-name translation (PG vs SQLite vs wire):
+        - PG ``agent_id`` ↔ SQLite ``strategy_id`` ↔ wire ``strategy_id``
+          (same identity, different column names — agent_id is the deployed
+          ``resolve_agent_id()`` form, strategy_id is the local form).
+        - PG ``ledger_entry_id`` is also the primary key; we mirror it into
+          the proto's ``id`` field so AccountingProcessor.drain_one can treat
+          PG and SQLite rows identically.
+        - PG ``retry_count`` / ``last_error`` map to proto ``attempts`` /
+          ``error`` (SQLite-compatible names).
         """
         ledger_id = row["ledger_entry_id"] or ""
         created = row.get("created_at")
@@ -1760,13 +1757,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         return gateway_pb2.OutboxEntry(
             id=ledger_id,
             deployment_id=row.get("deployment_id") or "",
-            strategy_id=row.get("strategy_id") or "",
-            cycle_id="",  # not stored in PG schema (see gap note above)
+            strategy_id=row.get("agent_id") or "",
+            cycle_id=row.get("cycle_id") or "",
             ledger_entry_id=ledger_id,
             intent_type=row.get("intent_type") or "",
-            wallet_address="",  # not stored in PG schema (see gap note above)
-            position_key="",  # not stored in PG schema (see gap note above)
-            market_id="",  # not stored in PG schema (see gap note above)
+            wallet_address=row.get("wallet_address") or "",
+            position_key=row.get("position_key") or "",
+            market_id=row.get("market_id") or "",
             status=row.get("status") or "pending",
             attempts=int(row.get("retry_count") or 0),
             error=row.get("last_error") or "",
@@ -1830,15 +1827,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 await self._snapshot_execute(
                     """
                     INSERT INTO accounting_outbox
-                        (ledger_entry_id, strategy_id, deployment_id, intent_type,
+                        (ledger_entry_id, agent_id, deployment_id, intent_type,
+                         cycle_id, wallet_address, position_key, market_id,
                          status, retry_count)
-                    VALUES ($1, $2, $3, $4, 'pending', 0)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 0)
                     ON CONFLICT (ledger_entry_id) DO NOTHING
                     """,
                     ledger_entry_id,
                     strategy_id,
                     deployment_id,
                     request.intent_type or "",
+                    request.cycle_id or "",
+                    request.wallet_address or "",
+                    request.position_key or "",
+                    request.market_id or "",
                 )
                 return gateway_pb2.SaveOutboxEntryResponse(success=True)
             except Exception as e:
@@ -1889,7 +1891,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 row = await self._snapshot_fetchrow(
                     """
-                    SELECT ledger_entry_id, strategy_id, deployment_id, intent_type,
+                    SELECT ledger_entry_id, agent_id, deployment_id, intent_type,
+                           cycle_id, wallet_address, position_key, market_id,
                            status, retry_count, last_error, created_at, processed_at
                     FROM accounting_outbox
                     WHERE ledger_entry_id = $1
@@ -1941,7 +1944,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             try:
                 rows = await self._snapshot_fetch(
                     """
-                    SELECT ledger_entry_id, strategy_id, deployment_id, intent_type,
+                    SELECT ledger_entry_id, agent_id, deployment_id, intent_type,
+                           cycle_id, wallet_address, position_key, market_id,
                            status, retry_count, last_error, created_at, processed_at
                     FROM accounting_outbox
                     WHERE deployment_id = $1
