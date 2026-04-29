@@ -1476,6 +1476,15 @@ service PolymarketService {
   rpc GetTradesHistory(PolymarketGetTradesRequest) returns (PolymarketTradesResponse);
   rpc GetOrder(PolymarketGetOrderRequest) returns (PolymarketOrderInfoResponse);
 
+  // Historical data
+  rpc GetPriceHistory(PolymarketGetPriceHistoryRequest) returns (PolymarketPriceHistoryResponse);
+  // ``GetTradeTape`` (NOT ``GetTrades``) intentionally avoids colliding with
+  // the existing ``GetTradesHistory`` RPC above. The two have different
+  // semantics: ``GetTradesHistory`` is the gateway-managed wallet's own fills
+  // (authenticated /trades), while ``GetTradeTape`` is the public market-wide
+  // trade tape (authenticated /data/trades, optional token filter).
+  rpc GetTradeTape(PolymarketGetTradeTapeRequest) returns (PolymarketTradeTapeResponse);
+
   // Balance queries
   rpc GetBalanceAllowance(PolymarketBalanceAllowanceRequest) returns (PolymarketBalanceAllowanceResponse);
 }
@@ -1800,6 +1809,71 @@ message PolymarketBalanceAllowanceResponse {
   string allowance = 2;
   bool success = 3;
   string error = 4;
+}
+
+// =============================================================================
+// Polymarket Historical Data Messages
+// =============================================================================
+//
+// ``GetPriceHistory`` proxies the public CLOB ``/prices-history`` endpoint.
+// Either ``interval`` (predefined: 1m/1h/6h/1d/1w/max) or
+// ``start_ts``+``end_ts`` (custom Unix-second range) may be provided — they
+// are mutually exclusive at the source endpoint, validated server-side.
+// ``fidelity`` (resolution in minutes) is optional in either mode.
+message PolymarketGetPriceHistoryRequest {
+  string token_id = 1;        // CLOB token id (YES or NO outcome)
+  string interval = 2;        // Optional: 1m / 1h / 6h / 1d / 1w / max
+  int64 start_ts = 3;         // Optional: Unix seconds, requires end_ts
+  int64 end_ts = 4;           // Optional: Unix seconds, requires start_ts
+  int32 fidelity = 5;         // Optional: minute-resolution buckets
+}
+
+// One CLOB ``/prices-history`` point. Polymarket returns ``t`` (Unix seconds)
+// and ``p`` (probability 0.0-1.0); we mirror them as int64 + string-decimal.
+message PolymarketHistoricalPrice {
+  int64 timestamp = 1;        // Unix seconds (UTC)
+  string price = 2;           // Decimal string (probability 0.0-1.0)
+}
+
+message PolymarketPriceHistoryResponse {
+  string token_id = 1;
+  string interval = 2;        // Echo of the resolved interval ("custom" if range)
+  repeated PolymarketHistoricalPrice prices = 3;
+  int64 start_time = 4;       // Unix seconds of first price (0 if empty)
+  int64 end_time = 5;         // Unix seconds of last price (0 if empty)
+  bool success = 6;
+  string error = 7;
+}
+
+// ``GetTradeTape`` proxies the authenticated CLOB ``/data/trades`` endpoint.
+// ``token_id`` is optional (omit for market-wide tape). ``limit`` is capped
+// at 500 by the upstream and defaults to 100 when zero.
+message PolymarketGetTradeTapeRequest {
+  string token_id = 1;        // Optional: filter trades by CLOB token id
+  int32 limit = 2;             // Default 100, capped at 500 server-side
+}
+
+// One trade from the tape. Mirrors ``HistoricalTrade`` model fields plus
+// any market/asset metadata the upstream returns (kept for compatibility
+// with future provider-side enrichment).
+message PolymarketHistoricalTrade {
+  string id = 1;              // Trade id (sometimes ``tradeId`` upstream)
+  string token_id = 2;        // CLOB token id
+  string side = 3;            // "BUY" or "SELL"
+  string price = 4;           // Decimal string
+  string size = 5;            // Decimal string
+  int64 timestamp = 6;        // Unix seconds (UTC)
+  string maker = 7;           // Optional maker address
+  string taker = 8;           // Optional taker address
+  string market_id = 9;       // Optional condition / market id when present
+  string asset_id = 10;       // Optional asset id (alias for token_id upstream)
+  string outcome = 11;        // Optional "YES"/"NO" if upstream tags it
+}
+
+message PolymarketTradeTapeResponse {
+  repeated PolymarketHistoricalTrade trades = 1;
+  bool success = 2;
+  string error = 3;
 }
 
 // =============================================================================

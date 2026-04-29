@@ -16,8 +16,10 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 import aiohttp
@@ -26,18 +28,26 @@ from eth_account import Account
 from eth_account.messages import encode_typed_data
 from pydantic import SecretStr
 
+if TYPE_CHECKING:
+    from web3 import Web3
+
 from almanak.framework.connectors.polymarket import (
     CLOB_AUTH_DOMAIN,
     CLOB_AUTH_MESSAGE,
     CLOB_AUTH_TYPES,
     ApiCredentials,
     ClobClient,
+    CtfSDK,
+    GammaMarket,
+    MarketFilters,
     OrderFilters,
     PolymarketConfig,
     SignatureType,
+    TransactionData,
 )
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.utils.rpc_provider import get_cached_web3, get_rpc_url, is_local_rpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -49,6 +59,29 @@ logger = logging.getLogger(__name__)
 
 CLOB_BASE_URL = "https://clob.polymarket.com"
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
+
+# Upstream cap for /data/trades — documented in the proto and confirmed against
+# Polymarket's CLOB. Validated at the gateway boundary so callers see
+# ``INVALID_ARGUMENT`` rather than an opaque upstream 4xx.
+_TRADE_TAPE_LIMIT_MAX = 500
+
+# Polygon mainnet chain ID (https://chainlist.org/chain/137). Polymarket V2
+# contracts only exist on Polygon mainnet — sending a setup/wrap tx to any
+# other chain wastes gas at best, signs a real tx against the wrong contracts
+# at worst. We assert this once per process before the first send_raw_transaction.
+POLYGON_MAINNET_CHAIN_ID = 137
+
+# pUSD balance cache staleness, in blocks. Polygon block time is ~2 s, so 50
+# blocks ≈ 100 s — long enough to cover the typical strategy decide loop
+# without bouncing between RPC and cache, short enough that another in-flight
+# wrap from a different process / wallet movement gets noticed quickly.
+PUSD_CACHE_STALE_BLOCKS = 50
+
+# Polygon enforces a 30 gwei minimum priority fee at the Heimdall layer for
+# EIP-1559 transactions. Our floor is the same as the network minimum so we
+# don't get silently rejected with "max priority fee per gas higher than max
+# fee per gas" or "transaction underpriced".
+POLYGON_MIN_PRIORITY_FEE_WEI = 30 * 10**9  # 30 gwei
 
 
 class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
@@ -66,6 +99,27 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         self.settings = settings
         self._http_session: aiohttp.ClientSession | None = None
         self._credentials_lock = asyncio.Lock()
+
+        # V2 on-chain wallet auto-setup state. The first BUY/market order
+        # acquires this lock, submits any missing token approvals (USDC.e
+        # → Onramp, pUSD → V2 exchanges, CTF → V2 exchanges + adapter), and
+        # wraps source asset → pUSD as needed. Subsequent calls are cheap
+        # balance lookups behind the same lock.
+        self._wallet_ready_lock = asyncio.Lock()
+        self._allowances_applied = False
+        # Lazily built (web3.py is sync; kept off the asyncio loop). The TYPE_CHECKING
+        # import keeps mypy honest without paying the import cost at module load.
+        self._polygon_web3: Web3 | None = None
+        self._ctf_sdk: CtfSDK | None = None
+        # Chain-id assertion runs once per process. Set to the verified value
+        # (or a sentinel for accepted Anvil forks) the first time we sign.
+        self._chain_id_verified: bool = False
+        # pUSD balance cache for BUY orders. Avoids re-reading on-chain on
+        # every order when the prior balance + the in-flight wraps already
+        # cover the new ``min_pusd_units``. Keyed by wallet implicitly (one
+        # servicer = one signer). Reset whenever the cache is invalidated.
+        self._cached_pusd_balance: int | None = None
+        self._cached_pusd_balance_block: int | None = None
 
         self._private_key = settings.private_key or settings.polymarket_private_key
         self._wallet_address = self._resolve_signer_address()
@@ -107,9 +161,22 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             return self.settings.safe_address
         return self._wallet_address
 
-    def _build_client(self) -> ClobClient:
-        if not self._available or not self._wallet_address or not self._private_key:
-            raise ValueError("Polymarket signing identity is not configured in the gateway")
+    def _build_client(self, *, require_signer: bool = True) -> ClobClient:
+        """Build a ``ClobClient`` for use by an RPC handler.
+
+        ``require_signer=True`` (the default) is the safe choice for any RPC
+        that signs orders, derives api credentials, or otherwise needs the
+        trading EOA. ``require_signer=False`` is for read-only public RPCs
+        like ``GetPriceHistory`` and may be invoked on a gateway that has no
+        Polymarket signer configured at all (e.g. a market-data-only deploy).
+        Public endpoints don't read ``wallet_address`` / ``private_key`` from
+        the config, so we pass placeholder values that satisfy
+        ``PolymarketConfig``'s required-field validators without enabling any
+        signing path.
+        """
+        if require_signer:
+            if not self._available or not self._wallet_address or not self._private_key:
+                raise ValueError("Polymarket signing identity is not configured in the gateway")
 
         api_credentials = None
         if self._credentials_available and self._api_key and self._api_secret and self._api_passphrase:
@@ -119,9 +186,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 passphrase=SecretStr(self._api_passphrase),
             )
 
+        # Placeholders only used when ``require_signer=False`` and the gateway
+        # has no real Polymarket signer wired. ClobClient never reads these
+        # for the public endpoints (``get_price_history``, ``get_orderbook``,
+        # ``get_market``); any signed call on the returned client would
+        # produce an obviously-invalid signature, which is the desired
+        # fail-loud behavior if a caller mis-routes a signed RPC here.
+        wallet = self._wallet_address or "0x" + "0" * 40
+        key = self._private_key or "0x" + "0" * 64
+
         config = PolymarketConfig(
-            wallet_address=self._wallet_address,
-            private_key=SecretStr(self._private_key),
+            wallet_address=wallet,
+            private_key=SecretStr(key),
             signature_type=self._signature_type,
             funder_address=self._funder_address if self._funder_address != self._wallet_address else None,
             api_credentials=api_credentials,
@@ -190,9 +266,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         signable = encode_typed_data(full_message=typed_data)
         signed = Account.sign_message(signable, self._private_key)
 
+        # Modern eth-account returns hex without `0x`; Polymarket's
+        # /auth/api-key + /auth/derive-api-key reject unprefixed signatures
+        # with HTTP 401 "Invalid L1 Request headers". Always prefix.
+        sig_hex = signed.signature.hex()
+        if not sig_hex.startswith("0x"):
+            sig_hex = "0x" + sig_hex
+
         return {
             "POLY_ADDRESS": self._wallet_address,
-            "POLY_SIGNATURE": signed.signature.hex(),
+            "POLY_SIGNATURE": sig_hex,
             "POLY_TIMESTAMP": timestamp,
             "POLY_NONCE": str(nonce),
         }
@@ -265,6 +348,343 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             logger.exception("Failed to create credentials")
 
         return False
+
+    # =========================================================================
+    # On-chain Wallet Auto-Setup (V2)
+    # =========================================================================
+    #
+    # Polymarket V2 trading from a fresh wallet requires three setup steps:
+    #
+    #   1. Token approvals — USDC.e → CollateralOnramp, pUSD → CTF V2 exchange,
+    #      pUSD → NegRisk V2 exchange, CTF → CTF V2 exchange, CTF → NegRisk
+    #      Adapter. Five txs, each ~50–80k gas, idempotent.
+    #   2. Source asset → pUSD wrap via the Onramp.
+    #   3. API credentials (already handled by ``_ensure_credentials``).
+    #
+    # Steps 1 and 2 happen on-chain and are NOT part of the user-facing intent
+    # vocabulary (no PREDICTION_BUY intent emits an approve+wrap as siblings).
+    # The right home is here: the gateway service that owns Polymarket
+    # trading runs the setup lazily on first BUY, behind a lock, with the
+    # same private key it uses for off-chain order signing.
+    #
+    # Each user pays gas for setup once per wallet lifetime. After the first
+    # call, ``_allowances_applied`` short-circuits step 1; step 2 only fires
+    # when the wallet's pUSD balance can't cover the requested order.
+
+    def _get_polygon_web3(self):
+        """Return the gateway-shared Polygon Web3 client.
+
+        Delegates to ``get_cached_web3`` so the underlying ``HTTPProvider``
+        connection pool is reused across every gateway service that talks to
+        Polygon (no per-call socket churn). web3.py is sync; sync calls are
+        still dispatched via ``asyncio.to_thread`` to keep the async gRPC
+        handlers non-blocking.
+
+        ``ALMANAK_POLYMARKET_NETWORK=anvil`` (or any other non-mainnet value
+        recognised by ``get_rpc_url``) routes the same lookup through the
+        Anvil port mapping for local-fork testing.
+        """
+        if self._polygon_web3 is None:
+            network = os.environ.get("ALMANAK_POLYMARKET_NETWORK", "mainnet")
+            self._polygon_web3 = get_cached_web3("polygon", network=network)
+        return self._polygon_web3
+
+    def _get_ctf_sdk(self) -> CtfSDK:
+        if self._ctf_sdk is None:
+            self._ctf_sdk = CtfSDK()
+        return self._ctf_sdk
+
+    @staticmethod
+    def _is_anvil_polymarket_setup() -> bool:
+        """Whether the current process is wired up against an Anvil polygon fork.
+
+        True when ``ALMANAK_POLYMARKET_NETWORK`` explicitly selects Anvil OR
+        when the resolved Polygon RPC URL points to localhost. Used to relax
+        the chain-id assertion: a forked Anvil keeps the same Polygon
+        contract addresses but can return any chain ID depending on flags.
+        """
+        if (os.environ.get("ALMANAK_POLYMARKET_NETWORK") or "").lower() == "anvil":
+            return True
+        try:
+            return is_local_rpc(get_rpc_url("polygon"))
+        except (ValueError, KeyError):
+            # No RPC configured at all — defer the real error to the
+            # send_raw_transaction path; not Anvil from our perspective.
+            return False
+
+    async def _assert_polygon_chain_id(self, web3) -> None:  # noqa: ANN001
+        """Verify the connected RPC is Polygon mainnet (137) before signing.
+
+        Polymarket V2 contracts only exist on Polygon mainnet. A misconfigured
+        RPC env (e.g. a generic ``RPC_URL`` pointing at Arbitrum) would
+        otherwise let us silently sign setup/wrap txs against the wrong chain
+        and burn gas at best, mint corrupt state at worst. Cached on the
+        servicer so the eth_chainId round-trip happens at most once per process.
+
+        Anvil polygon forks are exempt: ``_is_anvil_polymarket_setup`` returns
+        ``True`` for ``ALMANAK_POLYMARKET_NETWORK=anvil`` or a localhost RPC,
+        and we accept any chain ID those forks report (Anvil defaults to 31337
+        unless ``--chain-id 137`` was passed).
+        """
+        if self._chain_id_verified:
+            return
+
+        if self._is_anvil_polymarket_setup():
+            # Skip the assertion but mark verified so we don't keep checking.
+            logger.debug("polymarket setup running against Anvil fork; chain-id assertion skipped")
+            self._chain_id_verified = True
+            return
+
+        actual = await asyncio.to_thread(lambda: web3.eth.chain_id)
+        if actual != POLYGON_MAINNET_CHAIN_ID:
+            raise ValueError(
+                f"Polymarket setup tx aborted: RPC reports chain {actual}, "
+                f"expected polygon mainnet ({POLYGON_MAINNET_CHAIN_ID})"
+            )
+        self._chain_id_verified = True
+
+    @staticmethod
+    async def _build_eip1559_gas_fields(web3) -> dict[str, int]:  # noqa: ANN001
+        """Compute EIP-1559 gas fields for a Polygon tx; fall back to legacy when unsupported.
+
+        Returns a dict suitable for ``Account.sign_transaction``. Detects
+        EIP-1559 support by reading ``baseFeePerGas`` from the latest block:
+        when present we emit ``maxFeePerGas`` / ``maxPriorityFeePerGas``,
+        otherwise we fall back to legacy ``gasPrice`` for Anvil instances that
+        run pre-London or with EIP-1559 disabled.
+
+        Polygon enforces a 30 gwei minimum priority fee at the validator layer
+        (POLYGON_MIN_PRIORITY_FEE_WEI). We use ``max_priority_fee`` when the
+        node estimates higher, otherwise the floor — never below.
+        """
+        latest = await asyncio.to_thread(web3.eth.get_block, "latest")
+        base_fee = latest.get("baseFeePerGas") if isinstance(latest, dict) else getattr(latest, "baseFeePerGas", None)
+        if base_fee is None:
+            # Pre-London / Anvil-without-EIP-1559 → legacy gasPrice.
+            gas_price = await asyncio.to_thread(lambda: web3.eth.gas_price)
+            return {"gasPrice": int(gas_price)}
+
+        # max_priority_fee is an estimate from the node. Some providers return
+        # 0 or unrealistically low values for Polygon; clamp to the network
+        # minimum so the validator doesn't drop the tx.
+        try:
+            estimated_priority = int(await asyncio.to_thread(lambda: web3.eth.max_priority_fee))
+        except Exception:  # noqa: BLE001 — eth_maxPriorityFeePerGas isn't universal; floor below
+            estimated_priority = 0
+        max_priority_fee = max(estimated_priority, POLYGON_MIN_PRIORITY_FEE_WEI)
+        # Battle-tested formula: 2 * baseFee + priority. Covers a single
+        # base-fee doubling (Polygon's EIP-1559 baseFee changes by at most
+        # 12.5% per block) so the tx remains includable for many blocks.
+        max_fee = 2 * int(base_fee) + max_priority_fee
+        return {
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": max_priority_fee,
+        }
+
+    async def _sign_and_submit_setup_tx(self, tx_data: TransactionData) -> str:
+        """Sign a setup transaction with the gateway's key and broadcast.
+
+        Returns the tx hash (0x-prefixed). Waits for the receipt and raises
+        if the tx reverted — setup must succeed before any order proceeds.
+
+        Asserts the connected RPC is Polygon mainnet (or an accepted Anvil
+        fork) before broadcasting, and uses EIP-1559 gas fields with a
+        Polygon-safe priority floor (30 gwei). Falls back to legacy
+        ``gasPrice`` when the chain doesn't expose ``baseFeePerGas``.
+        """
+        web3 = self._get_polygon_web3()
+        wallet = self._wallet_address
+        if not wallet or not self._private_key:
+            raise ValueError("Polymarket auto-setup requires a configured signer")
+
+        await self._assert_polygon_chain_id(web3)
+
+        nonce = await asyncio.to_thread(web3.eth.get_transaction_count, wallet)
+        chain_id = await asyncio.to_thread(lambda: web3.eth.chain_id)
+        gas_fields = await self._build_eip1559_gas_fields(web3)
+
+        tx = {
+            "from": wallet,
+            "to": web3.to_checksum_address(tx_data.to),
+            "data": tx_data.data,
+            "value": tx_data.value,
+            "gas": tx_data.gas_estimate,
+            "nonce": nonce,
+            "chainId": chain_id,
+            **gas_fields,
+        }
+        signed = Account.sign_transaction(tx, self._private_key)
+        tx_hash = await asyncio.to_thread(web3.eth.send_raw_transaction, signed.raw_transaction)
+        tx_hex = tx_hash.hex() if isinstance(tx_hash, bytes) else str(tx_hash)
+        if not tx_hex.startswith("0x"):
+            tx_hex = "0x" + tx_hex
+        receipt = await asyncio.to_thread(web3.eth.wait_for_transaction_receipt, tx_hash, 120)
+        if receipt.status != 1:
+            raise ValueError(f"Polymarket setup tx reverted: {tx_hex} ({tx_data.description})")
+        logger.info("polymarket setup tx confirmed: %s — %s", tx_hex, tx_data.description)
+        return tx_hex
+
+    async def _ensure_wallet_ready(self, min_pusd_units: int = 0) -> None:
+        """Idempotent on-chain wallet setup for Polymarket V2 trading.
+
+        - First call: submits the V2 5-tx approval set (only the missing legs).
+        - SELL orders (``min_pusd_units == 0``): no pUSD balance read — the
+          maker spends shares (CTF), not pUSD. Allowances still need to be in
+          place for the V2 exchange to pull shares, so the approval pass runs.
+        - BUY orders: cache the on-chain pUSD balance on the servicer; only
+          re-read on cache miss, when the cache is stale by more than
+          ``PUSD_CACHE_STALE_BLOCKS``, or when the cached value can't cover the
+          requested order. After a wrap, the cache is updated to
+          ``cached + wrap_amount`` so the next BUY doesn't pay another RPC
+          round-trip just to confirm what we know we just deposited.
+
+        Behind a single async lock so concurrent first-orders coalesce. Raises
+        ``ValueError`` if the source asset balance is insufficient to wrap to
+        the required pUSD amount, so the calling RPC fails fast with a clear
+        message.
+
+        Auto-setup only supports the EOA-funded path: balances/allowances are
+        checked on ``self._wallet_address`` and setup txs are signed by that
+        same EOA. In a Safe / ``polymarket_wallet_address`` deployment the
+        funder is a different account, so prepping the signer's wallet would
+        leave the actual funder unprepared. Refuse early in that case rather
+        than silently approving the wrong account.
+        """
+        if not self._wallet_address or not self._private_key:
+            return  # signing disabled — no auto-setup possible
+
+        if self._funder_address and self._funder_address.lower() != self._wallet_address.lower():
+            raise ValueError(
+                "Polymarket auto-setup currently supports only EOA deployments where "
+                f"funder_address == signer (got funder={self._funder_address}, signer={self._wallet_address}). "
+                "Pre-fund and pre-approve the funder before placing orders, or run the gateway "
+                "with the funder EOA's key."
+            )
+
+        async with self._wallet_ready_lock:
+            ctf = self._get_ctf_sdk()
+            web3 = self._get_polygon_web3()
+            wallet = self._wallet_address
+
+            if not self._allowances_applied:
+                tx_data_list = await asyncio.to_thread(ctf.ensure_allowances, wallet, web3)
+                if tx_data_list:
+                    logger.info("Applying %d Polymarket V2 approvals for %s", len(tx_data_list), wallet)
+                    for tx_data in tx_data_list:
+                        await self._sign_and_submit_setup_tx(tx_data)
+                self._allowances_applied = True
+
+            # SELL short-circuit: no pUSD math, no balance read, return after
+            # allowances are in place. Saves one ERC20 balanceOf call per SELL.
+            if min_pusd_units <= 0:
+                return
+
+            pusd_balance = await self._get_pusd_balance_cached(ctf, web3, wallet, min_pusd_units)
+            if pusd_balance < min_pusd_units:
+                deficit = min_pusd_units - pusd_balance
+                source_balance = await asyncio.to_thread(ctf.get_source_asset_balance, wallet, web3)
+                if source_balance < deficit:
+                    raise ValueError(
+                        f"Insufficient source asset for wrap: need {deficit / 10**6:.4f} more "
+                        f"(have {source_balance / 10**6:.4f} {ctf.source_asset[:10]}..., "
+                        f"pUSD {pusd_balance / 10**6:.4f}); fund the wallet."
+                    )
+                logger.info(
+                    "Wrapping %.4f source-asset → pUSD to cover order (current pUSD: %.4f)",
+                    deficit / 10**6,
+                    pusd_balance / 10**6,
+                )
+                wrap_tx = ctf.build_wrap_to_pusd_tx(wallet, deficit)
+                await self._sign_and_submit_setup_tx(wrap_tx)
+                # Optimistic cache update — receipt confirmed the wrap landed
+                # (``_sign_and_submit_setup_tx`` raises on revert), so the new
+                # pUSD balance is at least cached + deficit. Re-anchor to the
+                # current block so the staleness counter starts fresh.
+                self._cached_pusd_balance = pusd_balance + deficit
+                try:
+                    raw_block = await asyncio.to_thread(lambda: web3.eth.block_number)
+                    self._cached_pusd_balance_block = int(raw_block)
+                except Exception:  # noqa: BLE001
+                    self._cached_pusd_balance_block = None
+
+    async def _get_pusd_balance_cached(  # noqa: ANN001
+        self,
+        ctf: CtfSDK,
+        web3,
+        wallet: str,
+        min_pusd_units: int,
+    ) -> int:
+        """Return the wallet's pUSD balance, using the per-instance cache when fresh.
+
+        Re-reads on-chain when:
+          1. There is no cached value yet.
+          2. The cached value is below ``min_pusd_units`` (we'd otherwise wrap
+             unnecessarily, or, worse, refuse a BUY that an outside transfer
+             has already covered).
+          3. The cache was set more than ``PUSD_CACHE_STALE_BLOCKS`` blocks
+             ago (catches outside transfers / consumption from a different
+             process, without paying RPC for every order).
+
+        Falls back to a fresh read if reading the current block number fails —
+        we'd rather pay the extra RPC round-trip than serve a stale cache after
+        a transient block-number lookup error.
+        """
+        # Read the latest block number once. If it isn't a real int (e.g. an
+        # RPC failure mid-call, or a test fake that returns a MagicMock for
+        # ``eth.block_number``), drop the staleness check rather than serve a
+        # cache we can't reason about.
+        # Any failure reading block_number (RPC error, MagicMock fixture in
+        # tests, etc.) falls through to a fresh on-chain read — better than
+        # serving a cache we can't reason about. Catch broadly because RPC
+        # backends throw a wide range of exceptions and we don't want a
+        # transient infrastructure issue to break the pUSD path.
+        try:
+            raw_block = await asyncio.to_thread(lambda: web3.eth.block_number)
+            current_block = int(raw_block)
+        except Exception:  # noqa: BLE001
+            current_block = None
+
+        cache_fresh = (
+            self._cached_pusd_balance is not None
+            and self._cached_pusd_balance >= min_pusd_units
+            and current_block is not None
+            and self._cached_pusd_balance_block is not None
+            and (current_block - self._cached_pusd_balance_block) <= PUSD_CACHE_STALE_BLOCKS
+        )
+        if cache_fresh:
+            return self._cached_pusd_balance  # type: ignore[return-value]
+
+        balance = await asyncio.to_thread(ctf.get_pusd_balance, wallet, web3)
+        self._cached_pusd_balance = balance
+        self._cached_pusd_balance_block = current_block
+        return balance
+
+    async def _fetch_market_for_token(self, client: ClobClient, token_id: str) -> GammaMarket:
+        """Resolve the GammaMarket that owns ``token_id``.
+
+        V2 ``build_limit_order`` / ``build_market_order`` require a
+        ``GammaMarket`` for tick-size + min-size validation AND neg-risk
+        exchange routing (``market.neg_risk`` chooses CTFv2 vs NegRisk V2).
+        """
+        markets = await asyncio.to_thread(client.get_markets, MarketFilters(clob_token_ids=[token_id], limit=1))
+        if not markets:
+            raise ValueError(f"No Polymarket market found for token_id={token_id}")
+        return markets[0]
+
+    @staticmethod
+    def _required_pusd_units_for_buy(price: str, size: str) -> int:
+        """Compute pUSD token units (6 decimals) required to cover a BUY order.
+
+        BUY: maker spends pUSD = price × size. SELL: maker spends shares,
+        no pUSD needed (returns 0).
+        """
+        try:
+            usd = (Decimal(price) * Decimal(size)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
+            if usd <= 0:
+                return 0
+            return int((usd * (10**6)).to_integral_value())
+        except (InvalidOperation, ValueError):
+            return 0
 
     # =========================================================================
     # L2 Authentication (HMAC-SHA256)
@@ -718,17 +1138,32 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                     success=False,
                     error=f"Invalid side '{request.side}': must be 'BUY' or 'SELL'",
                 )
+
             client = await self._build_authenticated_client()
             try:
+                # V2 build_limit_order requires a GammaMarket for tick + neg-risk routing.
+                # Resolve the market BEFORE running on-chain wallet setup —
+                # _ensure_wallet_ready submits real approvals/wraps that mutate
+                # state and burn gas, so a typoed/unknown token_id must fail
+                # fast here instead of after we've already paid for setup txs.
+                market = await self._fetch_market_for_token(client, request.token_id)
+
+                # V2 on-chain wallet auto-setup. For BUY, pre-flight wraps source
+                # asset → pUSD if the wallet doesn't hold enough collateral. SELL
+                # consumes shares (CTF), so pUSD isn't required — but allowances
+                # still need to be in place for the V2 exchange to pull shares.
+                min_pusd = self._required_pusd_units_for_buy(request.price, request.size) if side == "BUY" else 0
+                await self._ensure_wallet_ready(min_pusd_units=min_pusd)
+
                 response = await asyncio.to_thread(
                     client.create_and_post_order,
                     token_id=request.token_id,
                     price=price,
                     size=size,
                     side=side,
+                    market=market,
                     time_in_force=request.time_in_force or "GTC",
                     expiration=request.expiration if request.expiration > 0 else 0,
-                    fee_rate_bps=request.fee_rate_bps or "0",
                 )
             finally:
                 client.close()
@@ -753,7 +1188,48 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         request: gateway_pb2.PolymarketMarketOrderRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketOrderResponse:
-        """Create and post a market order."""
+        """Create and post a market order against the current top-of-book.
+
+        V2 NOTE — implemented as an FOK limit order. Polymarket's CLOB has no
+        separate "market order" primitive; "market" semantics are produced by
+        sending a Fill-or-Kill limit at the current best cross-side price.
+        Either the entire size matches at-or-better than that price within the
+        single match cycle, or nothing matches and the order is killed.
+
+        Cross-side pricing — Polymarket CLOB convention (verified against
+        ``ClobClient.get_price`` and ``OrderBook.best_bid`` / ``best_ask`` in
+        ``almanak/framework/connectors/polymarket/{clob_client,models}.py``):
+
+            ``GET /price?side=BUY``  -> best BID  (highest buyer's price)
+            ``GET /price?side=SELL`` -> best ASK  (lowest seller's price)
+
+        The ``side`` parameter names "the side of the book to read from", not
+        "the trade direction of the caller". So to price a market BUY (which
+        crosses the ASK / lifts an offer) we must call ``side=SELL``; to price
+        a market SELL (which crosses the BID / hits a bid) we must call
+        ``side=BUY``. This is the opposite of an intuitive ``price_side =
+        side`` mapping — that mistake samples the wrong side of the spread
+        and silently lets the worst_price guard pass even when the executable
+        price is far worse.
+
+        ``worst_price`` enforcement is two-layer:
+            (a) Submission-time guard: the sampled top-of-book price must be
+                at least as good as ``worst_price``, otherwise we never sign
+                or submit. This is a single-level / single-sample check — it
+                does NOT walk the book, so it cannot catch slippage from
+                depth being thinner than ``size``.
+            (b) Match-time guard: the FOK semantics on the CLOB ensure the
+                whole order fills at-or-better than the limit price (which
+                is the sampled top-of-book). If the book moved between
+                sample and match, the FOK kills rather than partially
+                filling at a worse price.
+
+        Args:
+            request: PolymarketMarketOrderRequest. ``amount`` is denominated
+                in pUSD for BUY (converted to token size by dividing by the
+                sampled price, ``ROUND_DOWN``) and in tokens for SELL.
+                ``worst_price`` is optional but recommended.
+        """
         if not self._available:
             return gateway_pb2.PolymarketOrderResponse(success=False, error="Polymarket not configured")
 
@@ -774,8 +1250,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         if amount <= 0:
             return gateway_pb2.PolymarketOrderResponse(success=False, error="Amount must be positive")
 
-        # For market orders, we need to get the current price first
-        price_side = "BUY" if side == "BUY" else "SELL"
+        # Cross-side price sampling. See the docstring: a market BUY needs the
+        # ASK, which Polymarket returns from ``/price?side=SELL``. A market
+        # SELL needs the BID, returned from ``/price?side=BUY``. Hence the
+        # swap below — this is INTENTIONAL, not a typo.
+        price_side = "SELL" if side == "BUY" else "BUY"
 
         price_success, price_data, price_error = await self._request(
             "GET",
@@ -797,7 +1276,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         if price <= 0:
             return gateway_pb2.PolymarketOrderResponse(success=False, error="Invalid price: price must be positive")
 
-        # Validate worst_price if provided
+        # worst_price guard — submission-time check on the sampled top-of-book
+        # price (single-level, NOT depth-aware). Match-time FOK semantics on
+        # the CLOB enforce the same bound on every fill of this order. See
+        # the docstring for the two-layer rationale.
         if request.worst_price:
             try:
                 worst = Decimal(request.worst_price)
@@ -806,9 +1288,15 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                     success=False, error=f"Invalid worst_price format: '{request.worst_price}'"
                 )
             if side == "BUY" and price > worst:
-                return gateway_pb2.PolymarketOrderResponse(success=False, error="Price exceeds worst price")
+                return gateway_pb2.PolymarketOrderResponse(
+                    success=False,
+                    error=f"Best ask {price} exceeds worst_price {worst} for BUY",
+                )
             if side == "SELL" and price < worst:
-                return gateway_pb2.PolymarketOrderResponse(success=False, error="Price below worst price")
+                return gateway_pb2.PolymarketOrderResponse(
+                    success=False,
+                    error=f"Best bid {price} below worst_price {worst} for SELL",
+                )
 
         # For market orders, request.amount semantics differ by side:
         # - BUY: amount is in USDC, need to convert to token size
@@ -822,15 +1310,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             # SELL: amount is already in tokens (use parsed Decimal for consistency)
             size_str = str(amount)
 
-        # Create the order with the current market price
+        # Create the order with the current market price.
+        # V2: ``fee_rate_bps`` and on-chain ``nonce`` are gone (operator-set
+        # fees, ``timestamp`` replaces nonce). Proto fields kept for wire
+        # compat but not threaded through.
         create_request = gateway_pb2.PolymarketCreateOrderRequest(
             token_id=request.token_id,
             price=str(price),
             size=size_str,
             side=side,
-            fee_rate_bps=request.fee_rate_bps,
             expiration=request.expiration,
-            nonce=request.nonce,
             time_in_force="FOK",  # Market orders use Fill-or-Kill
         )
 
@@ -1052,6 +1541,146 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             created_at=data.created_at.isoformat() if data.created_at else "",
             success=True,
         )
+
+    # =========================================================================
+    # Historical Data RPCs (VIB-3695)
+    # =========================================================================
+
+    async def GetPriceHistory(
+        self,
+        request: gateway_pb2.PolymarketGetPriceHistoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PolymarketPriceHistoryResponse:
+        """Proxy ``ClobClient.get_price_history`` (public ``/prices-history``).
+
+        Mutual-exclusion of ``interval`` vs ``start_ts``+``end_ts`` is enforced
+        at this gateway boundary (per the security model: never delegate
+        argument validation to downstream layers) — invalid inputs map to
+        ``INVALID_ARGUMENT`` rather than the generic upstream ``ValueError``.
+
+        Public endpoint — uses ``_build_client(require_signer=False)`` so a
+        market-data-only gateway (no Polymarket signer wired) can still serve
+        this RPC. ``ClobClient.get_price_history`` is a plain HTTP fetch and
+        never reads ``wallet_address`` / ``private_key`` from the config.
+        """
+        # Treat zero-valued proto fields as "not set" so callers can omit them
+        # (proto3 has no `optional` distinction for primitives by default and
+        # we deliberately did not mark them ``optional`` to keep the wire
+        # format simple).
+        interval = request.interval or None
+        start_ts = request.start_ts or None
+        end_ts = request.end_ts or None
+        fidelity = request.fidelity or None
+
+        # Validate at the gateway boundary. ``interval`` and ``start_ts``+``end_ts``
+        # are mutually exclusive at the source endpoint; surface a clean
+        # ``INVALID_ARGUMENT`` rather than letting the upstream 400 leak as a
+        # generic exception. Partial range (one of start_ts/end_ts set without
+        # the other) is also rejected since the upstream silently treats it as
+        # a half-bounded range that can return wildly inconsistent windows.
+        if not request.token_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "token_id is required")
+        if interval is not None and (start_ts is not None or end_ts is not None):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "interval and start_ts/end_ts are mutually exclusive",
+            )
+        if (start_ts is None) != (end_ts is None):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "start_ts and end_ts must both be set (or both omitted)",
+            )
+
+        try:
+            client = self._build_client(require_signer=False)
+            try:
+                history = await asyncio.to_thread(
+                    client.get_price_history,
+                    request.token_id,
+                    interval,
+                    start_ts,
+                    end_ts,
+                    fidelity,
+                )
+            finally:
+                client.close()
+        except Exception as e:
+            return gateway_pb2.PolymarketPriceHistoryResponse(success=False, error=str(e))
+
+        prices = [
+            gateway_pb2.PolymarketHistoricalPrice(
+                timestamp=int(p.timestamp.timestamp()),
+                price=str(p.price),
+            )
+            for p in history.prices
+        ]
+        return gateway_pb2.PolymarketPriceHistoryResponse(
+            token_id=history.token_id,
+            interval=history.interval,
+            prices=prices,
+            start_time=int(history.start_time.timestamp()) if history.start_time else 0,
+            end_time=int(history.end_time.timestamp()) if history.end_time else 0,
+            success=True,
+        )
+
+    async def GetTradeTape(
+        self,
+        request: gateway_pb2.PolymarketGetTradeTapeRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PolymarketTradeTapeResponse:
+        """Proxy ``ClobClient.get_trade_tape`` (authenticated ``/data/trades``).
+
+        Authenticated upstream path: use ``_build_authenticated_client`` so the
+        gateway's API credentials are attached. ``token_id`` and ``limit`` are
+        both optional on the wire; default ``limit`` to 100 to match the SDK
+        when the caller leaves the field unset.
+
+        ``limit`` is validated at the gateway boundary against the upstream's
+        documented cap (500). Out-of-range values map to ``INVALID_ARGUMENT``
+        instead of leaking as a generic upstream error.
+        """
+        # Validate at the gateway boundary; the upstream caps at 500 (per the
+        # proto comment) but doesn't always fail loudly on overshoot, so we
+        # reject here. Negative values are rejected (request.limit is int32).
+        if request.limit < 0 or request.limit > _TRADE_TAPE_LIMIT_MAX:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"limit must be in [0, {_TRADE_TAPE_LIMIT_MAX}], got {request.limit}",
+            )
+
+        try:
+            token_id = request.token_id or None
+            limit = request.limit if request.limit > 0 else 100
+
+            client = await self._build_authenticated_client()
+            try:
+                trades = await asyncio.to_thread(client.get_trade_tape, token_id, limit)
+            finally:
+                client.close()
+        except Exception as e:
+            return gateway_pb2.PolymarketTradeTapeResponse(success=False, error=str(e))
+
+        proto_trades = [
+            gateway_pb2.PolymarketHistoricalTrade(
+                id=t.id,
+                token_id=t.token_id,
+                side=t.side,
+                price=str(t.price),
+                size=str(t.size),
+                timestamp=int(t.timestamp.timestamp()),
+                maker=t.maker or "",
+                taker=t.taker or "",
+                # The model only carries id/token_id/side/price/size/ts/
+                # maker/taker today; the proto reserves market_id / asset_id /
+                # outcome for future provider-side enrichment without forcing
+                # another proto rev.
+                market_id="",
+                asset_id=t.token_id,
+                outcome="",
+            )
+            for t in trades
+        ]
+        return gateway_pb2.PolymarketTradeTapeResponse(trades=proto_trades, success=True)
 
     # =========================================================================
     # Balance RPCs

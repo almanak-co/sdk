@@ -68,6 +68,57 @@ class TestStablecoins:
         assert result.price == Decimal("1.00")
         await source.close()
 
+    @pytest.mark.asyncio
+    async def test_pusd_with_resolved_token_returns_one(self):
+        """``OnChainPriceSource.get_price`` accepts ``resolved_token`` and
+        routes through ``is_stablecoin_for_fallback`` so symbol-clash tokens
+        like Polymarket pUSD (whose symbol is also used by ``Pleasing USD``,
+        ``Palm USD``, ``Plume USD`` on other chains) get the $1.00 fast-path
+        only when the resolved address matches the on-chain Polymarket pUSD.
+        Aggregator-level tests exist in ``test_price_aggregator_ceiling.py``;
+        this is the direct unit assertion at the OnChainPriceSource layer."""
+        from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
+
+        from almanak import Chain
+
+        polymarket_pusd = ResolvedToken(
+            symbol="PUSD",
+            address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+            decimals=6,
+            chain=Chain.POLYGON,
+            chain_id=137,
+            name="Polymarket USD",
+            coingecko_id="",
+            is_stablecoin=True,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol="USDC",
+            bridge_type=BridgeType.NATIVE,
+            source="static",
+        )
+
+        source = OnChainPriceSource(chain="polygon")
+        result = await source.get_price("PUSD", "USD", resolved_token=polymarket_pusd)
+
+        assert result.price == Decimal("1.00")
+        assert result.confidence == 0.99
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_pusd_without_resolved_token_does_not_short_circuit(self):
+        """Symbol-only "PUSD" no longer falls through to the stablecoin
+        fast-path (PUSD was removed from the symbol allowlist precisely
+        because the symbol clashes with non-stables). Without
+        ``resolved_token`` the path falls through to the Chainlink lookup,
+        which has no PUSD/USD feed, so it must raise ``DataSourceUnavailable``
+        — never silently return $1.00."""
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        source = OnChainPriceSource(chain="polygon")
+        with pytest.raises(DataSourceUnavailable):
+            await source.get_price("PUSD", "USD")
+        await source.close()
+
 
 class TestChainlinkPricing:
     """Chainlink latestRoundData() pricing."""

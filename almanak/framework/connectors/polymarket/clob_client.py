@@ -46,10 +46,12 @@ from .exceptions import (
     PolymarketRateLimitError,
 )
 from .models import (
+    BYTES32_ZERO,
     CLOB_AUTH_DOMAIN,
     CLOB_AUTH_MESSAGE,
     CLOB_AUTH_TYPES,
-    CTF_EXCHANGE_DOMAIN,
+    CTF_EXCHANGE_V2,
+    NEG_RISK_EXCHANGE_V2,
     ORDER_TYPES,
     ApiCredentials,
     BalanceAllowance,
@@ -75,6 +77,7 @@ from .models import (
     Trade,
     TradeFilters,
     UnsignedOrder,
+    build_ctf_exchange_domain,
 )
 
 logger = structlog.get_logger(__name__)
@@ -712,11 +715,26 @@ class ClobClient:
     def get_server_time(self) -> int:
         """Get server timestamp.
 
+        V2 returns ``/time`` as a raw integer (``1777384897``); historical V1
+        responses were ``{"time": <int>}``. Accept both — a future API change
+        back to a dict shape, or a transitional period where one host serves
+        each, must not break the L1-auth timestamp-drift check.
+
         Returns:
-            Unix timestamp from server
+            Unix timestamp from server.
         """
         data = self._get("/time")
-        return int(data.get("time", time.time()))
+        if isinstance(data, int):
+            return data
+        if isinstance(data, dict):
+            return int(data.get("time", time.time()))
+        # Defensive: an unexpected shape (e.g. string) — try to coerce, fall
+        # back to local clock so the auth check uses *something* reasonable.
+        try:
+            return int(data)
+        except (TypeError, ValueError):
+            logger.warning("Unexpected /time response shape: %r", data)
+            return int(time.time())
 
     # =========================================================================
     # Market Data (Gamma API)
@@ -856,21 +874,38 @@ class ClobClient:
         return orderbook
 
     def get_price(self, token_id: str) -> TokenPrice:
-        """Get price for a token.
+        """Get best bid/ask/mid for a token.
+
+        V2 split the V1 single-call ``/price`` endpoint into per-side queries:
+        ``/price?token_id=X&side=BUY`` returns ``{"price": "<best bid>"}`` and
+        ``/price?token_id=X&side=SELL`` returns ``{"price": "<best ask>"}``.
+        We make both calls and derive ``mid = (bid + ask) / 2`` rather than
+        adding a third round-trip to ``/midpoint`` — Polymarket's midpoint is
+        the same arithmetic mean.
+
+        A side that has no resting liquidity returns
+        ``{"error": "No orderbook exists ..."}`` with HTTP 404; we surface
+        that as a ``PolymarketAPIError`` (the caller decides whether to fall
+        back). Both sides are required for a meaningful TokenPrice — a
+        one-sided response would silently produce a zero on the other leg.
 
         Args:
-            token_id: CLOB token ID
+            token_id: CLOB token ID.
 
         Returns:
-            TokenPrice with bid, ask, and mid
+            TokenPrice with bid, ask, and mid.
         """
         cache_key = f"price:{token_id}"
         cached = self._get_cached(cache_key)
         if cached:
             return cached
 
-        data = self._get("/price", params={"token_id": token_id})
-        price = TokenPrice.from_api_response(data)
+        bid_data = self._get("/price", params={"token_id": token_id, "side": "BUY"})
+        ask_data = self._get("/price", params={"token_id": token_id, "side": "SELL"})
+        bid = Decimal(str(bid_data.get("price", "0")))
+        ask = Decimal(str(ask_data.get("price", "0")))
+        mid = (bid + ask) / Decimal(2) if bid > 0 and ask > 0 else Decimal("0")
+        price = TokenPrice(bid=bid, ask=ask, mid=mid)
         self._set_cached(cache_key, price)
         return price
 
@@ -934,22 +969,6 @@ class ClobClient:
     # Price constraints
     MIN_PRICE = Decimal("0.01")
     MAX_PRICE = Decimal("0.99")
-
-    def _resolve_fee_rate_bps(self, requested: int, market: GammaMarket | None) -> int:
-        """Pick the feeRateBps to sign into the order.
-
-        The Polymarket CLOB validator rejects orders whose ``feeRateBps`` does
-        not match the market's current ``makerBaseFee`` with::
-
-            400 {"error": "invalid fee rate (0), current market's maker fee: 1000"}
-
-        When market metadata is available we use its maker-fee value (fail-safe
-        default for GTC orders that rest on the book). Otherwise we fall back
-        to what the caller asked for. See VIB-3012.
-        """
-        if market is not None and market.maker_base_fee_bps:
-            return market.maker_base_fee_bps
-        return requested
 
     def _generate_salt(self) -> int:
         """Generate a salt for order uniqueness.
@@ -1296,51 +1315,55 @@ class ClobClient:
         effective_tick = tick_size or (market.order_price_min_tick_size if market else self.DEFAULT_TICK_SIZE)
         return self._round_to_tick_size(price, effective_tick, side)
 
+    def _resolve_exchange_address(self, market: GammaMarket) -> str:
+        """Pick V2 verifyingContract per market.
+
+        NegRisk multi-outcome markets sign against ``NEG_RISK_EXCHANGE_V2``;
+        binary YES/NO markets sign against ``CTF_EXCHANGE_V2``. Driven by
+        ``GammaMarket.neg_risk`` on the API response.
+        """
+        return NEG_RISK_EXCHANGE_V2 if market.neg_risk else CTF_EXCHANGE_V2
+
     def build_limit_order(
         self,
         params: LimitOrderParams,
-        market: GammaMarket | None = None,
+        market: GammaMarket,
     ) -> UnsignedOrder:
-        """Build an unsigned limit order.
+        """Build an unsigned V2 limit order.
 
         Limit orders specify exact price and size. They remain on the orderbook
-        until filled, cancelled, or expired.
+        until filled, cancelled, or expired (GTD).
 
         For BUY orders:
-            - You spend USDC (maker_amount = size * price)
+            - You spend pUSD (maker_amount = size * price)
             - You receive shares (taker_amount = size)
 
         For SELL orders:
             - You spend shares (maker_amount = size)
-            - You receive USDC (taker_amount = size * price)
+            - You receive pUSD (taker_amount = size * price)
 
         Args:
-            params: Limit order parameters
-            market: Optional GammaMarket metadata for market-specific validation.
-                   If provided, uses market.order_min_size for size validation
-                   and market.order_price_min_tick_size for tick validation.
+            params: Limit order parameters (V2: no fee_rate_bps; expiration is
+                wire-only GTD timestamp, not signed).
+            market: GammaMarket metadata. **Required in V2** — drives both
+                validation (min size, tick size) and exchange routing
+                (regular CTF V2 vs NegRisk V2). Passing ``None`` raises.
 
         Returns:
-            UnsignedOrder ready for signing
+            UnsignedOrder ready for signing.
 
         Raises:
             PolymarketInvalidPriceError: If price is out of range (0.01-0.99)
             PolymarketInvalidTickSizeError: If price is not a valid tick multiple
             PolymarketMinimumOrderError: If size is below market minimum
-
-        Example:
-            >>> params = LimitOrderParams(
-            ...     token_id="123...",
-            ...     side="BUY",
-            ...     price=Decimal("0.65"),
-            ...     size=Decimal("100"),
-            ... )
-            >>> order = client.build_limit_order(params)
-            >>>
-            >>> # With market metadata for proper minimum and tick validation
-            >>> market = client.get_market(market_id)
-            >>> order = client.build_limit_order(params, market=market)
+            ValueError: If ``market`` is None.
         """
+        if market is None:
+            raise ValueError(
+                "build_limit_order requires a GammaMarket in V2 — needed for "
+                "tick/min-size validation AND neg-risk exchange routing."
+            )
+
         # Validate inputs using market-specific minimum and tick size
         self._validate_price(params.price)
         self._validate_tick_size(params.price, market=market)
@@ -1353,7 +1376,7 @@ class ClobClient:
         sig_type = self.config.signature_type.value
 
         # Derive maker/taker so that the integer ratio == params.price exactly.
-        # BUY: maker = USDC, taker = shares. SELL: maker = shares, taker = USDC.
+        # BUY: maker = pUSD, taker = shares. SELL: maker = shares, taker = pUSD.
         shares_tokens_desired = self._to_token_units(params.size)
         side = OrderSide.BUY.value if params.side == "BUY" else OrderSide.SELL.value
         maker_amount, taker_amount = self._build_amounts_at_price(params.side, params.price, shares_tokens_desired)
@@ -1361,26 +1384,26 @@ class ClobClient:
         # shares minimum or Polymarket's $1 BUY floor.
         self._validate_quantized_amounts(params.side, maker_amount, taker_amount, market=market)
 
-        # Build the order struct
         return UnsignedOrder(
             salt=self._generate_salt(),
             maker=maker,
             signer=signer,
-            taker="0x0000000000000000000000000000000000000000",  # Public order
             token_id=int(params.token_id),
             maker_amount=maker_amount,
             taker_amount=taker_amount,
-            expiration=params.expiration or 0,  # 0 = no expiry
-            nonce=0,  # Used for on-chain cancellation
-            fee_rate_bps=self._resolve_fee_rate_bps(params.fee_rate_bps, market),
             side=side,
             signature_type=sig_type,
+            timestamp=int(time.time() * 1000),  # ms — replaces V1 nonce for per-address uniqueness
+            metadata=BYTES32_ZERO,
+            builder=self.config.builder_code,
+            exchange_address=self._resolve_exchange_address(market),
+            api_expiration=params.expiration or 0,  # API-level GTD; 0 = no expiration
         )
 
     def build_market_order(
         self,
         params: MarketOrderParams,
-        market: GammaMarket | None = None,
+        market: GammaMarket,
     ) -> UnsignedOrder:
         """Build an unsigned market order.
 
@@ -1422,6 +1445,11 @@ class ClobClient:
             >>> market = client.get_market(market_id)
             >>> order = client.build_market_order(params, market=market)
         """
+        if market is None:
+            raise ValueError(
+                "build_market_order requires a GammaMarket in V2 — needed for "
+                "tick/min-size validation AND neg-risk exchange routing."
+            )
         # Use worst_price or default to max/min depending on side
         if params.worst_price is not None:
             self._validate_price(params.worst_price)
@@ -1437,7 +1465,7 @@ class ClobClient:
         sig_type = self.config.signature_type.value
 
         if params.side == "BUY":
-            # For market BUY: amount is USDC to spend; shares = amount / price.
+            # For market BUY: amount is pUSD to spend; shares = amount / price.
             expected_shares = params.amount / price
             self._validate_size(expected_shares, market=market)
             self._validate_order_value_usd(params.amount)
@@ -1458,15 +1486,16 @@ class ClobClient:
             salt=self._generate_salt(),
             maker=maker,
             signer=signer,
-            taker="0x0000000000000000000000000000000000000000",
             token_id=int(params.token_id),
             maker_amount=maker_amount,
             taker_amount=taker_amount,
-            expiration=0,  # Market orders should not expire
-            nonce=0,
-            fee_rate_bps=self._resolve_fee_rate_bps(0, market),
             side=side,
             signature_type=sig_type,
+            timestamp=int(time.time() * 1000),
+            metadata=BYTES32_ZERO,
+            builder=self.config.builder_code,
+            exchange_address=self._resolve_exchange_address(market),
+            api_expiration=0,  # Market orders should not carry GTD
         )
 
     def sign_order(self, order: UnsignedOrder) -> SignedOrder:
@@ -1486,7 +1515,8 @@ class ClobClient:
             >>> signed = client.sign_order(unsigned)
             >>> response = client.submit_order(signed)
         """
-        # Build EIP-712 typed data
+        # Build EIP-712 typed data — V2 domain's verifyingContract is per-order
+        # (CTF V2 vs NegRisk V2), driven by UnsignedOrder.exchange_address.
         typed_data = {
             "types": {
                 "EIP712Domain": [
@@ -1498,7 +1528,7 @@ class ClobClient:
                 **ORDER_TYPES,
             },
             "primaryType": "Order",
-            "domain": CTF_EXCHANGE_DOMAIN,
+            "domain": build_ctf_exchange_domain(order.exchange_address),
             "message": order.to_struct(),
         }
 
@@ -1523,15 +1553,14 @@ class ClobClient:
     def create_and_sign_limit_order(
         self,
         params: LimitOrderParams,
-        market: GammaMarket | None = None,
+        market: GammaMarket,
     ) -> SignedOrder:
-        """Build and sign a limit order in one call.
-
-        Convenience method that combines build_limit_order and sign_order.
+        """Build and sign a V2 limit order in one call.
 
         Args:
             params: Limit order parameters
-            market: Optional GammaMarket metadata for market-specific validation
+            market: GammaMarket metadata. Required in V2 — drives validation
+                AND neg-risk exchange routing.
 
         Returns:
             SignedOrder ready for submission
@@ -1542,15 +1571,14 @@ class ClobClient:
     def create_and_sign_market_order(
         self,
         params: MarketOrderParams,
-        market: GammaMarket | None = None,
+        market: GammaMarket,
     ) -> SignedOrder:
-        """Build and sign a market order in one call.
-
-        Convenience method that combines build_market_order and sign_order.
+        """Build and sign a V2 market order in one call.
 
         Args:
             params: Market order parameters
-            market: Optional GammaMarket metadata for market-specific validation
+            market: GammaMarket metadata. Required in V2 — drives validation
+                AND neg-risk exchange routing.
 
         Returns:
             SignedOrder ready for submission
@@ -1594,27 +1622,35 @@ class ClobClient:
         price: Decimal,
         size: Decimal,
         side: str,
+        market: GammaMarket,
         time_in_force: str = "GTC",
         expiration: int = 0,
-        fee_rate_bps: str = "0",
     ) -> OrderResponse:
-        """Compatibility helper used by gateway-backed and legacy callers."""
+        """Compatibility helper used by gateway-backed and legacy callers.
+
+        Args:
+            market: GammaMarket — required in V2 to route neg-risk and validate
+                tick / min-size.
+            expiration: API-level GTD timestamp (Unix seconds). 0 = no expiry.
+        """
         params = LimitOrderParams(
             token_id=token_id,
             side=side,  # type: ignore[arg-type]
             price=price,
             size=size,
             expiration=expiration,
-            fee_rate_bps=int(fee_rate_bps or 0),
         )
-        signed = self.create_and_sign_limit_order(params)
+        signed = self.create_and_sign_limit_order(params, market=market)
         return self.submit_order(signed, OrderType(time_in_force))
 
     def submit_order_payload(self, payload: dict[str, Any]) -> OrderResponse:
-        """Submit an order from a pre-built payload dict.
+        """Submit an order from a pre-built (already-signed) payload dict.
 
-        This method is used by ClobActionHandler to submit orders from
-        ActionBundle metadata where the payload is already prepared.
+        Direct API for callers that build the EIP-712 payload themselves
+        (e.g. external scripts or tests against a real Polymarket key).
+        The framework execution path no longer calls this — under V2 the
+        gateway signs server-side and ``ClobActionHandler`` routes through
+        ``create_and_post_order`` instead.
 
         Args:
             payload: Order payload dict containing 'order', 'signature', and 'orderType'

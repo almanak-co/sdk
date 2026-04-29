@@ -54,6 +54,10 @@ dependencies = [
     "simple-term-menu>=1.6.4,<2.0.0",
     # LSP / editor tooling (used by almanak-code)
     "pyright>=1.1.390",
+    # Polymarket V2 building blocks (typed-data structs, amount math, signing helpers).
+    # Used by the polymarket connector — we keep our own ClobClient (rate limit, error
+    # handling, credential management) but borrow V2 reference helpers from this dep.
+    "py-clob-client-v2==1.0.0",
 ]
 
 [project.optional-dependencies]

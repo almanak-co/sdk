@@ -3362,6 +3362,16 @@ class PolymarketServiceStub(object):
                 request_serializer=gateway__pb2.PolymarketGetOrderRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PolymarketOrderInfoResponse.FromString,
                 _registered_method=True)
+        self.GetPriceHistory = channel.unary_unary(
+                '/almanak.gateway.proto.PolymarketService/GetPriceHistory',
+                request_serializer=gateway__pb2.PolymarketGetPriceHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PolymarketPriceHistoryResponse.FromString,
+                _registered_method=True)
+        self.GetTradeTape = channel.unary_unary(
+                '/almanak.gateway.proto.PolymarketService/GetTradeTape',
+                request_serializer=gateway__pb2.PolymarketGetTradeTapeRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PolymarketTradeTapeResponse.FromString,
+                _registered_method=True)
         self.GetBalanceAllowance = channel.unary_unary(
                 '/almanak.gateway.proto.PolymarketService/GetBalanceAllowance',
                 request_serializer=gateway__pb2.PolymarketBalanceAllowanceRequest.SerializeToString,
@@ -3482,6 +3492,24 @@ class PolymarketServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetPriceHistory(self, request, context):
+        """Historical data
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTradeTape(self, request, context):
+        """``GetTradeTape`` (NOT ``GetTrades``) intentionally avoids colliding with
+        the existing ``GetTradesHistory`` RPC above. The two have different
+        semantics: ``GetTradesHistory`` is the gateway-managed wallet's own fills
+        (authenticated /trades), while ``GetTradeTape`` is the public market-wide
+        trade tape (authenticated /data/trades, optional token filter).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetBalanceAllowance(self, request, context):
         """Balance queries
         """
@@ -3576,6 +3604,16 @@ def add_PolymarketServiceServicer_to_server(servicer, server):
                     servicer.GetOrder,
                     request_deserializer=gateway__pb2.PolymarketGetOrderRequest.FromString,
                     response_serializer=gateway__pb2.PolymarketOrderInfoResponse.SerializeToString,
+            ),
+            'GetPriceHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPriceHistory,
+                    request_deserializer=gateway__pb2.PolymarketGetPriceHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.PolymarketPriceHistoryResponse.SerializeToString,
+            ),
+            'GetTradeTape': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTradeTape,
+                    request_deserializer=gateway__pb2.PolymarketGetTradeTapeRequest.FromString,
+                    response_serializer=gateway__pb2.PolymarketTradeTapeResponse.SerializeToString,
             ),
             'GetBalanceAllowance': grpc.unary_unary_rpc_method_handler(
                     servicer.GetBalanceAllowance,
@@ -4046,6 +4084,60 @@ class PolymarketService(object):
             '/almanak.gateway.proto.PolymarketService/GetOrder',
             gateway__pb2.PolymarketGetOrderRequest.SerializeToString,
             gateway__pb2.PolymarketOrderInfoResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPriceHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PolymarketService/GetPriceHistory',
+            gateway__pb2.PolymarketGetPriceHistoryRequest.SerializeToString,
+            gateway__pb2.PolymarketPriceHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTradeTape(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PolymarketService/GetTradeTape',
+            gateway__pb2.PolymarketGetTradeTapeRequest.SerializeToString,
+            gateway__pb2.PolymarketTradeTapeResponse.FromString,
             options,
             channel_credentials,
             insecure,

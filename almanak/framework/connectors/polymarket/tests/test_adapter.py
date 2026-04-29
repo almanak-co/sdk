@@ -414,6 +414,38 @@ class TestBuyIntentCompilation:
             bundle = adapter_with_mocks.compile_intent(intent)
             assert bundle.metadata["order_type"] == tif
 
+    def test_buy_intent_with_expiration_hours_forces_gtd_order_type(self, adapter_with_mocks, test_market):
+        """V2 GTD path: any positive ``expiration_hours`` must force the
+        compiled order_type to GTD, regardless of the user-supplied TIF.
+
+        V2 dropped the on-chain expiration field from the signed Order struct
+        — the matcher only honors expiration when order_type=GTD on the wire
+        envelope. Routing a GTC order with an expiration timestamp would
+        silently leave the order live past the deadline (the timestamp is
+        ignored by the matcher).
+        """
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("50"),
+            max_price=Decimal("0.65"),
+            order_type="limit",
+            time_in_force="GTC",  # explicitly NOT GTD — the override must still kick in
+            expiration_hours=2,
+        )
+
+        bundle = adapter_with_mocks.compile_intent(intent)
+
+        assert bundle.metadata["order_type"] == "GTD"
+        # Expiration must be a future Unix timestamp (~2h from now). Loose
+        # bounds because test wall-clock isn't pinned.
+        expiration = bundle.metadata["order_request"]["expiration"]
+        from datetime import UTC, datetime
+
+        now = int(datetime.now(UTC).timestamp())
+        assert expiration > now + 3600, "expiration should be > 1h in the future"
+        assert expiration < now + 3 * 3600, "expiration should be < 3h in the future"
+
 
 # =============================================================================
 # Sell Intent Compilation Tests
@@ -768,3 +800,57 @@ class TestGammaMarketProperties:
     def test_market_no_price(self, test_market):
         """Test no_price property."""
         assert test_market.no_price == test_market.outcome_prices[1]
+
+
+# =============================================================================
+# V2 GTD edge cases for the BUY-intent compiler
+# =============================================================================
+
+
+class TestV2GtdElevation:
+    """V2 dropped on-chain expiration; GTD on the API envelope is the only
+    way the matcher honors a deadline. The adapter must elevate to GTD
+    when ``expiration_hours`` is set, regardless of the user-supplied TIF."""
+
+    def test_none_expiration_hours_does_not_force_gtd(self, adapter_with_mocks, test_market):
+        """expiration_hours=None (the default) leaves the user TIF intact."""
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("50"),
+            max_price=Decimal("0.65"),
+            order_type="limit",
+            time_in_force="IOC",
+        )
+        bundle = adapter_with_mocks.compile_intent(intent)
+        assert bundle.metadata["order_type"] == "IOC"
+
+    def test_expiration_hours_overrides_ioc_to_gtd(self, adapter_with_mocks, test_market):
+        """Even an explicit IOC must be elevated to GTD when a deadline is
+        set — IOC + expiration is contradictory but GTD is the right intent."""
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("50"),
+            max_price=Decimal("0.65"),
+            order_type="limit",
+            time_in_force="IOC",
+            expiration_hours=1,
+        )
+        bundle = adapter_with_mocks.compile_intent(intent)
+        assert bundle.metadata["order_type"] == "GTD"
+
+    def test_expiration_hours_overrides_market_route_ioc_to_gtd(self, adapter_with_mocks, test_market):
+        """Market orders are elevated to LIMIT/IOC for safety in V2.
+        A user who also sets expiration_hours expects GTD semantics —
+        the deadline must win over the market→IOC override."""
+        intent = PredictionBuyIntent(
+            market_id=test_market.id,
+            outcome="YES",
+            shares=Decimal("50"),
+            max_price=Decimal("0.65"),
+            order_type="market",  # would be elevated to IOC
+            expiration_hours=1,
+        )
+        bundle = adapter_with_mocks.compile_intent(intent)
+        assert bundle.metadata["order_type"] == "GTD"

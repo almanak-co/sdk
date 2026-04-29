@@ -7,12 +7,15 @@ Polymarket uses a hybrid architecture:
 - Off-chain CLOB for order matching (see clob_client.py)
 - On-chain CTF for token ownership and settlement (this module)
 
-Key Contract Addresses (Polygon Mainnet):
-- CTF Exchange: 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E
-- Neg Risk Exchange: 0xC5d563A36AE78145C45a50134d48A1215220f80a
+Key Contract Addresses (Polygon Mainnet — V2):
+- CTF Exchange V2:    0xE111180000d2663C0091e4f400237545B87B996B
+- NegRisk Exchange V2: 0xe2222d279d744050d28e00520010520000310F59
+- NegRisk Adapter:    0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296
 - Conditional Tokens: 0x4D97DCd97eC945f40cF65F87097ACe5EA0476045
-- Neg Risk Adapter: 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296
-- USDC (Polygon): 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+- pUSD (V2 collateral): 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB
+- CollateralOnramp:   0x93070a847efEf7F70739046A929D47a521F5B8ee
+- CollateralOfframp:  0x2957922Eb93258b93368531d39fAcCA3B4dC5854
+- USDC.e (source):    0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
 
 Example:
     from almanak.framework.connectors.polymarket import CtfSDK
@@ -20,23 +23,19 @@ Example:
     from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
     from web3 import Web3
 
-    # Connect to the gateway sidecar first
     gateway_client = GatewayClient()
     gateway_client.connect()
-
-    # Production: web3 must use GatewayWeb3Provider so RPC calls go
-    # through the gateway sidecar, not directly to the chain.
     web3 = Web3(GatewayWeb3Provider(gateway_client, chain="polygon"))
     sdk = CtfSDK()
 
-    # Check allowances
-    status = sdk.check_allowances(wallet_address, web3)
+    # Idempotent V2 5-tx approval set (source→Onramp, pUSD→exchanges, CTF→exchanges)
+    for tx in sdk.ensure_allowances(wallet_address, web3):
+        ...  # sign + submit
 
-    # Build approval transaction if needed
-    if not status.usdc_approved_ctf_exchange:
-        tx = sdk.build_approve_usdc_tx(CTF_EXCHANGE, MAX_UINT256, wallet_address)
+    # Wrap source asset (USDC.e) to pUSD before trading
+    wrap_tx = sdk.build_wrap_to_pusd_tx(wallet_address, amount)
 
-    # Check if market is resolved
+    # Redeem winnings
     resolution = sdk.get_condition_resolution(condition_id, web3)
     if resolution.is_resolved:
         tx = sdk.build_redeem_tx(condition_id, [1, 2], wallet_address)
@@ -53,12 +52,15 @@ from hexbytes import HexBytes
 from web3 import Web3
 
 from .models import (
+    COLLATERAL_OFFRAMP,
+    COLLATERAL_ONRAMP,
     CONDITIONAL_TOKENS,
-    CTF_EXCHANGE,
+    CTF_EXCHANGE_V2,
     NEG_RISK_ADAPTER,
-    NEG_RISK_EXCHANGE,
+    NEG_RISK_EXCHANGE_V2,
     POLYGON_CHAIN_ID,
-    USDC_POLYGON,
+    PUSD,
+    USDCE_POLYGON,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,16 @@ logger = logging.getLogger(__name__)
 
 # Maximum uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1
+
+# Threshold above which an ERC-20 allowance is treated as "infinite" (i.e.
+# the wallet has applied a MAX_UINT256 approval and we don't need to re-submit).
+# Picked as MAX_UINT256 // 2: realistic order flow can never drag a full MAX
+# approval below this point, but a dust allowance (e.g. a leftover 1-wei from a
+# pre-existing partial approval) is below it — so ``ensure_allowances`` will
+# correctly re-issue the MAX approval rather than skip it. Without this
+# guard, ``allowance > 0`` would mark a dust allowance as "ready" and the
+# next wrap or order would revert as soon as it spent past that dust amount.
+SUFFICIENT_ALLOWANCE_THRESHOLD = MAX_UINT256 // 2
 
 # Zero bytes32 (root parent collection)
 ZERO_BYTES32 = b"\x00" * 32
@@ -89,6 +101,9 @@ GAS_ESTIMATES = {
     "split_position": 150_000,
     "merge_positions": 150_000,
     "redeem_positions": 200_000,
+    # V2 collateral ramp ops
+    "wrap": 150_000,
+    "unwrap": 150_000,
 }
 
 
@@ -135,38 +150,67 @@ class TransactionData:
 
 @dataclass
 class AllowanceStatus:
-    """Status of token allowances for Polymarket trading.
+    """Status of token allowances for Polymarket V2 trading.
 
-    Attributes:
-        usdc_balance: USDC balance in token units
-        usdc_allowance_ctf_exchange: USDC allowance for CTF Exchange
-        usdc_allowance_neg_risk_exchange: USDC allowance for Neg Risk Exchange
-        ctf_approved_for_ctf_exchange: ERC-1155 approved for CTF Exchange
-        ctf_approved_for_neg_risk_adapter: ERC-1155 approved for Neg Risk Adapter
+    V2 collateral pivot: spending collateral is pUSD (minted via the
+    CollateralOnramp from a source asset like USDC.e). Six approvals are
+    required for both binary CTF and neg-risk markets to work:
+
+      Source asset:
+        1. source_asset → CollateralOnramp  (so we can wrap → pUSD)
+
+      pUSD spend (the BUY-side leg — Polymarket V2 pulls pUSD from the maker
+      via these contracts on order fill):
+        2. pUSD → CTF Exchange V2           (binary YES/NO market BUYs)
+        3. pUSD → NegRisk Exchange V2       (neg-risk order matching)
+        4. pUSD → NegRisk Adapter           (neg-risk split/merge — the adapter
+                                             is the actual spender on fills)
+
+      CTF (ERC-1155) operator (the SELL-side leg — V2 exchanges pull shares):
+        5. CTF.setApprovalForAll(CTF Exchange V2)
+        6. CTF.setApprovalForAll(NegRisk Adapter)
     """
 
-    usdc_balance: int
-    usdc_allowance_ctf_exchange: int
-    usdc_allowance_neg_risk_exchange: int
+    source_asset_balance: int
+    pusd_balance: int
+    source_asset_allowance_onramp: int
+    pusd_allowance_ctf_exchange: int
+    pusd_allowance_neg_risk_exchange: int
+    pusd_allowance_neg_risk_adapter: int
     ctf_approved_for_ctf_exchange: bool
     ctf_approved_for_neg_risk_adapter: bool
 
     @property
-    def usdc_approved_ctf_exchange(self) -> bool:
-        """Check if USDC is approved for CTF Exchange."""
-        return self.usdc_allowance_ctf_exchange > 0
+    def source_asset_approved_onramp(self) -> bool:
+        """Check if the source asset (USDC.e / USDC) is approved for the Onramp.
+
+        Sufficiency rather than non-zero — see ``SUFFICIENT_ALLOWANCE_THRESHOLD``.
+        """
+        return self.source_asset_allowance_onramp >= SUFFICIENT_ALLOWANCE_THRESHOLD
 
     @property
-    def usdc_approved_neg_risk_exchange(self) -> bool:
-        """Check if USDC is approved for Neg Risk Exchange."""
-        return self.usdc_allowance_neg_risk_exchange > 0
+    def pusd_approved_ctf_exchange(self) -> bool:
+        """Check if pUSD is approved for CTF Exchange V2 (sufficiency, not >0)."""
+        return self.pusd_allowance_ctf_exchange >= SUFFICIENT_ALLOWANCE_THRESHOLD
+
+    @property
+    def pusd_approved_neg_risk_exchange(self) -> bool:
+        """Check if pUSD is approved for NegRisk Exchange V2 (sufficiency, not >0)."""
+        return self.pusd_allowance_neg_risk_exchange >= SUFFICIENT_ALLOWANCE_THRESHOLD
+
+    @property
+    def pusd_approved_neg_risk_adapter(self) -> bool:
+        """Check if pUSD is approved for the NegRisk Adapter (sufficiency, not >0)."""
+        return self.pusd_allowance_neg_risk_adapter >= SUFFICIENT_ALLOWANCE_THRESHOLD
 
     @property
     def fully_approved(self) -> bool:
-        """Check if all necessary approvals are in place."""
+        """Check if all V2 approvals are in place (6-tx set fully applied)."""
         return (
-            self.usdc_approved_ctf_exchange
-            and self.usdc_approved_neg_risk_exchange
+            self.source_asset_approved_onramp
+            and self.pusd_approved_ctf_exchange
+            and self.pusd_approved_neg_risk_exchange
+            and self.pusd_approved_neg_risk_adapter
             and self.ctf_approved_for_ctf_exchange
             and self.ctf_approved_for_neg_risk_adapter
         )
@@ -221,8 +265,8 @@ class CtfSDK:
         # Check if wallet needs approvals
         status = sdk.check_allowances("0x...", web3)
 
-        if not status.usdc_approved_ctf_exchange:
-            tx = sdk.build_approve_usdc_tx(CTF_EXCHANGE, MAX_UINT256, "0x...")
+        if not status.pusd_approved_ctf_exchange:
+            tx = sdk.build_approve_collateral_tx(PUSD, CTF_EXCHANGE_V2, "0x...")
             # Sign and submit tx...
 
         # Build redeem transaction for resolved market
@@ -236,35 +280,45 @@ class CtfSDK:
     def __init__(
         self,
         chain_id: int = POLYGON_CHAIN_ID,
-        ctf_exchange: str = CTF_EXCHANGE,
-        neg_risk_exchange: str = NEG_RISK_EXCHANGE,
+        ctf_exchange: str = CTF_EXCHANGE_V2,
+        neg_risk_exchange: str = NEG_RISK_EXCHANGE_V2,
         conditional_tokens: str = CONDITIONAL_TOKENS,
         neg_risk_adapter: str = NEG_RISK_ADAPTER,
-        usdc: str = USDC_POLYGON,
+        pusd: str = PUSD,
+        collateral_onramp: str = COLLATERAL_ONRAMP,
+        collateral_offramp: str = COLLATERAL_OFFRAMP,
+        source_asset: str = USDCE_POLYGON,
     ) -> None:
         """Initialize the CTF SDK.
 
         Args:
             chain_id: Chain ID (default: Polygon 137)
-            ctf_exchange: CTF Exchange contract address
-            neg_risk_exchange: Neg Risk Exchange contract address
+            ctf_exchange: CTF Exchange V2 contract address
+            neg_risk_exchange: NegRisk CTF Exchange V2 contract address
             conditional_tokens: Conditional Tokens contract address
-            neg_risk_adapter: Neg Risk Adapter contract address
-            usdc: USDC token address
+            neg_risk_adapter: NegRisk Adapter contract address
+            pusd: pUSD collateral token (V2). Approved to V2 exchanges.
+            collateral_onramp: CollateralOnramp contract for wrapping source asset → pUSD.
+            collateral_offramp: CollateralOfframp contract for unwrapping pUSD → source asset.
+            source_asset: The user's source-of-funds token (USDC.e by default; switch to
+                native USDC after Polymarket flips the Onramp pause). Approved to the Onramp.
         """
         self.chain_id = chain_id
         self.ctf_exchange = Web3.to_checksum_address(ctf_exchange)
         self.neg_risk_exchange = Web3.to_checksum_address(neg_risk_exchange)
         self.conditional_tokens = Web3.to_checksum_address(conditional_tokens)
         self.neg_risk_adapter = Web3.to_checksum_address(neg_risk_adapter)
-        self.usdc = Web3.to_checksum_address(usdc)
-
+        self.pusd = Web3.to_checksum_address(pusd)
+        self.collateral_onramp = Web3.to_checksum_address(collateral_onramp)
+        self.collateral_offramp = Web3.to_checksum_address(collateral_offramp)
+        self.source_asset = Web3.to_checksum_address(source_asset)
         # Load ABIs
         self._abi_dir = os.path.join(os.path.dirname(__file__), "abis")
         self._erc20_abi = self._load_abi("erc20")
         self._erc1155_abi = self._load_abi("erc1155")
         self._conditional_tokens_abi = self._load_abi("conditional_tokens")
-        self._ctf_exchange_abi = self._load_abi("ctf_exchange")
+        self._collateral_onramp_abi = self._load_abi("collateral_onramp")
+        self._collateral_offramp_abi = self._load_abi("collateral_offramp")
 
         logger.info(
             "CtfSDK initialized for chain_id=%d, ctf_exchange=%s, conditional_tokens=%s",
@@ -287,36 +341,91 @@ class CtfSDK:
     # Token Approvals
     # =========================================================================
 
-    def build_approve_usdc_tx(
+    def build_approve_collateral_tx(
         self,
+        asset: str,
         spender: str,
-        amount: int,
-        sender: str,
+        sender: str,  # noqa: ARG002  # kept for caller API symmetry
+        amount: int = MAX_UINT256,
     ) -> TransactionData:
-        """Build USDC approval transaction.
+        """Build a generic ERC-20 approve transaction.
 
-        Approves the spender (typically CTF Exchange or Neg Risk Exchange)
-        to spend USDC on behalf of the sender.
+        Used in V2 for: source-asset → Onramp, pUSD → CTF Exchange V2,
+        pUSD → NegRisk Exchange V2.
 
         Args:
-            spender: Address to approve (e.g., CTF_EXCHANGE)
-            amount: Amount to approve (use MAX_UINT256 for unlimited)
-            sender: Transaction sender address
+            asset: ERC-20 asset address (e.g., pUSD, USDC.e, native USDC).
+            spender: Address to approve.
+            sender: Transaction sender address (informational; tx is built
+                without a from-address since callers may rebroadcast under
+                a different signer / via Zodiac wrapper).
+            amount: Approval amount (defaults to MAX_UINT256).
 
         Returns:
-            TransactionData for the approval
+            TransactionData for the approval.
         """
+        asset = Web3.to_checksum_address(asset)
         spender = Web3.to_checksum_address(spender)
 
-        # Encode approve(address,uint256)
         selector = bytes(Web3.keccak(text="approve(address,uint256)")[:4])
         data = selector + abi_encode(["address", "uint256"], [spender, amount])
 
         return TransactionData(
-            to=self.usdc,
+            to=asset,
             data="0x" + data.hex(),
             gas_estimate=GAS_ESTIMATES["approve_erc20"],
-            description=f"Approve USDC spending for {spender[:10]}...",
+            description=f"Approve {asset[:10]}... spending for {spender[:10]}...",
+        )
+
+    def build_wrap_to_pusd_tx(
+        self,
+        wallet: str,
+        amount: int,
+        source_asset: str | None = None,
+    ) -> TransactionData:
+        """Build a CollateralOnramp.wrap call to mint pUSD from a source asset.
+
+        Args:
+            wallet: Address that will receive the minted pUSD.
+            amount: Amount of source asset to wrap (token units; same decimals as pUSD).
+            source_asset: Source asset address (defaults to ``self.source_asset``,
+                typically USDC.e). After Polymarket flips the Onramp pause to allow
+                native USDC, callers may pass ``USDC_NATIVE_POLYGON`` instead.
+
+        Returns:
+            TransactionData targeting CollateralOnramp.wrap(asset, to, amount).
+        """
+        wallet = Web3.to_checksum_address(wallet)
+        asset = Web3.to_checksum_address(source_asset or self.source_asset)
+
+        selector = bytes(Web3.keccak(text="wrap(address,address,uint256)")[:4])
+        data = selector + abi_encode(["address", "address", "uint256"], [asset, wallet, amount])
+
+        return TransactionData(
+            to=self.collateral_onramp,
+            data="0x" + data.hex(),
+            gas_estimate=GAS_ESTIMATES.get("wrap", 150_000),
+            description=f"Wrap {asset[:10]}... → pUSD for {wallet[:10]}...",
+        )
+
+    def build_unwrap_from_pusd_tx(
+        self,
+        wallet: str,
+        amount: int,
+        target_asset: str | None = None,
+    ) -> TransactionData:
+        """Build a CollateralOfframp.unwrap call to redeem pUSD back to a source asset."""
+        wallet = Web3.to_checksum_address(wallet)
+        asset = Web3.to_checksum_address(target_asset or self.source_asset)
+
+        selector = bytes(Web3.keccak(text="unwrap(address,address,uint256)")[:4])
+        data = selector + abi_encode(["address", "address", "uint256"], [asset, wallet, amount])
+
+        return TransactionData(
+            to=self.collateral_offramp,
+            data="0x" + data.hex(),
+            gas_estimate=GAS_ESTIMATES.get("unwrap", 150_000),
+            description=f"Unwrap pUSD → {asset[:10]}... for {wallet[:10]}...",
         )
 
     def build_approve_conditional_tokens_tx(
@@ -331,7 +440,7 @@ class CtfSDK:
         to transfer conditional tokens on behalf of the sender.
 
         Args:
-            operator: Address to approve (e.g., CTF_EXCHANGE)
+            operator: Address to approve (e.g., CTF_EXCHANGE_V2 or NEG_RISK_ADAPTER)
             approved: True to approve, False to revoke
             sender: Transaction sender address
 
@@ -352,62 +461,82 @@ class CtfSDK:
         )
 
     def check_allowances(self, wallet: str, web3: Any) -> AllowanceStatus:
-        """Check all relevant token allowances.
+        """Check all relevant V2 token allowances.
 
-        Queries USDC allowances and ERC-1155 operator approvals needed
-        for trading on Polymarket.
+        Queries the source-asset → Onramp leg, the pUSD → exchange legs, and
+        the CTF (ERC-1155) operator approvals needed to trade on Polymarket V2.
 
         Args:
-            wallet: Wallet address to check
-            web3: Web3 instance
+            wallet: Wallet address to check.
+            web3: Web3 instance.
 
         Returns:
-            AllowanceStatus with all allowance information
+            AllowanceStatus with V2 allowance information.
         """
         wallet = Web3.to_checksum_address(wallet)
 
-        # Create contract instances
-        usdc_contract = web3.eth.contract(address=self.usdc, abi=self._erc20_abi)
+        source_contract = web3.eth.contract(address=self.source_asset, abi=self._erc20_abi)
+        pusd_contract = web3.eth.contract(address=self.pusd, abi=self._erc20_abi)
         ctf_contract = web3.eth.contract(address=self.conditional_tokens, abi=self._conditional_tokens_abi)
 
-        # Query USDC balance and allowances
-        usdc_balance = usdc_contract.functions.balanceOf(wallet).call()
-        usdc_allowance_ctf = usdc_contract.functions.allowance(wallet, self.ctf_exchange).call()
-        usdc_allowance_neg_risk = usdc_contract.functions.allowance(wallet, self.neg_risk_exchange).call()
+        # Source asset (e.g. USDC.e) — balance + allowance to Onramp
+        source_balance = source_contract.functions.balanceOf(wallet).call()
+        source_allowance_onramp = source_contract.functions.allowance(wallet, self.collateral_onramp).call()
 
-        # Query ERC-1155 operator approvals
+        # pUSD — balance + allowance to both V2 exchanges and the NegRisk Adapter.
+        # The Adapter is the actual spender on neg-risk fills (it splits/merges
+        # the multi-outcome conditional tokens). Without this approval, neg-risk
+        # BUYs are rejected with "the allowance is not enough -> spender: 0xd91E80...".
+        pusd_balance = pusd_contract.functions.balanceOf(wallet).call()
+        pusd_allowance_ctf = pusd_contract.functions.allowance(wallet, self.ctf_exchange).call()
+        pusd_allowance_neg_risk = pusd_contract.functions.allowance(wallet, self.neg_risk_exchange).call()
+        pusd_allowance_neg_risk_adapter = pusd_contract.functions.allowance(wallet, self.neg_risk_adapter).call()
+
+        # CTF (ERC-1155) operator approvals
         ctf_approved_exchange = ctf_contract.functions.isApprovedForAll(wallet, self.ctf_exchange).call()
         ctf_approved_adapter = ctf_contract.functions.isApprovedForAll(wallet, self.neg_risk_adapter).call()
 
         return AllowanceStatus(
-            usdc_balance=usdc_balance,
-            usdc_allowance_ctf_exchange=usdc_allowance_ctf,
-            usdc_allowance_neg_risk_exchange=usdc_allowance_neg_risk,
+            source_asset_balance=source_balance,
+            pusd_balance=pusd_balance,
+            source_asset_allowance_onramp=source_allowance_onramp,
+            pusd_allowance_ctf_exchange=pusd_allowance_ctf,
+            pusd_allowance_neg_risk_exchange=pusd_allowance_neg_risk,
+            pusd_allowance_neg_risk_adapter=pusd_allowance_neg_risk_adapter,
             ctf_approved_for_ctf_exchange=ctf_approved_exchange,
             ctf_approved_for_neg_risk_adapter=ctf_approved_adapter,
         )
 
     def ensure_allowances(self, wallet: str, web3: Any) -> list[TransactionData]:
-        """Build transactions to ensure all necessary approvals.
+        """Build the idempotent V2 6-tx approval set.
 
-        Checks current allowance status and returns a list of transactions
-        needed to set up all required approvals for trading.
-
-        Args:
-            wallet: Wallet address
-            web3: Web3 instance
+        Emits only the approvals the wallet doesn't already have. Order:
+            1. source_asset → CollateralOnramp     (so user can wrap to pUSD)
+            2. pUSD → CTF Exchange V2              (binary BUYs)
+            3. pUSD → NegRisk Exchange V2          (neg-risk order matching)
+            4. pUSD → NegRisk Adapter              (neg-risk split/merge — the
+                                                    adapter is the actual spender
+                                                    on fill, not the exchange)
+            5. CTF.setApprovalForAll(CTF Exchange V2)  (binary SELLs pull shares)
+            6. CTF.setApprovalForAll(NegRisk Adapter)  (neg-risk SELLs / merge)
 
         Returns:
-            List of TransactionData for any needed approvals
+            List of TransactionData for any approvals that aren't already in place.
         """
         status = self.check_allowances(wallet, web3)
-        transactions = []
+        transactions: list[TransactionData] = []
 
-        if not status.usdc_approved_ctf_exchange:
-            transactions.append(self.build_approve_usdc_tx(self.ctf_exchange, MAX_UINT256, wallet))
+        if not status.source_asset_approved_onramp:
+            transactions.append(self.build_approve_collateral_tx(self.source_asset, self.collateral_onramp, wallet))
 
-        if not status.usdc_approved_neg_risk_exchange:
-            transactions.append(self.build_approve_usdc_tx(self.neg_risk_exchange, MAX_UINT256, wallet))
+        if not status.pusd_approved_ctf_exchange:
+            transactions.append(self.build_approve_collateral_tx(self.pusd, self.ctf_exchange, wallet))
+
+        if not status.pusd_approved_neg_risk_exchange:
+            transactions.append(self.build_approve_collateral_tx(self.pusd, self.neg_risk_exchange, wallet))
+
+        if not status.pusd_approved_neg_risk_adapter:
+            transactions.append(self.build_approve_collateral_tx(self.pusd, self.neg_risk_adapter, wallet))
 
         if not status.ctf_approved_for_ctf_exchange:
             transactions.append(self.build_approve_conditional_tokens_tx(self.ctf_exchange, True, wallet))
@@ -454,19 +583,25 @@ class CtfSDK:
         wallets = [wallet] * len(token_ids)
         return ctf_contract.functions.balanceOfBatch(wallets, token_ids).call()
 
-    def get_usdc_balance(self, wallet: str, web3: Any) -> int:
-        """Get USDC balance.
+    def get_pusd_balance(self, wallet: str, web3: Any) -> int:
+        """Get pUSD balance — the spendable trading collateral in V2.
 
         Args:
             wallet: Wallet address
             web3: Web3 instance
 
         Returns:
-            USDC balance in base units (6 decimals)
+            pUSD balance in base units (6 decimals).
         """
         wallet = Web3.to_checksum_address(wallet)
-        usdc_contract = web3.eth.contract(address=self.usdc, abi=self._erc20_abi)
-        return usdc_contract.functions.balanceOf(wallet).call()
+        pusd_contract = web3.eth.contract(address=self.pusd, abi=self._erc20_abi)
+        return pusd_contract.functions.balanceOf(wallet).call()
+
+    def get_source_asset_balance(self, wallet: str, web3: Any) -> int:
+        """Get the source-asset (USDC.e or native USDC) balance — Onramp input."""
+        wallet = Web3.to_checksum_address(wallet)
+        source_contract = web3.eth.contract(address=self.source_asset, abi=self._erc20_abi)
+        return source_contract.functions.balanceOf(wallet).call()
 
     # =========================================================================
     # Position ID Calculation
@@ -499,7 +634,7 @@ class CtfSDK:
         """Calculate ERC-1155 position ID from collection ID.
 
         Args:
-            collateral: Collateral token address (USDC)
+            collateral: Collateral token address (pUSD in V2)
             collection_id: Collection ID (32 bytes)
 
         Returns:
@@ -524,8 +659,8 @@ class CtfSDK:
         yes_collection = self.get_collection_id(condition_id, INDEX_SET_YES)
         no_collection = self.get_collection_id(condition_id, INDEX_SET_NO)
 
-        yes_token_id = self.get_position_id(self.usdc, yes_collection)
-        no_token_id = self.get_position_id(self.usdc, no_collection)
+        yes_token_id = self.get_position_id(self.pusd, yes_collection)
+        no_token_id = self.get_position_id(self.pusd, no_collection)
 
         return yes_token_id, no_token_id
 
@@ -541,12 +676,12 @@ class CtfSDK:
     ) -> TransactionData:
         """Build split position transaction.
 
-        Splits USDC into YES and NO conditional tokens.
-        Requires USDC approval for Conditional Tokens contract.
+        Splits pUSD into YES and NO conditional tokens.
+        Requires pUSD approval for the Conditional Tokens contract.
 
         Args:
             condition_id: Condition ID (hex string or bytes)
-            amount: Amount of USDC to split (in base units)
+            amount: Amount of pUSD to split (in base units)
             sender: Transaction sender address
 
         Returns:
@@ -560,14 +695,14 @@ class CtfSDK:
         selector = bytes(Web3.keccak(text="splitPosition(address,bytes32,bytes32,uint256[],uint256)")[:4])
         data = selector + abi_encode(
             ["address", "bytes32", "bytes32", "uint256[]", "uint256"],
-            [self.usdc, ZERO_BYTES32, condition_bytes, BINARY_PARTITION, amount],
+            [self.pusd, ZERO_BYTES32, condition_bytes, BINARY_PARTITION, amount],
         )
 
         return TransactionData(
             to=self.conditional_tokens,
             data="0x" + data.hex(),
             gas_estimate=GAS_ESTIMATES["split_position"],
-            description=f"Split {amount} USDC into YES/NO tokens",
+            description=f"Split {amount} pUSD into YES/NO tokens",
         )
 
     def build_merge_tx(
@@ -578,7 +713,7 @@ class CtfSDK:
     ) -> TransactionData:
         """Build merge positions transaction.
 
-        Merges equal amounts of YES and NO tokens back into USDC.
+        Merges equal amounts of YES and NO tokens back into pUSD.
         Requires ERC-1155 approval for Conditional Tokens contract.
 
         Args:
@@ -597,14 +732,14 @@ class CtfSDK:
         selector = bytes(Web3.keccak(text="mergePositions(address,bytes32,bytes32,uint256[],uint256)")[:4])
         data = selector + abi_encode(
             ["address", "bytes32", "bytes32", "uint256[]", "uint256"],
-            [self.usdc, ZERO_BYTES32, condition_bytes, BINARY_PARTITION, amount],
+            [self.pusd, ZERO_BYTES32, condition_bytes, BINARY_PARTITION, amount],
         )
 
         return TransactionData(
             to=self.conditional_tokens,
             data="0x" + data.hex(),
             gas_estimate=GAS_ESTIMATES["merge_positions"],
-            description=f"Merge {amount} YES+NO tokens into USDC",
+            description=f"Merge {amount} YES+NO tokens into pUSD",
         )
 
     def build_redeem_tx(
@@ -634,7 +769,7 @@ class CtfSDK:
         selector = bytes(Web3.keccak(text="redeemPositions(address,bytes32,bytes32,uint256[])")[:4])
         data = selector + abi_encode(
             ["address", "bytes32", "bytes32", "uint256[]"],
-            [self.usdc, ZERO_BYTES32, condition_bytes, index_sets],
+            [self.pusd, ZERO_BYTES32, condition_bytes, index_sets],
         )
 
         return TransactionData(
@@ -707,6 +842,7 @@ __all__ = [
     "AllowanceStatus",
     "ResolutionStatus",
     "MAX_UINT256",
+    "SUFFICIENT_ALLOWANCE_THRESHOLD",
     "ZERO_BYTES32",
     "INDEX_SET_YES",
     "INDEX_SET_NO",

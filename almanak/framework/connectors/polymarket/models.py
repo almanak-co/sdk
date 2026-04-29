@@ -43,20 +43,38 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# CLOB API base URLs
+# CLOB API base URLs.
+#
+# V2 is served at the canonical ``clob.polymarket.com`` host. The pre-cutover
+# preview host ``clob-v2.polymarket.com`` now 301-redirects here, but we point
+# directly at the canonical host because httpx (used by ``ClobClient``) does
+# not follow redirects by default — pointing at ``clob-v2`` would surface as
+# 301 errors on every request. Override via ``POLYMARKET_CLOB_URL`` env var
+# or ``PolymarketConfig.clob_base_url``.
 CLOB_BASE_URL = "https://clob.polymarket.com"
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 DATA_API_BASE_URL = "https://data-api.polymarket.com"
 
-# Contract addresses (Polygon Mainnet)
-CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+# Contract addresses (Polygon Mainnet) — V2 (April 2026 cutover)
+CTF_EXCHANGE_V2 = "0xE111180000d2663C0091e4f400237545B87B996B"
+NEG_RISK_EXCHANGE_V2 = "0xe2222d279d744050d28e00520010520000310F59"
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
-USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+
+# V2 collateral pivot — pUSD via Onramp/Offramp wrappers
+PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+COLLATERAL_ONRAMP = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+COLLATERAL_OFFRAMP = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"
+
+# Source assets (ramp inputs). Both can be wrapped to pUSD via the Onramp.
+USDCE_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # bridged USDC.e (transitional)
+USDC_NATIVE_POLYGON = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"  # native Circle USDC (future)
 
 # Chain ID
 POLYGON_CHAIN_ID = 137
+
+# Default value for V2 bytes32 fields (metadata, builder) when no attribution is set.
+BYTES32_ZERO = "0x" + "00" * 32
 
 
 # =============================================================================
@@ -83,6 +101,7 @@ class OrderType(StrEnum):
     """Order time-in-force types."""
 
     GTC = "GTC"  # Good Till Cancelled
+    GTD = "GTD"  # Good Till Date — V2 GTD; matcher refuses after `expiration` ts
     IOC = "IOC"  # Immediate or Cancel
     FOK = "FOK"  # Fill or Kill
 
@@ -342,6 +361,13 @@ class PolymarketConfig(BaseModel):
         description="Use legacy gas pricing (gasPrice) instead of EIP-1559 (maxFeePerGas/maxPriorityFeePerGas)",
     )
 
+    # V2 builder attribution. Default zero bytes (no attribution). Register
+    # with Polymarket to receive a builder code for fee-share / branding.
+    builder_code: str = Field(
+        default=BYTES32_ZERO,
+        description="V2 builder attribution code (bytes32 hex). Defaults to zero (no attribution).",
+    )
+
     @field_validator("wallet_address", mode="before")
     @classmethod
     def checksum_wallet(cls, v: str) -> str:
@@ -423,28 +449,39 @@ CLOB_AUTH_TYPES = {
 
 CLOB_AUTH_MESSAGE = "This message attests that I control the given wallet"
 
-# CTF Exchange Order Domain
-CTF_EXCHANGE_DOMAIN = {
-    "name": "Polymarket CTF Exchange",
-    "version": "1",
-    "chainId": POLYGON_CHAIN_ID,
-    "verifyingContract": CTF_EXCHANGE,
-}
+# CTF Exchange Order Domain — V2 (verifyingContract is per-order; build via helper).
+CTF_EXCHANGE_V2_DOMAIN_NAME = "Polymarket CTF Exchange"
+CTF_EXCHANGE_V2_DOMAIN_VERSION = "2"
+
+
+def build_ctf_exchange_domain(exchange_address: str) -> dict:
+    """Build a per-order EIP-712 domain.
+
+    V2 orders may target either the regular CTF Exchange or the NegRisk
+    CTF Exchange — the verifyingContract differs per market, so we build
+    the domain dict per call rather than holding it as a module constant.
+    """
+    return {
+        "name": CTF_EXCHANGE_V2_DOMAIN_NAME,
+        "version": CTF_EXCHANGE_V2_DOMAIN_VERSION,
+        "chainId": POLYGON_CHAIN_ID,
+        "verifyingContract": exchange_address,
+    }
+
 
 ORDER_TYPES = {
     "Order": [
         {"name": "salt", "type": "uint256"},
         {"name": "maker", "type": "address"},
         {"name": "signer", "type": "address"},
-        {"name": "taker", "type": "address"},
         {"name": "tokenId", "type": "uint256"},
         {"name": "makerAmount", "type": "uint256"},
         {"name": "takerAmount", "type": "uint256"},
-        {"name": "expiration", "type": "uint256"},
-        {"name": "nonce", "type": "uint256"},
-        {"name": "feeRateBps", "type": "uint256"},
         {"name": "side", "type": "uint8"},
         {"name": "signatureType", "type": "uint8"},
+        {"name": "timestamp", "type": "uint256"},
+        {"name": "metadata", "type": "bytes32"},
+        {"name": "builder", "type": "bytes32"},
     ]
 }
 
@@ -476,13 +513,16 @@ class GammaMarket(BaseModel):
     maker_base_fee_bps: int = Field(
         default=0,
         description=(
-            "Market's maker fee in basis points. Must be signed into the order's "
-            "feeRateBps — the CLOB validator rejects GTC orders whose fee does not "
-            "match the current market fee with `invalid fee rate (0), current "
-            "market's maker fee: N`."
+            "Market's maker fee in basis points. V2: informational only — fees are "
+            "operator-set at match time and not signed into the order. Surfaced for "
+            "UX / accounting (use ``getClobMarketInfo()`` for the live operator-side "
+            "fee parameters)."
         ),
     )
-    taker_base_fee_bps: int = Field(default=0, description="Market's taker fee in basis points.")
+    taker_base_fee_bps: int = Field(
+        default=0,
+        description="Market's taker fee in basis points (informational; V2 fees are dynamic).",
+    )
     best_bid: Decimal | None = Field(default=None, description="Current best bid")
     best_ask: Decimal | None = Field(default=None, description="Current best ask")
     last_trade_price: Decimal | None = Field(default=None, description="Last execution price")
@@ -491,6 +531,9 @@ class GammaMarket(BaseModel):
     event_slug: str | None = Field(default=None, description="Parent event slug")
     group_slug: str | None = Field(default=None, description="Market group slug")
     tags: list[str] = Field(default_factory=list, description="Market tags/categories")
+    # V2 routing — neg-risk markets sign against NEG_RISK_EXCHANGE_V2; binary
+    # YES/NO markets sign against CTF_EXCHANGE_V2. Driven by the API response.
+    neg_risk: bool = Field(default=False, description="True if market trades on the NegRisk CTF Exchange V2")
 
     @classmethod
     def from_api_response(cls, data: dict) -> "GammaMarket":
@@ -546,6 +589,7 @@ class GammaMarket(BaseModel):
             event_slug=data.get("eventSlug") or data.get("event_slug"),
             group_slug=data.get("groupItemSlug") or data.get("group_slug"),
             tags=tags,
+            neg_risk=bool(data.get("negRisk") or data.get("neg_risk") or False),
         )
 
     @property
@@ -602,13 +646,24 @@ class OrderBook(BaseModel):
 
     @property
     def best_bid(self) -> Decimal | None:
-        """Get best bid price."""
-        return self.bids[0].price if self.bids else None
+        """Best bid (highest price someone is willing to BUY at).
+
+        Polymarket's CLOB returns the orderbook in depth-walk order — bids
+        ascend from worst to best, so the best bid sits at the END of the
+        list, not the start. Cross-checked against ``GET /price?side=BUY``
+        which returns the same value as ``bids[-1].price`` on a live market.
+        """
+        return self.bids[-1].price if self.bids else None
 
     @property
     def best_ask(self) -> Decimal | None:
-        """Get best ask price."""
-        return self.asks[0].price if self.asks else None
+        """Best ask (lowest price someone is willing to SELL at).
+
+        Polymarket's CLOB returns the orderbook in depth-walk order — asks
+        descend from worst to best, so the best ask sits at the END of the
+        list. Cross-checked against ``GET /price?side=SELL``.
+        """
+        return self.asks[-1].price if self.asks else None
 
     @property
     def spread(self) -> Decimal | None:
@@ -635,6 +690,24 @@ class TokenPrice(BaseModel):
         )
 
 
+@dataclass
+class SimplifiedMarket:
+    """Lightweight market summary from CLOB ``/simplified-markets``.
+
+    Mirrors the proto ``PolymarketSimplifiedMarket`` shape. Used by the
+    paginated discovery endpoint that returns only the fields needed to
+    sweep open markets cheaply (no question text, prices, or fees) — the
+    full ``GammaMarket`` is fetched separately when a caller drills in.
+    """
+
+    condition_id: str
+    tokens: list[str]
+    min_incentive_size: Decimal
+    max_incentive_spread: Decimal
+    active: bool
+    closed: bool
+
+
 # =============================================================================
 # Order Models
 # =============================================================================
@@ -642,14 +715,21 @@ class TokenPrice(BaseModel):
 
 @dataclass
 class LimitOrderParams:
-    """Parameters for building a limit order."""
+    """Parameters for building a V2 limit order.
+
+    V2 changes vs V1:
+    - Drop on-chain ``expiration`` (V2 orders carry no on-chain expiration;
+      GTD time is API-level and lives on the order envelope, not the signed struct).
+    - Drop ``fee_rate_bps`` (operator-set in V2; never signed by the maker).
+    """
 
     token_id: str
     side: Literal["BUY", "SELL"]
     price: Decimal
     size: Decimal
-    expiration: int | None = None
-    fee_rate_bps: int = 0
+    # API-level GTD timestamp (Unix seconds). 0 = no expiration. Routed to the
+    # `expiration` field of the V2 order envelope (NOT the signed struct).
+    expiration: int = 0
 
 
 @dataclass
@@ -664,58 +744,74 @@ class MarketOrderParams:
 
 @dataclass
 class UnsignedOrder:
-    """Unsigned order ready for signing."""
+    """Unsigned V2 order ready for EIP-712 signing.
+
+    Field set matches the V2 ``Order`` struct (11 fields signed). The
+    ``exchange_address`` is the V2 verifyingContract for this order — it
+    differs between regular CTF Exchange V2 and NegRisk CTF Exchange V2,
+    routed by ``GammaMarket.neg_risk``.
+
+    ``api_expiration`` is the GTD timestamp included in the wire envelope but
+    NOT in the signed struct — V2's matcher enforces freshness off-chain.
+    """
 
     salt: int
     maker: str
     signer: str
-    taker: str
     token_id: int
     maker_amount: int
     taker_amount: int
-    expiration: int
-    nonce: int
-    fee_rate_bps: int
     side: int
     signature_type: int
+    timestamp: int
+    metadata: str
+    builder: str
+    # Routing — verifyingContract for the EIP-712 domain.
+    exchange_address: str
+    # Wire-only (NOT signed). API-level GTD; 0 = no expiration.
+    api_expiration: int = 0
 
     def to_struct(self) -> dict:
-        """Convert to struct for EIP-712 signing."""
+        """Convert to struct for EIP-712 signing.
+
+        Returns the 11-field V2 Order struct. ``exchange_address`` and
+        ``api_expiration`` are intentionally excluded — they belong on the
+        domain / wire envelope, not the signed payload.
+        """
         return {
             "salt": self.salt,
             "maker": self.maker,
             "signer": self.signer,
-            "taker": self.taker,
             "tokenId": self.token_id,
             "makerAmount": self.maker_amount,
             "takerAmount": self.taker_amount,
-            "expiration": self.expiration,
-            "nonce": self.nonce,
-            "feeRateBps": self.fee_rate_bps,
             "side": self.side,
             "signatureType": self.signature_type,
+            "timestamp": self.timestamp,
+            "metadata": self.metadata,
+            "builder": self.builder,
         }
 
 
 @dataclass
 class SignedOrder:
-    """Signed order ready for submission."""
+    """Signed V2 order ready for submission to /order."""
 
     order: UnsignedOrder
     signature: str
 
     def to_api_payload(self, owner: str, order_type: str = "GTC") -> dict:
-        """Convert to Polymarket CLOB `/order` submission payload.
+        """Convert to Polymarket V2 CLOB `/order` submission payload.
 
         Args:
             owner: Polymarket API key (UUID) that owns the credential used
                 to authenticate the request. Required by the API matcher.
             order_type: One of "GTC", "GTD", "FOK", "FAK".
 
-        Payload shape matches py-clob-client's canonical format — signature
-        lives **inside** the `order` object (with an `0x` prefix), `side` is
-        the string `"BUY"` / `"SELL"`, and the api-key owner is a top-level
-        field alongside `orderType`.
+        Wire shape matches py-clob-client-v2's ``order_to_json_v2``: signature
+        is inside the ``order`` object with `0x` prefix, ``side`` is a string
+        ("BUY"/"SELL"), and ``timestamp`` / ``metadata`` / ``builder`` are
+        included alongside the API-level ``expiration``.
         """
         signature = self.signature if self.signature.startswith("0x") else f"0x{self.signature}"
         side_str = "BUY" if self.order.side == OrderSide.BUY.value else "SELL"
@@ -724,15 +820,15 @@ class SignedOrder:
                 "salt": self.order.salt,
                 "maker": self.order.maker,
                 "signer": self.order.signer,
-                "taker": self.order.taker,
                 "tokenId": str(self.order.token_id),
                 "makerAmount": str(self.order.maker_amount),
                 "takerAmount": str(self.order.taker_amount),
-                "expiration": str(self.order.expiration),
-                "nonce": str(self.order.nonce),
-                "feeRateBps": str(self.order.fee_rate_bps),
                 "side": side_str,
+                "expiration": str(self.order.api_expiration),
                 "signatureType": self.order.signature_type,
+                "timestamp": str(self.order.timestamp),
+                "metadata": self.order.metadata,
+                "builder": self.order.builder,
                 "signature": signature,
             },
             "owner": owner,
@@ -1032,21 +1128,28 @@ class HistoricalTrade:
 
 
 __all__ = [
-    # Constants
+    # Constants — V2 contract addresses
     "CLOB_BASE_URL",
     "GAMMA_BASE_URL",
     "DATA_API_BASE_URL",
-    "CTF_EXCHANGE",
-    "NEG_RISK_EXCHANGE",
+    "CTF_EXCHANGE_V2",
+    "NEG_RISK_EXCHANGE_V2",
     "CONDITIONAL_TOKENS",
     "NEG_RISK_ADAPTER",
-    "USDC_POLYGON",
+    "PUSD",
+    "COLLATERAL_ONRAMP",
+    "COLLATERAL_OFFRAMP",
+    "USDCE_POLYGON",
+    "USDC_NATIVE_POLYGON",
     "POLYGON_CHAIN_ID",
+    "BYTES32_ZERO",
     # EIP-712
     "CLOB_AUTH_DOMAIN",
     "CLOB_AUTH_TYPES",
     "CLOB_AUTH_MESSAGE",
-    "CTF_EXCHANGE_DOMAIN",
+    "CTF_EXCHANGE_V2_DOMAIN_NAME",
+    "CTF_EXCHANGE_V2_DOMAIN_VERSION",
+    "build_ctf_exchange_domain",
     "ORDER_TYPES",
     # Enums
     "SignatureType",
@@ -1062,6 +1165,7 @@ __all__ = [
     "PriceLevel",
     "OrderBook",
     "TokenPrice",
+    "SimplifiedMarket",
     # Orders
     "LimitOrderParams",
     "MarketOrderParams",

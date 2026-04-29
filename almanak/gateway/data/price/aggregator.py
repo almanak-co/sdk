@@ -62,8 +62,49 @@ DEFAULT_MAGNITUDE_OUTLIER_RATIO = 100.0
 # fungible DeFi token; $10M/token provides >100× headroom.
 DEFAULT_SINGLE_SOURCE_PRICE_CEILING = Decimal("10_000_000")  # $10M per token
 
-# Stablecoins that fall back to $1.00 when all price sources fail
+# Stablecoins that fall back to $1.00 when all price sources fail.
+# Symbol-keyed: only entries whose symbol is unambiguous across the EVM token
+# set. Add a token here only if every chain's "<symbol>" is a USD-pegged stable.
 STABLECOIN_FALLBACK_TOKENS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "USDC.E", "USDT.E"})
+
+# Address-keyed fallback for stablecoins whose symbol clashes with non-stables.
+# Polymarket V2 collateral pUSD (Polygon ``0xC011...82DFB``) is enforced 1:1 vs
+# USDC.e/USDC at the on-chain Onramp, but the bare "PUSD" symbol is also used
+# by ``Pleasing USD`` / ``Palm USD`` / ``Plume USD`` (all ``is_stablecoin: false``
+# in our token registry). Symbol-only matching would silently price those at
+# $1.00 on feed failure, which would corrupt valuations / PnL on other chains.
+#
+# Source addresses are EIP-55 checksummed (a repo-wide test enforces this for
+# all production constants); the frozenset stores the lowercased form so the
+# helper below compares without normalising at every call site.
+STABLECOIN_FALLBACK_ADDRESSES: frozenset[str] = frozenset(
+    addr.lower()
+    for addr in (
+        "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",  # Polymarket pUSD (Polygon)
+    )
+)
+
+
+def is_stablecoin_for_fallback(token: str, resolved_token: ResolvedToken | None) -> bool:
+    """Return True if the token qualifies for the $1.00 fallback when all sources fail.
+
+    Match priority:
+
+    1. **Address-keyed allowlist** — preferred when ``resolved_token`` is
+       available. Resolves the symbol-clash hazard for tokens like ``PUSD``
+       (Polymarket vs. ``Pleasing USD`` / ``Palm USD`` / ``Plume USD``) where
+       only one of the four is a real stable.
+    2. **Symbol-keyed allowlist** — legacy path for callers that haven't
+       resolved the token to an address yet (e.g. price-aggregator paths
+       that take a bare symbol). Restricted to symbols that are unambiguous
+       across the EVM token set.
+    """
+    if resolved_token is not None:
+        addr = getattr(resolved_token, "address", None)
+        if isinstance(addr, str) and addr.lower() in STABLECOIN_FALLBACK_ADDRESSES:
+            return True
+    return token.upper() in STABLECOIN_FALLBACK_TOKENS
+
 
 # Prefixes for derivative tokens that are known to be unpriceable on standard feeds.
 # These tokens (PT, YT, LP, etc.) don't have Chainlink/Binance/CoinGecko listings,
@@ -298,7 +339,7 @@ class PriceAggregator:
         # Check if all sources failed
         if not results.valid_results:
             # Stablecoin fallback: use $1.00 for known stablecoins when all sources fail
-            if quote.upper() == "USD" and token.upper() in STABLECOIN_FALLBACK_TOKENS:
+            if quote.upper() == "USD" and is_stablecoin_for_fallback(token, resolved_token):
                 logger.warning(
                     "All price sources failed for stablecoin %s/%s, using $1.00 fallback. Errors: %s",
                     token,

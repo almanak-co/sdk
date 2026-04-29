@@ -44,7 +44,7 @@ from almanak.framework.data.interfaces import (
     PriceResult,
 )
 from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
-from almanak.gateway.data.price.aggregator import STABLECOIN_FALLBACK_TOKENS
+from almanak.gateway.data.price.aggregator import is_stablecoin_for_fallback
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -245,8 +245,9 @@ class OnChainPriceSource(BasePriceSource):
             if time.time() - cached_at < self._cache_ttl:
                 return result
 
-        # Stablecoins: $1.00 without RPC
-        if token_upper in STABLECOIN_FALLBACK_TOKENS:
+        # Stablecoins: $1.00 without RPC. ``resolved_token`` lets us
+        # disambiguate symbol clashes (e.g. Polymarket pUSD vs ``Pleasing USD``).
+        if is_stablecoin_for_fallback(token, resolved_token):
             result = PriceResult(
                 price=Decimal("1.00"),
                 source=self.source_name,

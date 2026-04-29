@@ -99,13 +99,11 @@ class OrderResult:
     Attributes:
         success: Whether the order was built successfully
         order_id: Order ID if submitted
-        signed_order_payload: Signed order payload for submission
         error: Error message if failed
     """
 
     success: bool
     order_id: str | None = None
-    signed_order_payload: dict[str, Any] | None = None
     error: str | None = None
     token_id: str | None = None
     side: str | None = None
@@ -311,6 +309,11 @@ class PolymarketAdapter:
                     order_type = OrderType.IOC
                 else:
                     order_type = self._map_time_in_force(intent.time_in_force)
+                # V2 GTD: when expiration_hours is set, force GTD time-in-force
+                # so the API matcher honors the off-chain expiration (V2 has no
+                # on-chain expiration field in the signed Order struct).
+                if intent.expiration_hours is not None and intent.expiration_hours > 0:
+                    order_type = OrderType.GTD
 
             else:
                 # No max_price → reject. The legacy fallback was an aggressive
@@ -717,12 +720,16 @@ class PolymarketAdapter:
         """Calculate expiration timestamp.
 
         Args:
-            expiration_hours: Hours until expiration, or None for no expiry
+            expiration_hours: Hours until expiration. ``None`` or ``<= 0`` means
+                "no expiry"; the GTD gate at the call site uses the same
+                ``> 0`` predicate, so non-positive values must round-trip to
+                ``0`` here or non-GTD orders would carry a stale, already-
+                expired timestamp.
 
         Returns:
             Unix timestamp or 0 for no expiry
         """
-        if expiration_hours is None:
+        if expiration_hours is None or expiration_hours <= 0:
             return 0
         return int(datetime.now(UTC).timestamp()) + (expiration_hours * 3600)
 

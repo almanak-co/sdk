@@ -1,18 +1,19 @@
 """Tests for protocol-aware balance resolution (VIB-3138).
 
-Background: Polymarket on Polygon settles in USDC.e, not native USDC. A
-strategy calling ``market.balance("USDC")`` without protocol context gets
-native USDC and the CLOB later rejects the order with "insufficient balance".
+Background: Polymarket V2 (April 2026 cutover) settles trades in PUSD, the
+in-system collateral minted from USDC.e (or native USDC) via the
+CollateralOnramp. A strategy calling ``market.balance("USDC")`` without
+protocol context gets native USDC and the CLOB later rejects the order with
+"insufficient balance".
 
-Fix: ``market.balance("USDC", protocol="polymarket")`` now returns the
-USDC.e balance via the ``PROTOCOL_TOKEN_VARIANTS`` registry.
+Fix: ``market.balance("USDC", protocol="polymarket")`` returns the PUSD
+balance — the spendable trading collateral — via the
+``PROTOCOL_TOKEN_VARIANTS`` registry.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
-
-import pytest
 
 from almanak.framework.data.market_snapshot import PROTOCOL_TOKEN_VARIANTS
 from almanak.framework.strategies.intent_strategy import (
@@ -33,19 +34,19 @@ def _tb(symbol: str, qty: str, usd: str) -> TokenBalance:
 
 
 class TestPolymarketUSDCVariant:
-    """The ticket's motivating case: Polymarket on Polygon needs USDC.e."""
+    """The ticket's motivating case: Polymarket V2 on Polygon needs PUSD."""
 
-    def test_balance_with_polymarket_protocol_returns_usdc_e(self):
-        """``balance("USDC", protocol="polymarket")`` resolves to USDC.e."""
+    def test_balance_with_polymarket_protocol_returns_pusd(self):
+        """``balance("USDC", protocol="polymarket")`` resolves to PUSD."""
         market = _make_market(
             chain="polygon",
             balances={
                 "USDC": _tb("USDC", "2.00", "2.00"),
-                "USDC.e": _tb("USDC.e", "1.21", "1.21"),
+                "PUSD": _tb("PUSD", "1.21", "1.21"),
             },
         )
         result = market.balance("USDC", protocol="polymarket")
-        assert result.symbol == "USDC.e"
+        assert result.symbol == "PUSD"
         assert result.balance == Decimal("1.21")
 
     def test_balance_without_protocol_returns_symbol_as_given(self):
@@ -54,7 +55,7 @@ class TestPolymarketUSDCVariant:
             chain="polygon",
             balances={
                 "USDC": _tb("USDC", "2.00", "2.00"),
-                "USDC.e": _tb("USDC.e", "1.21", "1.21"),
+                "PUSD": _tb("PUSD", "1.21", "1.21"),
             },
         )
         result = market.balance("USDC")
@@ -67,7 +68,7 @@ class TestPolymarketUSDCVariant:
             chain="polygon",
             balances={
                 "USDC": _tb("USDC", "2.00", "2.00"),
-                "USDC.e": _tb("USDC.e", "1.21", "1.21"),
+                "PUSD": _tb("PUSD", "1.21", "1.21"),
             },
         )
         assert market.balance_usd("USDC", protocol="polymarket") == Decimal("1.21")
@@ -99,7 +100,7 @@ class TestUnknownProtocolPassthrough:
             chain="polygon",
             balances={"WMATIC": _tb("WMATIC", "50", "10")},
         )
-        # polymarket's registry only has USDC -> USDC.e; WMATIC is not there.
+        # polymarket's registry only has USDC -> PUSD; WMATIC is not there.
         result = market.balance("WMATIC", protocol="polymarket")
         assert result.symbol == "WMATIC"
 
@@ -110,7 +111,7 @@ class TestRegistryShape:
     def test_registry_has_polygon_polymarket_usdc_mapping(self):
         assert "polygon" in PROTOCOL_TOKEN_VARIANTS
         assert "polymarket" in PROTOCOL_TOKEN_VARIANTS["polygon"]
-        assert PROTOCOL_TOKEN_VARIANTS["polygon"]["polymarket"]["USDC"] == "USDC.e"
+        assert PROTOCOL_TOKEN_VARIANTS["polygon"]["polymarket"]["USDC"] == "PUSD"
 
 
 class TestCaseInsensitiveChainAndProtocol:
@@ -121,22 +122,22 @@ class TestCaseInsensitiveChainAndProtocol:
             chain="polygon",
             balances={
                 "USDC": _tb("USDC", "2.00", "2.00"),
-                "USDC.e": _tb("USDC.e", "1.21", "1.21"),
+                "PUSD": _tb("PUSD", "1.21", "1.21"),
             },
         )
         result = market.balance("USDC", protocol="POLYMARKET")
-        assert result.symbol == "USDC.e"
+        assert result.symbol == "PUSD"
 
     def test_uppercase_chain_still_resolves(self):
         market = _make_market(
             chain="POLYGON",
             balances={
                 "USDC": _tb("USDC", "2.00", "2.00"),
-                "USDC.e": _tb("USDC.e", "1.21", "1.21"),
+                "PUSD": _tb("PUSD", "1.21", "1.21"),
             },
         )
         result = market.balance("USDC", protocol="polymarket")
-        assert result.symbol == "USDC.e"
+        assert result.symbol == "PUSD"
 
     def test_lowercase_symbol_still_resolves(self):
         """Registry stores canonical uppercase keys; callers may pass lowercase."""
@@ -144,8 +145,8 @@ class TestCaseInsensitiveChainAndProtocol:
             chain="polygon",
             balances={
                 "USDC": _tb("USDC", "2.00", "2.00"),
-                "USDC.e": _tb("USDC.e", "1.21", "1.21"),
+                "PUSD": _tb("PUSD", "1.21", "1.21"),
             },
         )
         result = market.balance("usdc", protocol="polymarket")
-        assert result.symbol == "USDC.e"
+        assert result.symbol == "PUSD"

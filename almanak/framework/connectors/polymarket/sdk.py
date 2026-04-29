@@ -318,7 +318,7 @@ class PolymarketSDK:
 
         Example:
             >>> status = sdk.check_allowances()
-            >>> print(f"USDC approved: {status.usdc_approved_ctf_exchange}")
+            >>> print(f"pUSD approved on V2 exchange: {status.pusd_approved_ctf_exchange}")
             >>> print(f"Fully approved: {status.fully_approved}")
         """
         if self.web3 is None:
@@ -330,23 +330,26 @@ class PolymarketSDK:
     # Balance Methods
     # =========================================================================
 
-    def get_usdc_balance(self) -> int:
-        """Get USDC balance for configured wallet.
+    def get_pusd_balance(self) -> int:
+        """Get pUSD (V2 trading collateral) balance for configured wallet.
 
         Returns:
-            USDC balance in base units (6 decimals)
+            pUSD balance in base units (6 decimals).
 
         Raises:
-            ValueError: If web3 instance is not configured
-
-        Example:
-            >>> balance = sdk.get_usdc_balance()
-            >>> print(f"USDC balance: {balance / 1e6}")
+            ValueError: If web3 instance is not configured.
         """
         if self.web3 is None:
             raise ValueError("Web3 instance required for balance checking. Initialize SDK with web3 parameter.")
 
-        return self.ctf.get_usdc_balance(self.config.wallet_address, self.web3)
+        return self.ctf.get_pusd_balance(self.config.wallet_address, self.web3)
+
+    def get_source_asset_balance(self) -> int:
+        """Get the V2 source-asset (USDC.e / native USDC) balance for configured wallet."""
+        if self.web3 is None:
+            raise ValueError("Web3 instance required for balance checking. Initialize SDK with web3 parameter.")
+
+        return self.ctf.get_source_asset_balance(self.config.wallet_address, self.web3)
 
     def get_position_balance(self, token_id: int) -> int:
         """Get ERC-1155 position token balance.

@@ -36,14 +36,6 @@ Monitors prediction market positions for resolution events.
     options:
       show_root_heading: true
 
-## AutoRedemptionService
-
-Automatically redeems resolved prediction market positions.
-
-::: almanak.framework.services.AutoRedemptionService
-    options:
-      show_root_heading: true
-
 ## Models
 
 ### StuckDetectionResult

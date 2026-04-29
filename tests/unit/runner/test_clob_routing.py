@@ -127,7 +127,14 @@ def _make_clob_bundle():
     bundle.transactions = []
     bundle.metadata = {
         "protocol": "polymarket",
-        "order_payload": {"token_id": "0x123", "side": "BUY", "size": "50"},
+        "order_request": {
+            "token_id": "0x123",
+            "side": "BUY",
+            "price": "0.50",
+            "size": "50",
+            "time_in_force": "GTC",
+            "expiration": 0,
+        },
         "intent_id": "pred-intent-001",
     }
     return bundle

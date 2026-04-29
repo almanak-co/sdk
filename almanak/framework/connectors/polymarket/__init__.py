@@ -100,21 +100,27 @@ from .market_making import (
     should_requote,
 )
 from .models import (
-    # Constants
+    # Constants — V2 contract addresses
+    BYTES32_ZERO,
     CLOB_AUTH_DOMAIN,
     CLOB_AUTH_MESSAGE,
     CLOB_AUTH_TYPES,
     CLOB_BASE_URL,
+    COLLATERAL_OFFRAMP,
+    COLLATERAL_ONRAMP,
     CONDITIONAL_TOKENS,
-    CTF_EXCHANGE,
-    CTF_EXCHANGE_DOMAIN,
+    CTF_EXCHANGE_V2,
+    CTF_EXCHANGE_V2_DOMAIN_NAME,
+    CTF_EXCHANGE_V2_DOMAIN_VERSION,
     DATA_API_BASE_URL,
     GAMMA_BASE_URL,
     NEG_RISK_ADAPTER,
-    NEG_RISK_EXCHANGE,
+    NEG_RISK_EXCHANGE_V2,
     ORDER_TYPES,
     POLYGON_CHAIN_ID,
-    USDC_POLYGON,
+    PUSD,
+    USDC_NATIVE_POLYGON,
+    USDCE_POLYGON,
     # Credentials & Config
     ApiCredentials,
     # Positions & Trades
@@ -149,6 +155,7 @@ from .models import (
     TradeFilters,
     TradeStatus,
     UnsignedOrder,
+    build_ctf_exchange_domain,
 )
 from .receipt_parser import (
     PAYOUT_REDEMPTION_TOPIC,
@@ -221,21 +228,28 @@ __all__ = [
     "INDEX_SET_NO",
     "BINARY_PARTITION",
     "GAS_ESTIMATES",
-    # Constants
+    # Constants — V2 contract addresses
     "CLOB_BASE_URL",
     "GAMMA_BASE_URL",
     "DATA_API_BASE_URL",
-    "CTF_EXCHANGE",
-    "NEG_RISK_EXCHANGE",
+    "CTF_EXCHANGE_V2",
+    "NEG_RISK_EXCHANGE_V2",
     "CONDITIONAL_TOKENS",
     "NEG_RISK_ADAPTER",
-    "USDC_POLYGON",
+    "PUSD",
+    "COLLATERAL_ONRAMP",
+    "COLLATERAL_OFFRAMP",
+    "USDCE_POLYGON",
+    "USDC_NATIVE_POLYGON",
     "POLYGON_CHAIN_ID",
+    "BYTES32_ZERO",
     # EIP-712
     "CLOB_AUTH_DOMAIN",
     "CLOB_AUTH_TYPES",
     "CLOB_AUTH_MESSAGE",
-    "CTF_EXCHANGE_DOMAIN",
+    "CTF_EXCHANGE_V2_DOMAIN_NAME",
+    "CTF_EXCHANGE_V2_DOMAIN_VERSION",
+    "build_ctf_exchange_domain",
     "ORDER_TYPES",
     # Credentials & Config
     "ApiCredentials",

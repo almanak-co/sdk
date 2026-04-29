@@ -44,11 +44,15 @@ from typing import Any
 from almanak.framework.connectors.base import EventRegistry, HexDecoder
 
 from .models import (
+    COLLATERAL_OFFRAMP,
+    COLLATERAL_ONRAMP,
     CONDITIONAL_TOKENS,
-    CTF_EXCHANGE,
+    CTF_EXCHANGE_V2,
     NEG_RISK_ADAPTER,
-    NEG_RISK_EXCHANGE,
-    USDC_POLYGON,
+    NEG_RISK_EXCHANGE_V2,
+    PUSD,
+    USDC_NATIVE_POLYGON,
+    USDCE_POLYGON,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,15 +105,19 @@ TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 USDC_DECIMALS = 6
 DECIMAL_SCALE = 10**USDC_DECIMALS
 
-# Polymarket contract addresses (Polygon Mainnet)
-# Used for filtering receipt logs to only process events from known contracts
+# Polymarket contract addresses (Polygon Mainnet) — V2.
+# Used for filtering receipt logs to only process events from known contracts.
 POLYMARKET_CONTRACTS: frozenset[str] = frozenset(
     {
         CONDITIONAL_TOKENS.lower(),  # CTF ERC-1155 tokens
-        CTF_EXCHANGE.lower(),  # CTF Exchange for trading
-        NEG_RISK_EXCHANGE.lower(),  # Neg Risk Exchange
-        NEG_RISK_ADAPTER.lower(),  # Neg Risk Adapter
-        USDC_POLYGON.lower(),  # USDC on Polygon
+        CTF_EXCHANGE_V2.lower(),  # V2 CTF Exchange for trading
+        NEG_RISK_EXCHANGE_V2.lower(),  # V2 NegRisk CTF Exchange
+        NEG_RISK_ADAPTER.lower(),  # NegRisk Adapter (split/merge)
+        PUSD.lower(),  # V2 collateral
+        USDCE_POLYGON.lower(),  # Source asset (bridged USDC.e)
+        USDC_NATIVE_POLYGON.lower(),  # Source asset (native Circle USDC)
+        COLLATERAL_ONRAMP.lower(),  # Wrap source-asset → pUSD
+        COLLATERAL_OFFRAMP.lower(),  # Unwrap pUSD → source-asset
     }
 )
 
@@ -698,10 +706,11 @@ class PolymarketReceiptParser:
         Args:
             receipt: Transaction receipt dict with 'logs', 'transactionHash', etc.
             filter_by_contract: If True (default), only parse logs from known
-                Polymarket contracts (CONDITIONAL_TOKENS, CTF_EXCHANGE,
-                NEG_RISK_EXCHANGE, NEG_RISK_ADAPTER, USDC_POLYGON). Set to False
-                to parse all matching event signatures regardless of contract
-                address (useful for testing or analyzing multi-protocol transactions).
+                Polymarket V2 contracts (CONDITIONAL_TOKENS, CTF_EXCHANGE_V2,
+                NEG_RISK_EXCHANGE_V2, NEG_RISK_ADAPTER, PUSD, USDCE_POLYGON,
+                COLLATERAL_ONRAMP, COLLATERAL_OFFRAMP). Set to False to parse
+                all matching event signatures regardless of contract address
+                (useful for testing or analyzing multi-protocol transactions).
 
         Returns:
             CtfParseResult with extracted events and redemption data
@@ -1293,7 +1302,7 @@ class PolymarketReceiptParser:
             total_spent = sum(
                 transfer.value
                 for transfer in result.erc20_transfers
-                if transfer.token_address.lower() == USDC_POLYGON.lower()
+                if transfer.token_address.lower() in (PUSD.lower(), USDCE_POLYGON.lower(), USDC_NATIVE_POLYGON.lower())
             )
 
             return total_spent if total_spent > 0 else None
@@ -1389,7 +1398,7 @@ class PolymarketReceiptParser:
             total_received = sum(
                 transfer.value
                 for transfer in result.erc20_transfers
-                if transfer.token_address.lower() == USDC_POLYGON.lower()
+                if transfer.token_address.lower() in (PUSD.lower(), USDCE_POLYGON.lower(), USDC_NATIVE_POLYGON.lower())
             )
 
             return total_received if total_received > 0 else None

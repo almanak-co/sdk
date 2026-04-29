@@ -758,6 +758,57 @@ def get_rpc_url_cached(
     return get_rpc_url(chain, network)
 
 
+@lru_cache(maxsize=8)
+def get_cached_web3(chain: str, network: str = "mainnet"):  # noqa: ANN201
+    """Return a cached sync ``web3.Web3`` instance for the given chain/network.
+
+    Uses the same URL resolution as ``get_rpc_url``. The returned instance is
+    cached at the process level so multiple gateway services share a single
+    HTTPProvider connection pool instead of each instantiating their own. POA
+    chains (Polygon, BSC, Avalanche, Sonic) automatically have the
+    ``ExtraDataToPOAMiddleware`` injected so ``eth.get_block("latest")`` does
+    not raise on the 32-byte ``extraData`` field.
+
+    The cache key is ``(chain, network)``; tests that need a fresh client (e.g.
+    after env mutation) should call ``get_cached_web3.cache_clear()``.
+
+    Args:
+        chain: Chain name (e.g. "polygon", "ethereum", "arbitrum")
+        network: Network environment ("mainnet", "sepolia", "anvil")
+
+    Returns:
+        Cached ``web3.Web3`` instance bound to a process-shared HTTPProvider.
+    """
+    # Local import keeps web3 cost off module load (matches the other call sites
+    # in this gateway that lazy-import web3).
+    from web3 import Web3
+
+    rpc_url = get_rpc_url(chain, network=network)
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+
+    # POA chains include a 32-byte extraData on every block; the default
+    # web3.py block validator rejects that as malformed. Inject the POA
+    # middleware so eth.get_block("latest") works for fee_history / EIP-1559
+    # checks downstream.
+    if is_poa_chain(chain):
+        try:
+            from web3.middleware import ExtraDataToPOAMiddleware
+
+            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        except ImportError:
+            # Older web3.py releases name it differently. Best-effort: if
+            # neither name resolves, callers that read latest block extraData
+            # will see a clear web3 error instead of a silent malformation.
+            try:
+                from web3.middleware import geth_poa_middleware  # type: ignore[attr-defined]
+
+                w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+            except ImportError:
+                logger.warning("POA middleware unavailable for chain %s; latest-block reads may fail", chain)
+
+    return w3
+
+
 # =============================================================================
 # Exports
 # =============================================================================

@@ -15,20 +15,28 @@ while handling the fundamental differences between on-chain and off-chain execut
    The PlanExecutor detects Polymarket bundles by checking:
    - ActionBundle.metadata["protocol"] == "polymarket"
    - ActionBundle.transactions == [] (CLOB orders have no on-chain txs)
-   - ActionBundle.metadata["order_payload"] exists
+   - ActionBundle.metadata["order_request"] exists
 
    This allows routing to ClobActionHandler before the standard on-chain path.
 
 2. EXECUTION FLOW
    ----------------
+   The framework never signs CLOB orders itself — under V2 the strategy
+   container holds no private keys, so signing happens server-side in the
+   gateway's PolymarketService. The adapter only assembles a plain
+   ``order_request`` dict (token_id, side, price, size, time_in_force,
+   expiration) and the handler hands that dict to the gateway-routed
+   ``ClobClient.create_and_post_order``, which signs and posts in one
+   round-trip.
+
    ```
-   IntentCompiler.compile() → ActionBundle (with order_payload in metadata)
+   IntentCompiler.compile() → ActionBundle (with order_request in metadata)
                                     ↓
    PlanExecutor._execute_step() → detects protocol: polymarket
                                     ↓
    ClobActionHandler.can_handle() → True
                                     ↓
-   ClobActionHandler.execute() → Submit order via CLOB API
+   ClobActionHandler.execute() → ClobClient.create_and_post_order()
                                     ↓
    ClobExecutionResult → Contains order_id, status, fills
                                     ↓
@@ -524,7 +532,7 @@ class ClobActionHandler:
         Detection criteria:
         1. metadata["protocol"] == "polymarket"
         2. transactions list is empty (CLOB orders are off-chain)
-        3. metadata["order_payload"] or metadata["order_request"] exists
+        3. metadata["order_request"] exists
 
         This method implements the ExecutionHandler protocol interface.
 
@@ -542,8 +550,11 @@ class ClobActionHandler:
         if bundle.transactions:
             return False
 
-        # Must have order payload for CLOB submission
-        if "order_payload" not in bundle.metadata and "order_request" not in bundle.metadata:
+        # Must have an order_request for the gateway to sign + submit.
+        # The legacy V1 ``order_payload`` (pre-signed in the strategy
+        # container) is gone -- under V2 the gateway holds the keys and
+        # signs server-side.
+        if "order_request" not in bundle.metadata:
             return False
 
         return True
@@ -575,7 +586,6 @@ class ClobActionHandler:
                 error="CLOB client not configured",
             )
 
-        order_payload = bundle.metadata.get("order_payload")
         order_request = bundle.metadata.get("order_request", {})
         intent_id = bundle.metadata.get("intent_id")
         requested_size = _parse_decimal(bundle.metadata.get("size") or order_request.get("size"))
@@ -598,25 +608,36 @@ class ClobActionHandler:
                 },
             )
 
-            if order_payload is not None:
-                order_response = self._clob.submit_order_payload(order_payload)
-            else:
-                req_price = _parse_decimal(order_request.get("price"))
-                req_size = _parse_decimal(order_request.get("size"))
-                if req_price is None or req_size is None:
-                    raise ValueError(
-                        f"order_request is missing required price or size fields: "
-                        f"price={order_request.get('price')!r}, size={order_request.get('size')!r}"
-                    )
-                order_response = self._clob.create_and_post_order(
-                    token_id=str(order_request.get("token_id", "")),
-                    price=req_price,
-                    size=req_size,
-                    side=str(order_request.get("side", "")),
-                    time_in_force=str(order_request.get("time_in_force", bundle.metadata.get("order_type", "GTC"))),
-                    expiration=int(order_request.get("expiration", 0) or 0),
-                    fee_rate_bps=str(order_request.get("fee_rate_bps", "0")),
+            req_price = _parse_decimal(order_request.get("price"))
+            req_size = _parse_decimal(order_request.get("size"))
+            if req_price is None or req_size is None:
+                raise ValueError(
+                    f"order_request is missing required price or size fields: "
+                    f"price={order_request.get('price')!r}, size={order_request.get('size')!r}"
                 )
+            # V2: ``create_and_post_order`` requires a GammaMarket so it can
+            # route neg-risk vs binary CTF V2 (the verifyingContract differs)
+            # and validate tick / min-size. Look it up from the token_id —
+            # the gateway holds the keys and signs server-side, the framework
+            # only assembles the request.
+            from almanak.framework.connectors.polymarket import MarketFilters
+
+            token_id = str(order_request.get("token_id", ""))
+            markets = self._clob.get_markets(MarketFilters(clob_token_ids=[token_id], limit=1))
+            if not markets:
+                raise ValueError(f"No Polymarket market found for token_id={token_id}")
+            # V2: ``fee_rate_bps`` and on-chain ``nonce`` are gone — fees
+            # are operator-set at match time, ``timestamp`` replaces nonce
+            # for per-address uniqueness. ``expiration`` is API-level GTD.
+            order_response = self._clob.create_and_post_order(
+                token_id=token_id,
+                price=req_price,
+                size=req_size,
+                side=str(order_request.get("side", "")),
+                market=markets[0],
+                time_in_force=str(order_request.get("time_in_force", bundle.metadata.get("order_type", "GTC"))),
+                expiration=int(order_request.get("expiration", 0) or 0),
+            )
 
             # VIB-3218: propagate filled_size / avg_fill_price so the runner
             # can build a PredictionFill on the ExecutionResult and strategies

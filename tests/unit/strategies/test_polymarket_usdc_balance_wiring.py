@@ -1,10 +1,12 @@
 """Regression guard for VIB-3219.
 
-Polymarket settles on Polygon in USDC.e (bridged), not native USDC. The
-protocol-aware balance API ``market.balance("USDC", protocol="polymarket")``
-routes to the USDC.e variant via ``PROTOCOL_TOKEN_VARIANTS``. If a polymarket
-strategy forgets the ``protocol="polymarket"`` kwarg it sees plain USDC and
-may size incorrectly (or hold when funds are actually present, or vice-versa).
+Polymarket V2 (April 2026 cutover) settles on Polygon in PUSD — the
+in-system collateral minted from USDC.e (or native USDC) via the
+CollateralOnramp — not native USDC. The protocol-aware balance API
+``market.balance("USDC", protocol="polymarket")`` routes to the PUSD variant
+via ``PROTOCOL_TOKEN_VARIANTS``. If a polymarket strategy forgets the
+``protocol="polymarket"`` kwarg it sees plain USDC and may size incorrectly
+(or hold when funds are actually present, or vice-versa).
 
 This test pins the three call sites enumerated in VIB-3219 so a future refactor
 can't silently drop the kwarg. The source guard is AST-based (not regex) per
@@ -96,14 +98,14 @@ def test_polymarket_strategy_passes_protocol_kwarg(strategy_path: Path) -> None:
         )
 
 
-def test_market_snapshot_returns_usdc_e_for_polymarket() -> None:
-    """Functional check: with USDC=2.00 and USDC.e=1.21, polymarket protocol resolves to 1.21."""
+def test_market_snapshot_returns_pusd_for_polymarket() -> None:
+    """Functional check: with USDC=2.00 and PUSD=1.21, polymarket protocol resolves to 1.21."""
     market = MarketSnapshot(chain="polygon", wallet_address="0xtest")
     market._balances["USDC"] = TokenBalance(symbol="USDC", balance=Decimal("2.00"), balance_usd=Decimal("2.00"))
-    market._balances["USDC.e"] = TokenBalance(symbol="USDC.e", balance=Decimal("1.21"), balance_usd=Decimal("1.21"))
+    market._balances["PUSD"] = TokenBalance(symbol="PUSD", balance=Decimal("1.21"), balance_usd=Decimal("1.21"))
 
     result = market.balance("USDC", protocol="polymarket")
-    assert result.symbol == "USDC.e"
+    assert result.symbol == "PUSD"
     assert result.balance == Decimal("1.21")
     assert result.balance_usd == Decimal("1.21")
 

@@ -344,13 +344,24 @@ class TestAllowanceConvenience:
         sdk.close()
 
     def test_check_allowances_with_web3(self, config, mock_web3):
-        """Should call CTF SDK check_allowances when web3 configured."""
+        """Should call CTF SDK check_allowances when web3 configured.
+
+        Allowance values below the sufficiency threshold no longer count as
+        ``fully_approved`` (see ``ctf_sdk.SUFFICIENT_ALLOWANCE_THRESHOLD``);
+        use MAX_UINT256 here to exercise the standard ``ensure_allowances``
+        end-state.
+        """
+        from almanak.framework.connectors.polymarket.ctf_sdk import MAX_UINT256
+
         sdk = PolymarketSDK(config, web3=mock_web3)
 
         mock_status = AllowanceStatus(
-            usdc_balance=1000000,
-            usdc_allowance_ctf_exchange=1000000,
-            usdc_allowance_neg_risk_exchange=1000000,
+            source_asset_balance=1000000,
+            pusd_balance=500000,
+            source_asset_allowance_onramp=MAX_UINT256,
+            pusd_allowance_ctf_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_adapter=MAX_UINT256,
             ctf_approved_for_ctf_exchange=True,
             ctf_approved_for_neg_risk_adapter=True,
         )
@@ -358,7 +369,8 @@ class TestAllowanceConvenience:
         with patch.object(sdk.ctf, "check_allowances", return_value=mock_status):
             result = sdk.check_allowances()
 
-            assert result.usdc_balance == 1000000
+            assert result.source_asset_balance == 1000000
+            assert result.pusd_balance == 500000
             assert result.fully_approved is True
 
         sdk.close()
@@ -372,22 +384,22 @@ class TestAllowanceConvenience:
 class TestBalanceMethods:
     """Tests for balance convenience methods."""
 
-    def test_get_usdc_balance_without_web3_raises(self, config):
+    def test_get_pusd_balance_without_web3_raises(self, config):
         """Should raise error when web3 not configured."""
         sdk = PolymarketSDK(config)
 
         with pytest.raises(ValueError) as exc_info:
-            sdk.get_usdc_balance()
+            sdk.get_pusd_balance()
 
         assert "Web3 instance required" in str(exc_info.value)
         sdk.close()
 
-    def test_get_usdc_balance_with_web3(self, config, mock_web3):
-        """Should return USDC balance when web3 configured."""
+    def test_get_pusd_balance_with_web3(self, config, mock_web3):
+        """Should return pUSD (V2 trading collateral) balance when web3 configured."""
         sdk = PolymarketSDK(config, web3=mock_web3)
 
-        with patch.object(sdk.ctf, "get_usdc_balance", return_value=1000000):
-            result = sdk.get_usdc_balance()
+        with patch.object(sdk.ctf, "get_pusd_balance", return_value=1000000):
+            result = sdk.get_pusd_balance()
 
             assert result == 1000000
 
@@ -437,7 +449,9 @@ class TestSDKIntegration:
         """CTF SDK should be accessible through SDK."""
         sdk = PolymarketSDK(config)
 
-        assert hasattr(sdk.ctf, "build_approve_usdc_tx")
+        assert hasattr(sdk.ctf, "build_approve_collateral_tx")
+        assert hasattr(sdk.ctf, "build_wrap_to_pusd_tx")
+        assert hasattr(sdk.ctf, "build_unwrap_from_pusd_tx")
         assert hasattr(sdk.ctf, "build_redeem_tx")
         assert hasattr(sdk.ctf, "check_allowances")
 
@@ -450,3 +464,51 @@ class TestSDKIntegration:
         assert sdk.config.wallet_address == config.wallet_address
 
         sdk.close()
+
+
+# =============================================================================
+# V2 source-asset balance method
+# =============================================================================
+
+
+class TestV2SourceAssetBalance:
+    """V2 added a separate balance lookup for the source asset (USDC.e by
+    default) — distinct from pUSD. Pre-flight uses both: pUSD covers the
+    order and source-asset covers the wrap when pUSD is short."""
+
+    def test_get_source_asset_balance_without_web3_raises(self, config):
+        """Same web3-required guard as pUSD balance."""
+        sdk = PolymarketSDK(config)
+        try:
+            with pytest.raises(ValueError, match="Web3 instance required"):
+                sdk.get_source_asset_balance()
+        finally:
+            sdk.close()
+
+    def test_get_source_asset_balance_with_web3(self, config, mock_web3):
+        """Forwards to ctf.get_source_asset_balance with the SDK's wallet."""
+        sdk = PolymarketSDK(config, web3=mock_web3)
+        try:
+            with patch.object(sdk.ctf, "get_source_asset_balance", return_value=42_000_000) as mock_call:
+                result = sdk.get_source_asset_balance()
+                assert result == 42_000_000
+                mock_call.assert_called_once_with(config.wallet_address, mock_web3)
+        finally:
+            sdk.close()
+
+    def test_pusd_and_source_asset_balances_independent(self, config, mock_web3):
+        """The two methods must hit different ctf calls — a refactor that
+        accidentally aliased one to the other would still pass each
+        individual test but break pre-flight wrap math."""
+        sdk = PolymarketSDK(config, web3=mock_web3)
+        try:
+            with (
+                patch.object(sdk.ctf, "get_pusd_balance", return_value=1) as pusd_mock,
+                patch.object(sdk.ctf, "get_source_asset_balance", return_value=999) as src_mock,
+            ):
+                assert sdk.get_pusd_balance() == 1
+                assert sdk.get_source_asset_balance() == 999
+                assert pusd_mock.call_count == 1
+                assert src_mock.call_count == 1
+        finally:
+            sdk.close()

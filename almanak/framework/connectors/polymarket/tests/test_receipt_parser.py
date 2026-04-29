@@ -18,10 +18,10 @@ import pytest
 
 from almanak.framework.connectors.polymarket.models import (
     CONDITIONAL_TOKENS,
-    CTF_EXCHANGE,
+    CTF_EXCHANGE_V2,
     NEG_RISK_ADAPTER,
-    NEG_RISK_EXCHANGE,
-    USDC_POLYGON,
+    NEG_RISK_EXCHANGE_V2,
+    PUSD,
 )
 from almanak.framework.connectors.polymarket.receipt_parser import (
     ERC20_TRANSFER_TOPIC,
@@ -160,7 +160,7 @@ def sample_payout_redemption_log() -> dict:
         "topics": [
             PAYOUT_REDEMPTION_TOPIC,
             "0x000000000000000000000000742d35Cc6634C0532925a3b844Bc9e7595f5ABCD",  # redeemer
-            "0x0000000000000000000000002791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # collateralToken (USDC)
+            "0x000000000000000000000000C011a7E12a19f7B1f670d46F03B03f3342E82DFB",  # collateralToken (V2 pUSD)
             "0x9915bea232fa12b20058f9cea1187ea51366352bf833393676cd0db557a58249",  # conditionId
         ],
         # parentCollectionId, offset to indexSets, payout, indexSets array
@@ -183,7 +183,7 @@ def sample_payout_redemption_log() -> dict:
 def sample_erc20_transfer_log() -> dict:
     """Sample ERC-20 Transfer log (USDC)."""
     return {
-        "address": USDC_POLYGON,
+        "address": PUSD,
         "topics": [
             ERC20_TRANSFER_TOPIC,
             "0x0000000000000000000000004D97DCd97eC945f40cF65F87097ACe5EA0476045",  # from (CTF contract)
@@ -437,7 +437,7 @@ class TestParseCtfReceipt:
 
         redemption = result.redemptions[0]
         assert redemption.redeemer.lower() == "0x742d35cc6634c0532925a3b844bc9e7595f5abcd"
-        assert redemption.collateral_token.lower() == USDC_POLYGON.lower()
+        assert redemption.collateral_token.lower() == PUSD.lower()
         assert "9915bea232fa12b20058f9cea1187ea51366352bf833393676cd0db557a58249" in redemption.condition_id.lower()
         assert 1 in redemption.index_sets
         assert 2 in redemption.index_sets
@@ -459,7 +459,7 @@ class TestParseCtfReceipt:
 
         transfer = result.erc20_transfers[0]
         assert transfer.to_addr.lower() == "0x742d35cc6634c0532925a3b844bc9e7595f5abcd"
-        assert transfer.token_address.lower() == USDC_POLYGON.lower()
+        assert transfer.token_address.lower() == PUSD.lower()
         assert transfer.value == 10000010  # 0x98968a = 10000010
         assert transfer.value_decimal == Decimal("10.00001")
 
@@ -627,8 +627,8 @@ class TestUtilityMethods:
     def test_is_polymarket_contract_known(self, parser: PolymarketReceiptParser) -> None:
         """Test is_polymarket_contract for known contracts."""
         assert parser.is_polymarket_contract(CONDITIONAL_TOKENS) is True
-        assert parser.is_polymarket_contract(CTF_EXCHANGE) is True
-        assert parser.is_polymarket_contract(USDC_POLYGON) is True
+        assert parser.is_polymarket_contract(CTF_EXCHANGE_V2) is True
+        assert parser.is_polymarket_contract(PUSD) is True
         # Test case insensitivity
         assert parser.is_polymarket_contract(CONDITIONAL_TOKENS.lower()) is True
 
@@ -754,15 +754,26 @@ class TestContractAddressFiltering:
     """Tests for contract address filtering in receipt parsing."""
 
     def test_polymarket_contracts_contains_all_known_addresses(self) -> None:
-        """Test that POLYMARKET_CONTRACTS contains all expected addresses."""
+        """Test that POLYMARKET_CONTRACTS contains all expected V2 addresses."""
+        from almanak.framework.connectors.polymarket.models import (
+            COLLATERAL_OFFRAMP,
+            COLLATERAL_ONRAMP,
+            USDC_NATIVE_POLYGON,
+            USDCE_POLYGON,
+        )
+
         # All contracts should be lowercase
         assert CONDITIONAL_TOKENS.lower() in POLYMARKET_CONTRACTS
-        assert CTF_EXCHANGE.lower() in POLYMARKET_CONTRACTS
-        assert NEG_RISK_EXCHANGE.lower() in POLYMARKET_CONTRACTS
+        assert CTF_EXCHANGE_V2.lower() in POLYMARKET_CONTRACTS
+        assert NEG_RISK_EXCHANGE_V2.lower() in POLYMARKET_CONTRACTS
         assert NEG_RISK_ADAPTER.lower() in POLYMARKET_CONTRACTS
-        assert USDC_POLYGON.lower() in POLYMARKET_CONTRACTS
-        # Should be exactly 5 addresses
-        assert len(POLYMARKET_CONTRACTS) == 5
+        assert PUSD.lower() in POLYMARKET_CONTRACTS
+        assert USDCE_POLYGON.lower() in POLYMARKET_CONTRACTS
+        assert COLLATERAL_ONRAMP.lower() in POLYMARKET_CONTRACTS
+        assert COLLATERAL_OFFRAMP.lower() in POLYMARKET_CONTRACTS
+        assert USDC_NATIVE_POLYGON.lower() in POLYMARKET_CONTRACTS
+        # V2 set: CTF + 2 V2 exchanges + NegRisk Adapter + pUSD + USDC.e + USDC native + Onramp + Offramp
+        assert len(POLYMARKET_CONTRACTS) == 9
 
     def test_filter_by_contract_excludes_non_polymarket_logs(self, parser: PolymarketReceiptParser) -> None:
         """Test that logs from non-Polymarket contracts are filtered out."""
@@ -869,9 +880,9 @@ class TestContractAddressFiltering:
                     ),
                     "logIndex": 1,
                 },
-                # Log from USDC_POLYGON - should be included
+                # Log from PUSD - should be included
                 {
-                    "address": USDC_POLYGON,
+                    "address": PUSD,
                     "topics": [
                         ERC20_TRANSFER_TOPIC,
                         "0x0000000000000000000000004D97DCd97eC945f40cF65F87097ACe5EA0476045",
@@ -885,7 +896,7 @@ class TestContractAddressFiltering:
         result = parser.parse_ctf_receipt(receipt)
 
         assert result.success is True
-        # Only 2 logs should be parsed (CONDITIONAL_TOKENS and USDC_POLYGON)
+        # Only 2 logs should be parsed (CONDITIONAL_TOKENS and PUSD)
         assert len(result.events) == 2
         assert len(result.transfer_singles) == 1
         assert len(result.erc20_transfers) == 1
@@ -894,10 +905,10 @@ class TestContractAddressFiltering:
         """Test that all known Polymarket contract addresses pass the filter."""
         contracts_to_test = [
             CONDITIONAL_TOKENS,
-            CTF_EXCHANGE,
-            NEG_RISK_EXCHANGE,
+            CTF_EXCHANGE_V2,
+            NEG_RISK_EXCHANGE_V2,
             NEG_RISK_ADAPTER,
-            USDC_POLYGON,
+            PUSD,
         ]
 
         for contract_address in contracts_to_test:
@@ -1056,3 +1067,184 @@ class TestContractAddressFiltering:
         assert result.redemption_result is not None
         assert result.redemption_result.success is True
         assert result.redemption_result.amount_redeemed > 0
+
+
+# =============================================================================
+# V2 dual-collateral cost basis / proceeds extraction
+#
+# extract_cost_basis and extract_proceeds in V2 sum BOTH pUSD and USDC.e
+# transfers — V2 trades pay in pUSD but the wrap leg moves USDC.e through
+# the same receipt. V1 only summed USDC.e.
+# =============================================================================
+
+
+# Stable test addresses used by the cost-basis / proceeds fixtures. The
+# bare "user" / "protocol" labels disambiguate transfer direction, which
+# matters for direction-sensitive bookkeeping later on; today's
+# ``extract_cost_basis`` / ``extract_proceeds`` are direction-agnostic
+# (sum of recognised tokens), but the fixtures use directional logs so
+# regressions adding direction logic catch real test cases instead of
+# silently passing.
+_TEST_USER = "0x742d35Cc6634C0532925a3b844Bc9e7595f5ABCD"
+_TEST_PROTOCOL = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+
+
+def _erc20_transfer_log(
+    token_address: str,
+    amount_units: int,
+    *,
+    from_addr: str = _TEST_PROTOCOL,
+    to_addr: str = _TEST_USER,
+) -> dict:
+    """Build a minimal ERC-20 Transfer log at the given token address.
+
+    ``from_addr`` and ``to_addr`` default to a protocol→user transfer (the
+    legacy shape) but accept overrides so cost-basis fixtures (user→protocol)
+    and proceeds fixtures (protocol→user) can model the actual direction.
+    """
+    return {
+        "address": token_address,
+        "topics": [
+            ERC20_TRANSFER_TOPIC,
+            "0x000000000000000000000000" + from_addr[2:],
+            "0x000000000000000000000000" + to_addr[2:],
+        ],
+        "data": "0x" + amount_units.to_bytes(32, "big").hex(),
+        "logIndex": 0,
+    }
+
+
+class TestV2DualCollateralExtraction:
+    """V2 cost-basis / proceeds must include BOTH pUSD and USDC.e transfers
+    so a wrap-then-trade receipt is accounted for correctly."""
+
+    def test_cost_basis_sums_pusd_and_usdce(self, parser: PolymarketReceiptParser) -> None:
+        """A receipt with both pUSD and USDC.e transfers (e.g. wrap-then-buy)
+        sums to the total of both — single-token V1 logic would miss one leg.
+
+        Cost-basis transfers go user→protocol (the user is paying out).
+        Direction-keyed fixtures so a future direction-aware extractor
+        keeps these tests green and a regression that drops direction has
+        a real test surface to break.
+        """
+        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 1,
+            "status": 1,
+            "logs": [
+                _erc20_transfer_log(USDCE_POLYGON, 5_000_000, from_addr=_TEST_USER, to_addr=_TEST_PROTOCOL),
+                _erc20_transfer_log(PUSD, 5_000_000, from_addr=_TEST_USER, to_addr=_TEST_PROTOCOL),
+            ],
+        }
+
+        cost = parser.extract_cost_basis(receipt)
+        assert cost == 10_000_000  # 5 + 5 = 10 USD-equivalent
+
+    def test_cost_basis_pusd_only(self, parser: PolymarketReceiptParser) -> None:
+        """Trade with no wrap leg — only pUSD; V2 path still sums correctly."""
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 1,
+            "status": 1,
+            "logs": [_erc20_transfer_log(PUSD, 7_500_000, from_addr=_TEST_USER, to_addr=_TEST_PROTOCOL)],
+        }
+        assert parser.extract_cost_basis(receipt) == 7_500_000
+
+    def test_cost_basis_usdce_only(self, parser: PolymarketReceiptParser) -> None:
+        """Wrap-only receipt (no trade) — USDC.e leg counted."""
+        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 1,
+            "status": 1,
+            "logs": [_erc20_transfer_log(USDCE_POLYGON, 3_000_000, from_addr=_TEST_USER, to_addr=_TEST_PROTOCOL)],
+        }
+        assert parser.extract_cost_basis(receipt) == 3_000_000
+
+    def test_proceeds_sums_pusd_and_usdce(self, parser: PolymarketReceiptParser) -> None:
+        """Proceeds path mirrors cost basis: sum of both V2 collateral tokens.
+
+        Proceeds transfers go protocol→user (the user is receiving).
+        """
+        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 1,
+            "status": 1,
+            "logs": [
+                _erc20_transfer_log(PUSD, 4_000_000, from_addr=_TEST_PROTOCOL, to_addr=_TEST_USER),
+                _erc20_transfer_log(USDCE_POLYGON, 1_000_000, from_addr=_TEST_PROTOCOL, to_addr=_TEST_USER),
+            ],
+        }
+        assert parser.extract_proceeds(receipt) == 5_000_000
+
+    def test_cost_basis_ignores_other_erc20s(self, parser: PolymarketReceiptParser) -> None:
+        """Random ERC-20 transfers in the same receipt must not count
+        toward cost basis (POLYMARKET_CONTRACTS filtering applies first)."""
+        unrelated = "0x1111111111111111111111111111111111111111"
+        receipt = {
+            "transactionHash": "0xabc",
+            "blockNumber": 1,
+            "status": 1,
+            "logs": [
+                _erc20_transfer_log(unrelated, 999_999),
+                _erc20_transfer_log(PUSD, 1_000_000),
+            ],
+        }
+        # Only pUSD counts (unrelated is filtered by POLYMARKET_CONTRACTS).
+        assert parser.extract_cost_basis(receipt) == 1_000_000
+
+    def test_cost_basis_returns_none_on_no_transfers(self, parser: PolymarketReceiptParser) -> None:
+        """No ERC-20 transfers at all → None (caller can short-circuit)."""
+        receipt = {"transactionHash": "0xabc", "blockNumber": 1, "status": 1, "logs": []}
+        assert parser.extract_cost_basis(receipt) is None
+
+    def test_proceeds_returns_none_on_no_transfers(self, parser: PolymarketReceiptParser) -> None:
+        receipt = {"transactionHash": "0xabc", "blockNumber": 1, "status": 1, "logs": []}
+        assert parser.extract_proceeds(receipt) is None
+
+
+class TestV2PolymarketContractsSet:
+    """The frozenset of recognized contract addresses is the gating filter
+    for parse_ctf_receipt. V2 added 5 new addresses (pUSD, USDC.e, native
+    USDC, Onramp, Offramp) and dropped the V1 exchanges — pin the membership."""
+
+    def test_v2_pusd_in_set(self) -> None:
+        assert PUSD.lower() in POLYMARKET_CONTRACTS
+
+    def test_v2_usdce_in_set(self) -> None:
+        from almanak.framework.connectors.polymarket.models import USDCE_POLYGON
+
+        assert USDCE_POLYGON.lower() in POLYMARKET_CONTRACTS
+
+    def test_v2_onramp_in_set(self) -> None:
+        from almanak.framework.connectors.polymarket.models import COLLATERAL_ONRAMP
+
+        assert COLLATERAL_ONRAMP.lower() in POLYMARKET_CONTRACTS
+
+    def test_v2_offramp_in_set(self) -> None:
+        from almanak.framework.connectors.polymarket.models import COLLATERAL_OFFRAMP
+
+        assert COLLATERAL_OFFRAMP.lower() in POLYMARKET_CONTRACTS
+
+    def test_v2_exchanges_in_set(self) -> None:
+        assert CTF_EXCHANGE_V2.lower() in POLYMARKET_CONTRACTS
+        assert NEG_RISK_EXCHANGE_V2.lower() in POLYMARKET_CONTRACTS
+
+    def test_set_size_matches_v2_contract_count(self) -> None:
+        """V2: 9 contracts in the filter set (CTF + 2 V2 exchanges + adapter
+        + pUSD + USDC.e + USDC native + Onramp + Offramp). A drift here
+        means we either added without testing or accidentally dropped a
+        contract."""
+        assert len(POLYMARKET_CONTRACTS) == 9
+
+    def test_addresses_are_all_lowercase(self) -> None:
+        """All entries must be stored lowercase so case-insensitive
+        comparisons (``log['address'].lower() in POLYMARKET_CONTRACTS``)
+        always work without per-call normalization."""
+        for addr in POLYMARKET_CONTRACTS:
+            assert addr == addr.lower(), f"{addr} is not lowercase"

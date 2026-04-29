@@ -65,29 +65,19 @@ def executor_no_clob():
 
 @pytest.fixture
 def clob_buy_bundle():
-    """Create a valid CLOB buy order bundle."""
+    """Create a valid V2 CLOB buy order bundle (order_request, gateway-signed)."""
     return ActionBundle(
         intent_type="PREDICTION_BUY",
         transactions=[],  # Empty - CLOB orders are off-chain
         metadata={
             "protocol": "polymarket",
-            "order_payload": {
-                "order": {
-                    "salt": 12345,
-                    "maker": "0x1234567890123456789012345678901234567890",
-                    "signer": "0x1234567890123456789012345678901234567890",
-                    "taker": "0x0000000000000000000000000000000000000000",
-                    "tokenId": "1234567890",
-                    "makerAmount": "1000000000",
-                    "takerAmount": "500000000",
-                    "expiration": "0",
-                    "nonce": "0",
-                    "feeRateBps": "0",
-                    "side": 0,
-                    "signatureType": 0,
-                },
-                "signature": "0xabcdef1234567890",
-                "orderType": "GTC",
+            "order_request": {
+                "token_id": "1234567890",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "100",
+                "time_in_force": "GTC",
+                "expiration": 0,
             },
             "side": "BUY",
             "size": "100",
@@ -100,15 +90,19 @@ def clob_buy_bundle():
 
 @pytest.fixture
 def clob_sell_bundle():
-    """Create a valid CLOB sell order bundle."""
+    """Create a valid V2 CLOB sell order bundle (order_request, gateway-signed)."""
     return ActionBundle(
         intent_type="PREDICTION_SELL",
         transactions=[],  # Empty - CLOB orders are off-chain
         metadata={
             "protocol": "polymarket",
-            "order_payload": {
-                "order": {"salt": 67890},
-                "signature": "0xfedcba",
+            "order_request": {
+                "token_id": "1234567890",
+                "side": "SELL",
+                "price": "0.60",
+                "size": "50",
+                "time_in_force": "GTC",
+                "expiration": 0,
             },
             "side": "SELL",
             "size": "50",
@@ -182,12 +176,12 @@ class TestIsClobBundle:
         """Non-Polymarket bundle should not be CLOB."""
         assert executor_with_clob._is_clob_bundle(uniswap_swap_bundle) is False
 
-    def test_rejects_bundle_without_order_payload(self, executor_with_clob):
-        """Bundle without order_payload should not be CLOB."""
+    def test_rejects_bundle_without_order_request(self, executor_with_clob):
+        """Bundle without order_request should not be CLOB."""
         bundle = ActionBundle(
             intent_type="PREDICTION_BUY",
             transactions=[],
-            metadata={"protocol": "polymarket"},  # Missing order_payload
+            metadata={"protocol": "polymarket"},  # Missing order_request
         )
         assert executor_with_clob._is_clob_bundle(bundle) is False
 
@@ -198,7 +192,14 @@ class TestIsClobBundle:
             transactions=[{"to": "0x123", "data": "0x"}],  # Has transactions
             metadata={
                 "protocol": "polymarket",
-                "order_payload": {"order": {}},
+                "order_request": {
+                    "token_id": "0xabc",
+                    "side": "BUY",
+                    "price": "0.5",
+                    "size": "1",
+                    "time_in_force": "GTC",
+                    "expiration": 0,
+                },
             },
         )
         assert executor_with_clob._is_clob_bundle(bundle) is False
@@ -386,9 +387,13 @@ class TestEndToEndIntegration:
             transactions=[],
             metadata={
                 "protocol": "polymarket",
-                "order_payload": {
-                    "order": {"salt": 111, "tokenId": "token-yes"},
-                    "signature": "0xsig",
+                "order_request": {
+                    "token_id": "token-yes",
+                    "side": "BUY",
+                    "price": "0.65",
+                    "size": "50",
+                    "time_in_force": "GTC",
+                    "expiration": 0,
                 },
                 "side": "BUY",
                 "size": "50",
@@ -421,9 +426,13 @@ class TestEndToEndIntegration:
             transactions=[],
             metadata={
                 "protocol": "polymarket",
-                "order_payload": {
-                    "order": {"salt": 222},
-                    "signature": "0xsig_sell",
+                "order_request": {
+                    "token_id": "token-yes",
+                    "side": "SELL",
+                    "price": "0.70",
+                    "size": "25",
+                    "time_in_force": "GTC",
+                    "expiration": 0,
                 },
                 "side": "SELL",
                 "size": "25",

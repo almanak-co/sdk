@@ -34,8 +34,20 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 
 @pytest.fixture
 def mock_clob_client():
-    """Create a mock ClobClient."""
+    """Create a mock ClobClient.
+
+    Pre-configured with a non-empty ``get_markets`` result so the V2 path
+    in ``ClobActionHandler.execute`` (which looks up the GammaMarket from
+    the token_id before calling ``create_and_post_order``) finds a market.
+    """
     client = MagicMock()
+    # Provide a stand-in GammaMarket so the token_id -> market lookup
+    # succeeds in ClobActionHandler.execute. Tests that need to assert
+    # behaviour on a missing market should override this on the fixture.
+    market = MagicMock()
+    market.id = "market-456"
+    market.condition_id = "0xcondition"
+    client.get_markets.return_value = [market]
     return client
 
 
@@ -53,37 +65,27 @@ def handler_no_client():
 
 @pytest.fixture
 def valid_clob_bundle():
-    """Create a valid CLOB order bundle."""
+    """Create a valid V2 CLOB order bundle (order_request, gateway-signed)."""
     return ActionBundle(
         intent_type="PREDICTION_BUY",
         transactions=[],  # CLOB orders have no on-chain transactions
         metadata={
             "protocol": "polymarket",
-            "order_payload": {
-                "order": {
-                    "salt": 12345,
-                    "maker": "0x1234...",
-                    "signer": "0x1234...",
-                    "taker": "0x0000...",
-                    "tokenId": "12345...",
-                    "makerAmount": "1000000000",
-                    "takerAmount": "500000000",
-                    "expiration": "0",
-                    "nonce": "0",
-                    "feeRateBps": "0",
-                    "side": 0,
-                    "signatureType": 0,
-                },
-                "signature": "0xabcdef...",
-                "orderType": "GTC",
+            "order_request": {
+                "token_id": "12345",
+                "side": "BUY",
+                "price": "0.50",
+                "size": "100",
+                "time_in_force": "GTC",
+                "expiration": 0,
             },
             "side": "BUY",
             "size": "100",
             "price": "0.50",
             # VIB-3218: production adapter always sets order_type on the
-            # bundle (polymarket/adapter.py:354). Omitting it from the
-            # fixture would let GTC tests pass via the ``order_type_hint == ""``
-            # branch and mask regressions in the IOC/FOK zero-fill demotion.
+            # bundle. Omitting it from the fixture would let GTC tests
+            # pass via the ``order_type_hint == ""`` branch and mask
+            # regressions in the IOC/FOK zero-fill demotion.
             "order_type": "GTC",
             "intent_id": "test-intent-123",
         },
@@ -92,7 +94,7 @@ def valid_clob_bundle():
 
 @pytest.fixture
 def valid_order_request_bundle():
-    """Create a valid gateway-backed CLOB order_request bundle."""
+    """Create a valid gateway-backed CLOB order_request bundle (IOC variant)."""
     return ActionBundle(
         intent_type="PREDICTION_BUY",
         transactions=[],
@@ -100,12 +102,12 @@ def valid_order_request_bundle():
             "protocol": "polymarket",
             "intent_id": "test-intent-123",
             "order_request": {
-                "token_id": "12345...",
+                "token_id": "12345",
                 "side": "BUY",
                 "price": "0.50",
                 "size": "100",
                 "time_in_force": "IOC",
-                "fee_rate_bps": "1000",
+                "expiration": 0,
             },
         },
     )
@@ -172,9 +174,21 @@ class TestCanHandle:
         valid_clob_bundle.transactions = [{"to": "0x123", "data": "0xabc"}]
         assert handler.can_handle(valid_clob_bundle) is False
 
-    def test_rejects_bundle_without_order_payload(self, handler, valid_clob_bundle):
-        """Test that handler rejects bundles without order_payload."""
-        del valid_clob_bundle.metadata["order_payload"]
+    def test_rejects_bundle_without_order_request(self, handler, valid_clob_bundle):
+        """Test that handler rejects bundles without order_request."""
+        del valid_clob_bundle.metadata["order_request"]
+        assert handler.can_handle(valid_clob_bundle) is False
+
+    def test_rejects_bundle_with_only_legacy_order_payload(self, handler, valid_clob_bundle):
+        """V1 ``order_payload`` alone must NOT be accepted (regression guard).
+
+        VIB-3696: the handler used to accept ``order_payload`` and call
+        ``submit_order_payload`` on the gateway-routed client, which has
+        no such method -> AttributeError at runtime. The dead branch is
+        removed; bundles that only carry the legacy key must be rejected.
+        """
+        del valid_clob_bundle.metadata["order_request"]
+        valid_clob_bundle.metadata["order_payload"] = {"order": {}, "signature": "0x"}
         assert handler.can_handle(valid_clob_bundle) is False
 
     def test_rejects_wrong_protocol(self, handler, valid_clob_bundle):
@@ -198,7 +212,7 @@ class TestExecute:
 
     def test_execute_success(self, handler, mock_clob_client, valid_clob_bundle, mock_order_response):
         """Test successful order submission."""
-        mock_clob_client.submit_order_payload.return_value = mock_order_response
+        mock_clob_client.create_and_post_order.return_value = mock_order_response
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -206,7 +220,11 @@ class TestExecute:
         assert result.order_id == "order-123"
         assert result.status == ClobOrderStatus.LIVE
         assert result.error is None
-        mock_clob_client.submit_order_payload.assert_called_once_with(valid_clob_bundle.metadata["order_payload"])
+        # V2: handler always routes through create_and_post_order; the
+        # legacy submit_order_payload branch was removed in VIB-3696.
+        mock_clob_client.create_and_post_order.assert_called_once()
+        # Legacy V1 method must never be reached even if the mock has it.
+        mock_clob_client.submit_order_payload.assert_not_called()
 
     def test_execute_order_request_calls_create_and_post_order(
         self, handler, mock_clob_client, valid_order_request_bundle, mock_order_response
@@ -219,15 +237,54 @@ class TestExecute:
 
         assert result.success is True
         mock_clob_client.create_and_post_order.assert_called_once_with(
-            token_id="12345...",
+            token_id="12345",
             price=Decimal("0.50"),
             size=Decimal("100"),
             side="BUY",
+            market=mock_clob_client.get_markets.return_value[0],
             time_in_force="GTC",
             expiration=0,
-            fee_rate_bps="1000",
         )
         mock_clob_client.submit_order_payload.assert_not_called()
+
+    def test_execute_resolves_market_from_token_id(
+        self, handler, mock_clob_client, valid_clob_bundle, mock_order_response
+    ):
+        """The handler must look up the market that owns the order's
+        ``token_id``, not just pick "the first market". Regression: V2
+        signs against neg-risk vs binary CTF V2 based on
+        ``market.neg_risk``, so picking the wrong market silently corrupts
+        the signature path."""
+        # Build the MarketFilters that the handler is expected to construct
+        # from the bundle and use to look up the market via the SDK.
+        from almanak.framework.connectors.polymarket import MarketFilters
+
+        # Two distinct markets — the handler must pass the bundle's token_id
+        # in the filter so the SDK returns the matching one.
+        owning_market = MagicMock()
+        owning_market.id = "market-OWNING-12345"
+        owning_market.condition_id = "0xowning"
+
+        def get_markets_by_filter(filters: MarketFilters):
+            assert filters.clob_token_ids == ["12345"], (
+                f"expected clob_token_ids=['12345'] from bundle's order_request, got {filters.clob_token_ids}"
+            )
+            assert filters.limit == 1
+            return [owning_market]
+
+        mock_clob_client.get_markets.side_effect = get_markets_by_filter
+        mock_clob_client.create_and_post_order.return_value = mock_order_response
+
+        result = asyncio.run(handler.execute(valid_clob_bundle))
+
+        assert result.success is True
+        # The submission must use the SPECIFIC market we returned for the
+        # bundle's token_id, not some sibling. This passes if and only if
+        # ``execute`` resolves the market via token_id-keyed lookup before
+        # signing.
+        mock_clob_client.create_and_post_order.assert_called_once()
+        call_kwargs = mock_clob_client.create_and_post_order.call_args.kwargs
+        assert call_kwargs["market"] is owning_market
 
     def test_execute_without_client(self, handler_no_client, valid_clob_bundle):
         """Test that execute fails gracefully without client."""
@@ -246,7 +303,7 @@ class TestExecute:
 
     def test_execute_api_error(self, handler, mock_clob_client, valid_clob_bundle):
         """Test handling of API errors."""
-        mock_clob_client.submit_order_payload.side_effect = Exception("API rate limit exceeded")
+        mock_clob_client.create_and_post_order.side_effect = Exception("API rate limit exceeded")
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -264,7 +321,7 @@ class TestExecute:
         # the mock realistic values so Decimal comparisons work.
         mock_response.filled_size = Decimal("100")
         mock_response.avg_fill_price = Decimal("0.65")
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -273,7 +330,7 @@ class TestExecute:
 
     def test_execute_includes_submitted_at(self, handler, mock_clob_client, valid_clob_bundle, mock_order_response):
         """Test that result includes submission timestamp."""
-        mock_clob_client.submit_order_payload.return_value = mock_order_response
+        mock_clob_client.create_and_post_order.return_value = mock_order_response
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -288,7 +345,7 @@ class TestExecute:
         self, handler, mock_clob_client, valid_clob_bundle, mock_order_response
     ):
         """GTC that rests on the book returns success=True but filled_size=0."""
-        mock_clob_client.submit_order_payload.return_value = mock_order_response
+        mock_clob_client.create_and_post_order.return_value = mock_order_response
         # valid_clob_bundle.metadata["order_type"] is GTC by payload
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
@@ -311,8 +368,9 @@ class TestExecute:
         mock_response.status.value = "LIVE"
         mock_response.filled_size = Decimal("0")
         mock_response.avg_fill_price = None
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         valid_clob_bundle.metadata["order_type"] = "IOC"
+        valid_clob_bundle.metadata["order_request"]["time_in_force"] = "IOC"
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -360,8 +418,9 @@ class TestExecute:
         mock_response.status.value = "LIVE"
         mock_response.filled_size = Decimal("10")
         mock_response.avg_fill_price = Decimal("0.51")
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         valid_clob_bundle.metadata["order_type"] = "IOC"
+        valid_clob_bundle.metadata["order_request"]["time_in_force"] = "IOC"
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -397,9 +456,10 @@ class TestExecute:
         mock_response.status.value = "LIVE"
         mock_response.filled_size = Decimal("10")
         mock_response.avg_fill_price = Decimal("0.51")
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         # Fixture default is GTC (we set it explicitly for clarity).
         valid_clob_bundle.metadata["order_type"] = "GTC"
+        valid_clob_bundle.metadata["order_request"]["time_in_force"] = "GTC"
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -415,8 +475,9 @@ class TestExecute:
         mock_response.status.value = "MATCHED"
         mock_response.filled_size = Decimal("25")
         mock_response.avg_fill_price = Decimal("0.48")
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         valid_clob_bundle.metadata["order_type"] = "IOC"
+        valid_clob_bundle.metadata["order_request"]["time_in_force"] = "IOC"
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
         fill = result.to_prediction_fill()
@@ -432,12 +493,28 @@ class TestExecute:
     def test_to_prediction_fill_returns_none_without_requested_size(
         self, handler, mock_clob_client, valid_clob_bundle, mock_order_response
     ):
-        """Bundles with no size hint (e.g. SELL 'all') produce no PredictionFill."""
-        mock_clob_client.submit_order_payload.return_value = mock_order_response
+        """Bundles with no size hint anywhere produce no PredictionFill.
+
+        In production V2 every compiled bundle has size in both the top-level
+        metadata and the nested order_request, so requested_size is always
+        populated. This test exercises the defensive path where neither is
+        present (legacy / hand-built / partially-populated bundle).
+        """
+        mock_clob_client.create_and_post_order.return_value = mock_order_response
         del valid_clob_bundle.metadata["size"]
+        # Also drop size from order_request so _parse_decimal returns None.
+        # We still need a numeric size for create_and_post_order, so swap to
+        # a request bundle that omits size and has the handler fail-out
+        # before the API call instead.
+        valid_clob_bundle.metadata["order_request"].pop("size", None)
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
+        # Without size, the handler raises ValueError ("missing required
+        # price or size fields") and routes to the FAILED exception path —
+        # requested_size remains None and to_prediction_fill() returns None.
+        assert result.success is False
+        assert result.status == ClobOrderStatus.FAILED
         assert result.requested_size is None
         assert result.to_prediction_fill() is None
 
@@ -456,7 +533,7 @@ class TestExecute:
         mock_response.status.value = "MATCHED"
         mock_response.filled_size = "100"  # string, not Decimal
         mock_response.avg_fill_price = "0.47"  # string, not Decimal
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -473,7 +550,7 @@ class TestExecute:
         mock_response.status.value = "LIVE"
         mock_response.filled_size = None
         mock_response.avg_fill_price = None
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         # Default GTC in fixture -> None fill is consistent with resting order
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -496,8 +573,9 @@ class TestExecute:
         mock_response.status.value = "LIVE"
         mock_response.filled_size = Decimal("0")
         mock_response.avg_fill_price = None
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         valid_clob_bundle.metadata["order_type"] = "FOK"
+        valid_clob_bundle.metadata["order_request"]["time_in_force"] = "FOK"
 
         result = asyncio.run(handler.execute(valid_clob_bundle))
 
@@ -518,7 +596,7 @@ class TestExecute:
         mock_response.status.value = "MATCHED"
         mock_response.filled_size = Decimal("50")
         mock_response.avg_fill_price = Decimal("0.60")
-        mock_clob_client.submit_order_payload.return_value = mock_response
+        mock_clob_client.create_and_post_order.return_value = mock_response
         # No size metadata -> requested_size is None
         del valid_clob_bundle.metadata["size"]
 

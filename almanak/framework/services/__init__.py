@@ -1,12 +1,5 @@
 """Almanak Strategy Framework v2.0 - Services"""
 
-from .auto_redemption import (
-    AutoRedemptionService,
-    MarketResolvedEvent,
-    RedemptionAttempt,
-    RedemptionCallback,
-    RedemptionStatus,
-)
 from .base import (
     HealthCheckResult,
     Service,
@@ -57,7 +50,6 @@ __all__ = [
     "ServiceStopError",
     # Services
     "AllowanceInfo",
-    "AutoRedemptionService",
     "BalanceInfo",
     "BorrowPosition",
     "EmergencyManager",
@@ -66,7 +58,6 @@ __all__ = [
     "FullPositionSummary",
     "GetPositionCallback",
     "LPPositionInfo",
-    "MarketResolvedEvent",
     "MonitoredPosition",
     "MonitoringResult",
     "OperatorCardGenerator",
@@ -76,9 +67,6 @@ __all__ = [
     "PredictionEvent",
     "PredictionExitConditions",
     "PredictionPositionMonitor",
-    "RedemptionAttempt",
-    "RedemptionCallback",
-    "RedemptionStatus",
     "StrategySnapshot",
     "StuckDetectionResult",
     "StuckDetector",

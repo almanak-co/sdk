@@ -77,19 +77,24 @@ def mock_gamma_market() -> GammaMarket:
 
 @pytest.fixture
 def mock_orderbook() -> OrderBook:
-    """Create a mock OrderBook for testing."""
+    """Mock OrderBook in Polymarket's depth-walk format.
+
+    Bids ascend (worst→best), asks descend (worst→best). best_bid is the
+    LAST entry in ``bids``, best_ask is the LAST entry in ``asks``. This
+    matches what ``GET /book`` actually returns.
+    """
     return OrderBook(
         market="19045189272319329424023217822141741659150265216200539353252147725932663608488",
         asset_id="19045189272319329424023217822141741659150265216200539353252147725932663608488",
         bids=[
-            PriceLevel(price=Decimal("0.64"), size=Decimal("1000")),
-            PriceLevel(price=Decimal("0.63"), size=Decimal("2500")),
             PriceLevel(price=Decimal("0.62"), size=Decimal("5000")),
+            PriceLevel(price=Decimal("0.63"), size=Decimal("2500")),
+            PriceLevel(price=Decimal("0.64"), size=Decimal("1000")),  # best bid
         ],
         asks=[
-            PriceLevel(price=Decimal("0.66"), size=Decimal("1500")),
-            PriceLevel(price=Decimal("0.67"), size=Decimal("3000")),
             PriceLevel(price=Decimal("0.68"), size=Decimal("4500")),
+            PriceLevel(price=Decimal("0.67"), size=Decimal("3000")),
+            PriceLevel(price=Decimal("0.66"), size=Decimal("1500")),  # best ask
         ],
         hash="0xabc123",
     )

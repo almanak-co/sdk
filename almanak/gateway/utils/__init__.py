@@ -9,6 +9,7 @@ from almanak.gateway.utils.rpc_provider import (
     POA_CHAINS,
     Network,
     NodeProvider,
+    get_cached_web3,
     get_rpc_url,
     get_rpc_url_cached,
     get_supported_chains,
@@ -20,6 +21,7 @@ from almanak.gateway.utils.rpc_provider import (
 __all__ = [
     "NodeProvider",
     "Network",
+    "get_cached_web3",
     "get_rpc_url",
     "get_rpc_url_cached",
     "is_poa_chain",

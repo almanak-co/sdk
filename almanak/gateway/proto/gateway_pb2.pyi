@@ -5836,6 +5836,224 @@ class PolymarketBalanceAllowanceResponse(_message.Message):
 Global___PolymarketBalanceAllowanceResponse: _TypeAlias = PolymarketBalanceAllowanceResponse  # noqa: Y015
 
 @_typing.final
+class PolymarketGetPriceHistoryRequest(_message.Message):
+    """=============================================================================
+    Polymarket Historical Data Messages
+    =============================================================================
+
+    ``GetPriceHistory`` proxies the public CLOB ``/prices-history`` endpoint.
+    Either ``interval`` (predefined: 1m/1h/6h/1d/1w/max) or
+    ``start_ts``+``end_ts`` (custom Unix-second range) may be provided — they
+    are mutually exclusive at the source endpoint, validated server-side.
+    ``fidelity`` (resolution in minutes) is optional in either mode.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TOKEN_ID_FIELD_NUMBER: _builtins.int
+    INTERVAL_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    FIDELITY_FIELD_NUMBER: _builtins.int
+    token_id: _builtins.str
+    """CLOB token id (YES or NO outcome)"""
+    interval: _builtins.str
+    """Optional: 1m / 1h / 6h / 1d / 1w / max"""
+    start_ts: _builtins.int
+    """Optional: Unix seconds, requires end_ts"""
+    end_ts: _builtins.int
+    """Optional: Unix seconds, requires start_ts"""
+    fidelity: _builtins.int
+    """Optional: minute-resolution buckets"""
+    def __init__(
+        self,
+        *,
+        token_id: _builtins.str = ...,
+        interval: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        fidelity: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["end_ts", b"end_ts", "fidelity", b"fidelity", "interval", b"interval", "start_ts", b"start_ts", "token_id", b"token_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketGetPriceHistoryRequest: _TypeAlias = PolymarketGetPriceHistoryRequest  # noqa: Y015
+
+@_typing.final
+class PolymarketHistoricalPrice(_message.Message):
+    """One CLOB ``/prices-history`` point. Polymarket returns ``t`` (Unix seconds)
+    and ``p`` (probability 0.0-1.0); we mirror them as int64 + string-decimal.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds (UTC)"""
+    price: _builtins.str
+    """Decimal string (probability 0.0-1.0)"""
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        price: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["price", b"price", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketHistoricalPrice: _TypeAlias = PolymarketHistoricalPrice  # noqa: Y015
+
+@_typing.final
+class PolymarketPriceHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TOKEN_ID_FIELD_NUMBER: _builtins.int
+    INTERVAL_FIELD_NUMBER: _builtins.int
+    PRICES_FIELD_NUMBER: _builtins.int
+    START_TIME_FIELD_NUMBER: _builtins.int
+    END_TIME_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    token_id: _builtins.str
+    interval: _builtins.str
+    """Echo of the resolved interval ("custom" if range)"""
+    start_time: _builtins.int
+    """Unix seconds of first price (0 if empty)"""
+    end_time: _builtins.int
+    """Unix seconds of last price (0 if empty)"""
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def prices(self) -> _containers.RepeatedCompositeFieldContainer[Global___PolymarketHistoricalPrice]: ...
+    def __init__(
+        self,
+        *,
+        token_id: _builtins.str = ...,
+        interval: _builtins.str = ...,
+        prices: _abc.Iterable[Global___PolymarketHistoricalPrice] | None = ...,
+        start_time: _builtins.int = ...,
+        end_time: _builtins.int = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["end_time", b"end_time", "error", b"error", "interval", b"interval", "prices", b"prices", "start_time", b"start_time", "success", b"success", "token_id", b"token_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketPriceHistoryResponse: _TypeAlias = PolymarketPriceHistoryResponse  # noqa: Y015
+
+@_typing.final
+class PolymarketGetTradeTapeRequest(_message.Message):
+    """``GetTradeTape`` proxies the authenticated CLOB ``/data/trades`` endpoint.
+    ``token_id`` is optional (omit for market-wide tape). ``limit`` is capped
+    at 500 by the upstream and defaults to 100 when zero.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TOKEN_ID_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    token_id: _builtins.str
+    """Optional: filter trades by CLOB token id"""
+    limit: _builtins.int
+    """Default 100, capped at 500 server-side"""
+    def __init__(
+        self,
+        *,
+        token_id: _builtins.str = ...,
+        limit: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "token_id", b"token_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketGetTradeTapeRequest: _TypeAlias = PolymarketGetTradeTapeRequest  # noqa: Y015
+
+@_typing.final
+class PolymarketHistoricalTrade(_message.Message):
+    """One trade from the tape. Mirrors ``HistoricalTrade`` model fields plus
+    any market/asset metadata the upstream returns (kept for compatibility
+    with future provider-side enrichment).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    TOKEN_ID_FIELD_NUMBER: _builtins.int
+    SIDE_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    SIZE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    MAKER_FIELD_NUMBER: _builtins.int
+    TAKER_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    ASSET_ID_FIELD_NUMBER: _builtins.int
+    OUTCOME_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """Trade id (sometimes ``tradeId`` upstream)"""
+    token_id: _builtins.str
+    """CLOB token id"""
+    side: _builtins.str
+    """"BUY" or "SELL" """
+    price: _builtins.str
+    """Decimal string"""
+    size: _builtins.str
+    """Decimal string"""
+    timestamp: _builtins.int
+    """Unix seconds (UTC)"""
+    maker: _builtins.str
+    """Optional maker address"""
+    taker: _builtins.str
+    """Optional taker address"""
+    market_id: _builtins.str
+    """Optional condition / market id when present"""
+    asset_id: _builtins.str
+    """Optional asset id (alias for token_id upstream)"""
+    outcome: _builtins.str
+    """Optional "YES"/"NO" if upstream tags it"""
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        token_id: _builtins.str = ...,
+        side: _builtins.str = ...,
+        price: _builtins.str = ...,
+        size: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        maker: _builtins.str = ...,
+        taker: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+        asset_id: _builtins.str = ...,
+        outcome: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "id", b"id", "maker", b"maker", "market_id", b"market_id", "outcome", b"outcome", "price", b"price", "side", b"side", "size", b"size", "taker", b"taker", "timestamp", b"timestamp", "token_id", b"token_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketHistoricalTrade: _TypeAlias = PolymarketHistoricalTrade  # noqa: Y015
+
+@_typing.final
+class PolymarketTradeTapeResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TRADES_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def trades(self) -> _containers.RepeatedCompositeFieldContainer[Global___PolymarketHistoricalTrade]: ...
+    def __init__(
+        self,
+        *,
+        trades: _abc.Iterable[Global___PolymarketHistoricalTrade] | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success", "trades", b"trades"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketTradeTapeResponse: _TypeAlias = PolymarketTradeTapeResponse  # noqa: Y015
+
+@_typing.final
 class EnsoRouteRequest(_message.Message):
     """=============================================================================
     Enso Route Messages

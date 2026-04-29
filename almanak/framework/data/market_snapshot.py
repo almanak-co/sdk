@@ -79,12 +79,13 @@ DEFAULT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 # Per-protocol token variant registry (VIB-3138)
 # =============================================================================
 #
-# Some protocols only accept a specific token variant. Polymarket settles in
-# USDC.e on Polygon, NOT native USDC -- a strategy calling
+# Some protocols only accept a specific token variant. Polymarket V2 (April
+# 2026 cutover) settles in pUSD on Polygon — a strategy calling
 # ``market.balance("USDC")`` without protocol context returns native USDC and
 # the CLOB later rejects the order with "insufficient balance". This registry
 # lets callers disambiguate: ``market.balance("USDC", protocol="polymarket")``
-# returns the USDC.e balance on Polygon.
+# returns the pUSD balance on Polygon (the actually-spendable collateral,
+# wrapped from USDC.e or native USDC at the on-chain CollateralOnramp).
 #
 # Shape: ``{chain: {protocol: {generic_symbol: preferred_variant_symbol}}}``
 # Extend this when a protocol has a non-default settlement-token variant.
@@ -92,7 +93,16 @@ DEFAULT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 PROTOCOL_TOKEN_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
     "polygon": {
         "polymarket": {
-            "USDC": "USDC.e",
+            # V2 (April 2026 cutover): the spendable trading collateral on
+            # Polymarket is pUSD, minted from USDC.e (or native USDC) via the
+            # CollateralOnramp. ``balance("USDC", protocol="polymarket")``
+            # returns the pUSD balance — the amount actually usable for orders.
+            #
+            # Polymarket's pUSD is registered as ``PUSD`` on polygon in
+            # ``framework/data/tokens/data/tokens.json``. Three other tokens
+            # share the symbol on other chains (Pleasing/Palm/Plume USD) but
+            # the resolver is chain-scoped so the lookup is unambiguous here.
+            "USDC": "PUSD",
         },
     },
 }
@@ -1040,7 +1050,7 @@ class MarketSnapshot:
                 When set, resolves generic symbols through ``PROTOCOL_TOKEN_VARIANTS``
                 to the protocol's preferred variant -- e.g.,
                 ``balance("USDC", protocol="polymarket")`` on Polygon returns the
-                USDC.e balance specifically. When unset, returns the balance for
+                pUSD balance specifically. When unset, returns the balance for
                 the symbol as given (which may or may not match what the protocol
                 actually settles in).
 
@@ -1056,10 +1066,10 @@ class MarketSnapshot:
             # Returns: Decimal("1000.50")
 
             polymarket_usdc = snapshot.balance("USDC", protocol="polymarket")
-            # On Polygon: returns USDC.e balance (what Polymarket actually settles in)
+            # On Polygon: returns pUSD balance (V2 trading collateral)
         """
         # VIB-3138: If a protocol was specified, translate the symbol to the
-        # variant that protocol settles in (e.g., USDC -> USDC.e on polymarket).
+        # variant that protocol settles in (e.g., USDC -> PUSD on polymarket).
         resolved_token = self._resolve_protocol_variant(token, protocol)
 
         # Return cached value if available
@@ -1101,7 +1111,7 @@ class MarketSnapshot:
         """Translate a generic symbol to the protocol's preferred variant.
 
         VIB-3138: Some protocols only accept a specific token variant (e.g.,
-        Polymarket on Polygon settles in USDC.e, not native USDC). When a
+        Polymarket V2 on Polygon settles in pUSD, not native USDC). When a
         caller passes ``protocol=``, look up the variant in
         ``PROTOCOL_TOKEN_VARIANTS`` and return the resolved symbol. When there
         is no mapping, return the original symbol unchanged.
@@ -2734,7 +2744,7 @@ class MarketSnapshot:
             protocol: Optional protocol name for variant disambiguation (VIB-3138).
                 Forwarded to :meth:`balance` so that, e.g.,
                 ``balance_usd("USDC", protocol="polymarket")`` on Polygon is
-                computed from the USDC.e balance (what Polymarket settles in).
+                computed from the pUSD balance (the V2 trading collateral).
 
         Returns:
             Balance value in USD as a Decimal
@@ -2748,8 +2758,10 @@ class MarketSnapshot:
             # If balance is 2 WETH at $2500, returns: Decimal("5000.00")
         """
         token_balance = self.balance(token, protocol=protocol)
-        # Price lookups follow the generic symbol -- USDC.e and USDC share
-        # the same USD peg, so pricing on the resolved variant is unnecessary.
+        # Price lookups follow the generic symbol -- pUSD, USDC.e, and USDC
+        # all share the same USD peg, so pricing on the resolved variant is
+        # unnecessary (and pUSD has no Chainlink/CoinGecko listing anyway —
+        # the gateway price aggregator falls back to $1.00 by address).
         token_price = self.price(token)
         return token_balance * token_price
 

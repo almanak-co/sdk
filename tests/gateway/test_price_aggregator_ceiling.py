@@ -107,6 +107,152 @@ class TestSingleSourcePriceCeiling:
         assert result.price == Decimal("50000000")
 
 
+class TestStablecoinFallback:
+    """Tests for the ``$1.00`` fallback when all upstream sources fail.
+
+    Address-keyed fallback was added to disambiguate the ``PUSD`` symbol
+    (Polymarket vs. ``Pleasing USD`` / ``Palm USD`` / ``Plume USD``); the
+    legacy symbol-keyed allowlist is preserved for unambiguous symbols only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pusd_with_polymarket_address_falls_back_to_one_dollar(self) -> None:
+        """Polymarket pUSD (resolved to its on-chain address) gets $1.00 when
+        all sources fail. This is the original PR's intent: pUSD has no
+        Chainlink / CoinGecko listing, so the fallback IS the price source."""
+        from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
+        from almanak.gateway.data.price.aggregator import PriceAggregator
+
+        from almanak import Chain
+
+        sources = [
+            MockPriceSource("chainlink", error="no feed"),
+            MockPriceSource("coingecko", error="404 not listed"),
+        ]
+        aggregator = PriceAggregator(sources=sources)
+
+        polymarket_pusd = ResolvedToken(
+            symbol="PUSD",
+            address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+            decimals=6,
+            chain=Chain.POLYGON,
+            chain_id=137,
+            name="Polymarket USD",
+            coingecko_id="",
+            is_stablecoin=True,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol="USDC",
+            bridge_type=BridgeType.NATIVE,
+            source="static",
+        )
+        result = await aggregator.get_aggregated_price("PUSD", "USD", resolved_token=polymarket_pusd)
+
+        assert result.price == Decimal("1.00")
+        assert result.source == "stablecoin_fallback"
+
+    @pytest.mark.asyncio
+    async def test_pusd_with_other_address_does_not_fall_back(self) -> None:
+        """A non-Polymarket token whose symbol happens to be ``PUSD`` (e.g.
+        ``Pleasing USD`` on a different chain) must NOT get the $1.00
+        fallback when sources fail — that's the security regression Codex
+        flagged for the symbol-only allowlist."""
+        from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
+        from almanak.gateway.data.price.aggregator import PriceAggregator
+
+        from almanak import Chain
+
+        sources = [
+            MockPriceSource("chainlink", error="no feed"),
+            MockPriceSource("coingecko", error="404 not listed"),
+        ]
+        aggregator = PriceAggregator(sources=sources)
+
+        pleasing_pusd = ResolvedToken(
+            symbol="PUSD",
+            address="0x1111111111111111111111111111111111111111",
+            decimals=18,
+            chain=Chain.ETHEREUM,
+            chain_id=1,
+            name="Pleasing USD",
+            coingecko_id="",
+            is_stablecoin=False,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol="PUSD",
+            bridge_type=BridgeType.NATIVE,
+            source="static",
+        )
+        with pytest.raises(AllDataSourcesFailed):
+            await aggregator.get_aggregated_price("PUSD", "USD", resolved_token=pleasing_pusd)
+
+    @pytest.mark.asyncio
+    async def test_pusd_without_resolved_token_does_not_fall_back(self) -> None:
+        """Without ``resolved_token`` the address-keyed allowlist can't tell
+        which PUSD this is, so it falls through to the symbol allowlist —
+        which no longer contains PUSD. Result: no fallback. Callers wanting
+        the Polymarket pUSD price must pass ``resolved_token``."""
+        from almanak.gateway.data.price.aggregator import PriceAggregator
+
+        sources = [
+            MockPriceSource("chainlink", error="no feed"),
+            MockPriceSource("coingecko", error="no feed"),
+        ]
+        aggregator = PriceAggregator(sources=sources)
+
+        with pytest.raises(AllDataSourcesFailed):
+            await aggregator.get_aggregated_price("PUSD", "USD")
+
+    @pytest.mark.asyncio
+    async def test_usdc_without_resolved_token_still_falls_back(self) -> None:
+        """USDC's symbol IS unambiguous across the EVM token set, so it
+        remains in the symbol-keyed allowlist and the legacy bare-symbol
+        path keeps working with no resolved_token."""
+        from almanak.gateway.data.price.aggregator import PriceAggregator
+
+        sources = [
+            MockPriceSource("chainlink", error="rate limited"),
+            MockPriceSource("coingecko", error="rate limited"),
+        ]
+        aggregator = PriceAggregator(sources=sources)
+
+        result = await aggregator.get_aggregated_price("USDC", "USD")
+
+        assert result.price == Decimal("1.00")
+        assert result.source == "stablecoin_fallback"
+
+    @pytest.mark.asyncio
+    async def test_non_usd_quote_does_not_use_fallback(self) -> None:
+        """The fallback only kicks in for ``USD`` quotes — pricing PUSD in
+        EUR with no working source must surface as ``AllDataSourcesFailed``,
+        not silently return $1.00 (which isn't even the right denomination)."""
+        from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
+        from almanak.gateway.data.price.aggregator import PriceAggregator
+
+        from almanak import Chain
+
+        sources = [MockPriceSource("chainlink", error="no feed")]
+        aggregator = PriceAggregator(sources=sources)
+
+        polymarket_pusd = ResolvedToken(
+            symbol="PUSD",
+            address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+            decimals=6,
+            chain=Chain.POLYGON,
+            chain_id=137,
+            name="Polymarket USD",
+            coingecko_id="",
+            is_stablecoin=True,
+            is_native=False,
+            is_wrapped_native=False,
+            canonical_symbol="USDC",
+            bridge_type=BridgeType.NATIVE,
+            source="static",
+        )
+        with pytest.raises(AllDataSourcesFailed):
+            await aggregator.get_aggregated_price("PUSD", "EUR", resolved_token=polymarket_pusd)
+
+
 class TestChainlinkFeedConfig:
     """Tests for Chainlink feed configuration correctness."""
 
