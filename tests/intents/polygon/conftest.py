@@ -10,9 +10,10 @@ Unmarked tests see the original EOA behaviour.
 
 Polygon-specific considerations:
 - Gas prices: Polygon mainnet gas prices can be very high (100-1000+ gwei).
-  Anvil forks preserve the block's base fee, so the EIP-1559 formula (2x base fee)
-  often exceeds the default 500 gwei cap.  We lower the base fee on the Anvil fork
-  to 30 gwei (normal Polygon range) so the gas price guard passes.
+  Intent tests rely on Anvil startup forcing ``--block-base-fee-per-gas 0``.
+  Keep module setup free of extra admin RPCs like ``evm_mine`` so a degraded
+  shared fork can be recovered by the generic restart path instead of hanging
+  during fixture setup.
 - WETH: Polygon WETH (0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619) is a PoS-bridged
   UChildERC20Proxy token, NOT a wrapped native token.  It cannot be obtained by
   wrapping MATIC.  We fund it via storage slot manipulation (slot 0, the _balances
@@ -49,29 +50,6 @@ from tests.intents.conftest import (
 CHAIN_NAME = "polygon"
 REQUIRED_CHAIN_ID = 137
 
-# Polygon mainnet base fees can exceed 300 gwei.  The EIP-1559 formula
-# (2 * base_fee + priority_fee) produces 600+ gwei, which exceeds the
-# default gas price cap.  We reset the Anvil fork's base fee to a
-# sensible value so the orchestrator's gas guard doesn't block txs.
-_ANVIL_BASE_FEE_WEI = 30 * 10**9  # 30 gwei -- within normal Polygon range
-
-
-def _lower_anvil_base_fee(rpc_url: str) -> None:
-    """Set the next block's base fee on the Anvil fork to a reasonable value.
-
-    Polygon mainnet can have very high base fees (300+ gwei) which, after the
-    EIP-1559 doubling formula, exceed the orchestrator's gas price cap.  By
-    resetting the base fee on the fork we avoid false-positive gas guard
-    failures in tests.
-
-    Uses in-process Web3 provider RPC instead of subprocess (cast).
-    """
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": TEST_POLYGON_WEB3_REQUEST_TIMEOUT}))
-    base_fee_hex = hex(_ANVIL_BASE_FEE_WEI)
-    w3.provider.make_request("anvil_setNextBlockBaseFeePerGas", [base_fee_hex])
-    # Mine a block so the new base fee takes effect
-    w3.provider.make_request("evm_mine", [])
-
 
 def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
     """Seed test wallet balances for Polygon on the current fork instance."""
@@ -79,9 +57,6 @@ def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
     # Required tokens for Polygon intent tests - fixture must fail if these can't be funded
     required_tokens = {"USDC", "WETH"}
     failed_tokens: list[str] = []
-
-    # Ensure sane base fee on every reseed (important after fork restart)
-    _lower_anvil_base_fee(rpc_url)
 
     # Fund with 100 native tokens (MATIC on Polygon)
     fund_native_token(TEST_WALLET, 100 * 10**18, rpc_url)
@@ -132,12 +107,13 @@ def anvil_instance(anvil_polygon: AnvilFixture) -> AnvilFixture:
 
 @pytest.fixture(scope="module")
 def anvil_rpc_url(anvil_polygon: AnvilFixture) -> str:
-    """Get the Anvil RPC URL for Polygon chain."""
-    rpc_url = f"http://127.0.0.1:{anvil_polygon.port}"
-    # Lower base fee immediately after fork so all subsequent operations
-    # (funding, gas estimation, execution) see a reasonable gas price.
-    _lower_anvil_base_fee(rpc_url)
-    return rpc_url
+    """Get the Anvil RPC URL for Polygon chain.
+
+    Keep this fixture side-effect free so a wedged shared fork can still be
+    recovered by the generic seeding/restart helpers instead of hanging in
+    module setup on an admin RPC.
+    """
+    return f"http://127.0.0.1:{anvil_polygon.port}"
 
 
 @pytest.fixture(scope="module")
@@ -243,9 +219,9 @@ def orchestrator(
     identical, so unchanged tests run unchanged.
 
     Without the marker: returns the standard ``ExecutionOrchestrator`` with a
-    permissive ``TransactionRiskConfig`` because Polygon gas prices on Anvil
-    forks can still spike above chain-specific caps even after lowering the
-    base fee.  The gas price guard is a production safety net, not something
+    permissive ``TransactionRiskConfig`` because Polygon fork gas heuristics
+    can still diverge from production caps even with the startup base-fee
+    override. The gas price guard is a production safety net, not something
     intent tests need to exercise.
     """
     if zodiac_safe is not None:
