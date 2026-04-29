@@ -211,6 +211,12 @@ class InsufficientFundsError(ExecutionError):
         available: int,
         token: str = "ETH",
     ) -> None:
+        if required <= available:
+            raise ValueError(
+                f"InsufficientFundsError requires required > available; "
+                f"got required={required}, available={available}, token={token}. "
+                f"Caller must not synthesise this exception when funds suffice."
+            )
         self.required = required
         self.available = available
         self.token = token

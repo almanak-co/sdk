@@ -5,9 +5,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.connectors.enso.client import (
+    CHAIN_MAPPING as SDK_CHAIN_MAPPING,
+)
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
-from almanak.gateway.services.enso_service import EnsoServiceServicer, _decode_bundle_arg
+from almanak.gateway.services.enso_service import (
+    CHAIN_MAPPING,
+    EnsoServiceServicer,
+    _decode_bundle_arg,
+)
 
 
 @pytest.fixture
@@ -174,3 +181,28 @@ class TestBundleArgDecoding:
         assert forwarded_args["deadline"] == 1_700_000_000  # int decoded
         assert forwarded_args["permit"] is True  # bool decoded
         assert forwarded_args["path"] == ["0xA", "0xB"]  # list decoded
+
+
+class TestEnsoServiceChainMapping:
+    """Guard the gateway chain allowlist against drift from the SDK client."""
+
+    def test_chain_mapping_matches_sdk_client(self):
+        """Gateway and SDK client must agree on supported Enso chains.
+
+        Drift caused VIB-3715 / BUG-37: Berachain present on the SDK side but
+        missing from the gateway, breaking edge_discovery_berachain at compile
+        time. Keep the two maps locked together.
+        """
+        assert CHAIN_MAPPING == SDK_CHAIN_MAPPING, (
+            f"Gateway Enso CHAIN_MAPPING diverges from SDK client. "
+            f"Only-in-gateway: {set(CHAIN_MAPPING) - set(SDK_CHAIN_MAPPING)} | "
+            f"Only-in-SDK: {set(SDK_CHAIN_MAPPING) - set(CHAIN_MAPPING)}"
+        )
+
+    def test_berachain_resolves(self, enso_service):
+        """Berachain (chain_id=80094) must resolve through _get_chain_id."""
+        assert enso_service._get_chain_id("berachain") == 80094
+        assert enso_service._get_chain_id("BERACHAIN") == 80094
+
+    def test_unknown_chain_returns_none(self, enso_service):
+        assert enso_service._get_chain_id("does-not-exist") is None

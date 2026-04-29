@@ -774,26 +774,47 @@ class ChainExecutor:
             if "nonce" in error_message:
                 raise NonceError(reason=original_error) from None
             elif "insufficient" in error_message or "balance" in error_message:
-                # Parse actual values from RPC error for better diagnostics
+                # Parse actual values from RPC error for better diagnostics.
+                # If the parser returns (0, 0) (regex fallback) or any case where
+                # available >= required, we cannot honestly claim "insufficient
+                # funds" — re-raise as a generic submission error so the upstream
+                # diagnostics aren't poisoned by a synthetic "need 0, have 0".
                 available, required = _parse_insufficient_funds_error(original_error)
-                deficit = required - available if required > available else 0
-
-                # Log with human-readable values
                 native = _CHAIN_NATIVE_SYMBOL.get(self._chain, "ETH")
-                logger.error(
-                    f"Insufficient funds error: have {_format_wei_as_native(available, self._chain)}, "
-                    f"need {_format_wei_as_native(required, self._chain)}, "
-                    f"deficit {_format_wei_as_native(deficit, self._chain)}"
+
+                if required > available:
+                    deficit = required - available
+                    logger.error(
+                        f"Insufficient funds error: have {_format_wei_as_native(available, self._chain)}, "
+                        f"need {_format_wei_as_native(required, self._chain)}, "
+                        f"deficit {_format_wei_as_native(deficit, self._chain)}"
+                    )
+                    raise InsufficientFundsError(
+                        required=required,
+                        available=available,
+                        token=native,
+                    ) from None
+
+                # Could not extract usable have/want values — fall back to the
+                # raw RPC error so callers see the real cause instead of a
+                # misleading "Insufficient ETH: need 0, have 0". Pass the
+                # signed tx hash for batch / sequential debugging even though
+                # the tx never reached the mempool.
+                logger.warning(
+                    "Funds-related RPC error could not be parsed into have/want values; propagating raw error: %s",
+                    original_error,
                 )
-                raise InsufficientFundsError(
-                    required=required,
-                    available=available,
-                    token=native,
+                raise SubmissionError(
+                    reason=original_error,
+                    tx_hash=signed_tx.tx_hash,
                 ) from None
             elif "gas" in error_message:
                 raise GasEstimationError(reason=original_error) from None
             else:
-                raise SubmissionError(reason=original_error) from None
+                raise SubmissionError(
+                    reason=original_error,
+                    tx_hash=signed_tx.tx_hash,
+                ) from None
 
     async def wait_for_receipt(
         self,

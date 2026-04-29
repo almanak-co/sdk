@@ -543,11 +543,23 @@ class PublicMempoolSubmitter(Submitter):
                     logger.warning(f"Insufficient funds error: {error_message}")
                     # Parse have/want values from error message
                     available, required = self._parse_insufficient_funds_values(error_message)
-                    # Not retryable - raise immediately
-                    raise InsufficientFundsError(
-                        required=required,
-                        available=available,
-                        token="ETH",
+                    # If the parser fell back to (0, 0) or the error doesn't
+                    # actually evidence insufficient funds (required <=
+                    # available), don't synthesise the misleading
+                    # "Insufficient ETH: need 0, have 0" — propagate the raw
+                    # RPC error instead. See VIB-3714 / BUG-45.
+                    if required > available:
+                        # Not retryable - raise immediately
+                        raise InsufficientFundsError(
+                            required=required,
+                            available=available,
+                            token="ETH",
+                        ) from None
+                    # Pass tx hash so batch / sequential callers can identify
+                    # which submission produced the unparseable error.
+                    raise SubmissionError(
+                        reason=error_message,
+                        tx_hash=signed_tx.tx_hash,
                     ) from None
 
                 elif error_category == "gas":

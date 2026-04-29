@@ -144,6 +144,57 @@ class AlertManager(Protocol):
 ApprovalCallback = Callable[[ApprovalRequest], Awaitable[ApprovalResponse]]
 
 
+def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
+    """Return a human-readable skip reason if ``intent`` is an ``amount='all'``
+    swap whose source balance is 0, else ``None``.
+
+    Mirrors the inline teardown path's ``balance_value <= 0`` short-circuit
+    (``runner_teardown.py:execute_teardown_inline``). Without this, a HOLD-state
+    strategy whose teardown logic unconditionally emits a swap-out (e.g.
+    ``pancakeswap_rsi_bsc`` selling the base token it never bought) marks the
+    entire teardown as failed even though there is nothing to sell. (BUG-39)
+
+    Withdraw / repay intents return ``None`` because their balance lives in
+    the protocol contract, not the wallet — the compiler resolves
+    ``amount='all'`` for those via on-chain queries.
+    """
+    if market is None:
+        return None
+    is_dict = isinstance(intent, dict)
+    amount = intent.get("amount") if is_dict else getattr(intent, "amount", None)
+    if amount != "all":
+        return None
+    intent_type_val = intent.get("intent_type") if is_dict else getattr(intent, "intent_type", None)
+    intent_type_str = str(intent_type_val).upper() if intent_type_val is not None else ""
+    # Whitelist SWAP only. Other intent types (WITHDRAW/REPAY/LP_CLOSE/
+    # PERP_CLOSE/BRIDGE/...) resolve ``amount='all'`` against protocol or
+    # cross-chain balances, not the wallet — let the compiler / inner balance
+    # check handle them.
+    if "SWAP" not in intent_type_str:
+        return None
+    withdraw_all = intent.get("withdraw_all") if is_dict else getattr(intent, "withdraw_all", False)
+    if withdraw_all:
+        return None
+    from_token = (
+        (intent.get("from_token") or intent.get("token"))
+        if is_dict
+        else (getattr(intent, "from_token", None) or getattr(intent, "token", None))
+    )
+    if not from_token:
+        return None
+    try:
+        bal = market.balance(from_token)
+    except Exception:  # noqa: BLE001 — market may not have this token registered yet
+        return None
+    balance_value = bal.balance if hasattr(bal, "balance") else bal
+    try:
+        if balance_value <= 0:
+            return f"{from_token} balance is 0 — nothing to teardown"
+    except TypeError:
+        return None
+    return None
+
+
 @dataclass
 class AtomicBundle:
     """Represents a bundle of intents for atomic execution."""
@@ -620,6 +671,7 @@ class TeardownManager:
 
         succeeded = 0
         failed = 0
+        skipped = 0
         total_costs = Decimal("0")
         final_balances: dict[str, Decimal] = {}
 
@@ -634,6 +686,30 @@ class TeardownManager:
             teardown_state.updated_at = datetime.now(UTC)
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
+
+            # Pre-flight no-op skip: amount='all' swap whose source balance
+            # is 0 — there is nothing to sell, so this is a no-op success,
+            # not a failure. Skips the whole slippage-escalation loop because
+            # retrying at higher slippage cannot conjure tokens that aren't
+            # there. Mirrors the inline teardown path
+            # (runner_teardown.execute_teardown_inline). Counted under
+            # ``succeeded`` to preserve the ``intents_total = succeeded +
+            # failed`` invariant exposed via ``TeardownResult.all_succeeded``.
+            # (BUG-39)
+            skip_reason = _zero_balance_swap_skip_reason(intent, market)
+            if skip_reason:
+                logger.info(f"Teardown intent {i + 1}/{len(intents)}: skipping — {skip_reason}")
+                succeeded += 1
+                skipped += 1
+                if on_progress:
+                    await on_progress(progress_pct, f"Skipped step {i + 1}/{len(intents)}: {skip_reason}")
+                # Mirror the success-path persist so a crash mid-teardown
+                # records the skip as completed and resume picks up at i+1.
+                teardown_state.completed_intents = succeeded
+                teardown_state.updated_at = datetime.now(UTC)
+                if self.state_manager:
+                    await self.state_manager.save_teardown_state(teardown_state)
+                continue
 
             # Execute with escalating slippage
             async def execute_at_slippage(
@@ -962,6 +1038,14 @@ class TeardownManager:
             await self.state_manager.save_teardown_state(teardown_state)
 
         final_value = positions.total_value_usd - total_costs
+        if skipped:
+            logger.info(
+                "Teardown for %s completed: %d executed, %d skipped (no-op), %d failed",
+                strategy.strategy_id,
+                succeeded - skipped,
+                skipped,
+                failed,
+            )
 
         return TeardownResult(
             success=failed == 0,

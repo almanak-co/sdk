@@ -70,6 +70,7 @@ ARBITRUM_PRICE_FEEDS: dict[str, str] = {
     "RDNT/USD": "0x20d0Fcab0ECFD078B036b6CAf1FaC69A6453b352",
     "MAGIC/USD": "0x47E55cCec6582838E173f252D08Afd8116c2202d",
     "WOO/USD": "0x5d5Ab15fb857De6FA209B6B41C7375F1C4BD9B90",
+    "SOL/USD": "0x24ceA4b8ce57cdA5058b924B9B9987992450590c",
 }
 
 # Base price feeds (Chain ID: 8453)
@@ -125,6 +126,18 @@ SONIC_PRICE_FEEDS: dict[str, str] = {
     "S/USD": "0xc76dFb89fF298145b417d221B2c747d84952e01d",
 }
 
+# Linea price feeds (Chain ID: 59144)
+# Reference: https://docs.chain.link/data-feeds/price-feeds/addresses?network=linea
+# All addresses verified on-chain via description() and latestAnswer() against
+# rpc.linea.build on 2026-04-29 (VIB-3718 / BUG-44).
+LINEA_PRICE_FEEDS: dict[str, str] = {
+    "ETH/USD": "0x3c6Cd9Cc7c7a4c2Cf5a82734CD249D7D593354dA",
+    "BTC/USD": "0x7A99092816C8BD5ec8ba229e3a6E6Da1E628E1F9",
+    "USDC/USD": "0xAADAa473C1bDF7317ec07c915680Af29DeBfdCb5",
+    "USDT/USD": "0xefCA2bbe0EdD0E22b2e0d2F8248E99F4bEf4A7dB",
+    "DAI/USD": "0x5133D67c38AFbdd02997c14Abd8d83676B4e309A",
+}
+
 # BNB Smart Chain price feeds (Chain ID: 56)
 # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses?network=bnb-chain
 BSC_PRICE_FEEDS: dict[str, str] = {
@@ -164,6 +177,7 @@ CHAINLINK_PRICE_FEEDS: dict[str, dict[str, str]] = {
     "bsc": BSC_PRICE_FEEDS,
     "avalanche": AVALANCHE_PRICE_FEEDS,
     "sonic": SONIC_PRICE_FEEDS,
+    "linea": LINEA_PRICE_FEEDS,
 }
 
 # Token symbol to pair mapping (for convenience)
@@ -241,6 +255,7 @@ CHAINLINK_CHAIN_IDS: dict[str, int] = {
     "bsc": 56,
     "avalanche": 43114,
     "sonic": 146,
+    "linea": 59144,
 }
 
 # =============================================================================
