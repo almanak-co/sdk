@@ -372,7 +372,13 @@ async def execute_and_verify(
     if teardown_result.success:
         verify_error_msg: str | None = None
         try:
-            positions_closed = await teardown_mgr._verify_closure(strategy)
+            # VIB-3742: thread the pre-execution ``positions`` snapshot so
+            # protocol-specific on-chain post-condition checks can run for
+            # each position the teardown should have closed.
+            positions_closed = await teardown_mgr._verify_closure(
+                strategy,
+                pre_execution_positions=positions,
+            )
         except Exception as verify_err:
             logger.exception(
                 "Post-teardown verification raised for %s — treating as verify-fail",

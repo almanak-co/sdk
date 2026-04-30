@@ -4128,8 +4128,20 @@ class IntentCompiler:
             tj_adapter = TraderJoeV2Adapter(config)
 
             protocol_params = getattr(intent, "protocol_params", None) or {}
-            known_bin_ids_raw = protocol_params.get("bin_ids") or []
-            known_bin_ids = [int(bin_id) for bin_id in known_bin_ids_raw]
+            known_bin_ids_raw = protocol_params.get("bin_ids")
+            known_bin_ids = [int(bin_id) for bin_id in (known_bin_ids_raw or [])]
+            # VIB-3742: Track whether bin_ids were provided by the caller. The
+            # heuristic fallback (active_id ± 50 bins) silently misses bins
+            # outside that window after price drift — a partial close that the
+            # framework otherwise reports as success. We need this flag to
+            # decide whether to emit a WARNING when we hit the heuristic path.
+            #
+            # An explicit ``bin_ids=[]`` counts as "provided" — the strategy is
+            # telling us "I already cleared my tracked positions" (e.g. last
+            # close just emptied ``self._position_bin_ids``), not "I forgot to
+            # tell you what to close." Treating that as the silent-leak
+            # scenario would emit a misleading warning on a no-op close.
+            bin_ids_were_provided = "bin_ids" in protocol_params and known_bin_ids_raw is not None
 
             position = None
             if known_bin_ids:
@@ -4192,6 +4204,34 @@ class IntentCompiler:
             if position is None:
                 # Fall back to full discovery when the strategy did not provide
                 # known bin IDs or the targeted lookup no longer finds liquidity.
+                # Note: we intentionally let build_remove_liquidity_transaction
+                # derive slippage-protected minimums for this path (below).
+                #
+                # VIB-3742: When bin_ids were absent from the LP_CLOSE intent,
+                # this heuristic falls back to TraderJoeV2Adapter.get_position()
+                # which scans only ±50 bins around the *current* active_id.
+                # After price drift the original bins may sit outside that
+                # window — `removeLiquidity` then closes only a subset and the
+                # framework otherwise reports success while liquidity remains
+                # stranded on-chain (root cause of the $1.16 leak that prompted
+                # VIB-3741 / VIB-3742).
+                #
+                # Fire a WARNING ONLY when the caller did not supply bin_ids.
+                # If bin_ids WERE supplied but the targeted lookup returned
+                # zero balance, that is a legitimate "already closed" no-op
+                # and not the silent-leak scenario — no warning in that case.
+                if not bin_ids_were_provided:
+                    logger.warning(
+                        "TraderJoe V2 LP_CLOSE for pool %s on %s: protocol_params['bin_ids'] "
+                        "was not supplied. Falling back to active_id ± 50 bin heuristic, "
+                        "which silently MISSES bins outside the current ±50 window after "
+                        "price drift and can leave liquidity stranded on-chain. Capture "
+                        "bin_ids from the LP_OPEN result and pass them on close: "
+                        "Intent.lp_close(..., protocol_params={'bin_ids': captured_bin_ids}). "
+                        "See blueprints/05-connectors.md (TraderJoe V2 section) and VIB-3742.",
+                        intent.pool,
+                        self.chain,
+                    )
                 t0 = time.perf_counter()
                 position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
                 logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")

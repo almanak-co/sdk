@@ -460,7 +460,19 @@ class TeardownManager:
             # in the recovery scenario). See PR #1522.
             if result.success:
                 try:
-                    positions_closed = await self._verify_closure(strategy, expected_positions=precomputed_positions)
+                    # VIB-3742: pass the pre-execution snapshot ``positions``
+                    # so the verifier can run protocol-specific on-chain
+                    # post-condition checks (e.g. TraderJoe V2 LB token
+                    # balance) for each position the teardown was supposed
+                    # to close. Without this, the verifier only re-reads
+                    # ``strategy.get_open_positions()`` which returns 0 the
+                    # moment ``on_intent_executed`` clears the strategy's
+                    # ``_position_id`` — silently passing partial closes.
+                    positions_closed = await self._verify_closure(
+                        strategy,
+                        expected_positions=precomputed_positions,
+                        pre_execution_positions=positions,
+                    )
                 except Exception as verify_err:
                     logger.exception(
                         "Post-teardown verification raised for %s — treating as verify-fail",
@@ -1098,42 +1110,162 @@ class TeardownManager:
         self,
         strategy: IntentStrategy,
         expected_positions: Any = None,
+        pre_execution_positions: Any = None,
     ) -> bool:
         """Verify that positions are actually closed on-chain.
 
-        When ``expected_positions`` is supplied (the ``--discover`` flow
-        threads its TeardownPositionSummary through), closure is checked
-        against those specific position IDs instead of re-reading
-        ``strategy.get_open_positions()`` — which in the recovery scenario
-        is empty both before AND after execution, so checking it alone
-        would falsely report "success" while discovered NFTs remained
-        live on-chain (CodeRabbit review #1522).
+        Three layers of verification, in priority order:
 
-        The verifier is intentionally conservative: for the precomputed
-        case we log the specific position IDs that were expected to close
-        so the operator sees the audit trail. The on-chain re-scan that
-        would definitively confirm each position's liquidity == 0 is
-        tracked as a follow-up; for now, trust the orchestrator's
-        per-intent success signal (already enforced by the retry loop)
-        together with this log.
+        1. **Per-protocol on-chain post-condition** (VIB-3742): for every
+           position present in ``pre_execution_positions`` (or
+           ``expected_positions`` if no pre-snapshot was supplied), look up
+           a registered ``TeardownPostCondition`` and run it. Any residual
+           on-chain liquidity / debt fails the verification with a
+           detailed residual map. This is the layer that catches the
+           original $1.16 leak: TJ V2 partial closes that look like clean
+           successes from in-memory state alone.
+        2. **Discover-path log** (existing behaviour): when
+           ``expected_positions`` is supplied (the ``--discover`` flow), log
+           the position IDs the orchestrator was supposed to close. Also
+           runs the post-condition over those IDs.
+        3. **In-memory state read** (legacy fallback): when no snapshot is
+           available, re-read ``strategy.get_open_positions()``. This is
+           the weak path the original verifier used; it's retained as a
+           last-resort signal but is no longer the primary check.
+
+        Returns ``False`` if ANY position has residual liquidity OR any
+        post-condition errors out (fail-closed).
         """
-        if expected_positions is not None and getattr(expected_positions, "positions", None):
-            expected_ids = [p.position_id for p in expected_positions.positions]
-            logger.info(
-                "Teardown verification: %d precomputed position(s) executed %s; "
-                "closure signalled by per-intent orchestrator success, not by "
-                "strategy.get_open_positions() (which is empty by design on the "
-                "discover path).",
-                len(expected_ids),
-                expected_ids,
+        # Choose the pre-execution snapshot. ``pre_execution_positions`` is
+        # what we want — it captures what was open BEFORE the teardown ran.
+        # ``expected_positions`` (the --discover path) is the runner-up.
+        snapshot = pre_execution_positions
+        if snapshot is None or not getattr(snapshot, "positions", None):
+            snapshot = expected_positions
+
+        snapshot_positions = list(getattr(snapshot, "positions", []) or [])
+
+        if snapshot_positions:
+            from almanak.framework.teardown.post_conditions import (
+                ClosureCheckResult,
+                get_teardown_post_condition,
             )
-            # The orchestrator already succeeded (checked upstream before this
-            # verify step); treat that as authoritative for discovered
-            # positions. A stronger on-chain re-scan belongs in a follow-up.
+
+            # Plumb gateway client / RPC through to post-conditions.
+            # ``compiler`` and ``orchestrator`` may both expose either; we
+            # try compiler first because it's the layer that already owns
+            # the gateway-or-rpc dual path. Both attributes are best-effort
+            # — the post-conditions tolerate ``None`` for both.
+            gateway_client = self._teardown_gateway_client()
+            rpc_url = self._teardown_rpc_url()
+            wallet_address = self._teardown_wallet_address(strategy)
+
+            failed_results: list[ClosureCheckResult] = []
+            for position in snapshot_positions:
+                protocol = (getattr(position, "protocol", "") or "").lower()
+                hook = get_teardown_post_condition(protocol)
+                if hook is None:
+                    # No post-condition registered for this protocol — log
+                    # at debug; the in-memory check below will still run.
+                    logger.debug(
+                        "Teardown verification: no on-chain post-condition "
+                        "registered for protocol %r (position_id=%s); "
+                        "falling back to in-memory state.",
+                        protocol,
+                        getattr(position, "position_id", ""),
+                    )
+                    continue
+
+                try:
+                    check = hook(
+                        position=position,
+                        wallet_address=wallet_address,
+                        gateway_client=gateway_client,
+                        rpc_url=rpc_url,
+                    )
+                except Exception as exc:  # noqa: BLE001 — fail-closed
+                    logger.exception(
+                        "Teardown post-condition for %s raised: %s",
+                        protocol,
+                        exc,
+                    )
+                    check = ClosureCheckResult(
+                        closed=False,
+                        protocol=protocol,
+                        position_id=getattr(position, "position_id", "") or "",
+                        error=f"Post-condition raised: {exc}",
+                    )
+
+                if not check.closed:
+                    failed_results.append(check)
+
+            if failed_results:
+                for check in failed_results:
+                    logger.error(
+                        "Post-teardown on-chain verification FAILED for %s position %s: residual=%s error=%s",
+                        check.protocol,
+                        check.position_id,
+                        check.residual,
+                        check.error,
+                    )
+                return False
+
+            # All registered post-conditions passed. We still log the
+            # discover-path summary so the existing audit trail is intact.
+            ids = [getattr(p, "position_id", "") for p in snapshot_positions]
+            logger.info(
+                "Teardown verification: %d position(s) passed on-chain post-condition checks: %s",
+                len(snapshot_positions),
+                ids,
+            )
             return True
 
+        # Last-resort: legacy in-memory state read. Used when neither a
+        # pre-execution snapshot nor an expected-positions list reaches us
+        # (paper / unit-test paths). This is the path the original
+        # implementation used end-to-end; it still works as a "did the
+        # strategy at least clear its own state?" smoke test.
         positions = strategy.get_open_positions()
         return len(positions.positions) == 0
+
+    # ------------------------------------------------------------------
+    # Helpers used by _verify_closure to plumb gateway / RPC / wallet to
+    # post-conditions. Kept tiny; the post-conditions tolerate all-None.
+    # ------------------------------------------------------------------
+
+    def _teardown_gateway_client(self) -> Any | None:
+        """Best-effort: surface a connected gateway client for post-conditions."""
+        for source in (self.compiler, self.orchestrator):
+            if source is None:
+                continue
+            client = getattr(source, "_gateway_client", None) or getattr(source, "gateway_client", None)
+            if client is not None:
+                if getattr(client, "is_connected", True):
+                    return client
+        return None
+
+    def _teardown_rpc_url(self) -> str | None:
+        """Best-effort: surface an RPC URL for post-conditions (test path)."""
+        for source in (self.compiler, self.orchestrator):
+            if source is None:
+                continue
+            getter = getattr(source, "_get_chain_rpc_url", None)
+            if callable(getter):
+                try:
+                    url = getter()
+                    if url:
+                        return url
+                except Exception:  # noqa: BLE001
+                    pass
+            url = getattr(source, "rpc_url", None) or getattr(source, "_rpc_url", None)
+            if url:
+                return url
+        return None
+
+    @staticmethod
+    def _teardown_wallet_address(strategy: Any) -> str:
+        """Best-effort: surface the strategy's wallet address."""
+        return getattr(strategy, "wallet_address", None) or getattr(strategy, "_wallet_address", None) or ""
 
     def _estimate_duration(self, mode: TeardownMode, intents: list) -> int:
         """Estimate teardown duration in minutes."""

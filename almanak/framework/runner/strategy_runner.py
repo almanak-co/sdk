@@ -1004,6 +1004,36 @@ class StrategyRunner:
 
         # Filter out None values and check for HOLD
         intents = [i for i in intents if i is not None]
+
+        # VIB-3742: framework auto-injects tracked LP position metadata
+        # (e.g. TraderJoe V2 bin_ids captured at LP_OPEN) into LP_CLOSE /
+        # LP_COLLECT_FEES intents that would otherwise lack ``protocol_params``.
+        # Strategies that already supply protocol_params manually are
+        # unaffected — the tracker never overwrites caller-supplied data.
+        # See almanak/framework/strategies/lp_position_tracker.py.
+        #
+        # Gate strictly on a real LPPositionTracker — MagicMock fake
+        # strategies in unit tests synthesize attributes on demand, so an
+        # ``isinstance`` check is the only reliable filter.
+        from ..strategies.lp_position_tracker import LPPositionTracker
+
+        tracker = getattr(strategy, "_lp_position_tracker", None)
+        inject_fn = getattr(strategy, "_framework_inject_intent_params", None)
+        if isinstance(tracker, LPPositionTracker) and callable(inject_fn):
+            framework_inject = cast(Callable[[AnyIntent], AnyIntent], inject_fn)
+            injected_intents: list[AnyIntent] = []
+            for raw_intent in intents:
+                try:
+                    injected_intents.append(framework_inject(raw_intent))
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    logger.warning(
+                        "Framework intent-injection hook raised (non-fatal, passing original intent): %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    injected_intents.append(raw_intent)
+            intents = injected_intents
+
         self._invoke_optional_hook(strategy, "on_copy_decision_output", decide_result, intents)
 
         state.intents = intents
@@ -1619,6 +1649,64 @@ class StrategyRunner:
         # Phase 12: shutdown drain (final lifecycle write, deregister,
         # STRATEGY_STOPPED event, flush, state manager close).
         await _run_loop_helpers.finalize_run_loop(self, strategy, strategy_id)
+
+    def _notify_intent_executed(
+        self,
+        strategy: Any,
+        intent: Any,
+        success: bool,
+        result: Any | None,
+        *,
+        framework_success: bool | None = None,
+    ) -> None:
+        """Fire ``strategy.on_intent_executed`` with framework hooks attached.
+
+        Calls the framework's LP position tracker (VIB-3742) BEFORE the user's
+        ``on_intent_executed`` callback so the user override sees the captured
+        bin_ids / position_ids on ``self.lp_position_tracker``. Both calls are
+        guarded — exceptions in either are logged at WARNING and never
+        propagated, mirroring the prior inline behaviour.
+
+        ``success`` is the *user-facing verdict* — reflects slippage breach,
+        reconciliation failure, etc. ``framework_success`` is the *on-chain
+        truth* used for tracker bookkeeping. They diverge when the on-chain
+        TX succeeded but a post-execution check downgraded the iteration
+        (e.g. slippage breach, recon incident): the user heard ``False`` but
+        the position state still moved on-chain. The tracker MUST track
+        chain reality so a future LP_CLOSE doesn't silently leak the
+        position the chain still holds. When ``framework_success`` is
+        ``None`` (default), it falls back to ``success`` — preserving prior
+        behaviour for callers that don't need to distinguish.
+        """
+        tracker_success = success if framework_success is None else framework_success
+
+        # Step 1: framework-level hook (LP position tracker, etc.)
+        # Gate strictly on a real LPPositionTracker instance — MagicMock
+        # strategies in unit tests synthesize any attribute on demand, so
+        # ``getattr(strategy, "_lp_position_tracker", None)`` would
+        # return a MagicMock rather than None and erroneously activate
+        # the framework path against a fake strategy.
+        from ..strategies.lp_position_tracker import LPPositionTracker
+
+        tracker = getattr(strategy, "_lp_position_tracker", None)
+        if isinstance(tracker, LPPositionTracker) and callable(
+            getattr(strategy, "_framework_record_intent_execution", None)
+        ):
+            try:
+                strategy._framework_record_intent_execution(intent, tracker_success, result)
+            except Exception as exc:  # noqa: BLE001 — hook must not poison runner
+                logger.warning(
+                    "Framework intent-execution hook raised (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        # Step 2: user callback
+        if hasattr(strategy, "on_intent_executed"):
+            try:
+                strategy.on_intent_executed(intent, success=success, result=result)
+            except Exception as e:
+                logger.warning(f"Error in on_intent_executed callback: {e}")
 
     def _emit_execution_timeline_event(
         self,
@@ -2907,12 +2995,10 @@ class StrategyRunner:
         if state.record_metrics:
             self._record_success(execution_proved=True)
 
-        # Notify strategy of successful execution
-        if hasattr(strategy, "on_intent_executed"):
-            try:
-                strategy.on_intent_executed(intent, success=True, result=state.last_execution_result)
-            except Exception as e:
-                logger.warning(f"Error in on_intent_executed callback: {e}")
+        # Notify strategy of successful execution (framework hooks first,
+        # then user callback — see _notify_intent_executed for VIB-3742
+        # LP position tracker integration).
+        self._notify_intent_executed(strategy, intent, True, state.last_execution_result)
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
@@ -2986,12 +3072,13 @@ class StrategyRunner:
         self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
 
         # Notify strategy of failure due to slippage breach so strategy
-        # authors can access the error on the result.
-        if hasattr(strategy, "on_intent_executed"):
-            try:
-                strategy.on_intent_executed(intent, success=False, result=last_execution_result)
-            except Exception as e:
-                logger.warning(f"Error in on_intent_executed callback: {e}")
+        # authors can access the error on the result. Pass
+        # ``framework_success=True`` because the on-chain TX itself
+        # succeeded — the framework tracker (VIB-3742 LP position tracker)
+        # must reflect chain reality, not the user-facing verdict, so a
+        # future LP_CLOSE can find the bin_ids / position_id that the
+        # opening TX actually committed on-chain.
+        self._notify_intent_executed(strategy, intent, False, last_execution_result, framework_success=True)
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
@@ -3062,12 +3149,13 @@ class StrategyRunner:
         self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
 
         # Notify strategy of the failed outcome so it does not treat
-        # the execution as clean.
-        if hasattr(strategy, "on_intent_executed"):
-            try:
-                strategy.on_intent_executed(intent, success=False, result=last_execution_result)
-            except Exception as e:
-                logger.warning(f"Error in on_intent_executed callback: {e}")
+        # the execution as clean. Pass ``framework_success=True`` because
+        # the on-chain TX succeeded — the recon breach is an accounting
+        # outcome layered on top, and the framework tracker must reflect
+        # chain reality (the on-chain position state DID move) so a future
+        # LP_CLOSE can find the bin_ids / position_id that the TX
+        # committed.
+        self._notify_intent_executed(strategy, intent, False, last_execution_result, framework_success=True)
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
@@ -3178,11 +3266,7 @@ class StrategyRunner:
         callback_result = last_execution_result or SimpleNamespace(error=error_msg)
         if last_execution_result and not last_execution_result.error:
             last_execution_result.error = error_msg
-        if hasattr(strategy, "on_intent_executed"):
-            try:
-                strategy.on_intent_executed(intent, success=False, result=callback_result)
-            except Exception as e:
-                logger.warning(f"Error in on_intent_executed callback: {e}")
+        self._notify_intent_executed(strategy, intent, False, callback_result)
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
@@ -3740,11 +3824,7 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"Step {step_num} execution failed: {e}")
             # Notify strategy of failed execution (mirrors _execute_single_chain)
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=None)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, intent, False, None)
             state.callback_fired = True
             state.failed_step = f"step-{step_num}"
             state.error_message = str(e)
@@ -3753,11 +3833,7 @@ class StrategyRunner:
         if not result.success:
             logger.error(f"Step {step_num} failed: {result.error}")
             # Notify strategy of failed execution (mirrors _execute_single_chain)
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=result)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, intent, False, result)
             state.callback_fired = True
             state.failed_result = result
             state.failed_step = f"step-{step_num}"
@@ -3827,11 +3903,7 @@ class StrategyRunner:
                 return True
 
         # Notify strategy of successful execution (mirrors _execute_single_chain lines 2459-2478)
-        if hasattr(strategy, "on_intent_executed"):
-            try:
-                strategy.on_intent_executed(intent, success=True, result=result)
-            except Exception as e:
-                logger.warning(f"Error in on_intent_executed callback: {e}")
+        self._notify_intent_executed(strategy, intent, True, result)
 
         # Save strategy state after successful execution
         if hasattr(strategy, "save_state"):
@@ -4113,11 +4185,7 @@ class StrategyRunner:
 
             logger.error(f"Bridge failed: {bridge_status}")
             # Notify strategy of bridge failure (source tx succeeded but bridge failed)
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=result)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, intent, False, result)
             state.callback_fired = True
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = f"Bridge transfer failed: {bridge_status.get('error', 'Unknown')}"
@@ -4126,11 +4194,7 @@ class StrategyRunner:
         except TimeoutError as e:
             logger.error(f"Bridge timeout: {e}")
             # Notify strategy of bridge timeout (source tx succeeded but bridge timed out)
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=result)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, intent, False, result)
             state.callback_fired = True
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = "Bridge transfer timed out after 5 minutes"
@@ -4151,11 +4215,7 @@ class StrategyRunner:
                 e,
                 exc_info=True,
             )
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=result)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, intent, False, result)
             state.callback_fired = True
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = f"Bridge wait failed ({type(e).__name__}): {e}"
@@ -4207,11 +4267,7 @@ class StrategyRunner:
                 exc,
             )
             # Notify strategy of bridge failure (source tx succeeded but bridge normalization failed)
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(intent, success=False, result=result)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, intent, False, result)
             state.callback_fired = True
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = str(exc)
@@ -4252,11 +4308,7 @@ class StrategyRunner:
         # inline (e.g. source TX verification failures, no-tx_hash, no-RPC-URL).
         # This single finalization block covers all break exits without per-exit patching.
         if state.failed_step and not state.callback_fired:
-            if hasattr(strategy, "on_intent_executed"):
-                try:
-                    strategy.on_intent_executed(state.current_intent, success=False, result=state.failed_result)
-                except Exception as cb_err:
-                    logger.warning(f"Error in on_intent_executed callback: {cb_err}")
+            self._notify_intent_executed(strategy, state.current_intent, False, state.failed_result)
 
         # Build result
         if state.failed_step:

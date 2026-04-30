@@ -41,6 +41,13 @@ from almanak.framework.teardown.models import (
     TeardownStatus,
     calculate_max_acceptable_loss,
 )
+from almanak.framework.teardown.post_conditions import (
+    ClosureCheckResult,
+    TeardownPostCondition,
+    get_teardown_post_condition,
+    has_teardown_post_condition,
+    register_teardown_post_condition,
+)
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager
 from almanak.framework.teardown.state_manager import (
@@ -83,4 +90,10 @@ __all__ = [
     "TeardownStateManager",
     "TeardownStateAdapter",
     "get_teardown_state_manager",
+    # Post-conditions (VIB-3742)
+    "ClosureCheckResult",
+    "TeardownPostCondition",
+    "get_teardown_post_condition",
+    "has_teardown_post_condition",
+    "register_teardown_post_condition",
 ]

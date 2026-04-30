@@ -94,6 +94,8 @@ from .indicator_models import (  # noqa: F401
     RSIData,
     StochasticData,
 )
+from .lp_position_tracker import PERSISTENT_STATE_KEY as _LP_TRACKER_STATE_KEY
+from .lp_position_tracker import LPPositionTracker
 from .metadata import (  # noqa: F401
     LEGACY_COMPAT_DATA_REQUIREMENTS,
     StrategyClassT,
@@ -2091,6 +2093,26 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._state_version: int = 0
         self._pending_save: Any | None = None
 
+        # VIB-3742: framework-default LP position tracker.
+        #
+        # Captures bin_ids / NFT position_ids from successful LP_OPEN results
+        # and auto-injects them into LP_CLOSE / LP_COLLECT_FEES intents so a
+        # strategy author cannot silently leak liquidity by forgetting the
+        # bin_ids round-trip. Strategies that already track manually keep
+        # working — manual ``protocol_params['bin_ids']`` always wins; the
+        # tracker only fills missing data, never overwrites.
+        #
+        # Wired into the runner via two seams:
+        # 1. ``_framework_record_intent_execution`` is invoked from
+        #    ``StrategyRunner`` immediately before ``on_intent_executed``,
+        #    so the user callback (which may itself read tracker state)
+        #    sees the up-to-date capture.
+        # 2. ``_framework_inject_intent_params`` is invoked from
+        #    ``StrategyRunner._step_extract_intents`` over each intent that
+        #    came back from ``decide()`` before compilation, so the compiler
+        #    sees populated ``protocol_params``.
+        self._lp_position_tracker: LPPositionTracker = LPPositionTracker()
+
         logger.info(f"Initialized IntentStrategy on {chain} with wallet {wallet_address[:10]}...")
 
     @property
@@ -2259,7 +2281,20 @@ class IntentStrategy(StrategyBase[ConfigT]):
         if not self._state_manager or not self._strategy_id:
             return
 
-        state = self.get_persistent_state()
+        state = self.get_persistent_state() or {}
+
+        # VIB-3742: append framework-owned LP tracker state under a reserved
+        # key. Always overwrite the framework slot (even with an empty dict)
+        # so a fully-cleared tracker — e.g. the strategy just closed its last
+        # position — leaves an explicit empty payload in storage rather than
+        # the stale prior state. Without this, a restart would resurrect
+        # already-closed bin_ids / position_ids and re-inject them into the
+        # next LP_CLOSE / LP_COLLECT_FEES.
+        tracker = getattr(self, "_lp_position_tracker", None)
+        if tracker is not None:
+            state = dict(state)  # don't mutate user's dict in place
+            state[_LP_TRACKER_STATE_KEY] = tracker.to_persistent_dict()
+
         if not state:
             return
 
@@ -2318,6 +2353,33 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
         self._pending_save = None
 
+    def _split_framework_state(self, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Separate framework-owned state keys from user state.
+
+        Framework-owned keys (``__framework_*__``) are restored into
+        framework components (LPPositionTracker, etc.) before the strategy's
+        own ``load_persistent_state`` is invoked. Returns
+        ``(user_state, framework_state)``.
+        """
+        if not state:
+            return {}, {}
+        framework_state: dict[str, Any] = {}
+        user_state: dict[str, Any] = {}
+        for key, value in state.items():
+            if isinstance(key, str) and key.startswith("__framework_") and key.endswith("__"):
+                framework_state[key] = value
+            else:
+                user_state[key] = value
+        return user_state, framework_state
+
+    def _restore_framework_state(self, framework_state: dict[str, Any]) -> None:
+        """Apply framework-owned state to internal components."""
+        tracker = getattr(self, "_lp_position_tracker", None)
+        if tracker is not None:
+            tracker_data = framework_state.get(_LP_TRACKER_STATE_KEY)
+            if isinstance(tracker_data, dict):
+                tracker.load_persistent_dict(tracker_data)
+
     def load_state(self) -> bool:
         """Load strategy state from persistence.
 
@@ -2341,7 +2403,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 state_data = asyncio.run(self._state_manager.load_state(self._strategy_id))
 
             if state_data and state_data.state:
-                self.load_persistent_state(state_data.state)
+                user_state, framework_state = self._split_framework_state(state_data.state)
+                self._restore_framework_state(framework_state)
+                self.load_persistent_state(user_state)
                 # Store version for CAS updates
                 self._state_version = state_data.version
                 # Log state keys with summarized values for operator visibility
@@ -2370,7 +2434,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
         try:
             state_data = await self._state_manager.load_state(self._strategy_id)
             if state_data and state_data.state:
-                self.load_persistent_state(state_data.state)
+                user_state, framework_state = self._split_framework_state(state_data.state)
+                self._restore_framework_state(framework_state)
+                self.load_persistent_state(user_state)
                 self._state_version = state_data.version
                 state_summary = {
                     k: (f"{v:.6g}" if isinstance(v, float) else str(v)[:80]) for k, v in state_data.state.items()
@@ -2449,6 +2515,55 @@ class IntentStrategy(StrategyBase[ConfigT]):
             result: ExecutionResult with enriched data
         """
         pass
+
+    # =========================================================================
+    # Framework hooks — invoked by the runner. Strategies should NOT call or
+    # override these directly. They route through the LPPositionTracker so
+    # bin_ids and NFT position_ids round-trip across LP_OPEN / LP_CLOSE
+    # without any caller boilerplate (VIB-3742).
+    # =========================================================================
+
+    def _framework_record_intent_execution(self, intent: Any, success: bool, result: Any) -> None:
+        """Framework-only hook: capture LP position metadata from results.
+
+        The runner calls this BEFORE invoking ``on_intent_executed`` so the
+        user callback sees the freshest tracker state. Failures here are
+        logged at WARNING and never propagated.
+        """
+        tracker = getattr(self, "_lp_position_tracker", None)
+        if tracker is None:
+            return
+        tracker.record_intent_execution(
+            intent=intent,
+            success=success,
+            result=result,
+            default_chain=self._chain,
+        )
+
+    def _framework_inject_intent_params(self, intent: Any) -> Any:
+        """Framework-only hook: auto-fill protocol_params on LP_CLOSE intents.
+
+        The runner calls this on each intent returned from ``decide()`` before
+        compilation. Returns the same intent if no injection is needed, or a
+        copy with ``protocol_params['bin_ids']`` (and future analogues) filled
+        in from previously captured LP_OPEN data.
+
+        Manual ``protocol_params`` always wins — the tracker never overwrites.
+        Failures here return the original intent unchanged.
+        """
+        tracker = getattr(self, "_lp_position_tracker", None)
+        if tracker is None:
+            return intent
+        return tracker.maybe_inject(intent, default_chain=self._chain)
+
+    @property
+    def lp_position_tracker(self) -> LPPositionTracker:
+        """Read-only accessor to the framework's LP position tracker.
+
+        Exposed for tests and tooling. Strategies should not need to touch
+        this directly — the runner manages it transparently.
+        """
+        return self._lp_position_tracker
 
     def valuate(self, market: MarketSnapshot) -> Decimal:
         """Calculate the total portfolio value in USD for vault settlement.
@@ -2648,6 +2763,19 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     "Use run_multi() for full multi-intent support."
                 )
 
+            # VIB-3742: apply the framework intent-injection hook here too —
+            # direct callers of run() (outside StrategyRunner) must benefit
+            # from the same auto-injection of tracked LP metadata
+            # (e.g. TraderJoe V2 bin_ids) that runner-driven strategies get.
+            try:
+                intent = self._framework_inject_intent_params(intent)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Framework intent-injection hook raised in run() (non-fatal, compiling original intent): %s",
+                    exc,
+                    exc_info=True,
+                )
+
             # Compile intent to ActionBundle
             compilation_result = self.compiler.compile(intent)
 
@@ -2787,6 +2915,22 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 result.success = True
                 return result
 
+            # VIB-3742: apply framework intent-injection BEFORE the state
+            # machine so direct callers benefit from auto-tracked LP metadata
+            # (e.g. TraderJoe V2 bin_ids) just like StrategyRunner-driven
+            # strategies do.
+            try:
+                intent = self._framework_inject_intent_params(intent)
+                result.intent = intent
+                self._current_intent = intent
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Framework intent-injection hook raised in run_with_state_machine "
+                    "(non-fatal, proceeding with original intent): %s",
+                    exc,
+                    exc_info=True,
+                )
+
             # Create state machine with sadflow hooks
             self._current_state_machine = IntentStateMachine(
                 intent=intent,
@@ -2822,6 +2966,20 @@ class IntentStrategy(StrategyBase[ConfigT]):
             # Set final result
             result.success = self._current_state_machine.success
             result.error = self._current_state_machine.error
+
+            # VIB-3742: record framework intent-execution for tracker capture
+            # (e.g. TraderJoe V2 bin_ids from LP_OPEN). Mirror what
+            # StrategyRunner._notify_intent_executed does so direct callers of
+            # run_with_state_machine() also feed the tracker. Hook failures are
+            # logged but never fail the iteration.
+            try:
+                self._framework_record_intent_execution(intent, result.success, result)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Framework intent-execution hook raised in run_with_state_machine (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
 
             return result
 
