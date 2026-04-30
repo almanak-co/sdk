@@ -3,9 +3,10 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import model_validator
-from pydantic_settings import BaseSettings
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 # Default persistent DB path for gateway data (timeline events, instance registry)
 DEFAULT_GATEWAY_DB_PATH = str(Path.home() / ".config" / "almanak" / "gateway.db")
@@ -36,7 +37,11 @@ class GatewaySettings(BaseSettings):
     network: str = "mainnet"
 
     # Pre-initialize chains (comma-separated). Empty = accept any chain on-demand.
-    chains: list[str] = []
+    # ``NoDecode`` disables pydantic-settings' default JSON decoding for the env
+    # var so ``ALMANAK_GATEWAY_CHAINS=bnb,arb`` reaches the field validator below
+    # as a plain string. Without this the env-var path raises ``SettingsError``
+    # because ``bnb,arb`` is not valid JSON.
+    chains: Annotated[list[str], NoDecode] = []
 
     # Enable the ManualPriceOverrideSource last-resort fallback. When True, the
     # gateway consults ``ALMANAK_PRICE_OVERRIDE_<TOKEN>`` env vars for tokens
@@ -123,6 +128,36 @@ class GatewaySettings(BaseSettings):
         "env_file": ".env",
         "extra": "ignore",
     }
+
+    @field_validator("chains", mode="before")
+    @classmethod
+    def _normalize_chains(cls, value: object) -> list[str]:
+        # Accepts a CSV string (env var or constructor) or a list of strings.
+        # ``NoDecode`` on the field disables pydantic-settings' default JSON
+        # decoding so the raw env-var string reaches us here. Each entry is
+        # canonicalized via ``resolve_chain_name`` so callers can pass any
+        # alias ("bsc"/"bnb"/"binance") and storage stays canonical. Unknown
+        # aliases fall through unchanged so the gateway still surfaces a clear
+        # error at request time rather than failing to start (lets operators
+        # stage support for chains the SDK does not yet recognise).
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            raw = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, list | tuple):
+            raw = [str(item).strip() for item in value if item is not None and str(item).strip()]
+        else:
+            return value  # type: ignore[return-value]
+
+        from almanak.core.constants import resolve_chain_name
+
+        normalized: list[str] = []
+        for chain in raw:
+            try:
+                normalized.append(resolve_chain_name(chain))
+            except ValueError:
+                normalized.append(chain.lower())
+        return normalized
 
     @model_validator(mode="after")
     def _fallback_env_vars(self) -> "GatewaySettings":

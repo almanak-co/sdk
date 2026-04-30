@@ -173,14 +173,52 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         forward calls to whatever chain the CLI default happens to name
         (e.g. "arbitrum"), returning data from the wrong chain. Empty
         settings.chains = accept any chain (on-demand mode).
+
+        Aliases are resolved on both sides (e.g. ``bsc`` matches a configured
+        ``bnb``). ``settings.chains`` is canonicalized at load time by the
+        Pydantic validator, but normalizing both sides at compare time also
+        covers any path that constructs the settings without the validator.
         """
-        if not self.settings.chains or chain in self.settings.chains:
+        if not self.settings.chains:
             return None
-        configured = ", ".join(sorted(self.settings.chains))
+
+        from almanak.core.constants import resolve_chain_name
+
+        def _canonical(name: object) -> str:
+            # Defense-in-depth: if settings.chains is constructed/mutated
+            # outside validation, a non-string entry must not raise. Return
+            # an empty sentinel that won't match any real chain name.
+            if not isinstance(name, str):
+                return ""
+            normalized = name.strip().lower()
+            if not normalized:
+                return ""
+            try:
+                return resolve_chain_name(normalized)
+            except ValueError:
+                return normalized
+
+        request_canonical = _canonical(chain)
+        # Fast path: settings.chains is already canonicalized by the validator
+        # at construction time, so the common case avoids re-normalizing.
+        if request_canonical in self.settings.chains:
+            return None
+        # Defense-in-depth: re-normalize on the configured side too in case some
+        # path bypassed the validator (e.g. ``GatewaySettings.model_construct``
+        # or post-construction mutation).
+        if any(_canonical(c) == request_canonical for c in self.settings.chains):
+            return None
+
+        # Coerce to strings before sorting — settings.chains is normally
+        # already a list[str] but the comparator above tolerates non-string
+        # entries; the human-readable error must do the same.
+        configured_strs = sorted(str(c) for c in self.settings.chains)
+        configured = ", ".join(configured_strs)
+        suggested = configured_strs[0] if configured_strs else chain
         return (
             f"Chain '{chain}' is not configured on this gateway. "
             f"Configured chains: [{configured}]. "
-            f"Pass --chain {next(iter(sorted(self.settings.chains)))} "
+            f"Pass --chain {suggested} "
             f"or start the gateway with --chains {chain}."
         )
 

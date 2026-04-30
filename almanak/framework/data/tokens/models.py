@@ -210,6 +210,7 @@ CHAIN_ID_MAP: dict[Chain, int] = {
     Chain.MANTLE: 5000,
     Chain.BERACHAIN: 80094,
     Chain.MONAD: 143,
+    Chain.LINEA: 59144,
 }
 
 
