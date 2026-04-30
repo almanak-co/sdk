@@ -420,6 +420,12 @@ class PendleReceiptParser:
         self,
         receipt: dict[str, Any],
         quoted_amount_out: int | None = None,
+        intent_swap_type: str | None = None,
+        token_in_address: str | None = None,
+        token_out_address: str | None = None,
+        token_in_decimals: int | None = None,
+        token_out_decimals: int | None = None,
+        wallet_address: str | None = None,
     ) -> ParseResult:
         """
         Parse a Pendle transaction receipt.
@@ -427,6 +433,16 @@ class PendleReceiptParser:
         Args:
             receipt: Transaction receipt dictionary
             quoted_amount_out: Expected output for slippage calculation
+            intent_swap_type: Compiler-supplied swap_type ("token_to_yt",
+                "yt_to_token", "token_to_pt", "pt_to_token"). Required for
+                YT swaps to reconstruct user-facing amounts (VIB-3751).
+            token_in_address: Compiler-supplied input token address (for YT).
+            token_out_address: Compiler-supplied output token address (for YT).
+            token_in_decimals: Compiler-supplied input token decimals (for YT).
+                Falls back to ``self.token_in_decimals`` (constructor default).
+            token_out_decimals: Compiler-supplied output token decimals (for YT).
+                Falls back to ``self.token_out_decimals`` (constructor default).
+            wallet_address: Compiler-supplied user wallet address (for YT).
 
         Returns:
             ParseResult with extracted events and swap data
@@ -511,6 +527,12 @@ class PendleReceiptParser:
                     swap_events[0],
                     transfer_events,
                     quoted_amount_out,
+                    intent_swap_type=intent_swap_type,
+                    token_in_address=token_in_address,
+                    token_out_address=token_out_address,
+                    token_in_decimals=token_in_decimals,
+                    token_out_decimals=token_out_decimals,
+                    wallet_address=wallet_address,
                 )
 
             # Log parsed receipt
@@ -922,10 +944,94 @@ class PendleReceiptParser:
         swap_event: SwapEventData,
         transfer_events: list[TransferEventData],
         quoted_amount_out: int | None,
+        intent_swap_type: str | None = None,
+        token_in_address: str | None = None,
+        token_out_address: str | None = None,
+        token_in_decimals: int | None = None,
+        token_out_decimals: int | None = None,
+        wallet_address: str | None = None,
     ) -> ParsedSwapResult:
-        """Build high-level swap result from events."""
-        # Determine swap direction
-        if swap_event.is_buy_pt:
+        """Build high-level swap result from events.
+
+        For PT swaps the Pendle Market Swap event directly reflects user-facing
+        amounts (SY <-> PT). For YT swaps (token_to_yt / yt_to_token) the Swap
+        event reflects an *internal* PT flash-mint+sell that the router uses to
+        synthesize the YT exposure — its amounts are NOT what the user paid or
+        received. To get user-facing amounts for YT swaps we MUST derive them
+        from Transfer events (input token leaving wallet, YT arriving at wallet
+        for buys; YT leaving wallet, output token arriving for sells).
+
+        VIB-3751: prior to this fix, YT swaps were silently misclassified as
+        PT sells, producing inflated ``amount_in`` (~the flash-minted PT
+        amount) which corrupted reconciliation, valuation, and the QA harness
+        ``deployed_usd`` column.
+
+        Args:
+            swap_event: Pendle Market Swap event (used for PT swaps).
+            transfer_events: All Transfer events from the receipt — required
+                for YT swap reconstruction.
+            quoted_amount_out: Optional pre-trade quote (raw int) for slippage.
+            intent_swap_type: Compiler-supplied swap_type ("token_to_yt",
+                "yt_to_token", "token_to_pt", "pt_to_token"). When provided
+                this overrides the legacy PT-direction inference.
+            token_in_address: Compiler-supplied input token address (for YT).
+            token_out_address: Compiler-supplied output token address (for YT).
+            wallet_address: Compiler-supplied user wallet (recipient/payer for YT).
+        """
+        # ----------------------------------------------------------------
+        # YT swap path — Market Swap event is misleading (reflects internal
+        # flash-mint+sell of PT, not the user's YT trade). Reconstruct
+        # user-facing amounts from Transfer events using the compiler's
+        # context (intent_swap_type + addresses + wallet).
+        # ----------------------------------------------------------------
+        if intent_swap_type in ("token_to_yt", "yt_to_token"):
+            yt_result = self._build_yt_swap_result(
+                intent_swap_type=intent_swap_type,
+                transfer_events=transfer_events,
+                token_in_address=token_in_address,
+                token_out_address=token_out_address,
+                token_in_decimals=token_in_decimals,
+                token_out_decimals=token_out_decimals,
+                wallet_address=wallet_address,
+                market_address=swap_event.market_address,
+                quoted_amount_out=quoted_amount_out,
+            )
+            if yt_result is not None:
+                logger.debug(
+                    "Pendle YT swap reconstructed: amount_in=%s, amount_out=%s, swap_type=%s",
+                    yt_result.amount_in_decimal,
+                    yt_result.amount_out_decimal,
+                    yt_result.swap_type,
+                )
+                return yt_result
+            # Fall through to legacy path on reconstruction failure (best-effort
+            # signal preserved with explicit warning rather than silently
+            # producing nonsense PT-shaped amounts).
+            logger.warning(
+                "Pendle YT swap %s: could not reconstruct user-facing amounts "
+                "from Transfer events; falling back to PT-shaped Swap event "
+                "(amounts will be the internal flash-mint values, not user-facing). "
+                "Check token_in_address=%s, token_out_address=%s, wallet_address=%s.",
+                intent_swap_type,
+                token_in_address,
+                token_out_address,
+                wallet_address,
+            )
+
+        # ----------------------------------------------------------------
+        # PT swap path — Market Swap event reflects user-facing SY <-> PT.
+        # If the compiler tagged the intent as PT we trust it; otherwise we
+        # fall back to the legacy ``is_buy_pt`` sign-based inference.
+        # ----------------------------------------------------------------
+        is_buying_pt: bool
+        if intent_swap_type == "token_to_pt":
+            is_buying_pt = True
+        elif intent_swap_type == "pt_to_token":
+            is_buying_pt = False
+        else:
+            is_buying_pt = swap_event.is_buy_pt
+
+        if is_buying_pt:
             # SY -> PT swap
             amount_in = swap_event.sy_amount
             amount_out = swap_event.pt_amount
@@ -976,6 +1082,117 @@ class PendleReceiptParser:
             swap_type=swap_type,
         )
 
+    def _build_yt_swap_result(
+        self,
+        *,
+        intent_swap_type: str,
+        transfer_events: list[TransferEventData],
+        token_in_address: str | None,
+        token_out_address: str | None,
+        wallet_address: str | None,
+        market_address: str,
+        quoted_amount_out: int | None,
+        token_in_decimals: int | None = None,
+        token_out_decimals: int | None = None,
+    ) -> ParsedSwapResult | None:
+        """Reconstruct user-facing amounts for a Pendle YT swap (VIB-3751).
+
+        For ``token_to_yt`` (buy YT):
+            - amount_in  = sum of token_in Transfers FROM wallet
+            - amount_out = sum of token_out (YT) Transfers TO wallet
+        For ``yt_to_token`` (sell YT):
+            - amount_in  = sum of token_in (YT) Transfers FROM wallet
+            - amount_out = sum of token_out Transfers TO wallet
+
+        Returns None when required addresses are missing or when no matching
+        Transfer events are present in the receipt — caller falls back to a
+        legacy path with an explicit warning rather than producing wrong data.
+        """
+        if not token_in_address or not token_out_address or not wallet_address:
+            return None
+
+        wallet = wallet_address.lower()
+        addr_in = token_in_address.lower()
+        addr_out = token_out_address.lower()
+
+        # Compute NET wallet-balance changes from Transfer events. We can't
+        # rely on a single "user-facing" transfer because the Pendle router
+        # may emit multiple Transfers (e.g., a partial refund of unused
+        # input). The robust signal is the net delta:
+        #   amount_in  = (token_in sent FROM wallet) - (token_in returned TO wallet)
+        #   amount_out = (token_out received TO wallet) - (token_out leaving wallet)
+        # A net of zero means there was no user-facing trade for that token —
+        # caller falls back to legacy parsing rather than report nonsense.
+        net_in = 0  # signed: positive when net flows OUT of wallet
+        net_out = 0  # signed: positive when net flows IN to wallet
+        for t in transfer_events:
+            t_token = (t.token_address or "").lower()
+            t_from = (t.from_addr or "").lower()
+            t_to = (t.to_addr or "").lower()
+            value = int(t.value or 0)
+            if value <= 0:
+                continue
+            if t_token == addr_in:
+                if t_from == wallet:
+                    net_in += value
+                elif t_to == wallet:
+                    net_in -= value
+            elif t_token == addr_out:
+                if t_to == wallet:
+                    net_out += value
+                elif t_from == wallet:
+                    net_out -= value
+
+        amount_in = net_in
+        amount_out = net_out
+
+        if amount_in <= 0 or amount_out <= 0:
+            return None
+
+        # Prefer caller-supplied decimals (compiler bundle metadata) over the
+        # parser's constructor-time defaults — the enricher instantiates
+        # PendleReceiptParser with chain only, leaving the constructor
+        # decimals at their 18-decimal fallbacks. Without this override,
+        # non-18-decimal Pendle markets (e.g., Plasma fUSDT0 = 6) report
+        # amounts off by 10^12. (Codex audit P1.)
+        in_decimals = token_in_decimals if token_in_decimals is not None else self.token_in_decimals
+        out_decimals = token_out_decimals if token_out_decimals is not None else self.token_out_decimals
+
+        amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**in_decimals)
+        amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**out_decimals)
+
+        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal("0")
+
+        slippage_bps = 0
+        if quoted_amount_out and quoted_amount_out > 0:
+            slippage_bps = int((Decimal(quoted_amount_out) - Decimal(amount_out)) / Decimal(quoted_amount_out) * 10000)
+        elif self.quoted_price and self.quoted_price > 0:
+            slippage_bps = int((self.quoted_price - effective_price) / self.quoted_price * 10000)
+
+        # Surface user-facing labels: for buy_yt the input is the underlying
+        # (e.g. "sUSDe") and the output is "YT"; vice versa for sell_yt.
+        if intent_swap_type == "token_to_yt":
+            swap_type = "buy_yt"
+            token_in = "TOKEN"
+            token_out = "YT"
+        else:
+            swap_type = "sell_yt"
+            token_in = "YT"
+            token_out = "TOKEN"
+
+        return ParsedSwapResult(
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=amount_in,
+            amount_out=amount_out,
+            amount_in_decimal=amount_in_decimal,
+            amount_out_decimal=amount_out_decimal,
+            effective_price=effective_price,
+            slippage_bps=slippage_bps,
+            market_address=market_address,
+            swap_type=swap_type,
+        )
+
     # =========================================================================
     # Extraction Methods (for Result Enrichment)
     # =========================================================================
@@ -985,6 +1202,12 @@ class PendleReceiptParser:
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        intent_swap_type: str | None = None,
+        token_in_address: str | None = None,
+        token_out_address: str | None = None,
+        token_in_decimals: int | None = None,
+        token_out_decimals: int | None = None,
+        wallet_address: str | None = None,
     ) -> SwapAmounts | None:
         """
         Extract swap amounts from receipt for Result Enrichment.
@@ -999,12 +1222,32 @@ class PendleReceiptParser:
                 Overrides the parser's internal ``slippage_bps``, which is
                 ``None`` on the enrichment path because constructor
                 ``quoted_price`` isn't available there.
+            intent_swap_type: VIB-3751 — compiler-supplied swap_type
+                ("token_to_yt", "yt_to_token", "token_to_pt", "pt_to_token").
+                Required for YT swaps to reconstruct user-facing amounts;
+                without it the parser falls back to the legacy PT-direction
+                inference which is wrong for YT trades.
+            token_in_address: Input token address from compiler (for YT).
+            token_out_address: Output token address from compiler (for YT).
+            token_in_decimals: Input token decimals from compiler. Required
+                for non-18-decimal markets (e.g., Plasma fUSDT0 = 6) so that
+                YT amount reconstruction does not mis-scale by 10^12.
+            token_out_decimals: Output token decimals from compiler.
+            wallet_address: User wallet from compiler (for YT).
 
         Returns:
             SwapAmounts dataclass or None if not found
         """
         try:
-            result = self.parse_receipt(receipt)
+            result = self.parse_receipt(
+                receipt,
+                intent_swap_type=intent_swap_type,
+                token_in_address=token_in_address,
+                token_out_address=token_out_address,
+                token_in_decimals=token_in_decimals,
+                token_out_decimals=token_out_decimals,
+                wallet_address=wallet_address,
+            )
             if not result.swap_result:
                 return None
 

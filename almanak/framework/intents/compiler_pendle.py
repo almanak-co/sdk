@@ -560,15 +560,45 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
 
         total_gas = sum(tx.gas_estimate for tx in transactions)
 
+        # Resolve out-token decimals (PT/YT info already looked up above; for
+        # PT/YT-out swaps both come from the static info dicts). For sells the
+        # out token is the underlying which was already resolved via
+        # _resolve_token. We capture out-token address+decimals so the
+        # receipt parser can reconstruct user-facing amounts for YT swaps
+        # from Transfer events (VIB-3751).
+        to_token_decimals: int | None = None
+        if to_token_name_upper.startswith("PT-"):
+            pt_info = PT_TOKEN_INFO.get(compiler.chain, {})
+            pt_data = pt_info.get(to_token_name_upper) or pt_info.get(intent.to_token)
+            if pt_data:
+                to_token_decimals = pt_data[1]
+        elif to_token_name_upper.startswith("YT-"):
+            yt_info = YT_TOKEN_INFO.get(compiler.chain, {})
+            yt_data = yt_info.get(to_token_name_upper) or yt_info.get(intent.to_token)
+            if yt_data:
+                to_token_decimals = yt_data[1]
+        else:
+            # Selling PT/YT — out token is the underlying we already resolved
+            resolved_out = compiler._resolve_token(intent.to_token)
+            if resolved_out is not None:
+                to_token_decimals = resolved_out.decimals
+
         metadata = {
             "from_token": from_token.to_dict(),
             "to_token": intent.to_token,
+            "to_token_address": token_out_address,
+            "to_token_decimals": to_token_decimals,
             "amount_in": str(amount_in),
             "min_amount_out": str(min_amount_out),
             "slippage": str(intent.max_slippage),
             "protocol": "pendle",
             "market": market,
             "swap_type": swap_type,
+            # VIB-3751: receipt parser needs the wallet address to reconstruct
+            # user-facing YT swap amounts from Transfer events (the Pendle
+            # Market Swap event reflects an internal flash-mint and is NOT
+            # a faithful representation of the user-facing trade).
+            "wallet_address": compiler.wallet_address,
         }
 
         # When a pre-swap was inserted, expose the original input token/amount

@@ -978,17 +978,69 @@ class ResultEnricher:
         if not bundle_metadata:
             return {}
         if field == "swap_amounts":
+            kwargs: dict[str, Any] = {}
             raw = bundle_metadata.get("expected_output_human")
-            if raw is None:
-                return {}
-            try:
-                expected_out = Decimal(str(raw))
-            except (InvalidOperation, TypeError, ValueError):
-                logger.debug("Could not coerce expected_output_human=%r to Decimal; skipping", raw)
-                return {}
-            if not expected_out.is_finite() or expected_out <= 0:
-                return {}
-            return {"expected_out": expected_out}
+            if raw is not None:
+                try:
+                    expected_out = Decimal(str(raw))
+                    if expected_out.is_finite() and expected_out > 0:
+                        kwargs["expected_out"] = expected_out
+                except (InvalidOperation, TypeError, ValueError):
+                    logger.debug("Could not coerce expected_output_human=%r to Decimal; skipping", raw)
+            # VIB-3751: thread Pendle YT swap context so the parser can
+            # reconstruct user-facing amounts from Transfer events (the
+            # Pendle Market Swap event is misleading for YT trades — it
+            # reports the internal PT flash-mint, not the user's YT trade).
+            #
+            # Gate strictly to Pendle: other swap parsers (Uniswap, Aerodrome,
+            # Curve, ...) accept ``expected_out`` but not the new
+            # ``intent_swap_type`` / ``token_in_address`` / ``token_out_address``
+            # / ``wallet_address`` kwargs. Without this gate, _invoke_extract's
+            # TypeError fallback would drop ALL kwargs (including the valid
+            # ``expected_out``), silently regressing realized-slippage reporting
+            # on every non-Pendle SWAP. (Codex audit P2.)
+            if (bundle_metadata.get("protocol") or "").lower() == "pendle":
+                for key in (
+                    "swap_type",
+                    "to_token_address",
+                    "to_token_decimals",
+                    "wallet_address",
+                ):
+                    val = bundle_metadata.get(key)
+                    if val is not None and val != "":
+                        if key == "swap_type":
+                            kwargs["intent_swap_type"] = val
+                        elif key == "to_token_address":
+                            kwargs["token_out_address"] = val
+                        elif key == "to_token_decimals":
+                            # Coerce to int — receipt parser uses 10**decimals;
+                            # str/Decimal slips through the bundle metadata path.
+                            try:
+                                kwargs["token_out_decimals"] = int(val)
+                            except (TypeError, ValueError):
+                                logger.debug(
+                                    "Could not coerce to_token_decimals=%r to int; "
+                                    "parser will fall back to constructor default",
+                                    val,
+                                )
+                        else:
+                            kwargs[key] = val
+                from_token_meta = bundle_metadata.get("from_token") or {}
+                if isinstance(from_token_meta, dict):
+                    addr = from_token_meta.get("address")
+                    if addr:
+                        kwargs["token_in_address"] = addr
+                    decimals = from_token_meta.get("decimals")
+                    if decimals is not None:
+                        try:
+                            kwargs["token_in_decimals"] = int(decimals)
+                        except (TypeError, ValueError):
+                            logger.debug(
+                                "Could not coerce from_token.decimals=%r to int; "
+                                "parser will fall back to constructor default",
+                                decimals,
+                            )
+            return kwargs
         if field == "protocol_fees":
             raw_tier = bundle_metadata.get("selected_fee_tier")
             if raw_tier in (None, ""):
@@ -1005,17 +1057,17 @@ class ResultEnricher:
             # ``ActionBundle.metadata`` (see compiler._compile_bridge), so we
             # thread those hints into the parser to keep the typed output
             # stable and avoid re-deriving them at parse time.
-            kwargs: dict[str, Any] = {}
+            bridge_kwargs: dict[str, Any] = {}
             for key in ("from_chain", "to_chain", "token", "amount", "bridge"):
                 val = bundle_metadata.get(key)
                 if val is not None and val != "":
-                    kwargs[key] = val
+                    bridge_kwargs[key] = val
             # Expected output (post-fee) from the compiler quote — optional,
             # parsers that do not accept it fall back via TypeError handling.
             out_amount = bundle_metadata.get("output_amount")
             if out_amount is not None:
-                kwargs["expected_amount_out"] = out_amount
-            return kwargs
+                bridge_kwargs["expected_amount_out"] = out_amount
+            return bridge_kwargs
         return {}
 
     def _invoke_extract(
@@ -1290,16 +1342,25 @@ class ResultEnricher:
         if getattr(original, "_is_cached_wrapper", False):
             return
 
-        cache: dict[str, Any] = {}
+        cache: dict[tuple, Any] = {}
 
-        def cached_parse_receipt(receipt: dict[str, Any]) -> Any:
-            # Use transactionHash as key, fall back to id() for hashability
+        def cached_parse_receipt(receipt: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+            # Use transactionHash + a deterministic kwargs signature as the
+            # key. VIB-3751: kwargs (e.g., intent_swap_type, token_in_address)
+            # MUST be part of the cache key — the original implementation
+            # dropped them entirely, which silently neutered context-aware
+            # parsing. The receipt itself is identical for every extract_*
+            # call within one enrichment, but two extract_* calls may pass
+            # different kwargs (e.g., one with `intent_swap_type` and one
+            # without), and we must not return the wrong cached result.
             tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash")
             if tx_hash is None:
                 tx_hash = id(receipt)
-            key = str(tx_hash)
+            kwarg_key = tuple(sorted((k, str(v)) for k, v in kwargs.items()))
+            arg_key = tuple(str(a) for a in args)
+            key = (str(tx_hash), arg_key, kwarg_key)
             if key not in cache:
-                cache[key] = original(receipt)
+                cache[key] = original(receipt, *args, **kwargs)
             return cache[key]
 
         cached_parse_receipt._is_cached_wrapper = True  # type: ignore[attr-defined]

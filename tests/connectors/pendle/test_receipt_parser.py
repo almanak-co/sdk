@@ -543,5 +543,311 @@ class TestEdgeCases:
         assert result.transaction_hash == "0x" + "ab" * 32
 
 
+# =============================================================================
+# YT Swap Tests (VIB-3751)
+# =============================================================================
+#
+# YT swaps cannot be inferred from the Pendle Market Swap event alone — that
+# event reflects an internal flash-mint+sell of PT that the router uses to
+# synthesize YT exposure. The user-facing amounts (input token sent to the
+# router, YT received) live only in Transfer events. The parser must be
+# given the compiler's ``intent_swap_type`` plus token+wallet addresses to
+# reconstruct the correct user-facing trade.
+
+
+class TestYTSwapReconstruction:
+    """VIB-3751: ensure YT swaps report user-facing amounts, not the
+    Market Swap event's internal flash-mint values."""
+
+    # Canonical sUSDe / YT-sUSDe-7MAY2026 / Pendle market addresses on
+    # Ethereum. These map to the failing strategy in QA-Report-April29 B20.
+    SUSDE = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+    YT_SUSDE = "0x30775B422b9c7415349855346352FAA61fD97E41"
+    MARKET = "0x8dAe8ECe668cf80d348873F23D456448E8694883"
+    ROUTER = "0x888888888889758F76e7103c6CbF23ABbF58F946"
+    WALLET = "0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF"
+
+    def _build_yt_buy_logs(
+        self,
+        *,
+        sUSDe_in_wei: int,
+        yt_out_wei: int,
+        # Internal flash-mint values that the Market Swap event misleadingly
+        # reports for the SY/PT leg of a YT buy. These are the WRONG values
+        # if anyone naively uses the Market Swap event to value the trade.
+        internal_pt_amount_wei: int,
+        internal_sy_amount_wei: int,
+    ) -> list[dict]:
+        """Build a logs list mirroring the on-chain shape of a Pendle YT buy."""
+        # 1) User -> Router: sends sUSDe (the input)
+        user_to_router_susde = create_transfer_log(
+            self.WALLET,
+            self.ROUTER,
+            sUSDe_in_wei,
+            self.SUSDE,
+            log_index=0,
+        )
+        # 2) Router internal: SY mint + various PT/YT/SY transfers (we
+        # simulate the noisy real receipt — only the user-facing transfers
+        # should drive the result).
+        router_to_market_sy = create_transfer_log(
+            self.ROUTER,
+            self.MARKET,
+            internal_sy_amount_wei,
+            "0x" + "11" * 20,  # SY token (irrelevant address)
+            log_index=1,
+        )
+        # 3) Market Swap event — reports the internal flash-mint+sell of PT.
+        # Negative pt_to_account, positive sy_to_account: looks like
+        # "PT -> SY" in the legacy reader, NOT the user's YT buy.
+        market_swap = create_swap_log(
+            self.ROUTER,
+            self.ROUTER,
+            -internal_pt_amount_wei,
+            internal_sy_amount_wei,
+            self.MARKET,
+            log_index=2,
+        )
+        # 4) Market -> Router: YT minted to router during flash-mint
+        market_to_router_yt = create_transfer_log(
+            self.MARKET,
+            self.ROUTER,
+            yt_out_wei + 100,  # extra YT that gets refunded
+            self.YT_SUSDE,
+            log_index=3,
+        )
+        # 5) Router -> User: YT delivered (the user-facing output)
+        router_to_user_yt = create_transfer_log(
+            self.ROUTER,
+            self.WALLET,
+            yt_out_wei,
+            self.YT_SUSDE,
+            log_index=4,
+        )
+        return [
+            user_to_router_susde,
+            router_to_market_sy,
+            market_swap,
+            market_to_router_yt,
+            router_to_user_yt,
+        ]
+
+    def test_yt_buy_uses_user_facing_amounts(self):
+        """A YT buy must report sUSDe-in / YT-out, NOT the internal PT/SY."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,  # sUSDe
+            token_out_decimals=18,  # YT-sUSDe
+        )
+        logs = self._build_yt_buy_logs(
+            sUSDe_in_wei=50 * 10**18,
+            yt_out_wei=60_971 * 10**18,
+            internal_pt_amount_wei=60_898 * 10**18,
+            internal_sy_amount_wei=49_476 * 10**18,
+        )
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_yt",
+            token_in_address=self.SUSDE,
+            token_out_address=self.YT_SUSDE,
+            wallet_address=self.WALLET,
+        )
+
+        assert amounts is not None
+        # The bug (VIB-3751) reported amount_in≈60898 (PT flash-mint amount)
+        # and amount_out≈49476 (SY internal). With the fix, amount_in must
+        # be the 50 sUSDe the user actually sent and amount_out must be the
+        # 60971 YT they actually received.
+        assert amounts.amount_in_decimal == Decimal("50")
+        assert amounts.amount_out_decimal == Decimal("60971")
+        assert amounts.token_in == "TOKEN"
+        assert amounts.token_out == "YT"
+
+    def test_yt_buy_no_decimals_double_application(self):
+        """Decimals must be applied exactly once — NEVER 18 then 18 again."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        logs = self._build_yt_buy_logs(
+            sUSDe_in_wei=10 * 10**18,
+            yt_out_wei=12_345 * 10**18,
+            internal_pt_amount_wei=10**24,
+            internal_sy_amount_wei=10**24,
+        )
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_yt",
+            token_in_address=self.SUSDE,
+            token_out_address=self.YT_SUSDE,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        # 10 * 10**18 wei / 10**18 = 10. Anything else (e.g., 10e-18 from
+        # double-application, or 10e36 from no-application) is wrong.
+        assert amounts.amount_in_decimal == Decimal("10")
+        assert amounts.amount_out_decimal == Decimal("12345")
+
+    def test_yt_sell_uses_user_facing_amounts(self):
+        """A YT sell must report YT-in / sUSDe-out (mirror of buy path)."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        # Sell flow: user sends YT to router, receives sUSDe
+        logs = [
+            # 1) User -> Router: sends YT
+            create_transfer_log(self.WALLET, self.ROUTER, 60_971 * 10**18, self.YT_SUSDE, 0),
+            # 2) Internal noise — flash-redeem and Market Swap
+            create_swap_log(self.ROUTER, self.ROUTER, 60_898 * 10**18, -49_476 * 10**18, self.MARKET, 1),
+            # 3) Router -> User: returns sUSDe
+            create_transfer_log(self.ROUTER, self.WALLET, 50 * 10**18, self.SUSDE, 2),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="yt_to_token",
+            token_in_address=self.YT_SUSDE,
+            token_out_address=self.SUSDE,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        assert amounts.amount_in_decimal == Decimal("60971")
+        assert amounts.amount_out_decimal == Decimal("50")
+        assert amounts.token_in == "YT"
+        assert amounts.token_out == "TOKEN"
+
+    def test_yt_swap_falls_back_to_legacy_when_context_missing(self):
+        """Without compiler context, the parser falls back to the legacy
+        PT-direction inference and emits a WARNING. This is intentional
+        back-compat for any caller that hasn't been updated to thread
+        intent_swap_type through; the ENRICHER path always supplies it."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        logs = self._build_yt_buy_logs(
+            sUSDe_in_wei=50 * 10**18,
+            yt_out_wei=60_971 * 10**18,
+            internal_pt_amount_wei=60_898 * 10**18,
+            internal_sy_amount_wei=49_476 * 10**18,
+        )
+        receipt = create_mock_receipt(logs=logs)
+
+        # No intent_swap_type / addresses passed — legacy path runs.
+        amounts = parser.extract_swap_amounts(receipt)
+        assert amounts is not None
+        # The legacy path produces the misleading internal values. We
+        # don't endorse this behavior — the assertion only documents the
+        # fallback shape so a future change is visible in tests.
+        assert amounts.amount_in_decimal != Decimal("50")
+
+    def test_yt_buy_with_input_refund_uses_net_flow(self):
+        """If the router refunds part of the input back to the wallet,
+        ``amount_in`` must report the NET flow (sent - refunded), not the
+        gross sent amount. Same mirror logic guards ``amount_out`` against
+        any output token leaking back from the wallet.
+        """
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        # User sends 60 sUSDe; router only spends 50 and refunds 10.
+        # User-facing input is the NET 50 (matches the strategy intent).
+        logs = [
+            create_transfer_log(self.WALLET, self.ROUTER, 60 * 10**18, self.SUSDE, 0),
+            create_swap_log(self.ROUTER, self.ROUTER, -(60 * 10**18), 50 * 10**18, self.MARKET, 1),
+            create_transfer_log(self.ROUTER, self.WALLET, 10 * 10**18, self.SUSDE, 2),
+            create_transfer_log(self.ROUTER, self.WALLET, 60_000 * 10**18, self.YT_SUSDE, 3),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_yt",
+            token_in_address=self.SUSDE,
+            token_out_address=self.YT_SUSDE,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        # NET sUSDe out = 60 sent - 10 refunded = 50 (user-facing trade)
+        assert amounts.amount_in_decimal == Decimal("50")
+        assert amounts.amount_out_decimal == Decimal("60000")
+
+    def test_pt_swap_unaffected_by_yt_path(self):
+        """PT swaps must continue to work via the SY/PT Swap-event reader."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        # PT buy: pt_to_account > 0, sy_to_account < 0
+        log = create_swap_log(
+            self.WALLET,
+            self.WALLET,
+            10**18,        # +1 PT
+            -(10**18),     # -1 SY
+            self.MARKET,
+        )
+        receipt = create_mock_receipt(logs=[log])
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_pt",
+            token_in_address=self.SUSDE,
+            token_out_address="0x" + "AB" * 20,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        # PT path — Swap event drives the values, not Transfer events.
+        assert amounts.amount_in_decimal == Decimal("1")
+        assert amounts.amount_out_decimal == Decimal("1")
+
+    def test_yt_buy_uses_compiler_decimals_for_non_18_markets(self):
+        """For non-18-decimal markets (e.g., Plasma fUSDT0 = 6 decimals),
+        the parser MUST honor compiler-supplied decimals. The enricher
+        instantiates PendleReceiptParser with chain only, leaving the
+        constructor decimals at their 18 fallbacks — without overrides
+        the reconstructed YT amounts would be off by 10^12. (Codex P1.)
+        """
+        # Constructor decimals left at default 18; compiler hands in 6 via kwargs
+        parser = PendleReceiptParser(chain="plasma")
+        FUSDT0 = "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B"
+        YT_FUSDT0 = "0x7B6aD25E30AB1E7F5393E26C3F6bF1f4e8C0138A"
+        MARKET = "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2"
+
+        # 1.5 fUSDT0 = 1_500_000 wei (6 decimals)
+        # 12 YT-fUSDT0 = 12_000_000 wei (6 decimals)
+        logs = [
+            create_transfer_log(self.WALLET, self.ROUTER, 1_500_000, FUSDT0, 0),
+            create_swap_log(self.ROUTER, self.ROUTER, -1_400_000, 1_400_000, MARKET, 1),
+            create_transfer_log(self.ROUTER, self.WALLET, 12_000_000, YT_FUSDT0, 2),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_yt",
+            token_in_address=FUSDT0,
+            token_out_address=YT_FUSDT0,
+            token_in_decimals=6,
+            token_out_decimals=6,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        # Without the fix, default decimals=18 would report 1.5e-12 fUSDT0.
+        assert amounts.amount_in_decimal == Decimal("1.5")
+        assert amounts.amount_out_decimal == Decimal("12")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

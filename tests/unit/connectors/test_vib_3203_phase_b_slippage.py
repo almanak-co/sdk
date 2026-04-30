@@ -277,6 +277,53 @@ class TestEnricherForwardsKwargToPhaseBParsers:
         assert ResultEnricher._build_extract_kwargs("swap_amounts", None) == {}
         assert ResultEnricher._build_extract_kwargs("swap_amounts", {}) == {}
 
+    def test_non_pendle_swap_does_not_get_yt_kwargs(self) -> None:
+        """VIB-3751: non-Pendle swap bundles must NOT receive Pendle YT
+        kwargs (intent_swap_type / token_in_address / etc.). A Uniswap
+        parser accepts ``expected_out`` but not those — forwarding them
+        would force _invoke_extract's TypeError fallback to drop ALL kwargs
+        (including the valid ``expected_out``), silently regressing
+        realized-slippage reporting on every non-Pendle SWAP."""
+        from almanak.framework.execution.result_enricher import ResultEnricher
+
+        # Bundle metadata shaped like a Uniswap V3 SWAP (no protocol=pendle).
+        bundle = {
+            "expected_output_human": "100.5",
+            "from_token": {"address": "0x" + "ab" * 20, "decimals": 18, "symbol": "WETH"},
+            "swap_type": "exactInputSingle",  # uniswap-style, NOT pendle's "token_to_yt"
+            "selected_fee_tier": 500,
+        }
+        kwargs = ResultEnricher._build_extract_kwargs("swap_amounts", bundle)
+        # Only the legacy expected_out should be forwarded; YT kwargs absent.
+        assert "expected_out" in kwargs
+        assert "intent_swap_type" not in kwargs
+        assert "token_in_address" not in kwargs
+        assert "token_out_address" not in kwargs
+        assert "wallet_address" not in kwargs
+
+    def test_pendle_swap_threads_yt_kwargs(self) -> None:
+        """VIB-3751: Pendle swap bundles forward the YT-context kwargs
+        alongside the existing ``expected_out``."""
+        from almanak.framework.execution.result_enricher import ResultEnricher
+
+        bundle = {
+            "expected_output_human": "60971",
+            "protocol": "pendle",
+            "swap_type": "token_to_yt",
+            "from_token": {"address": "0x" + "11" * 20, "decimals": 18, "symbol": "sUSDe"},
+            "to_token_address": "0x" + "22" * 20,
+            "to_token_decimals": 18,
+            "wallet_address": "0x" + "33" * 20,
+        }
+        kwargs = ResultEnricher._build_extract_kwargs("swap_amounts", bundle)
+        assert kwargs["expected_out"] == Decimal("60971")
+        assert kwargs["intent_swap_type"] == "token_to_yt"
+        assert kwargs["token_in_address"] == "0x" + "11" * 20
+        assert kwargs["token_out_address"] == "0x" + "22" * 20
+        assert kwargs["token_in_decimals"] == 18
+        assert kwargs["token_out_decimals"] == 18
+        assert kwargs["wallet_address"] == "0x" + "33" * 20
+
 
 class TestPhaseBLocalGuardsExpectedOut:
     """VIB-3203 Phase B parsers must mirror the Phase A guard pattern
