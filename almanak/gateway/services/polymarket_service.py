@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -25,16 +26,12 @@ from urllib.parse import urlencode
 import aiohttp
 import grpc
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 from pydantic import SecretStr
 
 if TYPE_CHECKING:
     from web3 import Web3
 
 from almanak.framework.connectors.polymarket import (
-    CLOB_AUTH_DOMAIN,
-    CLOB_AUTH_MESSAGE,
-    CLOB_AUTH_TYPES,
     ApiCredentials,
     ClobClient,
     CtfSDK,
@@ -44,6 +41,11 @@ from almanak.framework.connectors.polymarket import (
     PolymarketConfig,
     SignatureType,
     TransactionData,
+)
+from almanak.framework.connectors.polymarket.signer import (
+    build_clob_auth_typed_data,
+    sign_typed_data_local,
+    sign_typed_data_remote,
 )
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -84,10 +86,98 @@ PUSD_CACHE_STALE_BLOCKS = 50
 POLYGON_MIN_PRIORITY_FEE_WEI = 30 * 10**9  # 30 gwei
 
 
+def _resolve_polymarket_zodiac_entry() -> dict | None:
+    """Return the polymarket_zodiac entry from ALMANAK_GATEWAY_WALLETS, if any.
+
+    The Almanak platform ships per-chain wallet config as a JSON dict keyed by
+    chain alias. Polymarket-enabled deployments include an entry like::
+
+        {
+          "polygon": {
+            "wallet_address": "<polymarketSafe>",
+            "type": "polymarket_zodiac",
+            "eoa_address": "<userEoa>",
+            "zodiac_roles_address": "<rolesMod>",
+            "trading_eoa_address": "<throwawayEoa>"
+          }
+        }
+
+    The trading EOA's private key never ships to the gateway — it lives in the
+    Almanak Signer Service GCS bucket and is invoked via ``/sign/hash``. This
+    helper extracts the entry so ``__init__`` can wire the connector for remote
+    signing. Returns ``None`` when the env var is unset, malformed, or doesn't
+    contain a polymarket_zodiac entry — local-key fallback then applies.
+    """
+    raw = os.environ.get("ALMANAK_GATEWAY_WALLETS")
+    if not raw:
+        return None
+    # Fail closed once ``ALMANAK_GATEWAY_WALLETS`` is set: a malformed value
+    # used to log a warning and degrade to legacy local-key mode, which
+    # silently switches production traffic onto a different signer/funder
+    # than the platform intended. Gateway is the security boundary —
+    # mis-configured wallet config is a startup error, not a fallback path.
+    try:
+        wallets = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"ALMANAK_GATEWAY_WALLETS is not valid JSON: {e}") from e
+    if not isinstance(wallets, dict):
+        raise ValueError(f"ALMANAK_GATEWAY_WALLETS must be a JSON object keyed by chain, got {type(wallets).__name__}")
+
+    # Hoisted so we don't re-import inside the per-entry loop and so the
+    # ``polygon_canonical`` lookup falls back gracefully when the helper
+    # isn't importable for any reason. ``ImportError`` covers a stripped-down
+    # build; ``ValueError`` is what ``resolve_chain_name`` itself raises on
+    # an unknown alias.
+    _resolve_chain_name: Callable[[str], str] | None
+    try:
+        from almanak.core.constants import resolve_chain_name as _resolve_chain_name
+    except ImportError:
+        _resolve_chain_name = None
+    if _resolve_chain_name is not None:
+        try:
+            polygon_canonical = _resolve_chain_name("polygon")
+        except ValueError:
+            polygon_canonical = "polygon"
+    else:
+        polygon_canonical = "polygon"
+
+    for chain_key, entry in wallets.items():
+        if not isinstance(entry, dict) or entry.get("type") != "polymarket_zodiac":
+            continue
+        chain_str = str(chain_key).lower().strip()
+        if _resolve_chain_name is not None:
+            try:
+                normalized = _resolve_chain_name(chain_str)
+            except ValueError:
+                normalized = chain_str
+        else:
+            normalized = chain_str
+        if normalized == polygon_canonical:
+            return entry
+    return None
+
+
 class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     """Implements PolymarketService gRPC interface.
 
     Provides secure proxy to Polymarket CLOB API with credentials held in gateway.
+
+    Two signing modes are supported:
+
+    - **Local-key mode** (legacy / dev): a private key is held in process via
+      ``ALMANAK_GATEWAY_PRIVATE_KEY`` or ``POLYMARKET_PRIVATE_KEY``. Used for
+      EOA accounts and on-chain auto-setup (token approvals, pUSD wrap).
+
+    - **Platform mode** (production): the trading EOA's private key lives in
+      the Almanak Signer Service GCS bucket. Identity is sourced from the
+      ``polymarket_zodiac`` entry in ``ALMANAK_GATEWAY_WALLETS`` (which the
+      platform ships alongside ``ALMANAK_GATEWAY_SIGNER_SERVICE_URL`` /
+      ``..._JWT``). The on-chain auto-setup path is intentionally skipped —
+      the trading EOA cannot grant Safe approvals; the user grants them via
+      Zodiac Roles + Safe ``execTransaction`` post-deploy.
+
+    JSON path takes precedence over legacy ``polymarket_*`` env vars when both
+    are present.
     """
 
     def __init__(self, settings: GatewaySettings):
@@ -127,28 +217,66 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         # ledger: a shared ``_pending_setup_txs`` would race across concurrent
         # order RPCs (request A's approvals leaking into request B's response,
         # corrupting basis attribution across positions).
-        self._private_key = settings.private_key or settings.polymarket_private_key
-        self._wallet_address = self._resolve_signer_address()
-        self._funder_address = self._resolve_funder_address()
-        self._signature_type = (
-            SignatureType.POLY_GNOSIS_SAFE
-            if settings.safe_address and (settings.safe_mode or "").lower() in {"direct", "zodiac"}
-            else SignatureType.EOA
-        )
+
+        # Platform mode wins over legacy envs when ALMANAK_GATEWAY_WALLETS has a
+        # polymarket_zodiac entry — see _resolve_polymarket_zodiac_entry.
+        zodiac_entry = _resolve_polymarket_zodiac_entry()
+        self._signer_service_url: str | None = None
+        self._signer_service_jwt: str | None = None
+
+        if zodiac_entry is not None:
+            trading_eoa = zodiac_entry.get("trading_eoa_address")
+            polymarket_safe = zodiac_entry.get("wallet_address")
+            if not trading_eoa or not polymarket_safe:
+                raise ValueError(
+                    "ALMANAK_GATEWAY_WALLETS polymarket_zodiac entry is missing trading_eoa_address or wallet_address"
+                )
+            signer_url = settings.signer_service_url
+            signer_jwt = settings.signer_service_jwt
+            if not signer_url or not signer_jwt:
+                raise ValueError(
+                    "ALMANAK_GATEWAY_WALLETS specifies polymarket_zodiac but "
+                    "ALMANAK_GATEWAY_SIGNER_SERVICE_URL / ALMANAK_GATEWAY_SIGNER_SERVICE_JWT are not set"
+                )
+            self._private_key = None  # explicit: trading EOA's key lives in Signer Service
+            self._wallet_address = trading_eoa  # signer (recovers from sig)
+            self._funder_address = polymarket_safe  # maker = funder (Polymarket Safe)
+            self._signature_type = SignatureType.POLY_GNOSIS_SAFE
+            self._signer_service_url = signer_url
+            self._signer_service_jwt = signer_jwt
+            logger.info(
+                "PolymarketService initialized in platform mode (signer=%s, funder=%s, signature_type=%s)",
+                self._wallet_address,
+                self._funder_address,
+                self._signature_type.name,
+            )
+        else:
+            self._private_key = settings.private_key or settings.polymarket_private_key
+            self._wallet_address = self._resolve_signer_address()
+            self._funder_address = self._resolve_funder_address()
+            self._signature_type = (
+                SignatureType.POLY_GNOSIS_SAFE
+                if settings.safe_address and (settings.safe_mode or "").lower() in {"direct", "zodiac"}
+                else SignatureType.EOA
+            )
+
         self._api_key = settings.polymarket_api_key
         self._api_secret = settings.polymarket_secret
         self._api_passphrase = settings.polymarket_passphrase
 
-        self._available = bool(self._private_key and self._wallet_address)
+        # Capability check: either a local key, or a complete remote-signer config.
+        has_remote_signer = bool(self._signer_service_url) and bool(self._signer_service_jwt)
+        self._available = bool(self._wallet_address) and (bool(self._private_key) or has_remote_signer)
         self._credentials_available = bool(self._api_key and self._api_secret and self._api_passphrase)
 
         logger.debug(
-            "PolymarketService initialized: available=%s, credentials=%s, signer=%s, funder=%s, signature_type=%s",
+            "PolymarketService initialized: available=%s, credentials=%s, signer=%s, funder=%s, signature_type=%s, remote=%s",
             self._available,
             self._credentials_available,
             self._wallet_address,
             self._funder_address,
             self._signature_type.name,
+            has_remote_signer,
         )
 
     def _resolve_signer_address(self) -> str | None:
@@ -172,17 +300,29 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
         ``require_signer=True`` (the default) is the safe choice for any RPC
         that signs orders, derives api credentials, or otherwise needs the
-        trading EOA. ``require_signer=False`` is for read-only public RPCs
-        like ``GetPriceHistory`` and may be invoked on a gateway that has no
+        trading EOA. The signer can be either a local private key (EOA mode)
+        or ``signer_service_url`` + ``signer_service_jwt`` (platform mode —
+        the trading EOA's key lives in the Almanak Signer Service GCS bucket
+        and is invoked via ``/sign/hash`` for EIP-712 digests).
+
+        ``require_signer=False`` is for read-only public RPCs like
+        ``GetPriceHistory`` and may be invoked on a gateway that has no
         Polymarket signer configured at all (e.g. a market-data-only deploy).
         Public endpoints don't read ``wallet_address`` / ``private_key`` from
         the config, so we pass placeholder values that satisfy
         ``PolymarketConfig``'s required-field validators without enabling any
         signing path.
         """
+        has_remote_signer = bool(self._signer_service_url) and bool(self._signer_service_jwt)
+
         if require_signer:
-            if not self._available or not self._wallet_address or not self._private_key:
+            if not self._available or not self._wallet_address:
                 raise ValueError("Polymarket signing identity is not configured in the gateway")
+            if not self._private_key and not has_remote_signer:
+                raise ValueError(
+                    "Polymarket signing identity requires either a local private key or "
+                    "signer_service_url + signer_service_jwt (platform mode)"
+                )
 
         api_credentials = None
         if self._credentials_available and self._api_key and self._api_secret and self._api_passphrase:
@@ -192,22 +332,32 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 passphrase=SecretStr(self._api_passphrase),
             )
 
-        # Placeholders only used when ``require_signer=False`` and the gateway
-        # has no real Polymarket signer wired. ClobClient never reads these
-        # for the public endpoints (``get_price_history``, ``get_orderbook``,
-        # ``get_market``); any signed call on the returned client would
-        # produce an obviously-invalid signature, which is the desired
-        # fail-loud behavior if a caller mis-routes a signed RPC here.
+        # Placeholder wallet only used in the ``require_signer=False`` path
+        # when the gateway has no real Polymarket signer wired. ClobClient
+        # never reads it for the public endpoints (``get_price_history``,
+        # ``get_orderbook``, ``get_market``); any signed call on the returned
+        # client would produce an obviously-invalid signature, which is the
+        # desired fail-loud behavior if a caller mis-routes a signed RPC here.
         wallet = self._wallet_address or "0x" + "0" * 40
-        key = self._private_key or "0x" + "0" * 64
 
-        config = PolymarketConfig(
-            wallet_address=wallet,
-            private_key=SecretStr(key),
-            signature_type=self._signature_type,
-            funder_address=self._funder_address if self._funder_address != self._wallet_address else None,
-            api_credentials=api_credentials,
-        )
+        config_kwargs: dict = {
+            "wallet_address": wallet,
+            "signature_type": self._signature_type,
+            "funder_address": self._funder_address if self._funder_address != self._wallet_address else None,
+            "api_credentials": api_credentials,
+        }
+        if self._private_key:
+            config_kwargs["private_key"] = SecretStr(self._private_key)
+        elif has_remote_signer:
+            config_kwargs["signer_service_url"] = self._signer_service_url
+            config_kwargs["signer_service_jwt"] = SecretStr(self._signer_service_jwt)  # type: ignore[arg-type]
+        else:
+            # No real signer — only reachable via ``require_signer=False``.
+            # The placeholder key satisfies ``PolymarketConfig``'s validator
+            # but is never used by the public endpoints.
+            config_kwargs["private_key"] = SecretStr("0x" + "0" * 64)
+
+        config = PolymarketConfig(**config_kwargs)
         return ClobClient(config)
 
     async def _build_authenticated_client(self) -> ClobClient:
@@ -247,37 +397,31 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     # =========================================================================
 
     def _build_l1_headers(self, nonce: int = 0) -> dict[str, str]:
-        """Build L1 authentication headers using EIP-712 signing."""
+        """Build L1 authentication headers using EIP-712 signing.
+
+        Local-key mode: signs in-process via ``sign_typed_data_local``.
+        Platform mode: delegates to the Almanak Signer Service ``/sign/hash``
+        via ``sign_typed_data_remote``. Both paths return ``0x``-prefixed
+        65-byte hex (Polymarket's /auth endpoints reject unprefixed sigs).
+        """
+        if not self._wallet_address:
+            raise ValueError("Polymarket signing identity is not configured in the gateway")
         timestamp = str(int(time.time()))
+        typed_data = build_clob_auth_typed_data(self._wallet_address, timestamp, nonce)
 
-        typed_data = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                ],
-                **CLOB_AUTH_TYPES,
-            },
-            "primaryType": "ClobAuth",
-            "domain": CLOB_AUTH_DOMAIN,
-            "message": {
-                "address": self._wallet_address,
-                "timestamp": timestamp,
-                "nonce": nonce,
-                "message": CLOB_AUTH_MESSAGE,
-            },
-        }
-
-        signable = encode_typed_data(full_message=typed_data)
-        signed = Account.sign_message(signable, self._private_key)
-
-        # Modern eth-account returns hex without `0x`; Polymarket's
-        # /auth/api-key + /auth/derive-api-key reject unprefixed signatures
-        # with HTTP 401 "Invalid L1 Request headers". Always prefix.
-        sig_hex = signed.signature.hex()
-        if not sig_hex.startswith("0x"):
-            sig_hex = "0x" + sig_hex
+        if self._private_key:
+            sig_hex = sign_typed_data_local(typed_data, self._private_key)
+        elif self._signer_service_url and self._signer_service_jwt:
+            sig_hex = sign_typed_data_remote(
+                typed_data,
+                eoa_address=self._wallet_address,
+                signer_service_url=self._signer_service_url,
+                signer_service_jwt=self._signer_service_jwt,
+            )
+        else:
+            raise ValueError(
+                "Polymarket L1 signing requires either a local private key or signer_service_url + signer_service_jwt"
+            )
 
         return {
             "POLY_ADDRESS": self._wallet_address,
@@ -302,10 +446,15 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
     async def _derive_or_create_credentials(self) -> bool:
         """Inner credential derivation/creation (must be called while holding _credentials_lock)."""
-        # Try to derive existing credentials
+        # Try to derive existing credentials.
+        # ``_build_l1_headers`` is sync but in platform mode it does a
+        # blocking ``httpx.Client.post`` to the Almanak Signer Service. Run it
+        # off the event loop so a slow signer service doesn't stall other
+        # concurrent gateway RPCs. EOA mode is local-only and finishes in
+        # microseconds — the to_thread overhead is negligible.
         try:
             session = await self._get_session()
-            headers = self._build_l1_headers()
+            headers = await asyncio.to_thread(self._build_l1_headers)
 
             async with session.get(f"{CLOB_BASE_URL}/auth/derive-api-key", headers=headers) as response:
                 if response.status == 200:
@@ -326,10 +475,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         except (TimeoutError, aiohttp.ClientError) as e:
             logger.warning("Failed to derive credentials: %s", e)
 
-        # Create new credentials
+        # Create new credentials. Same to_thread reasoning as the derive
+        # path above — protect the event loop from a slow remote signer.
         try:
             session = await self._get_session()
-            headers = self._build_l1_headers()
+            headers = await asyncio.to_thread(self._build_l1_headers)
 
             async with session.post(f"{CLOB_BASE_URL}/auth/api-key", headers=headers) as response:
                 if response.status == 200:
@@ -609,6 +759,12 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         the required pUSD amount, so the calling RPC fails fast with a clear
         message.
 
+        Skipped entirely in platform mode (``self._private_key is None``): the
+        trading EOA can't grant Safe approvals — it's not the Safe owner and
+        has no gas. The user grants approvals via Zodiac Roles + Safe
+        ``execTransaction`` post-deploy (see
+        ``packages/backend/docs/polymarket-handoff.md``).
+
         Auto-setup only supports the EOA-funded path: balances/allowances are
         checked on ``self._wallet_address`` and setup txs are signed by that
         same EOA. In a Safe / ``polymarket_wallet_address`` deployment the
@@ -623,6 +779,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         setup_txs: list[dict[str, Any]] = []
 
         if not self._wallet_address or not self._private_key:
+            if self._wallet_address and not self._private_key:
+                logger.debug(
+                    "polymarket auto-setup skipped: platform mode (no local key); "
+                    "user-side Zodiac Roles permissions own approvals"
+                )
             return setup_txs  # signing disabled — no auto-setup possible
 
         if self._funder_address and self._funder_address.lower() != self._wallet_address.lower():

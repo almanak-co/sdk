@@ -34,8 +34,6 @@ from urllib.parse import urlencode
 
 import httpx
 import structlog
-from eth_account import Account
-from eth_account.messages import encode_typed_data
 
 from .exceptions import (
     PolymarketAPIError,
@@ -47,9 +45,6 @@ from .exceptions import (
 )
 from .models import (
     BYTES32_ZERO,
-    CLOB_AUTH_DOMAIN,
-    CLOB_AUTH_MESSAGE,
-    CLOB_AUTH_TYPES,
     CTF_EXCHANGE_V2,
     NEG_RISK_EXCHANGE_V2,
     ORDER_TYPES,
@@ -79,6 +74,7 @@ from .models import (
     UnsignedOrder,
     build_ctf_exchange_domain,
 )
+from .signer import build_clob_auth_typed_data, sign_typed_data_local, sign_typed_data_remote
 
 logger = structlog.get_logger(__name__)
 
@@ -303,6 +299,27 @@ class ClobClient:
     # L1 Authentication (EIP-712)
     # =========================================================================
 
+    def _sign_typed_data(self, typed_data: dict) -> str:
+        """Sign EIP-712 typed data using whichever signer the config selects.
+
+        Local mode: ``Account.sign_message`` with ``config.private_key``.
+        Remote mode: POST the digest to the Almanak Signer Service ``/sign/hash``
+        endpoint with the JWT bearer token. ``config.wallet_address`` is the
+        EOA whose key the service holds.
+
+        Returns ``0x``-prefixed 65-byte signature hex (``r||s||v``).
+        """
+        if self.config.private_key is not None:
+            return sign_typed_data_local(typed_data, self.config.private_key.get_secret_value())
+        # Remote mode — config validator guarantees both URL and JWT are set.
+        return sign_typed_data_remote(
+            typed_data,
+            eoa_address=self.config.wallet_address,
+            signer_service_url=self.config.signer_service_url,  # type: ignore[arg-type]
+            signer_service_jwt=self.config.signer_service_jwt.get_secret_value(),  # type: ignore[union-attr]
+            http_client=self._http,
+        )
+
     def _build_l1_headers(self, nonce: int = 0) -> dict[str, str]:
         """Build L1 authentication headers using EIP-712 signing.
 
@@ -314,38 +331,8 @@ class ClobClient:
         """
         timestamp = str(int(time.time()))
         wallet = self.config.wallet_address
-
-        # Build EIP-712 typed data
-        typed_data = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                ],
-                **CLOB_AUTH_TYPES,
-            },
-            "primaryType": "ClobAuth",
-            "domain": CLOB_AUTH_DOMAIN,
-            "message": {
-                "address": wallet,
-                "timestamp": timestamp,
-                "nonce": nonce,
-                "message": CLOB_AUTH_MESSAGE,
-            },
-        }
-
-        # Sign the typed data
-        private_key = self.config.private_key.get_secret_value()
-        signable = encode_typed_data(full_message=typed_data)
-        signed = Account.sign_message(signable, private_key)
-
-        # Modern eth-account returns hex without `0x`; Polymarket's
-        # GET /auth/derive-api-key rejects unprefixed signatures.
-        sig_hex = signed.signature.hex()
-        if not sig_hex.startswith("0x"):
-            sig_hex = "0x" + sig_hex
-
+        typed_data = build_clob_auth_typed_data(wallet, timestamp, nonce)
+        sig_hex = self._sign_typed_data(typed_data)
         return {
             "POLY_ADDRESS": wallet,
             "POLY_SIGNATURE": sig_hex,
@@ -1532,10 +1519,8 @@ class ClobClient:
             "message": order.to_struct(),
         }
 
-        # Sign with private key
-        private_key = self.config.private_key.get_secret_value()
-        signable = encode_typed_data(full_message=typed_data)
-        signed = Account.sign_message(signable, private_key)
+        # Local or remote signing depending on config — see _sign_typed_data.
+        sig_hex = self._sign_typed_data(typed_data)
 
         logger.debug(
             "Order signed",
@@ -1545,9 +1530,6 @@ class ClobClient:
             taker_amount=order.taker_amount,
         )
 
-        sig_hex = signed.signature.hex()
-        if not sig_hex.startswith("0x"):
-            sig_hex = "0x" + sig_hex
         return SignedOrder(order=order, signature=sig_hex)
 
     def create_and_sign_limit_order(

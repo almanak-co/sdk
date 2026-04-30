@@ -47,74 +47,136 @@ class TestWalletRegistryFromRaw:
 
     def test_duplicate_chain_after_normalization_raises(self):
         with pytest.raises(ValueError, match="Duplicate chain"):
-            WalletRegistry.from_raw({
-                "bnb": {
-                    "wallet_address": "0xABC",
-                    "type": "zodiac",
-                    "eoa_address": "0xEOA",
-                    "zodiac_roles_address": "0xZod",
-                },
-                "bsc": {
-                    "wallet_address": "0xABC",
-                    "type": "zodiac",
-                    "eoa_address": "0xEOA",
-                    "zodiac_roles_address": "0xZod",
-                },
-            })
+            WalletRegistry.from_raw(
+                {
+                    "bnb": {
+                        "wallet_address": "0xABC",
+                        "type": "zodiac",
+                        "eoa_address": "0xEOA",
+                        "zodiac_roles_address": "0xZod",
+                    },
+                    "bsc": {
+                        "wallet_address": "0xABC",
+                        "type": "zodiac",
+                        "eoa_address": "0xEOA",
+                        "zodiac_roles_address": "0xZod",
+                    },
+                }
+            )
 
     def test_solana_chain_parses_ok(self):
         """Solana chain is parseable (not rejected by registry)."""
-        registry = WalletRegistry.from_raw({
-            "solana": {"wallet_address": "SolAddr123", "type": "squads"},
-        })
+        registry = WalletRegistry.from_raw(
+            {
+                "solana": {"wallet_address": "SolAddr123", "type": "squads"},
+            }
+        )
         wallet = registry.resolve("solana")
         assert wallet.family == WalletFamily.SOLANA
         assert wallet.kind == WalletType.SQUADS
 
+    def test_polymarket_zodiac_chain_parses_with_trading_eoa(self):
+        """polymarket_zodiac entries surface trading_eoa_address on the resolved wallet config."""
+        registry = WalletRegistry.from_raw(
+            {
+                "polygon": {
+                    "wallet_address": "0xPolymarketSafe000000000000000000000000",
+                    "type": "polymarket_zodiac",
+                    "eoa_address": "0xUserEoa00000000000000000000000000000000",
+                    "zodiac_roles_address": "0xRolesMod0000000000000000000000000000000",
+                    "trading_eoa_address": "0xTradingEoa000000000000000000000000000000",
+                },
+            }
+        )
+        wallet = registry.resolve("polygon")
+        assert wallet.family == WalletFamily.EVM
+        assert wallet.kind == WalletType.POLYMARKET_ZODIAC
+        assert wallet.account_address == "0xPolymarketSafe000000000000000000000000"
+        assert wallet.config["eoa_address"] == "0xUserEoa00000000000000000000000000000000"
+        assert wallet.config["zodiac_roles_address"] == "0xRolesMod0000000000000000000000000000000"
+        assert wallet.config["trading_eoa_address"] == "0xTradingEoa000000000000000000000000000000"
+
+    def test_polymarket_zodiac_missing_trading_eoa_defaults_to_empty(self):
+        """If trading_eoa_address is missing the registry doesn't crash; gateway service validates."""
+        registry = WalletRegistry.from_raw(
+            {
+                "polygon": {
+                    "wallet_address": "0xPolymarketSafe000000000000000000000000",
+                    "type": "polymarket_zodiac",
+                    "eoa_address": "0xUserEoa00000000000000000000000000000000",
+                    "zodiac_roles_address": "0xRolesMod0000000000000000000000000000000",
+                },
+            }
+        )
+        wallet = registry.resolve("polygon")
+        assert wallet.config["trading_eoa_address"] == ""
+
+    def test_matic_alias_normalizes_to_polygon_for_polymarket_zodiac(self):
+        """The platform may key the entry as 'matic'; alias resolution must work for polymarket_zodiac."""
+        registry = WalletRegistry.from_raw(
+            {
+                "matic": {
+                    "wallet_address": "0xPolymarketSafe000000000000000000000000",
+                    "type": "polymarket_zodiac",
+                    "eoa_address": "0xUserEoa00000000000000000000000000000000",
+                    "zodiac_roles_address": "0xRolesMod0000000000000000000000000000000",
+                    "trading_eoa_address": "0xTradingEoa000000000000000000000000000000",
+                },
+            }
+        )
+        wallet = registry.resolve("polygon")  # canonical name resolves
+        assert wallet.kind == WalletType.POLYMARKET_ZODIAC
+
     def test_resolve_unknown_chain_raises(self):
-        registry = WalletRegistry.from_raw({
-            "arbitrum": {
-                "wallet_address": "0xABC",
-                "type": "zodiac",
-                "eoa_address": "0xEOA",
-                "zodiac_roles_address": "0xZod",
-            },
-        })
+        registry = WalletRegistry.from_raw(
+            {
+                "arbitrum": {
+                    "wallet_address": "0xABC",
+                    "type": "zodiac",
+                    "eoa_address": "0xEOA",
+                    "zodiac_roles_address": "0xZod",
+                },
+            }
+        )
         with pytest.raises(KeyError, match="No wallet configured"):
             registry.resolve("base")
 
     def test_is_uniform_true(self):
-        registry = WalletRegistry.from_raw({
-            "arbitrum": {
-                "wallet_address": "0xABC",
-                "type": "zodiac",
-                "eoa_address": "0xEOA",
-                "zodiac_roles_address": "0xZod",
-            },
-            "base": {
-                "wallet_address": "0xABC",
-                "type": "zodiac",
-                "eoa_address": "0xEOA",
-                "zodiac_roles_address": "0xZod",
-            },
-        })
+        registry = WalletRegistry.from_raw(
+            {
+                "arbitrum": {
+                    "wallet_address": "0xABC",
+                    "type": "zodiac",
+                    "eoa_address": "0xEOA",
+                    "zodiac_roles_address": "0xZod",
+                },
+                "base": {
+                    "wallet_address": "0xABC",
+                    "type": "zodiac",
+                    "eoa_address": "0xEOA",
+                    "zodiac_roles_address": "0xZod",
+                },
+            }
+        )
         assert registry.is_uniform()
 
     def test_is_uniform_false(self):
-        registry = WalletRegistry.from_raw({
-            "arbitrum": {
-                "wallet_address": "0xABC",
-                "type": "zodiac",
-                "eoa_address": "0xEOA",
-                "zodiac_roles_address": "0xZod",
-            },
-            "base": {
-                "wallet_address": "0xDEF",
-                "type": "zodiac",
-                "eoa_address": "0xEOA2",
-                "zodiac_roles_address": "0xZod2",
-            },
-        })
+        registry = WalletRegistry.from_raw(
+            {
+                "arbitrum": {
+                    "wallet_address": "0xABC",
+                    "type": "zodiac",
+                    "eoa_address": "0xEOA",
+                    "zodiac_roles_address": "0xZod",
+                },
+                "base": {
+                    "wallet_address": "0xDEF",
+                    "type": "zodiac",
+                    "eoa_address": "0xEOA2",
+                    "zodiac_roles_address": "0xZod2",
+                },
+            }
+        )
         assert not registry.is_uniform()
 
 

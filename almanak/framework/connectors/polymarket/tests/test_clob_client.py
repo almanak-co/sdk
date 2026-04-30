@@ -3374,3 +3374,97 @@ class TestV2RatioPreservation:
         )
         with pytest.raises(PolymarketMinimumOrderError):
             client.build_market_order(params, market=market)
+
+
+class TestV2OrderSigningRemote:
+    """V2 signing via the Almanak Signer Service (platform mode).
+
+    With ``signer_service_url`` + ``signer_service_jwt`` set on the config and
+    no ``private_key``, both ``_build_l1_headers`` and ``sign_order`` must
+    delegate to ``/sign/hash`` and the resulting signature must reassemble to
+    ``0x<r><s><v>`` from the service's ethers-v6 ``Signature.toJSON()`` shape.
+    """
+
+    @pytest.fixture
+    def remote_config(self, test_account):
+        return PolymarketConfig(
+            wallet_address=test_account.address,
+            signer_service_url="https://signer.example.com",
+            signer_service_jwt=SecretStr("jwt-token"),
+            signature_type=SignatureType.POLY_GNOSIS_SAFE,
+            funder_address="0x1234567890123456789012345678901234567890",
+        )
+
+    @staticmethod
+    def _make_signer_response(r_hex: str, s_hex: str, v: int) -> MagicMock:
+        response = MagicMock(spec=httpx.Response)
+        response.status_code = 200
+        response.json.return_value = {
+            "signed_transactions": [
+                {"_type": "signature", "r": "0x" + r_hex, "s": "0x" + s_hex, "v": v, "networkV": None}
+            ]
+        }
+        response.text = ""
+        return response
+
+    def test_l1_headers_use_remote_signer(self, remote_config, test_account):
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.post.return_value = self._make_signer_response("ab" * 32, "cd" * 32, 27)
+
+        client = ClobClient(remote_config, http_client=mock_http)
+        headers = client._build_l1_headers()
+
+        assert mock_http.post.called
+        call_url = mock_http.post.call_args.args[0]
+        assert call_url.endswith("/sign/hash")
+        body = mock_http.post.call_args.kwargs["json"]
+        assert body["eoa_address"] == test_account.address
+        assert body["signing_type"] == "EVM"
+        assert mock_http.post.call_args.kwargs["headers"]["Authorization"] == "Bearer jwt-token"
+
+        # Explicit digest payload assertions: a regression that posts the
+        # full typed-data blob, the wrong key name, or a non-32-byte value
+        # would still pass the headers-only checks above.
+        assert "transaction_payload" in body
+        assert isinstance(body["transaction_payload"], list)
+        assert len(body["transaction_payload"]) == 1
+        digest_hex = body["transaction_payload"][0]
+        assert digest_hex.startswith("0x")
+        # 32-byte digest = 64 hex chars + "0x" prefix.
+        assert len(digest_hex) == 2 + 64
+        # Must be valid hex.
+        int(digest_hex, 16)
+
+        assert headers["POLY_ADDRESS"] == test_account.address
+        assert headers["POLY_SIGNATURE"] == "0x" + "ab" * 32 + "cd" * 32 + "1b"
+
+    def test_sign_order_uses_remote_signer(self, remote_config):
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.post.return_value = self._make_signer_response("11" * 32, "22" * 32, 28)
+
+        client = ClobClient(remote_config, http_client=mock_http)
+        params = LimitOrderParams(
+            token_id="12345",
+            side="BUY",
+            price=Decimal("0.50"),
+            size=Decimal("10"),
+        )
+        market = _make_test_market(neg_risk=False)
+        unsigned = client.build_limit_order(params, market=market)
+        signed = client.sign_order(unsigned)
+
+        assert mock_http.post.called
+        # Same digest-payload sanity checks as the L1 path above.
+        body = mock_http.post.call_args.kwargs["json"]
+        assert "transaction_payload" in body
+        assert len(body["transaction_payload"]) == 1
+        digest_hex = body["transaction_payload"][0]
+        assert digest_hex.startswith("0x") and len(digest_hex) == 2 + 64
+        int(digest_hex, 16)
+
+        assert signed.signature == "0x" + "11" * 32 + "22" * 32 + "1c"
+        assert unsigned.signature_type == SignatureType.POLY_GNOSIS_SAFE.value
+        assert unsigned.maker == "0x1234567890123456789012345678901234567890"
+        assert unsigned.signer == remote_config.wallet_address

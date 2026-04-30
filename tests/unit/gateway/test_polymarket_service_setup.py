@@ -13,6 +13,7 @@ separately.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -275,7 +276,7 @@ class TestL1SignatureZeroXPrefix:
         """Force eth_account to return an unprefixed hex string and assert the
         gateway repairs it. Without the repair, /auth/derive-api-key returns
         HTTP 401 and the strategy can't trade."""
-        with patch("almanak.gateway.services.polymarket_service.Account") as mock_account:
+        with patch("almanak.framework.connectors.polymarket.signer.Account") as mock_account:
             signed = MagicMock()
             signed.signature.hex.return_value = "ab" * 65  # 130 hex chars, no 0x
             mock_account.sign_message.return_value = signed
@@ -989,4 +990,222 @@ class TestGetTradeTapeHandler:
         assert "rate limited" in response.error
 
 
-import json  # noqa: E402 — late import to avoid clashing at top of file
+# =============================================================================
+# Platform-mode init: ALMANAK_GATEWAY_WALLETS polymarket_zodiac entry
+# =============================================================================
+
+
+# Stable, lowercased addresses chosen to match what the platform ships.
+TRADING_EOA = "0x" + "11" * 20
+POLYMARKET_SAFE = "0x" + "22" * 20
+USER_EOA = "0x" + "33" * 20
+ZODIAC_ROLES = "0x" + "44" * 20
+
+
+def _platform_settings(*, signer_url: str | None = "https://signer.example.com", jwt: str | None = "jwt") -> MagicMock:
+    """GatewaySettings shaped as the platform deployer would inject them."""
+    s = MagicMock(spec=GatewaySettings)
+    # No legacy local-key envs in platform mode.
+    s.private_key = None
+    s.polymarket_private_key = None
+    s.eoa_address = None
+    s.polymarket_wallet_address = None
+    s.safe_address = None
+    s.safe_mode = None
+    s.polymarket_api_key = None
+    s.polymarket_secret = None
+    s.polymarket_passphrase = None
+    # Signer Service config — what the deployer + platform inject.
+    s.signer_service_url = signer_url
+    s.signer_service_jwt = jwt
+    return s
+
+
+def _gateway_wallets_json(extra_entries: dict | None = None) -> str:
+    """Build an ALMANAK_GATEWAY_WALLETS JSON with a polymarket_zodiac entry on polygon."""
+    import json as _json
+
+    wallets = {
+        "polygon": {
+            "wallet_address": POLYMARKET_SAFE,
+            "type": "polymarket_zodiac",
+            "eoa_address": USER_EOA,
+            "zodiac_roles_address": ZODIAC_ROLES,
+            "trading_eoa_address": TRADING_EOA,
+        }
+    }
+    if extra_entries:
+        wallets.update(extra_entries)
+    return _json.dumps(wallets)
+
+
+class TestPlatformModeInit:
+    """The constructor must wire identity from ALMANAK_GATEWAY_WALLETS in platform mode."""
+
+    def test_polymarket_zodiac_entry_overrides_legacy_settings(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        servicer = PolymarketServiceServicer(_platform_settings())
+
+        assert servicer._wallet_address == TRADING_EOA  # signer is the trading EOA
+        assert servicer._funder_address == POLYMARKET_SAFE  # maker = funder = safe
+        assert servicer._signature_type.name == "POLY_GNOSIS_SAFE"
+        assert servicer._private_key is None  # explicit — key lives in Signer Service
+        assert servicer._signer_service_url == "https://signer.example.com"
+        assert servicer._signer_service_jwt == "jwt"
+        assert servicer._available is True  # remote signer counts as capability
+
+    def test_matic_alias_resolves_same_as_polygon(self, monkeypatch):
+        """The platform's chain key may be 'polygon' or 'matic' — both must match."""
+        import json as _json
+
+        wallets = {
+            "matic": {
+                "wallet_address": POLYMARKET_SAFE,
+                "type": "polymarket_zodiac",
+                "eoa_address": USER_EOA,
+                "zodiac_roles_address": ZODIAC_ROLES,
+                "trading_eoa_address": TRADING_EOA,
+            }
+        }
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _json.dumps(wallets))
+        servicer = PolymarketServiceServicer(_platform_settings())
+
+        assert servicer._wallet_address == TRADING_EOA
+
+    def test_missing_signer_service_url_raises(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        with pytest.raises(ValueError, match="ALMANAK_GATEWAY_SIGNER_SERVICE_URL"):
+            PolymarketServiceServicer(_platform_settings(signer_url=None))
+
+    def test_missing_jwt_raises(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        # Match the JWT name specifically — a regression that drops the JWT
+        # mention from the constructor's error message would silently keep
+        # the URL-only assertion green here.
+        with pytest.raises(ValueError, match="ALMANAK_GATEWAY_SIGNER_SERVICE_JWT"):
+            PolymarketServiceServicer(_platform_settings(jwt=None))
+
+    def test_missing_trading_eoa_raises(self, monkeypatch):
+        import json as _json
+
+        wallets = {
+            "polygon": {
+                "wallet_address": POLYMARKET_SAFE,
+                "type": "polymarket_zodiac",
+                "eoa_address": USER_EOA,
+                "zodiac_roles_address": ZODIAC_ROLES,
+                # trading_eoa_address missing
+            }
+        }
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _json.dumps(wallets))
+        with pytest.raises(ValueError, match="trading_eoa_address"):
+            PolymarketServiceServicer(_platform_settings())
+
+    def test_no_polymarket_entry_falls_back_to_legacy(self, monkeypatch):
+        """When ALMANAK_GATEWAY_WALLETS has no polymarket_zodiac entry, legacy envs apply."""
+        import json as _json
+
+        wallets = {
+            "ethereum": {
+                "wallet_address": "0x" + "55" * 20,
+                "type": "zodiac",  # AlmanakWallet, not polymarket
+                "eoa_address": "0x" + "66" * 20,
+                "zodiac_roles_address": "0x" + "77" * 20,
+            }
+        }
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _json.dumps(wallets))
+        s = _platform_settings()
+        s.private_key = TEST_PRIVATE_KEY
+        s.eoa_address = TEST_WALLET
+        servicer = PolymarketServiceServicer(s)
+
+        assert servicer._private_key == TEST_PRIVATE_KEY
+        assert servicer._wallet_address == TEST_WALLET
+        assert servicer._signer_service_url is None
+        assert servicer._signer_service_jwt is None
+
+    def test_malformed_json_raises_at_startup(self, monkeypatch):
+        """Once ``ALMANAK_GATEWAY_WALLETS`` is set, a malformed value must
+        abort startup rather than silently degrading to the legacy
+        local-key path. The previous "warn and fall back" behaviour could
+        switch production traffic onto a different signer/funder than the
+        platform intended — gateway is the security boundary."""
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", "{not-json")
+        s = _platform_settings()
+        s.private_key = TEST_PRIVATE_KEY
+        s.eoa_address = TEST_WALLET
+        with pytest.raises(ValueError, match="ALMANAK_GATEWAY_WALLETS is not valid JSON"):
+            PolymarketServiceServicer(s)
+
+    def test_non_dict_json_raises_at_startup(self, monkeypatch):
+        """A JSON value that's not an object (e.g. a list or string) is
+        also a configuration error — refuse startup."""
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", '["not", "a", "dict"]')
+        s = _platform_settings()
+        s.private_key = TEST_PRIVATE_KEY
+        s.eoa_address = TEST_WALLET
+        with pytest.raises(ValueError, match="must be a JSON object keyed by chain"):
+            PolymarketServiceServicer(s)
+
+    def test_build_client_passes_remote_signer_to_polymarket_config(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        servicer = PolymarketServiceServicer(_platform_settings())
+        client = servicer._build_client()
+        cfg = client.config
+        assert cfg.private_key is None
+        assert cfg.signer_service_url == "https://signer.example.com"
+        assert cfg.signer_service_jwt is not None
+        assert cfg.signer_service_jwt.get_secret_value() == "jwt"
+        # wallet_address = trading EOA (signer); funder_address = polymarket safe (maker)
+        assert cfg.wallet_address.lower() == TRADING_EOA.lower()
+        assert cfg.funder_address is not None and cfg.funder_address.lower() == POLYMARKET_SAFE.lower()
+
+
+class TestEnsureWalletReadySkippedInPlatformMode:
+    """Auto-setup must be a no-op when no local key is available — the trading
+    EOA can't grant Safe approvals; user-side Zodiac Roles owns approvals."""
+
+    def test_ensure_wallet_ready_returns_immediately(self, monkeypatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        servicer = PolymarketServiceServicer(_platform_settings())
+
+        # _ensure_wallet_ready early-returns; nothing on-chain happens.
+        # If it tried to run the auto-setup path it would fail — there's no
+        # web3 instance, no CtfSDK, no key. We just call it and verify it
+        # returns cleanly without raising.
+        asyncio.run(servicer._ensure_wallet_ready(min_pusd_units=5_000_000))
+
+        # Allowances NOT marked applied — auto-setup didn't fire.
+        assert servicer._allowances_applied is False
+
+    def test_l1_headers_signs_via_remote_signer(self, monkeypatch):
+        """In platform mode, _build_l1_headers must POST to /sign/hash."""
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        servicer = PolymarketServiceServicer(_platform_settings())
+
+        # Patch the signer module's httpx.Client to intercept the POST.
+        # The remote signer creates its own client when http_client=None — patch
+        # the module-level httpx.Client constructor for that test path.
+        with patch("almanak.framework.connectors.polymarket.signer.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "signed_transactions": [
+                    {"_type": "signature", "r": "0x" + "aa" * 32, "s": "0x" + "bb" * 32, "v": 27, "networkV": None}
+                ]
+            }
+            mock_response.text = ""
+            mock_client.post.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            headers = servicer._build_l1_headers(nonce=0)
+
+            mock_client.post.assert_called_once()
+            url = mock_client.post.call_args.args[0]
+            assert url.endswith("/sign/hash")
+            body = mock_client.post.call_args.kwargs["json"]
+            assert body["eoa_address"] == TRADING_EOA
+            assert body["signing_type"] == "EVM"
+            assert headers["POLY_ADDRESS"] == TRADING_EOA
+            assert headers["POLY_SIGNATURE"] == "0x" + "aa" * 32 + "bb" * 32 + "1b"

@@ -35,7 +35,7 @@ from decimal import Decimal
 from enum import Enum, StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -315,10 +315,27 @@ class PolymarketConfig(BaseModel):
     """
 
     chain: str = Field(default="polygon", description="Chain identifier")
-    wallet_address: str = Field(description="User wallet address")
-    private_key: SecretStr = Field(description="Private key for signing")
+    wallet_address: str = Field(description="User wallet address (or trading EOA in remote-signing mode)")
+    # Local-signing path. Optional when the remote signer service is configured —
+    # the platform mode keeps the trading EOA's private key in the Almanak Signer
+    # Service GCS bucket and never ships it to the gateway.
+    private_key: SecretStr | None = Field(
+        default=None, description="Private key for local signing (None when using remote signer)"
+    )
     signature_type: SignatureType = Field(default=SignatureType.EOA, description="Signature type for authentication")
     funder_address: str | None = Field(default=None, description="Funder address for proxy wallets")
+    # Remote-signing path (Almanak platform). When set, signing is delegated to the
+    # Almanak Signer Service via POST {signer_service_url}/sign/hash with a JWT
+    # bearer token. wallet_address must be the EOA whose key the service holds
+    # (the trading EOA from the platform's polymarket_zodiac wallet entry).
+    signer_service_url: str | None = Field(
+        default=None,
+        description="Almanak Signer Service base URL. When set, signing is delegated to /sign/hash.",
+    )
+    signer_service_jwt: SecretStr | None = Field(
+        default=None,
+        description="JWT for the Almanak Signer Service. Required when signer_service_url is set.",
+    )
     rpc_url: str | None = Field(default=None, description="RPC endpoint for Polygon")
     clob_base_url: str = Field(default=CLOB_BASE_URL, description="CLOB API base URL")
     gamma_base_url: str = Field(default=GAMMA_BASE_URL, description="Gamma Markets API base URL")
@@ -375,6 +392,27 @@ class PolymarketConfig(BaseModel):
         from web3 import Web3
 
         return Web3.to_checksum_address(v)
+
+    @model_validator(mode="after")
+    def _require_signing_capability(self) -> "PolymarketConfig":
+        """Either a local private key OR a complete remote-signer config must be present.
+
+        Remote-signer mode requires both ``signer_service_url`` and
+        ``signer_service_jwt``. ``wallet_address`` is the trading EOA in remote
+        mode (the address whose key the Signer Service holds).
+        """
+        has_local_key = self.private_key is not None
+        has_remote_signer = bool(self.signer_service_url) and bool(self.signer_service_jwt)
+        if not has_local_key and not has_remote_signer:
+            raise ValueError(
+                "PolymarketConfig requires either private_key (local signing) or "
+                "signer_service_url + signer_service_jwt (remote signing via Almanak Signer Service)"
+            )
+        if self.signer_service_url and not self.signer_service_jwt:
+            raise ValueError("PolymarketConfig.signer_service_jwt is required when signer_service_url is set")
+        if self.signer_service_jwt and not self.signer_service_url:
+            raise ValueError("PolymarketConfig.signer_service_url is required when signer_service_jwt is set")
+        return self
 
     @classmethod
     def from_env(
