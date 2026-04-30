@@ -1269,6 +1269,17 @@ def strategy_test(
         load_dotenv(env_file)
         click.echo(f"Loaded environment from: {env_file}")
 
+    # `almanak strat test` always runs against a managed Anvil fork. If the user
+    # has no ALMANAK_PRIVATE_KEY set (fresh scaffolds ship with it empty),
+    # fall back to the well-known Anvil account #0 key so anvil_funding has a
+    # wallet to fund. Public test key — no security impact, only used here
+    # because this command is hardcoded to `--network anvil`.
+    if not os.environ.get("ALMANAK_PRIVATE_KEY"):
+        from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
+
+        os.environ["ALMANAK_PRIVATE_KEY"] = ANVIL_DEFAULT_PRIVATE_KEY
+        click.echo("ALMANAK_PRIVATE_KEY unset — using default Anvil account #0 (test-only)")
+
     install_redaction()
 
     skip_reason = _strat_test_skip_reason(working_dir, config_file)
