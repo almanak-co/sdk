@@ -102,12 +102,20 @@ CHAIN_IDS: dict[str, int] = {
     "zerog": 16661,
 }
 
-# Per-chain Anvil block gas limit overrides. When set, --block-gas-limit is passed to
+# Per-chain Anvil block gas limit overrides. When set, --gas-limit is passed to
 # the Anvil fork so transactions are never rejected for exceeding the block gas limit.
 # Mantle uses a non-standard gas accounting system (L1 calldata overhead included in
 # tx.gasLimit), so a generous block gas limit prevents false "intrinsic gas too high" errors.
+#
+# NOTE on flag name: Foundry/Anvil exposes the block-gas-limit override as
+# ``--gas-limit <GAS_LIMIT>`` (per ``anvil --help``). VIB-3666 originally wired
+# ``--block-gas-limit`` here, which Anvil does not advertise — the
+# ``_get_anvil_supported_flags()`` guard then silently dropped the override and
+# Mantle continued to reject APPROVE/SUPPLY transactions with ``intrinsic gas
+# too high -- tx.gas_limit > env.block.gas_limit`` (VIB-3746). The correct flag
+# is ``--gas-limit``.
 _CHAIN_BLOCK_GAS_LIMITS: dict[str, int] = {
-    "mantle": 1_000_000_000,  # 1B — Mantle L2 non-standard gas accounting (VIB-3666)
+    "mantle": 1_000_000_000,  # 1B — Mantle L2 non-standard gas accounting (VIB-3666/VIB-3746)
 }
 
 
@@ -1309,17 +1317,24 @@ class RollingForkManager:
         # and was removed in Foundry 1.x. Gas is always fake/free on Anvil forks.
         cmd.extend(["--block-base-fee-per-gas", "0"])
 
-        # Override block gas limit for chains with non-standard gas accounting (VIB-3666).
-        # Without this, some chains (e.g. Mantle) cause "intrinsic gas too high" rejections
-        # because the forked block.gas_limit is too low for the SDK's computed tx.gas_limit.
-        # Guarded by _get_anvil_supported_flags() (same pattern as --cache-path) to avoid
-        # startup failures on Anvil versions that don't support the flag.
+        # Override block gas limit for chains with non-standard gas accounting
+        # (VIB-3666 / VIB-3746). Without this, some chains (e.g. Mantle) cause
+        # "intrinsic gas too high" rejections because the forked block.gas_limit
+        # is too low for the SDK's computed tx.gas_limit.
+        #
+        # Foundry exposes this as ``--gas-limit`` (see ``anvil --help``):
+        # there is no ``--block-gas-limit`` flag — the previous wiring under
+        # VIB-3666 was silently dropped by the supported-flags guard and Mantle
+        # APPROVEs continued to revert (VIB-3746).
+        #
+        # Guarded by _get_anvil_supported_flags() (same pattern as --cache-path)
+        # to avoid startup failures on Anvil versions that don't support the flag.
         if self.chain in _CHAIN_BLOCK_GAS_LIMITS:
-            if "--block-gas-limit" in _get_anvil_supported_flags():
-                cmd.extend(["--block-gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
+            if "--gas-limit" in _get_anvil_supported_flags():
+                cmd.extend(["--gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
             else:
                 logger.warning(
-                    "Anvil does not support --block-gas-limit; skipping gas limit override for chain=%s",
+                    "Anvil does not support --gas-limit; skipping block gas limit override for chain=%s",
                     self.chain,
                 )
 

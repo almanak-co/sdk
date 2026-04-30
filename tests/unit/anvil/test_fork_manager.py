@@ -114,8 +114,14 @@ class TestBuildAnvilCommand:
         assert "--retries" in cmd
         assert "--silent" in cmd
 
-    def test_block_gas_limit_included_for_mantle_when_supported(self):
-        """Mantle gets --block-gas-limit when Anvil supports the flag (VIB-3666)."""
+    def test_gas_limit_included_for_mantle_when_supported(self):
+        """Mantle gets --gas-limit when Anvil supports the flag (VIB-3666 / VIB-3746).
+
+        Foundry's Anvil exposes the block-gas-limit override as ``--gas-limit``;
+        the previous wiring under VIB-3666 used ``--block-gas-limit`` which Anvil
+        does not advertise, silently skipping the override and re-introducing the
+        Mantle "intrinsic gas too high" failure (VIB-3746).
+        """
         _clear_flags_cache()
         mgr = RollingForkManager(
             rpc_url="https://mantle.example.com",
@@ -124,15 +130,43 @@ class TestBuildAnvilCommand:
         )
         with patch(
             "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
-            return_value={"--block-gas-limit", "--cache-path", "--block-base-fee-per-gas"},
+            return_value={"--gas-limit", "--cache-path", "--block-base-fee-per-gas"},
         ):
             cmd = mgr._build_anvil_command()
-        assert "--block-gas-limit" in cmd
-        idx = cmd.index("--block-gas-limit")
+        assert "--gas-limit" in cmd
+        idx = cmd.index("--gas-limit")
         assert cmd[idx + 1] == "1000000000"
 
-    def test_block_gas_limit_skipped_for_mantle_when_unsupported(self):
-        """No --block-gas-limit when Anvil doesn't advertise support (older versions)."""
+    def test_block_gas_limit_legacy_flag_never_used(self):
+        """Sanity: legacy ``--block-gas-limit`` flag must not appear (VIB-3746).
+
+        Anvil does not expose ``--block-gas-limit``; passing it would crash older
+        builds and is silently dropped on newer ones. The override is now wired to
+        ``--gas-limit`` instead.
+        """
+        _clear_flags_cache()
+        mgr = RollingForkManager(
+            rpc_url="https://mantle.example.com",
+            chain="mantle",
+            anvil_port=8545,
+        )
+        # Even when both flag names are advertised (extremely defensive), we must
+        # only ever emit --gas-limit, never the legacy spelling.
+        with patch(
+            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
+            return_value={
+                "--gas-limit",
+                "--block-gas-limit",
+                "--cache-path",
+                "--block-base-fee-per-gas",
+            },
+        ):
+            cmd = mgr._build_anvil_command()
+        assert "--block-gas-limit" not in cmd
+        assert "--gas-limit" in cmd
+
+    def test_gas_limit_skipped_for_mantle_when_unsupported(self):
+        """No --gas-limit when Anvil doesn't advertise support (older versions)."""
         _clear_flags_cache()
         mgr = RollingForkManager(
             rpc_url="https://mantle.example.com",
@@ -144,16 +178,18 @@ class TestBuildAnvilCommand:
             return_value={"--cache-path", "--block-base-fee-per-gas"},
         ):
             cmd = mgr._build_anvil_command()
+        assert "--gas-limit" not in cmd
         assert "--block-gas-limit" not in cmd
 
-    def test_block_gas_limit_not_included_for_non_override_chains(self):
-        """Ethereum (no entry in _CHAIN_BLOCK_GAS_LIMITS) never gets --block-gas-limit."""
+    def test_gas_limit_not_included_for_non_override_chains(self):
+        """Ethereum (no entry in _CHAIN_BLOCK_GAS_LIMITS) never gets --gas-limit."""
         mgr = self._make_manager()  # chain="ethereum"
         with patch(
             "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
-            return_value={"--block-gas-limit", "--cache-path", "--block-base-fee-per-gas"},
+            return_value={"--gas-limit", "--cache-path", "--block-base-fee-per-gas"},
         ):
             cmd = mgr._build_anvil_command()
+        assert "--gas-limit" not in cmd
         assert "--block-gas-limit" not in cmd
 
 

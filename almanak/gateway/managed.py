@@ -14,6 +14,7 @@ import os
 import socket
 import threading
 import time
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -362,14 +363,29 @@ class ManagedGateway:
         "zerog": "A0GI",
     }
 
-    async def _fund_anvil_wallets(self, chains: list[str] | None = None) -> None:
-        """Fund the wallet on each Anvil fork using the anvil_funding config.
+    # Default native-gas funding applied to every Anvil fork wallet so strategies
+    # can always pay for gas, even when their config.json omits ``anvil_funding``
+    # entirely (VIB-3752). Sized to comfortably cover several iterations of the
+    # most expensive demo strategies (lending lifecycles, multi-hop swaps).
+    DEFAULT_ANVIL_NATIVE_GAS_AMOUNT: Decimal = Decimal("100")
 
-        Reads token amounts from self._anvil_funding (set from config.json).
-        Native tokens (ETH, AVAX, etc.) are funded via anvil_setBalance.
-        ERC-20 tokens are funded via storage slot manipulation.
-        If anvil_funding is empty, no funding is performed.
-        Errors are logged but do not prevent gateway startup.
+    async def _fund_anvil_wallets(self, chains: list[str] | None = None) -> None:
+        """Fund the wallet on each Anvil fork.
+
+        Behaviour (VIB-3752):
+
+        * Reads token amounts from ``self._anvil_funding`` (set from
+          ``config.json``). Native tokens (ETH, AVAX, etc.) go through
+          ``anvil_setBalance``; ERC-20s go through storage-slot manipulation.
+        * Even when ``anvil_funding`` does not specify the chain's native token
+          (or is empty entirely), every Anvil fork wallet receives a baseline
+          ``DEFAULT_ANVIL_NATIVE_GAS_AMOUNT`` of native gas. Without this,
+          strategies whose author forgot to add ``anvil_funding`` (or who
+          configured another chain's native symbol — e.g. ``ETH`` on Optimism
+          when the per-chain lookup expected ``ETH`` and the strategy listed
+          something else) would hit ``Insufficient funds for gas`` on every
+          submission.
+        * Errors are logged but do not prevent gateway startup.
 
         Args:
             chains: If provided, only fund wallets on these chains. If None,
@@ -377,12 +393,6 @@ class ManagedGateway:
                     re-funding after a watchdog restart to avoid resetting
                     paper-trading state on healthy forks.
         """
-        if not self._anvil_funding:
-            logger.info("No anvil_funding in config -- skipping wallet funding")
-            return
-
-        from decimal import Decimal
-
         # Determine wallet address
         wallet = self._wallet_address
         if not wallet:
@@ -399,7 +409,13 @@ class ManagedGateway:
                 logger.warning(f"Could not derive wallet from ALMANAK_PRIVATE_KEY: {e}")
                 return
 
-        logger.info(f"Anvil funding for {wallet[:10]}...: {self._anvil_funding}")
+        if self._anvil_funding:
+            logger.info(f"Anvil funding for {wallet[:10]}...: {self._anvil_funding}")
+        else:
+            logger.info(
+                f"No anvil_funding in config for {wallet[:10]}...; "
+                f"applying default {self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT} native gas per chain (VIB-3752)"
+            )
 
         # Separate native tokens (per-symbol) from ERC-20s
         native_amounts: dict[str, Decimal] = {}
@@ -435,9 +451,26 @@ class ManagedGateway:
                         chain_native,
                     )
                 native_amount = native_amounts.get(chain_native, Decimal("0")) if chain_native else Decimal("0")
+
+                # VIB-3752: ensure baseline native gas funding even when the
+                # strategy's config.json omits anvil_funding for this chain.
+                # Without this, the wallet boots with 0 native balance and the
+                # first SWAP/APPROVE bounces with "Insufficient funds for gas".
+                #
+                # Apply unconditionally on chain_native lookup: ``manager.fund_wallet``
+                # uses ``anvil_setBalance`` which is symbol-agnostic — funding
+                # works correctly even on chains not yet in CHAIN_NATIVE_SYMBOL.
+                # Only top-up — never reduce a user-specified amount.
+                applied_default = False
+                if native_amount < self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT:
+                    native_amount = self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
+                    applied_default = True
+
                 if native_amount > 0:
                     await manager.fund_wallet(wallet, native_amount)
-                    logger.info(f"Funded native {chain_native}: {native_amount}")
+                    suffix = " (default; VIB-3752)" if applied_default else ""
+                    native_label = chain_native or f"<unknown native for {chain}>"
+                    logger.info(f"Funded native {native_label}: {native_amount}{suffix}")
                 if erc20_tokens:
                     # VIB-2570: Log each ERC20 token being funded so failures are traceable
                     logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")

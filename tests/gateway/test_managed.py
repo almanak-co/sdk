@@ -781,3 +781,139 @@ class TestAnvilFundingNativeTokenWarning:
         warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
         native_mismatch = [w for w in warning_calls if "Did you mean" in w]
         assert not native_mismatch, f"Unexpected mismatch warning: {native_mismatch}"
+
+
+class TestAnvilFundingDefaultNativeGas:
+    """VIB-3752: ensure native gas is funded even when anvil_funding is empty/missing.
+
+    The QA April 29 batch found ``velodrome_swap_optimism`` failing on Optimism
+    Anvil with ``Insufficient funds for gas * price + value`` because the
+    incubating strategy had no ``config.json`` (and therefore no
+    ``anvil_funding``). The previous behaviour skipped funding entirely in that
+    case, leaving the wallet at 0 native balance.
+    """
+
+    def _make_gateway(self, chain: str, anvil_funding: dict | None) -> "ManagedGateway":
+        settings = GatewaySettings(
+            host="127.0.0.1",
+            port=59990,
+            rpc_url="http://localhost:8545",
+            chain=chain,
+        )
+        gw = ManagedGateway(settings, anvil_chains=[chain], anvil_funding=anvil_funding)
+        gw._wallet_address = "0x" + "a" * 40
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_empty_funding_still_funds_native_gas(self):
+        """Empty anvil_funding -> default native gas amount is still applied."""
+        gw = self._make_gateway("optimism", anvil_funding=None)
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["optimism"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        # The default native gas top-up MUST have been applied — without this,
+        # strategies with no anvil_funding boot with 0 ETH and revert.
+        mock_manager.fund_wallet.assert_awaited_once()
+        call_args = mock_manager.fund_wallet.await_args
+        assert call_args.args[0] == gw._wallet_address
+        assert call_args.args[1] == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
+        # No ERC20 funding when the dict is empty.
+        mock_manager.fund_tokens.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_partial_funding_below_default_is_topped_up(self):
+        """anvil_funding with a small native amount -> topped up to default."""
+        gw = self._make_gateway("optimism", anvil_funding={"ETH": "0.5"})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["optimism"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        mock_manager.fund_wallet.assert_awaited_once()
+        funded_amount = mock_manager.fund_wallet.await_args.args[1]
+        assert funded_amount == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT, (
+            "0.5 ETH < default 100 ETH; helper must top up so gas is never the bottleneck"
+        )
+
+    @pytest.mark.asyncio
+    async def test_funding_above_default_is_respected(self):
+        """anvil_funding with a generous native amount -> not reduced."""
+        gw = self._make_gateway("optimism", anvil_funding={"ETH": 1000, "USDC": 5000})
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["optimism"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        funded_amount = mock_manager.fund_wallet.await_args.args[1]
+        assert funded_amount == Decimal("1000"), "User-specified amount must not be reduced"
+        mock_manager.fund_tokens.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_default_uses_chain_native_token_not_eth(self):
+        """On non-ETH chains, the default tops up the chain's native token (e.g. AVAX)."""
+        gw = self._make_gateway("avalanche", anvil_funding=None)
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["avalanche"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        # fund_wallet always denominates in the chain's native token; the
+        # top-up must therefore go through (not be filtered for ETH-only).
+        mock_manager.fund_wallet.assert_awaited_once()
+        funded_amount = mock_manager.fund_wallet.await_args.args[1]
+        assert funded_amount == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
+
+    @pytest.mark.asyncio
+    async def test_no_wallet_address_skips_funding(self):
+        """Without a derivable wallet, funding is skipped — no exception."""
+        gw = self._make_gateway("optimism", anvil_funding=None)
+        gw._wallet_address = None
+
+        mock_manager = AsyncMock()
+        gw._anvil_managers["optimism"] = mock_manager
+
+        # No ALMANAK_PRIVATE_KEY in env (env-isolation via patch)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ALMANAK_PRIVATE_KEY", None)
+            await gw._fund_anvil_wallets()
+
+        mock_manager.fund_wallet.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_funding_applies_when_chain_not_in_native_symbol_map(self):
+        """CodeRabbit feedback (PR #1981): even when the chain isn't yet in
+        ``CHAIN_NATIVE_SYMBOL``, the baseline native gas top-up must still
+        fire — ``manager.fund_wallet`` uses ``anvil_setBalance`` which is
+        symbol-agnostic, and skipping the top-up here would silently
+        regress every newly-added Anvil chain back to the original
+        ``Insufficient funds for gas`` failure mode that VIB-3752 fixes.
+        """
+        # "newchain" is intentionally NOT in CHAIN_NATIVE_SYMBOL.
+        assert "newchain" not in ManagedGateway.CHAIN_NATIVE_SYMBOL
+        gw = self._make_gateway("newchain", anvil_funding=None)
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["newchain"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        # Baseline must apply regardless of CHAIN_NATIVE_SYMBOL coverage.
+        mock_manager.fund_wallet.assert_awaited_once()
+        funded_amount = mock_manager.fund_wallet.await_args.args[1]
+        assert funded_amount == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
