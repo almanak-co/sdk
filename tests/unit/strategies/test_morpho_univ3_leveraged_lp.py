@@ -212,14 +212,28 @@ class TestTeardown:
         assert intents[3].token == "wstETH"
 
     def test_teardown_no_lp_position(self, strategy):
-        """Teardown without LP position skips LP close and swap."""
+        """Teardown without LP position AND with verified-zero WETH wallet
+        balance skips LP close and proceeds swap.
+
+        The strategy now also probes wallet WETH balance to support retries
+        after a partial-failure teardown (CodeRabbit PR #1964). To get the
+        old "skip swap" behavior the test must supply a market that reports
+        a zero WETH balance — without one, the strategy conservatively emits
+        the swap to avoid leaving proceeds stuck.
+        """
         from almanak.framework.teardown import TeardownMode
 
         strategy._lp_position_id = None
         strategy._borrowed_amount = Decimal("26.60")
         strategy._collateral_supplied = Decimal("0.014")
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        market = MagicMock()
+        zero_balance = MagicMock()
+        zero_balance.balance = Decimal("0")
+        zero_balance.balance_usd = Decimal("0")
+        market.balance.return_value = zero_balance
+
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
 
         # No LP close or swap, just: repay + withdraw
         assert len(intents) == 2

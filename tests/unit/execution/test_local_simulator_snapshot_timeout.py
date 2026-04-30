@@ -128,3 +128,96 @@ class TestEvmSnapshotTimeout:
         assert result.success
         assert "evm_snapshot" in snapshot_calls
         assert "evm_revert" in snapshot_calls
+
+    @pytest.mark.asyncio
+    async def test_revert_timeout_logs_error_and_completes(self, monkeypatch, caplog):
+        """A hanging evm_revert must not block the simulator's return.
+
+        Snapshot succeeds, simulation succeeds, then revert hangs. Without the
+        wait_for guard the cleanup `finally` block would block the caller for
+        the full transport timeout. With it, we log at ERROR (state-setup
+        leaked to the fork) and let the simulation result propagate. Claude #6.
+        """
+        sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
+
+        monkeypatch.setattr(
+            "almanak.framework.execution.simulator.local._EVM_SNAPSHOT_TIMEOUT",
+            0.1,
+        )
+
+        revert_hung = asyncio.Event()
+
+        async def _make_request(method, _params):
+            method_str = str(method)
+            if method_str == "evm_snapshot":
+                return {"result": "0x1"}
+            if method_str == "evm_revert":
+                revert_hung.set()
+                await asyncio.Event().wait()
+            return {"result": None}
+
+        mock_provider = MagicMock()
+        mock_provider.make_request = AsyncMock(side_effect=_make_request)
+
+        mock_web3 = MagicMock()
+        mock_web3.provider = mock_provider
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=150_000)
+        mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(
+            return_value={"status": 1, "transactionHash": "0x" + "a" * 64}
+        )
+        mock_web3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        mock_web3.to_checksum_address = lambda x: x
+        sim._web3 = mock_web3
+
+        txs = [_make_tx(APPROVE_SELECTOR), _make_tx(SWAP_SELECTOR)]
+
+        with caplog.at_level("ERROR", logger="almanak.framework.execution.simulator.local"):
+            result = await asyncio.wait_for(sim.simulate(txs, chain="arbitrum"), timeout=5.0)
+
+        assert revert_hung.is_set()
+        # Simulation result still propagates — gas estimation succeeded.
+        assert result.success
+        # Failure is loud: ERROR level mentions state leakage so operators see it.
+        assert any("evm_revert timed out" in rec.message for rec in caplog.records)
+        assert any("leaked" in rec.message.lower() for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_revert_returning_false_logs_error(self, caplog):
+        """Anvil returning `false` for evm_revert means the snapshot id was
+        already consumed and state did NOT roll back — must surface the leak
+        the same way an exception/timeout would. CodeRabbit PR #1964 feedback.
+        """
+        sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
+
+        async def _make_request(method, _params):
+            method_str = str(method)
+            if method_str == "evm_snapshot":
+                return {"result": "0x1"}
+            if method_str == "evm_revert":
+                return {"result": False}  # snapshot already consumed
+            return {"result": None}
+
+        mock_provider = MagicMock()
+        mock_provider.make_request = AsyncMock(side_effect=_make_request)
+
+        mock_web3 = MagicMock()
+        mock_web3.provider = mock_provider
+        mock_web3.eth.estimate_gas = AsyncMock(return_value=150_000)
+        mock_web3.eth.send_transaction = AsyncMock(return_value=b"\x00" * 32)
+        mock_web3.eth.wait_for_transaction_receipt = AsyncMock(
+            return_value={"status": 1, "transactionHash": "0x" + "a" * 64}
+        )
+        mock_web3.eth.get_block = AsyncMock(return_value={"baseFeePerGas": 1_000_000_000})
+        mock_web3.to_checksum_address = lambda x: x
+        sim._web3 = mock_web3
+
+        txs = [_make_tx(APPROVE_SELECTOR), _make_tx(SWAP_SELECTOR)]
+
+        with caplog.at_level("ERROR", logger="almanak.framework.execution.simulator.local"):
+            result = await sim.simulate(txs, chain="arbitrum")
+
+        # Simulation succeeds (gas estimation was OK), but cleanup failure logs at ERROR.
+        assert result.success
+        assert any("evm_revert returned non-True" in rec.message for rec in caplog.records)
+        assert any("leaked" in rec.message.lower() for rec in caplog.records)

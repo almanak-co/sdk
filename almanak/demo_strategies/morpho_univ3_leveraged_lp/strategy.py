@@ -368,12 +368,20 @@ class MorphoUniV3LeveragedLPStrategy(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
-        """Generate intents to unwind: close LP -> repay -> withdraw.
+        """Generate intents to unwind: close LP -> swap proceeds -> repay -> withdraw.
 
         Teardown order is critical for safety:
         1. Close LP to recover WETH + USDC
-        2. Repay borrowed USDC (frees collateral)
-        3. Withdraw wstETH collateral
+        2. Swap WETH proceeds to USDC (so REPAY has enough USDC even after swap fees)
+        3. Repay borrowed USDC (frees collateral)
+        4. Withdraw wstETH collateral
+
+        The proceeds-swap is gated on actual wallet WETH balance rather than
+        `_lp_position_id`. After a partial-failure retry where LP_CLOSE
+        succeeded but a downstream intent failed, `_lp_position_id` is already
+        cleared but the wallet still holds the unconverted WETH; gating on the
+        on-chain balance keeps the proceeds-swap on the retry path. (Codex P2 /
+        Claude #7).
         """
         from almanak.framework.teardown import TeardownMode
 
@@ -391,11 +399,48 @@ class MorphoUniV3LeveragedLPStrategy(IntentStrategy):
                 )
             )
 
-        # Step 2: Swap WETH from LP to USDC for repayment (only if LP was opened)
-        # Note: amount="all" swaps the entire wallet WETH balance. This is safe
-        # because each strategy has an isolated 1:1 wallet (gateway architecture),
-        # so no unrelated WETH exists in this wallet.
-        if self._lp_position_id is not None:
+        # Step 2: Swap WETH from LP proceeds to USDC for repayment.
+        # Gate on either (a) an LP still tracked, or (b) wallet already holds WETH
+        # (retry case after LP closed but later intent failed). amount="all"
+        # is safe because each strategy has an isolated 1:1 wallet (gateway
+        # architecture), so no unrelated WETH exists in this wallet.
+        wallet_has_weth = self._lp_position_id is not None
+        if not wallet_has_weth:
+            # If the runner didn't pass a market snapshot, build one ourselves.
+            # Without this fallback, the retry path (where _lp_position_id has
+            # already been cleared by a successful LP_CLOSE) would skip the
+            # WETH→USDC swap entirely and leave the borrow stuck (CodeRabbit
+            # PR #1964 / Gemini feedback).
+            snapshot = market
+            if snapshot is None:
+                try:
+                    snapshot = self.create_market_snapshot()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"Unable to build market snapshot for teardown retry: {exc!r}. "
+                        "Conservatively assuming proceeds may exist and emitting swap."
+                    )
+                    wallet_has_weth = True
+
+            if snapshot is not None and not wallet_has_weth:
+                try:
+                    weth_balance = snapshot.balance("WETH")
+                    amount = (
+                        weth_balance.balance
+                        if hasattr(weth_balance, "balance")
+                        else Decimal(str(weth_balance))
+                    )
+                    # 1e-9 WETH ≈ a few wei of dust — safely below any real LP
+                    # proceeds but above rounding noise.
+                    wallet_has_weth = Decimal(str(amount)) > Decimal("0.000000001")
+                except (ValueError, KeyError, ConnectionError, TimeoutError) as exc:
+                    logger.warning(
+                        f"Unable to query on-chain WETH balance for teardown retry: {exc!r}. "
+                        "Conservatively assuming proceeds may exist and emitting swap."
+                    )
+                    wallet_has_weth = True
+
+        if wallet_has_weth:
             intents.append(
                 Intent.swap(
                     from_token="WETH",

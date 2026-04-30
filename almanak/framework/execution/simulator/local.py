@@ -603,18 +603,45 @@ class LocalSimulator(Simulator):
             )
 
         finally:
-            # Revert to snapshot to restore original state
+            # Revert to snapshot to restore original state. Failure here means
+            # state-setup transactions (e.g. an `approve`) executed during this
+            # simulation remain on the chain — leaking state to subsequent
+            # simulations on the same fork. The 1:1 wallet/gateway/fork rule
+            # (CLAUDE.md) limits blast radius for normal runs, but any
+            # shared-fork dev/CI scenario sees corrupted gas estimates on
+            # follow-up simulations. Surface this at ERROR so it's visible in
+            # logs/alerting; we do not fail the SimulationResult because gas
+            # estimation already succeeded for this call (Claude #5).
             if snapshot_id is not None:
                 try:
-                    await asyncio.wait_for(
+                    revert_response = await asyncio.wait_for(
                         web3.provider.make_request(RPCEndpoint("evm_revert"), [snapshot_id]),
                         timeout=_EVM_SNAPSHOT_TIMEOUT,
                     )
-                    logger.debug(f"Reverted to snapshot: {snapshot_id}")
+                    # Anvil/Hardhat return `true` on successful revert and `false`
+                    # if the snapshot id was already consumed or never valid. A
+                    # `false` response means the state did NOT roll back; treat
+                    # it the same way as an exception (CodeRabbit PR #1964).
+                    if revert_response.get("result") is True:
+                        logger.debug(f"Reverted to snapshot: {snapshot_id}")
+                    else:
+                        logger.error(
+                            f"evm_revert returned non-True ({revert_response.get('result')!r}). "
+                            "State-setup transactions may have leaked onto the fork; "
+                            "subsequent simulations could see stale state."
+                        )
                 except TimeoutError:
-                    logger.warning(f"evm_revert timed out after {_EVM_SNAPSHOT_TIMEOUT}s")
+                    logger.error(
+                        f"evm_revert timed out after {_EVM_SNAPSHOT_TIMEOUT}s. "
+                        "State-setup transactions may have leaked onto the fork; "
+                        "subsequent simulations could see stale state."
+                    )
                 except Exception as e:
-                    logger.warning(f"Failed to revert snapshot: {e}")
+                    logger.error(
+                        f"Failed to revert snapshot: {e}. "
+                        "State-setup transactions may have leaked onto the fork; "
+                        "subsequent simulations could see stale state."
+                    )
 
 
 __all__ = [

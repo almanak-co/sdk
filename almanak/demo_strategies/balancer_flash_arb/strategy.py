@@ -241,53 +241,111 @@ class BalancerFlashArbStrategy(IntentStrategy):
 
     # Teardown support
 
-    # Dust threshold: Enso swap quotes can leave 1-2 wei of base_token in the wallet
-    # after a "swap all" teardown. Without this floor, post-teardown verification
-    # incorrectly reports the wallet as still holding a position. VIB-3738.
+    # Dust threshold expressed in base_token native units. Enso "swap all" leaves
+    # ~1e-12 to 1e-9 of base_token behind from rounding; 1e-6 is well above that
+    # ceiling and well below any real position (1e-6 WETH ≈ $0.003). This is
+    # token-decimals dependent — for an 8-decimal high-priced asset (WBTC at
+    # ~$60k → 1e-6 WBTC ≈ $0.06) it's still safe; for a sub-cent memecoin a
+    # smaller floor would be wanted. Demo strategy assumes WETH/stablecoin
+    # pairs. VIB-3738.
     _BASE_TOKEN_DUST_THRESHOLD = Decimal("0.000001")
 
-    def _query_base_token_balance(self, market=None) -> tuple[Decimal, Decimal]:
+    def _query_base_token_balance(self, market=None) -> tuple[Decimal, Decimal] | None:
         """Read on-chain wallet balance for base_token.
 
-        Returns (balance_amount, balance_usd). On query failure, falls back to
-        Decimal("0") so teardown verification reports no position rather than
-        spuriously detecting one from cached state.
+        Returns (balance_amount, balance_usd) on success or `None` on query
+        failure. Callers MUST treat None as "unknown — assume position may
+        still exist" (fail closed). Returning a sentinel zero would let RPC
+        outages silently bypass teardown verification (Codex P1 / Claude #4).
         """
         try:
             snapshot = market or self.create_market_snapshot()
             balance = snapshot.balance(self.base_token)
+            # MarketSnapshot.balance() returns TokenBalance; the hasattr fallback
+            # is defensive against alternative balance providers that might
+            # return a bare Decimal.
             amount = balance.balance if hasattr(balance, "balance") else Decimal(str(balance))
             value_usd = getattr(balance, "balance_usd", None) or Decimal("0")
             return Decimal(str(amount)), Decimal(str(value_usd))
-        except Exception as exc:
+        except (ValueError, KeyError, ConnectionError, TimeoutError) as exc:
+            # ValueError covers "Cannot determine balance for X" from MarketSnapshot;
+            # ConnectionError/TimeoutError cover transient gateway/RPC issues.
+            # Anything else propagates so genuine logic bugs aren't masked.
             logger.warning(
                 f"Unable to query on-chain {self.base_token} balance for teardown: {exc!r}"
             )
-            return Decimal("0"), Decimal("0")
+            return None
+
+    def _has_likely_open_position(self) -> bool:
+        """Cached-state fallback signal — only consulted when on-chain query fails.
+
+        The strategy executed a SWAP (forced or fallen-back from flash_loan)
+        and we have no way to confirm the wallet is flat, so the safe assumption
+        is "position may still be open." Errs on the side of attempting an
+        unwind rather than silently bypassing teardown.
+        """
+        return self._trades_executed > 0 and (self.force_action == "swap" or self._fell_back_to_swap)
 
     def get_open_positions(self) -> "TeardownPositionSummary":
-        """Detect open positions via on-chain wallet balance, not cached counters.
+        """Detect open positions via on-chain wallet balance, with cached
+        fallback when the query fails.
 
         After a successful teardown SWAP, the wallet should hold approximately
-        zero base_token. The previous implementation read cached `_trades_executed`
-        and `_fell_back_to_swap` flags that were never reset, so verification
-        always reported the position as still open. VIB-3738.
+        zero base_token. The previous implementation read cached
+        `_trades_executed` / `_fell_back_to_swap` flags that were never reset,
+        so verification always reported the position as still open. VIB-3738.
+
+        On-chain query failure → fall back to cached state and report a
+        position so the framework retries / blocks teardown completion
+        (Codex P1 / Claude #4 — fail closed).
         """
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         positions = []
-        balance_amount, balance_usd = self._query_base_token_balance()
-        if balance_amount > self._BASE_TOKEN_DUST_THRESHOLD:
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.TOKEN,
-                    position_id="balancer_flash_arb_token_0",
-                    chain=self.chain,
-                    protocol="enso",
-                    value_usd=balance_usd,
-                    details={"asset": self.base_token, "balance": str(balance_amount)},
+        result = self._query_base_token_balance()
+        if result is None:
+            # On-chain truth unavailable — fall back to cached state.
+            if self._has_likely_open_position():
+                # Estimate value_usd from the swap intent's hardcoded amount
+                # ($3 in `_create_swap_intent`). Encoding "unknown" as $0 here
+                # is misleading: `TeardownPositionSummary.__post_init__` would
+                # total the position at zero and `safety_guard.py` would derive
+                # a $0 acceptable-loss floor from it (CodeRabbit feedback on
+                # PR #1964). Using the swap-intent's amount produces a sensible
+                # loss tolerance for the operator.
+                estimated_value_usd = Decimal("3")  # matches _create_swap_intent amount_usd
+                logger.warning(
+                    "Falling back to cached state for teardown verification "
+                    f"(on-chain {self.base_token} balance unavailable). "
+                    f"Reporting position with estimated value ${estimated_value_usd} "
+                    "so framework can retry."
                 )
-            )
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="balancer_flash_arb_token_0",
+                        chain=self.chain,
+                        protocol="enso",
+                        value_usd=estimated_value_usd,
+                        details={
+                            "asset": self.base_token,
+                            "valuation_source": "cached_fallback_estimate",
+                        },
+                    )
+                )
+        else:
+            balance_amount, balance_usd = result
+            if balance_amount > self._BASE_TOKEN_DUST_THRESHOLD:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.TOKEN,
+                        position_id="balancer_flash_arb_token_0",
+                        chain=self.chain,
+                        protocol="enso",
+                        value_usd=balance_usd,
+                        details={"asset": self.base_token, "balance": str(balance_amount)},
+                    )
+                )
 
         return TeardownPositionSummary(
             strategy_id=getattr(self, "strategy_id", "demo_balancer_flash_arb"),
@@ -298,14 +356,28 @@ class BalancerFlashArbStrategy(IntentStrategy):
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
         from almanak.framework.teardown import TeardownMode
 
-        # Skip the teardown swap if the wallet doesn't actually hold any base_token
-        # (e.g. the strategy never opened a position, or a previous teardown ran).
-        balance_amount, _ = self._query_base_token_balance(market)
-        if balance_amount <= self._BASE_TOKEN_DUST_THRESHOLD:
+        # Skip the teardown swap only if we KNOW the wallet has no base_token
+        # (on-chain query succeeded and balance is below dust). On query
+        # failure or cached-positive, we emit the swap to avoid leaving funds
+        # behind (Codex P1 / Claude #4).
+        result = self._query_base_token_balance(market)
+        if result is not None:
+            balance_amount, _ = result
+            if balance_amount <= self._BASE_TOKEN_DUST_THRESHOLD:
+                logger.info(
+                    f"No {self.base_token} balance to unwind ({balance_amount}) — skipping teardown swap"
+                )
+                return []
+        elif not self._has_likely_open_position():
+            # Query failed AND no record of executing a trade — nothing to unwind.
             logger.info(
-                f"No {self.base_token} balance to unwind ({balance_amount}) — skipping teardown swap"
+                f"On-chain {self.base_token} balance unknown and no trade executed — skipping teardown swap"
             )
             return []
+        else:
+            logger.warning(
+                f"On-chain {self.base_token} balance unknown but trade was executed — emitting teardown swap"
+            )
 
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal(str(self.max_slippage_pct)) / Decimal("100")
         return [

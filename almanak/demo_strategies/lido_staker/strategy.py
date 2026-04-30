@@ -72,12 +72,13 @@ from almanak.framework.utils.log_formatters import format_token_amount_human
 # Logger for debugging
 logger = logging.getLogger(__name__)
 
-# Dust threshold for teardown verification. stETH is a rebasing token: after a
-# full unwind swap, the wallet's reported stETH balance can briefly show 1-2 wei
-# (the rebase share-vs-amount conversion never lands exactly on zero). A bare
-# `> 0` check trips on this and reports the position as still open. 0.0001 stETH
-# is well below any real position (<$0.40 at typical prices) but well above any
-# rebase rounding artifact (which is sub-wei in human units). VIB-3739.
+# Dust threshold for teardown verification, in stETH/wstETH native units.
+# stETH is a rebasing token: after a full unwind swap, the wallet's reported
+# balance can show residual amounts from rebase share/amount conversion that
+# never lands exactly on zero (typically a few wei to ~1e-12 stETH). A bare
+# `> 0` check trips on this and reports the position as still open. 0.0001
+# stETH (≈$0.40 at typical ETH prices) is well below any real position and
+# many orders of magnitude above any rebase rounding artifact. VIB-3739.
 _DUST_THRESHOLD = Decimal("0.0001")
 
 

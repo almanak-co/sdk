@@ -175,6 +175,94 @@ class TestMorphoTeardownVerification:
         # that the LP position is still tracked so it can be retried.
         assert s._lp_position_id == 12345
 
+    def test_retry_after_lp_close_still_emits_proceeds_swap(self):
+        """Codex P2 / Claude #7: after LP_CLOSE clears `_lp_position_id` but
+        REPAY fails, a retry of generate_teardown_intents must still emit the
+        WETH→USDC proceeds swap (gated on wallet balance, not LP id)."""
+        from almanak.framework.intents.vocabulary import RepayIntent, SwapIntent, WithdrawIntent
+        from almanak.framework.teardown import TeardownMode
+
+        s = _make_morpho_strategy()
+
+        # Drive successful LP_CLOSE → _lp_position_id is None.
+        lp_close = MagicMock()
+        lp_close.intent_type = IntentType.LP_CLOSE
+        s.on_intent_executed(lp_close, success=True, result=MagicMock())
+        assert s._lp_position_id is None
+
+        # Wallet now holds the WETH proceeds; market reports a real balance.
+        market = MagicMock()
+        market.balance.return_value = _balance_obj("0.005", "17")
+
+        intents = s.generate_teardown_intents(TeardownMode.SOFT, market=market)
+
+        # Retry should NOT re-emit LP_CLOSE (already done) but MUST emit the
+        # WETH→USDC swap, then REPAY, then WITHDRAW.
+        intent_types = [type(i).__name__ for i in intents]
+        assert intent_types == ["SwapIntent", "RepayIntent", "WithdrawIntent"]
+        assert isinstance(intents[0], SwapIntent)
+        assert intents[0].from_token == "WETH"
+        assert intents[0].to_token == "USDC"
+        assert isinstance(intents[1], RepayIntent)
+        assert isinstance(intents[2], WithdrawIntent)
+
+    def test_retry_with_no_proceeds_skips_swap(self):
+        """If LP closed and proceeds already swapped (zero WETH), retry skips swap."""
+        from almanak.framework.intents.vocabulary import RepayIntent, WithdrawIntent
+        from almanak.framework.teardown import TeardownMode
+
+        s = _make_morpho_strategy()
+        s._lp_position_id = None  # already closed in prior teardown round
+
+        market = MagicMock()
+        market.balance.return_value = _balance_obj("0", "0")
+
+        intents = s.generate_teardown_intents(TeardownMode.SOFT, market=market)
+        intent_types = [type(i).__name__ for i in intents]
+        # No LP_CLOSE, no SWAP — just REPAY and WITHDRAW remaining.
+        assert intent_types == ["RepayIntent", "WithdrawIntent"]
+        assert isinstance(intents[0], RepayIntent)
+        assert isinstance(intents[1], WithdrawIntent)
+
+    def test_retry_with_no_market_falls_back_to_create_market_snapshot(self):
+        """If the runner doesn't pass a market kwarg, the strategy must still
+        check WETH balance via create_market_snapshot() before deciding to skip
+        the proceeds swap. CodeRabbit / Gemini PR #1964 feedback."""
+        from almanak.framework.intents.vocabulary import SwapIntent
+        from almanak.framework.teardown import TeardownMode
+
+        s = _make_morpho_strategy()
+        s._lp_position_id = None  # LP closed, retry path
+
+        # Strategy will build its own market snapshot.
+        snapshot = MagicMock()
+        snapshot.balance.return_value = _balance_obj("0.005", "17")
+        s.create_market_snapshot = MagicMock(return_value=snapshot)
+
+        # market=None simulates the runner not passing one.
+        intents = s.generate_teardown_intents(TeardownMode.SOFT, market=None)
+
+        s.create_market_snapshot.assert_called_once()
+        intent_types = [type(i).__name__ for i in intents]
+        assert "SwapIntent" in intent_types
+        swap = next(i for i in intents if isinstance(i, SwapIntent))
+        assert swap.from_token == "WETH"
+        assert swap.to_token == "USDC"
+
+    def test_retry_with_no_market_and_snapshot_failure_emits_swap(self):
+        """If neither the runner nor `create_market_snapshot()` provide a usable
+        market, conservatively emit the swap rather than silently skipping."""
+        from almanak.framework.intents.vocabulary import SwapIntent
+        from almanak.framework.teardown import TeardownMode
+
+        s = _make_morpho_strategy()
+        s._lp_position_id = None
+        s.create_market_snapshot = MagicMock(side_effect=RuntimeError("gateway offline"))
+
+        intents = s.generate_teardown_intents(TeardownMode.SOFT, market=None)
+        intent_types = [type(i).__name__ for i in intents]
+        assert "SwapIntent" in intent_types  # fail-safe emits the swap
+
 
 # ---------------------------------------------------------------------------
 # VIB-3738: balancer_flash_arb — get_open_positions reads on-chain balance
@@ -221,13 +309,38 @@ class TestBalancerTeardownVerification:
         assert position.details["asset"] == "WETH"
         assert position.details["balance"] == "0.5"
 
-    def test_query_failure_falls_back_to_no_position(self):
-        """If the on-chain query fails, the strategy reports no position
-        (preferring under-reporting to spurious teardown blocks)."""
+    def test_query_failure_with_cached_trade_reports_position(self):
+        """RPC failure + recorded trade → fail closed and report position.
+
+        Codex P1 / Claude #4: a silent under-report on RPC outage would let
+        teardown succeed while funds are still on-chain. Strategy must err on
+        the side of reporting a position so the framework retries.
+        """
         s = _make_balancer_strategy()
+        # _trades_executed=1 and force_action="swap" come from the fixture, so
+        # _has_likely_open_position() returns True.
 
         market = MagicMock()
-        market.balance.side_effect = RuntimeError("rpc unavailable")
+        market.balance.side_effect = ValueError("rpc unavailable")
+        s.create_market_snapshot = MagicMock(return_value=market)
+
+        summary = s.get_open_positions()
+        assert len(summary.positions) == 1
+        position = summary.positions[0]
+        assert position.details["valuation_source"] == "cached_fallback_estimate"
+        # value_usd must be non-zero so safety_guard derives a sensible
+        # acceptable-loss floor (CodeRabbit PR #1964).
+        assert position.value_usd > Decimal("0")
+
+    def test_query_failure_with_no_cached_trade_reports_no_position(self):
+        """RPC failure + no trade executed → no false-positive teardown."""
+        s = _make_balancer_strategy()
+        s._trades_executed = 0
+        s._fell_back_to_swap = False
+        s.force_action = None  # not a swap path
+
+        market = MagicMock()
+        market.balance.side_effect = ValueError("rpc unavailable")
         s.create_market_snapshot = MagicMock(return_value=market)
 
         summary = s.get_open_positions()
@@ -244,6 +357,20 @@ class TestBalancerTeardownVerification:
 
         intents = s.generate_teardown_intents(TeardownMode.SOFT, market=market)
         assert intents == []
+
+    def test_teardown_intents_emitted_on_query_failure_with_cached_trade(self):
+        """RPC failure during teardown intent generation must still emit the swap
+        if the strategy recorded an executed trade (Codex P1)."""
+        from almanak.framework.teardown import TeardownMode
+
+        s = _make_balancer_strategy()  # fixture: _trades_executed=1, force_action="swap"
+
+        market = MagicMock()
+        market.balance.side_effect = ValueError("rpc unavailable")
+
+        intents = s.generate_teardown_intents(TeardownMode.SOFT, market=market)
+        assert len(intents) == 1
+        assert intents[0].from_token == "WETH"
 
     def test_teardown_intents_emitted_when_balance_present(self):
         from almanak.framework.teardown import TeardownMode
