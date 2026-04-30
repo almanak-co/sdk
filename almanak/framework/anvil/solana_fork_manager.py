@@ -41,6 +41,10 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from almanak.framework.anvil.solana_program_registry import (
+    JUPITER_V6_PROGRAM_ID,
+    get_protocol_program_ids,
+)
 from almanak.framework.data.tokens.defaults import JUP as _JUP
 from almanak.framework.data.tokens.defaults import USDC as _USDC
 from almanak.framework.data.tokens.defaults import USDT as _USDT
@@ -62,8 +66,10 @@ ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
 COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
 
-# Jupiter Aggregator v6 program
-JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+# Jupiter Aggregator v6 program — kept as a module-level alias for back-compat
+# (downstream code and tests import ``JUPITER_PROGRAM`` from this module).
+# Canonical source: ``solana_program_registry.JUPITER_V6_PROGRAM_ID``.
+JUPITER_PROGRAM = JUPITER_V6_PROGRAM_ID
 
 # WSOL mint address - sourced from central token registry
 WSOL_MINT = WRAPPED_NATIVE["solana"]
@@ -108,18 +114,26 @@ DEFAULT_CLONE_ACCOUNTS: list[str] = [
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 ]
 
-DEFAULT_CLONE_PROGRAMS: list[str] = [
-    # Jupiter v6 (upgradeable, so we use --clone-upgradeable-program)
-    JUPITER_PROGRAM,
-    # Orca Whirlpools (Solana CLMM)
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
-    # Metaplex Token Metadata Program (BPFLoaderUpgradeable, required by Orca openPositionWithMetadata)
-    "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
-]
+# Default upgradeable programs cloned at validator startup.
+#
+# Sourced from ``solana_program_registry`` so that adding a new Solana
+# connector means appending a single entry to that registry — not editing
+# the fork manager. Keeps test-validator state aligned with the actual
+# protocol surface the SDK supports.
+#
+# VIB-3753: Without these clones the validator boots empty and every
+# strategy touching a real on-chain protocol hits ``ProgramAccountNotFound``.
+DEFAULT_CLONE_PROGRAMS: list[str] = get_protocol_program_ids(upgradeable=True)
 
-# Non-upgradeable programs to clone via --clone (BPFLoader2, NOT BPFLoaderUpgradeable).
-# These are also pre-fetched as JSON files for reliability.
-DEFAULT_CLONE_PROGRAM_ACCOUNTS: list[str] = []
+# Non-upgradeable programs cloned via --clone (BPFLoader2, NOT BPFLoaderUpgradeable).
+# Currently empty — every Solana protocol the SDK supports today is deployed via
+# BPFLoaderUpgradeable, so they all live in DEFAULT_CLONE_PROGRAMS above. If a
+# future entry sets ``upgradeable=False`` in the registry, the validator will
+# clone it via ``--clone`` (see _build_validator_command). The ``_prepare_clone_account_files``
+# pre-fetch path only iterates ``self.clone_accounts`` today and would need
+# extending if non-upgradeable programs are ever added (tracked as a follow-up
+# in the registry docstring; safe no-op today).
+DEFAULT_CLONE_PROGRAM_ACCOUNTS: list[str] = get_protocol_program_ids(upgradeable=False)
 
 # SPL Token Mint account layout (82 bytes)
 # https://github.com/solana-labs/solana-program-library/blob/master/token/program/src/state.rs

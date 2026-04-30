@@ -21,15 +21,25 @@ from almanak.framework.anvil.solana_fork_manager import (
     SOLANA_TOKEN_MINTS,
     SolanaForkManager,
 )
+from almanak.framework.anvil.solana_program_registry import (
+    SOLANA_PROTOCOL_PROGRAMS,
+    SolanaProgramEntry,
+    get_protocol_for_program_id,
+    get_protocol_program_ids,
+)
 
 __all__ = [
     "RollingForkManager",
     "ForkManagerConfig",
     "SolanaForkManager",
+    "SolanaProgramEntry",
+    "SOLANA_PROTOCOL_PROGRAMS",
     "CHAIN_IDS",
     "TOKEN_ADDRESSES",
     "TOKEN_DECIMALS",
     "KNOWN_BALANCE_SLOTS",
     "SOLANA_TOKEN_MINTS",
     "SOLANA_TOKEN_DECIMALS",
+    "get_protocol_for_program_id",
+    "get_protocol_program_ids",
 ]
