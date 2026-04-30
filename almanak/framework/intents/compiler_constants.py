@@ -457,6 +457,62 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     },
 }
 
+# PoolDataProvider addresses per chain/protocol. Used by the lending pre-flight
+# checks to call `getReserveConfigurationData(asset)` and surface frozen/inactive
+# reserves as typed compile-time errors (VIB-3701, VIB-3749).
+#
+# Aave V2 and Aave V3 share the `getReserveConfigurationData(address)` selector
+# and ABI-encoded return layout, so the same pre-flight code works for both.
+# Radiant V2 is an Aave V2 fork — verified addresses below come from the
+# Radiant Capital docs (https://docs.radiant.capital/) and on-chain:
+#   - Arbitrum Pool 0xF4B1...59E1, AaveProtocolDataProvider 0x596B...A2cC.
+#     Pool was frozen by governance after the October 2024 attack — this
+#     pre-flight surfaces that as `PoolReserveFrozenError` instead of letting
+#     the on-chain SUPPLY tx revert opaquely.
+#   - Ethereum Pool 0xA950...ED07, AaveProtocolDataProvider 0x362f...3813.
+#     Pool is active as of 2026-04-30; this still gives us a fast fail when
+#     the operator picks an asset whose reserve has been retired.
+LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]] = {
+    "ethereum": {
+        "aave_v3": "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
+        "radiant_v2": "0x362f3BB63Cff83bd169aE1793979E9e537993813",
+    },
+    "arbitrum": {
+        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+        "radiant_v2": "0x596B0cc4c5094507C50b579a662FE7e7b094A2cC",
+    },
+    "optimism": {
+        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+    },
+    "polygon": {
+        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+    },
+    "base": {
+        "aave_v3": "0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac",
+    },
+    "avalanche": {
+        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+    },
+    "bsc": {
+        "aave_v3": "0xc90Df74A7c16245c5F5C5870327Ceb38Fe5d5328",
+    },
+    "sonic": {
+        "aave_v3": "0xc0a344397cfa89dF1e1d3e4fb330834D789cF2CD",
+    },
+    "linea": {
+        "aave_v3": "0x47cd4b507B81cB831669c71c7077f4daF6762FF4",
+    },
+    "plasma": {
+        "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+    },
+    "mantle": {
+        "aave_v3": "0x487c5c669D9eee6057C44973207101276cf73b68",
+    },
+    "xlayer": {
+        "aave_v3": "0x6C505C31714f14e8af2A03633EB2Cdfb4959138F",
+    },
+}
+
 # Standard ERC20 function selectors
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
 ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address,address)

@@ -50,6 +50,11 @@ from .compiler import (
     TransactionData,
     UniswapV3LPAdapter,
 )
+from .compiler_lending import (
+    AssetNotCollateralEligibleError,
+    PoolReserveFrozenError,
+    assert_lending_reserve_active,
+)
 from .ensure_balance import (
     EnsureBalanceIntent,
     EnsureBalanceIntentType,
@@ -206,6 +211,10 @@ __all__ = [
     "LP_POSITION_MANAGERS",
     "LENDING_POOL_ADDRESSES",
     "AAVE_VARIABLE_RATE_MODE",
+    # Lending pre-flight (VIB-3701, VIB-3749)
+    "AssetNotCollateralEligibleError",
+    "PoolReserveFrozenError",
+    "assert_lending_reserve_active",
     # State Machine
     "IntentState",
     "IntentStateMachine",

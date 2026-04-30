@@ -46,6 +46,203 @@ class AssetNotCollateralEligibleError(ValueError):
     """
 
 
+class PoolReserveFrozenError(ValueError):
+    """The reserve for an asset is frozen or inactive on the target lending pool.
+
+    Raised at intent compile time when a pre-flight reserve-config query shows
+    `isActive == false` or `isFrozen == true`. Surfacing this as a typed error
+    lets strategies emit a clean ``Intent.hold(...)`` instead of submitting a
+    SUPPLY/BORROW that will revert on-chain (e.g. Radiant V2 Arbitrum after the
+    October 2024 attack — VIB-2445 / VIB-3749).
+
+    Reusable for any Aave V2 fork or Aave V3 market whose governance has
+    paused / frozen a reserve.
+    """
+
+
+# Decoded reserve configuration as returned by `getReserveConfigurationData`.
+# Used by both the collateral-eligibility check and the frozen-reserve check.
+class _DecodedReserveConfig:
+    __slots__ = (
+        "ltv",
+        "usage_as_collateral_enabled",
+        "is_active",
+        "is_frozen",
+    )
+
+    def __init__(
+        self,
+        *,
+        ltv: int,
+        usage_as_collateral_enabled: bool,
+        is_active: bool,
+        is_frozen: bool,
+    ) -> None:
+        self.ltv = ltv
+        self.usage_as_collateral_enabled = usage_as_collateral_enabled
+        self.is_active = is_active
+        self.is_frozen = is_frozen
+
+
+def _resolve_pool_data_provider(chain: str, protocol: str) -> str | None:
+    """Look up the PoolDataProvider address for (chain, protocol).
+
+    Returns ``None`` when no PoolDataProvider is registered — caller fails-open.
+    Aave V3 still falls back to ``AAVE_V3[chain]["pool_data_provider"]`` so the
+    chain table remains the single source of truth for that protocol.
+    """
+    chain_map = compiler_constants.LENDING_POOL_DATA_PROVIDERS.get(chain, {})
+    addr = chain_map.get(protocol)
+    if addr:
+        return addr
+    if protocol == "aave_v3" and chain in AAVE_V3:
+        return AAVE_V3[chain].get("pool_data_provider")
+    return None
+
+
+def _fetch_reserve_config(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    *,
+    protocol: str,
+    pre_flight_label: str,
+) -> _DecodedReserveConfig | None:
+    """Call `getReserveConfigurationData(asset)` and decode the result.
+
+    Shared low-level helper used by both the Aave V3 collateral-eligibility
+    pre-flight (VIB-3701) and the Aave V2-fork frozen-reserve pre-flight
+    (VIB-3749). Both pre-flights consume the same ABI — the underlying
+    `getReserveConfigurationData(address)` selector and 10-word return layout
+    are identical between Aave V2 and Aave V3.
+
+    Returns ``None`` when the check could not be performed (no gateway, RPC
+    error, malformed response) — callers fail-open in that case so an offline
+    / placeholder-mode compile still yields calldata.
+    """
+    pool_data_provider = _resolve_pool_data_provider(compiler.chain, protocol)
+    if not pool_data_provider:
+        return None
+
+    gateway = getattr(compiler, "_gateway_client", None)
+    if gateway is None or not getattr(gateway, "is_connected", False):
+        return None
+
+    selector_no_prefix = _AAVE_GET_RESERVE_CONFIG_SELECTOR[2:]
+    asset_padded = asset_address.lower().replace("0x", "").zfill(64)
+    call_data = "0x" + selector_no_prefix + asset_padded
+
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=compiler.chain,
+                method="eth_call",
+                params=json.dumps([{"to": pool_data_provider, "data": call_data}, "latest"]),
+                id=f"{pre_flight_label}:{compiler.chain}:{asset_address.lower()}",
+            ),
+            timeout=getattr(compiler, "rpc_timeout", 5.0),
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s pre-flight skipped for %s on %s: gateway call failed (%s)",
+            pre_flight_label,
+            asset_symbol,
+            compiler.chain,
+            exc,
+        )
+        return None
+
+    if not response.success or not response.result:
+        # When the PoolDataProvider call reverts (as happens on Radiant V2
+        # Arbitrum after the October 2024 attack — every method on the proxy
+        # returns 0x), treat that as a strong "pool is broken / shut down"
+        # signal and surface it as a frozen reserve. A healthy data provider
+        # never reverts on `getReserveConfigurationData`; only network errors
+        # or an RPC-level fault would otherwise reach this branch, and those
+        # already log a warning above.
+        error_text = (response.error or "").lower()
+        revert_signal = "revert" in error_text or "reverted" in error_text
+        if revert_signal:
+            return _DecodedReserveConfig(
+                ltv=0,
+                usage_as_collateral_enabled=False,
+                is_active=False,
+                is_frozen=True,
+            )
+        logger.warning(
+            "%s pre-flight: PoolDataProvider returned empty for asset=%s chain=%s "
+            "— assuming eligible (will revert on-chain if not)",
+            pre_flight_label,
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+
+    # gateway.rpc.Call wraps eth_call's hex result in json.dumps (see
+    # almanak/gateway/services/rpc_service.py), so response.result arrives as a
+    # JSON-encoded string like '"0x..."'. Decode before slicing or the ABI
+    # word offsets are off-by-one and the pre-flight silently fails-open.
+    try:
+        decoded = json.loads(response.result) if response.result.startswith('"') else response.result
+    except (ValueError, json.JSONDecodeError):
+        logger.warning(
+            "%s pre-flight: cannot JSON-decode RPC result for asset=%s chain=%s",
+            pre_flight_label,
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+    if not isinstance(decoded, str):
+        return None
+    # Empty `0x` payload from a successful eth_call is a strong "broken
+    # contract" signal — a healthy PoolDataProvider always returns a
+    # 320-byte ABI-encoded tuple. Treat the same as an explicit revert.
+    # Without this branch a shut-down proxy that returns success=True with
+    # empty data falls through to the short-response warning and the
+    # pre-flight silently fails open. CodeRabbit follow-up.
+    if decoded.lower() == "0x" or decoded == "":
+        return _DecodedReserveConfig(
+            ltv=0,
+            usage_as_collateral_enabled=False,
+            is_active=False,
+            is_frozen=True,
+        )
+    raw = decoded.removeprefix("0x") if decoded.startswith("0x") else decoded
+
+    # getReserveConfigurationData returns 10 uint256/bool words, ABI-encoded
+    # as 10 * 32 bytes = 640 hex chars. Word layout:
+    # 0: decimals, 1: ltv, 2: liquidationThreshold, 3: liquidationBonus,
+    # 4: reserveFactor, 5: usageAsCollateralEnabled (bool),
+    # 6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
+    # 8: isActive (bool), 9: isFrozen (bool).
+    if len(raw) < 640:
+        logger.warning(
+            "%s pre-flight: unexpected response length %d for asset=%s chain=%s",
+            pre_flight_label,
+            len(raw),
+            asset_symbol,
+            compiler.chain,
+        )
+        return None
+
+    try:
+        ltv = int(raw[64:128], 16)
+        usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
+        is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
+        is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
+    except ValueError:
+        return None
+
+    return _DecodedReserveConfig(
+        ltv=ltv,
+        usage_as_collateral_enabled=usage_as_collateral_enabled,
+        is_active=is_active,
+        is_frozen=is_frozen,
+    )
+
+
 def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, asset_symbol: str) -> str | None:
     """Verify an asset is collateral-eligible on the compiler's Aave V3 market.
 
@@ -74,91 +271,22 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
     if cache_key in cache:
         return cache[cache_key]
 
-    gateway = getattr(compiler, "_gateway_client", None)
-    if gateway is None or not getattr(gateway, "is_connected", False):
+    config = _fetch_reserve_config(
+        compiler,
+        asset_address,
+        asset_symbol,
+        protocol="aave_v3",
+        pre_flight_label="Aave V3 collateral",
+    )
+    if config is None:
+        # Fail-open: do NOT cache the miss. A transient gateway failure on
+        # iteration N must not permanently disable the pre-flight on iter N+1.
         return None
 
-    pool_data_provider = AAVE_V3[compiler.chain]["pool_data_provider"]
-    selector_no_prefix = _AAVE_GET_RESERVE_CONFIG_SELECTOR[2:]
-    asset_padded = asset_address.lower().replace("0x", "").zfill(64)
-    call_data = "0x" + selector_no_prefix + asset_padded
-
-    try:
-        from almanak.gateway.proto import gateway_pb2
-
-        response = gateway.rpc.Call(
-            gateway_pb2.RpcRequest(
-                chain=compiler.chain,
-                method="eth_call",
-                params=json.dumps([{"to": pool_data_provider, "data": call_data}, "latest"]),
-                id=f"aave_v3_reserve_config:{compiler.chain}:{asset_address.lower()}",
-            ),
-            timeout=getattr(compiler, "rpc_timeout", 5.0),
-        )
-    except Exception as exc:
-        # Network / gateway problems shouldn't block compilation — the on-chain
-        # tx will revert with the clear selector if eligibility is wrong.
-        # Do NOT cache the miss: a transient failure on iteration N must not
-        # permanently disable the pre-flight on iteration N+1.
-        logger.warning(
-            "Aave V3 collateral pre-flight skipped for %s on %s: gateway call failed (%s)",
-            asset_symbol,
-            compiler.chain,
-            exc,
-        )
-        return None
-
-    if not response.success or not response.result:
-        logger.warning(
-            "Aave V3 collateral pre-flight: PoolDataProvider returned empty for "
-            "asset=%s chain=%s — assuming eligible (will revert on-chain if not)",
-            asset_symbol,
-            compiler.chain,
-        )
-        return None
-
-    # gateway.rpc.Call wraps eth_call's hex result in json.dumps (see
-    # almanak/gateway/services/rpc_service.py), so response.result arrives as a
-    # JSON-encoded string like '"0x..."'. Decode before slicing or the ABI
-    # word offsets are off-by-one and the pre-flight silently fails-open.
-    try:
-        decoded = json.loads(response.result) if response.result.startswith('"') else response.result
-    except (ValueError, json.JSONDecodeError):
-        logger.warning(
-            "Aave V3 collateral pre-flight: cannot JSON-decode RPC result for asset=%s chain=%s",
-            asset_symbol,
-            compiler.chain,
-        )
-        return None
-    if not isinstance(decoded, str):
-        return None
-    raw = decoded.removeprefix("0x") if decoded.startswith("0x") else decoded
-
-    # getReserveConfigurationData returns 10 uint256/bool words, ABI-encoded
-    # as 10 * 32 bytes = 640 hex chars. Word layout:
-    # 0: decimals, 1: ltv, 2: liquidationThreshold, 3: liquidationBonus,
-    # 4: reserveFactor, 5: usageAsCollateralEnabled (bool),
-    # 6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
-    # 8: isActive (bool), 9: isFrozen (bool).
-    if len(raw) < 640:
-        logger.warning(
-            "Aave V3 collateral pre-flight: unexpected response length %d for asset=%s chain=%s",
-            len(raw),
-            asset_symbol,
-            compiler.chain,
-        )
-        return None
-
-    try:
-        ltv = int(raw[64:128], 16)
-        usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
-    except ValueError:
-        return None
-
-    if not usage_as_collateral_enabled or ltv == 0:
+    if not config.usage_as_collateral_enabled or config.ltv == 0:
         reason = (
             f"Asset {asset_symbol} on Aave V3 {compiler.chain} is not collateral-eligible "
-            f"(usageAsCollateralEnabled={usage_as_collateral_enabled}, ltv={ltv}). "
+            f"(usageAsCollateralEnabled={config.usage_as_collateral_enabled}, ltv={config.ltv}). "
             "Use as supply-only (omit use_as_collateral) or pick a different asset."
         )
         cache[cache_key] = reason
@@ -166,6 +294,167 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
 
     cache[cache_key] = None
     return None
+
+
+def _check_lending_reserve_active(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+) -> str | None:
+    """Verify the reserve for an asset is not frozen / inactive on the target pool.
+
+    Reusable across any Aave-compatible lending pool that exposes
+    ``getReserveConfigurationData(address)`` on its PoolDataProvider — covers
+    Aave V3 markets and Aave V2 forks (Radiant V2 today, others if added).
+
+    Returns:
+        None when the reserve is active and unfrozen, or when the check could
+        not be performed (fail-open — same offline / placeholder-mode contract
+        as ``_check_aave_v3_collateral_eligibility``).
+        A human-readable error string when the reserve is conclusively
+        frozen or inactive. Strategies should catch the typed
+        :class:`PoolReserveFrozenError` raised by the caller and emit
+        ``Intent.hold(...)`` instead of submitting a SUPPLY that will revert
+        on-chain. VIB-3749.
+    """
+    if not _resolve_pool_data_provider(compiler.chain, protocol):
+        return None
+
+    cache = getattr(compiler, "_lending_reserve_active_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_reserve_active_cache = cache
+
+    cache_key = (compiler.chain, protocol, asset_address.lower())
+    if cache_key in cache:
+        return cache[cache_key]
+
+    config = _fetch_reserve_config(
+        compiler,
+        asset_address,
+        asset_symbol,
+        protocol=protocol,
+        pre_flight_label=f"{protocol} reserve-active",
+    )
+    if config is None:
+        # Fail-open: do not cache transient failures.
+        return None
+
+    if not config.is_active or config.is_frozen:
+        reason = (
+            f"Reserve {asset_symbol} on {protocol} {compiler.chain} is not active "
+            f"(isActive={config.is_active}, isFrozen={config.is_frozen}). "
+            "The pool / asset is paused — strategy should HOLD until governance reactivates."
+        )
+        cache[cache_key] = reason
+        return reason
+
+    cache[cache_key] = None
+    return None
+
+
+class _CompilerLikeShim:
+    """Tiny duck-typed shim used when a strategy calls the public
+    ``assert_lending_reserve_active`` helper without a real ``IntentCompiler``.
+
+    The runner does not assign ``state.compiler`` back onto ``strategy._compiler``
+    until *after* ``decide()`` returns (see ``StrategyRunner.run_iteration``),
+    so a strategy that wants the pre-flight in ``decide()`` can't go through
+    ``self.compiler``. This shim lets the helper run with just the
+    gateway_client + chain that every strategy already exposes.
+    """
+
+    __slots__ = ("chain", "rpc_timeout", "_gateway_client", "_lending_reserve_active_cache")
+
+    def __init__(
+        self,
+        chain: str,
+        gateway_client: Any,
+        rpc_timeout: float,
+        cache: dict[Any, Any] | None,
+    ) -> None:
+        self.chain = chain
+        self.rpc_timeout = rpc_timeout
+        self._gateway_client = gateway_client
+        self._lending_reserve_active_cache = cache if cache is not None else {}
+
+
+def assert_lending_reserve_active(
+    compiler_or_strategy: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+) -> None:
+    """Strategy-facing pre-flight: raise ``PoolReserveFrozenError`` if frozen.
+
+    Call this from ``decide()`` before constructing a SUPPLY/BORROW Intent so
+    the strategy can short-circuit to ``Intent.hold(...)`` on iteration 1
+    rather than submitting a SUPPLY that the on-chain reserve will revert.
+
+    Accepts either:
+      - an ``IntentCompiler`` (or anything exposing ``chain``,
+        ``_gateway_client``, ``rpc_timeout``); or
+      - an ``IntentStrategy`` instance (we read ``self.chain``,
+        ``self._gateway_client``, ``self.rpc_timeout`` if present, and stash
+        the cache on the strategy instance directly).
+
+    The dual-input shape is necessary because the runner doesn't propagate
+    ``state.compiler`` back onto ``strategy._compiler`` until after
+    ``decide()`` returns — so accessing ``self.compiler`` from inside
+    ``decide()`` would raise ``RuntimeError`` for the pre-flight call.
+
+    Re-uses the same ``getReserveConfigurationData`` query and per-instance
+    cache as the compile-time pre-flight, so the strategy-level check costs
+    at most one RPC per (chain, protocol, asset) for the entire strategy run.
+
+    Fails open when the gateway / RPC is unavailable — caller continues to
+    behave as before in offline / placeholder-mode compiles.
+
+    VIB-3749. Reusable for any Aave V2 fork or Aave V3 market governance can
+    pause: Radiant V2 (Arbitrum frozen post-Oct-2024), Aave V3 markets where a
+    reserve gets paused, etc.
+
+    Raises:
+        PoolReserveFrozenError: when the reserve is conclusively frozen or
+        inactive on the target pool.
+    """
+    target = compiler_or_strategy
+
+    # Detect the strategy path: strategies have `_gateway_client` but their
+    # `.compiler` property raises if `_compiler` is unset (the runner-path
+    # gap). If the caller has `chain` + `_gateway_client` we run directly;
+    # otherwise we treat it as a compiler-shaped object as before.
+    has_chain = hasattr(target, "chain")
+    has_gateway = hasattr(target, "_gateway_client")
+    if has_chain and has_gateway and not _looks_like_compiler(target):
+        shim = _CompilerLikeShim(
+            chain=target.chain,
+            gateway_client=target._gateway_client,
+            rpc_timeout=getattr(target, "rpc_timeout", 5.0),
+            cache=getattr(target, "_lending_reserve_active_cache", None),
+        )
+        # Stash the cache on the strategy so iteration N+1 hits it.
+        if not isinstance(getattr(target, "_lending_reserve_active_cache", None), dict):
+            target._lending_reserve_active_cache = shim._lending_reserve_active_cache
+        else:
+            shim._lending_reserve_active_cache = target._lending_reserve_active_cache
+        reason = _check_lending_reserve_active(shim, asset_address, asset_symbol, protocol)
+    else:
+        reason = _check_lending_reserve_active(target, asset_address, asset_symbol, protocol)
+    if reason is not None:
+        raise PoolReserveFrozenError(reason)
+
+
+def _looks_like_compiler(obj: Any) -> bool:
+    """True when the duck-type matches the IntentCompiler surface we depend on.
+
+    Distinguishes a real compiler from a strategy. Strategies expose
+    ``_gateway_client`` and ``chain`` too, so we additionally check for the
+    `_resolve_token` method and the `_compile_*` family that only the compiler
+    has. Cheap, no imports, defensive.
+    """
+    return hasattr(obj, "_resolve_token") and hasattr(obj, "_format_amount")
 
 
 def _validate_curvance_market_tokens(
@@ -3539,31 +3828,7 @@ def _compile_supply_aave_compatible(
 
     if supply_token.is_native:
         weth_address = compiler._get_wrapped_native_address()
-        if weth_address:
-            actual_supply_address = weth_address
-            # Wrap native -> wrapped native (deposit() selector is the same
-            # across WETH/WAVAX/WBNB/etc.)
-            wrap_tx = TransactionData(
-                to=weth_address,
-                value=supply_amount,
-                data="0xd0e30db0",  # wrapped-native deposit()
-                gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
-                description=(
-                    f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
-                    f"{supply_token.symbol} to wrapped native token"
-                ),
-                tx_type="wrap",
-            )
-            transactions.append(wrap_tx)
-            # Approve wrapped native for pool
-            approve_txs = compiler._build_approve_tx(
-                weth_address,
-                pool_address,
-                supply_amount,
-            )
-            transactions.extend(approve_txs)
-            warnings.append(f"Native {supply_token.symbol} supply: wrapped before supplying")
-        else:
+        if weth_address is None:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -3572,6 +3837,54 @@ def _compile_supply_aave_compatible(
                 ),
                 intent_id=intent.intent_id,
             )
+        actual_supply_address = weth_address
+
+    # Pre-flight: confirm the reserve for this asset is active and unfrozen on
+    # the target pool. Surfaces a typed `PoolReserveFrozenError` (relayed as a
+    # FAILED compilation result) instead of submitting a SUPPLY TX that will
+    # revert opaquely on-chain — Radiant V2 Arbitrum has been frozen since the
+    # October 2024 attack and would otherwise eat one failed iteration before
+    # the strategy's post-revert state machine catches up. Reusable for any
+    # Aave V2 fork or Aave V3 market whose governance has paused a reserve.
+    # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when no
+    # gateway is attached so offline / placeholder-mode compiles still produce
+    # calldata; the on-chain revert remains the final guard.
+    frozen_reason = _check_lending_reserve_active(
+        compiler,
+        asset_address=actual_supply_address,
+        asset_symbol=supply_token.symbol,
+        protocol=protocol_lower,
+    )
+    if frozen_reason is not None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=frozen_reason,
+            intent_id=intent.intent_id,
+        )
+
+    if supply_token.is_native:
+        # Wrap native -> wrapped native (deposit() selector is the same
+        # across WETH/WAVAX/WBNB/etc.)
+        wrap_tx = TransactionData(
+            to=actual_supply_address,
+            value=supply_amount,
+            data="0xd0e30db0",  # wrapped-native deposit()
+            gas_estimate=compiler_constants.get_gas_estimate(compiler.chain, "wrap_eth"),
+            description=(
+                f"Wrap {compiler._format_amount(supply_amount, supply_token.decimals)} "
+                f"{supply_token.symbol} to wrapped native token"
+            ),
+            tx_type="wrap",
+        )
+        transactions.append(wrap_tx)
+        # Approve wrapped native for pool
+        approve_txs = compiler._build_approve_tx(
+            actual_supply_address,
+            pool_address,
+            supply_amount,
+        )
+        transactions.extend(approve_txs)
+        warnings.append(f"Native {supply_token.symbol} supply: wrapped before supplying")
     else:
         approve_txs = compiler._build_approve_tx(
             actual_supply_address,
