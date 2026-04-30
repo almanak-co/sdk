@@ -1,192 +1,187 @@
+"""Almanak SDK public API.
+
+Names listed in ``__all__`` are resolved lazily via :pep:`562` ``__getattr__`` so
+that consumers (notably the gateway sidecar, where ``almanak.framework.*``
+submodules pull in pandas / web3 / streamlit / matplotlib transitively) only pay
+the import cost of subpackages they actually touch. The ``TYPE_CHECKING`` block
+below preserves the eager re-exports for static type checkers (mypy, pyright)
+and IDE autocomplete.
+"""
+
+from typing import TYPE_CHECKING
+
 from ._version import __version__
 
-# Framework re-exports (common types)
-from .core.enums import (
-    ActionType,
-    Chain,
-    CoSigners,
-    ExecutionStatus,
-    Network,
-    Protocol,
-    SwapSide,
-    TransactionType,
-)
-from .core.models.action import Action
-from .core.models.action_bundle import ActionBundle
+if TYPE_CHECKING:
+    from .core.enums import (
+        ActionType,
+        Chain,
+        CoSigners,
+        ExecutionStatus,
+        Network,
+        Protocol,
+        SwapSide,
+        TransactionType,
+    )
+    from .core.models.action import Action
+    from .core.models.action_bundle import ActionBundle
+    from .framework import (
+        DEFAULT_GAS_ESTIMATES,
+        PROTOCOL_ROUTERS,
+        STRATEGY_REGISTRY,
+        ABTest,
+        ABTestConfig,
+        ABTestEventType,
+        ABTestManager,
+        ABTestResult,
+        ABTestStatus,
+        AggregatedPrice,
+        AlertManager,
+        AlertSendResult,
+        AllowanceInfo,
+        BacktestMetrics,
+        BacktestResult,
+        BalanceInfo,
+        BalanceProvider,
+        BorrowIntent,
+        BorrowPosition,
+        CanaryComparison,
+        CanaryConfig,
+        CanaryDecision,
+        CanaryDeployment,
+        CanaryEventType,
+        CanaryMetrics,
+        CanaryResult,
+        CanaryState,
+        CanaryStatus,
+        CircuitBreaker,
+        CollectFeesIntent,
+        CompilationResult,
+        CompilationStatus,
+        ConfigSnapshot,
+        ConfigValidationError,
+        CooldownTracker,
+        CreateTestResult,
+        DataClassification,
+        DataEnvelope,
+        DataMeta,
+        DataProvider,
+        DataRouter,
+        DataUnavailableError,
+        DefaultSwapAdapter,
+        DeployCanaryResult,
+        EmergencyManager,
+        EmergencyResult,
+        EndTestResult,
+        EscalationLevel,
+        EscalationPolicy,
+        EscalationResult,
+        EscalationState,
+        EscalationStatus,
+        ExecutionResult,
+        FullPositionSummary,
+        GetPositionCallback,
+        HoldIntent,
+        Instrument,
+        Intent,
+        IntentCompiler,
+        IntentCompilerConfig,
+        IntentStrategy,
+        IntentType,
+        LiquidityDepth,
+        LogFormat,
+        LogLevel,
+        LowConfidenceError,
+        LPCloseIntent,
+        LPOpenIntent,
+        LPPositionInfo,
+        MarketSnapshot,
+        MigrationError,
+        MigrationNotFoundError,
+        MigrationRegistry,
+        MigrationResult,
+        MultiStepStrategy,
+        NotificationCallback,
+        OperatorCardGenerator,
+        PauseStrategyCallback,
+        PendingTransaction,
+        PoolAnalytics,
+        PoolPrice,
+        PoolSnapshot,
+        PortfolioRisk,
+        PostgresConfig,
+        PriceData,
+        PriceInfo,
+        PriceOracle,
+        PromotionCriteria,
+        RepayIntent,
+        RiskConventions,
+        RiskGuard,
+        RiskGuardConfig,
+        RiskGuardGuidance,
+        RiskGuardResult,
+        RollbackInfo,
+        RollbackNotSafeError,
+        RSIData,
+        RSIProvider,
+        SlippageEstimate,
+        StateConflictError,
+        StateData,
+        StatelessStrategy,
+        StateManager,
+        StateManagerConfig,
+        StateMigration,
+        StateNotFoundError,
+        StateTier,
+        StatisticalResult,
+        StrategyBase,
+        StrategyMetadata,
+        StrategySnapshot,
+        StuckDetectionResult,
+        StuckDetector,
+        SwapIntent,
+        TierMetrics,
+        TimelineEvent,
+        TimelineEventType,
+        TimelineResponse,
+        TokenBalance,
+        TokenInfo,
+        TokenPosition,
+        TradeRecord,
+        TransactionData,
+        VariantComparison,
+        VariantMetrics,
+        VaRMethod,
+        VaultDepositIntent,
+        VaultRedeemIntent,
+        VolatilityResult,
+        YieldOpportunity,
+        add_context,
+        almanak_strategy,
+        auto_migrate,
+        check_rollback_safety,
+        clear_context,
+        configure_logging,
+        create_emergency_manager,
+        get_logger,
+        get_registry,
+        get_rollback_safe_version,
+        get_strategy,
+        list_strategies,
+        migrate,
+        migrate_state_data,
+        migration,
+        needs_migration,
+        new_strategy,
+        register_migration,
+        register_strategy,
+        resolve_instrument,
+        timeline_router,
+        unregister_strategy,
+    )
 
-# V2 Framework exports
-from .framework import (
-    DEFAULT_GAS_ESTIMATES,
-    PROTOCOL_ROUTERS,
-    # Strategy registry
-    STRATEGY_REGISTRY,
-    # A/B Testing
-    ABTest,
-    ABTestConfig,
-    ABTestEventType,
-    ABTestManager,
-    ABTestResult,
-    ABTestStatus,
-    # Quant Data Layer - key public types
-    AggregatedPrice,
-    # Alerting
-    AlertManager,
-    AlertSendResult,
-    # Services
-    AllowanceInfo,
-    # Backtesting
-    BacktestMetrics,
-    BacktestResult,
-    BalanceInfo,
-    BalanceProvider,
-    BorrowIntent,
-    BorrowPosition,
-    CanaryComparison,
-    CanaryConfig,
-    CanaryDecision,
-    # Deployment
-    CanaryDeployment,
-    CanaryEventType,
-    CanaryMetrics,
-    CanaryResult,
-    CanaryState,
-    CanaryStatus,
-    CircuitBreaker,
-    CollectFeesIntent,
-    CompilationResult,
-    CompilationStatus,
-    # Config
-    ConfigSnapshot,
-    ConfigValidationError,
-    CooldownTracker,
-    CreateTestResult,
-    DataClassification,
-    DataEnvelope,
-    DataMeta,
-    DataProvider,
-    DataRouter,
-    DataUnavailableError,
-    DefaultSwapAdapter,
-    DeployCanaryResult,
-    EmergencyManager,
-    EmergencyResult,
-    EndTestResult,
-    EscalationLevel,
-    EscalationPolicy,
-    EscalationResult,
-    EscalationState,
-    EscalationStatus,
-    ExecutionResult,
-    FullPositionSummary,
-    GetPositionCallback,
-    HoldIntent,
-    Instrument,
-    # Intents
-    Intent,
-    IntentCompiler,
-    IntentCompilerConfig,
-    # Strategy base classes
-    IntentStrategy,
-    IntentType,
-    LiquidityDepth,
-    LogFormat,
-    LogLevel,
-    LowConfidenceError,
-    LPCloseIntent,
-    LPOpenIntent,
-    LPPositionInfo,
-    MarketSnapshot,
-    MigrationError,
-    MigrationNotFoundError,
-    MigrationRegistry,
-    MigrationResult,
-    MultiStepStrategy,
-    NotificationCallback,
-    OperatorCardGenerator,
-    PauseStrategyCallback,
-    PendingTransaction,
-    PoolAnalytics,
-    PoolPrice,
-    PoolSnapshot,
-    PortfolioRisk,
-    PostgresConfig,
-    PriceData,
-    PriceInfo,
-    PriceOracle,
-    PromotionCriteria,
-    RepayIntent,
-    RiskConventions,
-    RiskGuard,
-    RiskGuardConfig,
-    RiskGuardGuidance,
-    RiskGuardResult,
-    RollbackInfo,
-    RollbackNotSafeError,
-    RSIData,
-    RSIProvider,
-    SlippageEstimate,
-    StateConflictError,
-    StateData,
-    StatelessStrategy,
-    # State management
-    StateManager,
-    StateManagerConfig,
-    # State migrations
-    StateMigration,
-    StateNotFoundError,
-    StateTier,
-    StatisticalResult,
-    StrategyBase,
-    StrategyMetadata,
-    StrategySnapshot,
-    StuckDetectionResult,
-    StuckDetector,
-    SwapIntent,
-    TierMetrics,
-    TimelineEvent,
-    TimelineEventType,
-    TimelineResponse,
-    TokenBalance,
-    TokenInfo,
-    TokenPosition,
-    TradeRecord,
-    TransactionData,
-    VariantComparison,
-    VariantMetrics,
-    VaRMethod,
-    VaultDepositIntent,
-    VaultRedeemIntent,
-    VolatilityResult,
-    YieldOpportunity,
-    add_context,
-    almanak_strategy,
-    auto_migrate,
-    check_rollback_safety,
-    clear_context,
-    # Logging
-    configure_logging,
-    create_emergency_manager,
-    get_logger,
-    get_registry,
-    get_rollback_safe_version,
-    get_strategy,
-    list_strategies,
-    migrate,
-    migrate_state_data,
-    migration,
-    needs_migration,
-    # CLI helpers
-    new_strategy,
-    register_migration,
-    register_strategy,
-    resolve_instrument,
-    # API
-    timeline_router,
-    unregister_strategy,
-)
-
-# Backward compatibility alias - Strategy maps to IntentStrategy
-Strategy = IntentStrategy
+    # Backward compatibility alias - Strategy maps to IntentStrategy.
+    Strategy = IntentStrategy
 
 __all__ = [
     "__version__",
@@ -371,3 +366,54 @@ __all__ = [
     "CircuitBreaker",
     "DataProvider",
 ]
+
+# --- Lazy resolution dispatch ---------------------------------------------------
+
+_CORE_ENUM_NAMES: frozenset[str] = frozenset(
+    {
+        "ActionType",
+        "Chain",
+        "CoSigners",
+        "ExecutionStatus",
+        "Network",
+        "Protocol",
+        "SwapSide",
+        "TransactionType",
+    }
+)
+
+_CORE_MODEL_NAMES: dict[str, str] = {
+    "Action": "almanak.core.models.action",
+    "ActionBundle": "almanak.core.models.action_bundle",
+}
+
+# Every other public name is re-exported from the top-level framework package,
+# whose own __getattr__ resolves to the right subpackage.
+_FRAMEWORK_NAMES: frozenset[str] = frozenset(__all__) - {
+    "__version__",
+    "Strategy",
+    *_CORE_ENUM_NAMES,
+    *_CORE_MODEL_NAMES,
+}
+
+
+def __getattr__(name: str) -> object:
+    import importlib
+
+    if name == "Strategy":
+        attr = importlib.import_module("almanak.framework").IntentStrategy
+    elif name in _CORE_ENUM_NAMES:
+        attr = getattr(importlib.import_module("almanak.core.enums"), name)
+    elif name in _CORE_MODEL_NAMES:
+        attr = getattr(importlib.import_module(_CORE_MODEL_NAMES[name]), name)
+    elif name in _FRAMEWORK_NAMES:
+        attr = getattr(importlib.import_module("almanak.framework"), name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    globals()[name] = attr
+    return attr
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | set(globals()))

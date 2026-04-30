@@ -47,7 +47,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, runtime_checkable
 
-import pandas as pd
+if TYPE_CHECKING:
+    # Pandas is heavy (~83 MB resident with pyarrow/numpy). Imported only for
+    # static type-checker visibility on the two ``pd.DataFrame`` return
+    # annotations below; the actual ``pd.DataFrame(...)`` constructions and
+    # ``df.attrs / df["col"]`` operations live inside ``_ohlcv_via_router``
+    # which does its own function-local ``import pandas as pd``.
+    import pandas as pd
 
 from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
@@ -1521,7 +1527,7 @@ class MarketSnapshot:
         gap_strategy: "GapStrategy" = "nan",
         *,
         pool_address: str | None = None,
-    ) -> pd.DataFrame:
+    ) -> "pd.DataFrame":
         """Get OHLCV (candlestick) data for a token.
 
         Fetches historical candlestick data from the configured OHLCV providers.
@@ -1628,13 +1634,15 @@ class MarketSnapshot:
         quote: str,
         gap_strategy: "GapStrategy",
         pool_address: str | None,
-    ) -> pd.DataFrame:
+    ) -> "pd.DataFrame":
         """Fetch OHLCV via OHLCVRouter and convert to DataFrame.
 
         Internal helper that routes through the multi-provider OHLCVRouter,
         then converts the candle list to a pandas DataFrame matching the
         existing ohlcv() return format.
         """
+        import pandas as pd
+
         from .models import Instrument as InstrumentCls
 
         token_str = token if isinstance(token, str) else token.pair

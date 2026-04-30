@@ -35,6 +35,11 @@ from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
+# MarketSnapshot is bound at runtime so ``typing.get_type_hints`` on this
+# adapter's public methods resolves the annotation. Pandas was the original
+# reason this import was deferred; ``data.market_snapshot`` now imports
+# pandas only inside the methods that build DataFrames, so importing the
+# class itself is cheap.
 from ...data.market_snapshot import MarketSnapshot
 from ...intents.vocabulary import (
     IntentType,

@@ -36,6 +36,14 @@ from almanak.framework.models.base import (
     default_intent_id,
     default_timestamp,
 )
+
+# PredictionExitConditions is bound at runtime so ``typing.get_type_hints``
+# on ``Intent.prediction_buy`` resolves the annotation. The original eager
+# import surfaced a circular cycle (services.prediction_monitor ->
+# auto_redemption -> api.actions -> strategies.base -> ..intents); after the
+# lazy framework/api/__init__ + the function-local ``api.timeline`` deferrals
+# in services modules, that cycle is broken at the api layer and this import
+# is cheap (~50 MB resident, no pandas / connectors / strategies pulled).
 from almanak.framework.services.prediction_monitor import PredictionExitConditions
 
 # =============================================================================

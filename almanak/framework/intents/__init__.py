@@ -22,9 +22,20 @@ Example:
     result = compiler.compile(intent)
 """
 
-# Re-export PredictionExitConditions for convenient access
-from almanak.framework.services.prediction_monitor import PredictionExitConditions
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    # Re-export PredictionExitConditions for convenient access. Resolved lazily
+    # at runtime via __getattr__ below to avoid a circular import:
+    # ``services.prediction_monitor`` re-enters ``intents`` (via
+    # auto_redemption -> api.actions -> strategies -> ..intents) before this
+    # module finishes loading.
+    from almanak.framework.services.prediction_monitor import PredictionExitConditions
+
+# vocabulary is imported FIRST (before any submodule that may, via the
+# connectors / execution / strategies graph, try to ``from ..intents import
+# DecideResult``) so the intents package namespace has DecideResult and
+# IntentSequence bound before any deeper cycle has a chance to fire.
 from .bridge import (
     BridgeAmount,
     BridgeChainError,
@@ -248,3 +259,18 @@ __all__ = [
     "SadflowExitCallback",
     "SadflowRetryCallback",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "PredictionExitConditions":
+        from almanak.framework.services.prediction_monitor import (
+            PredictionExitConditions,
+        )
+
+        globals()["PredictionExitConditions"] = PredictionExitConditions
+        return PredictionExitConditions
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | set(globals()))

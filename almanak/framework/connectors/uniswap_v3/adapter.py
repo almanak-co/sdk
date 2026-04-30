@@ -24,8 +24,13 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.contracts import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
-from almanak.framework.data.market_snapshot import PriceUnavailableError
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
+
+if TYPE_CHECKING:
+    # Used only inside ``compile_swap``; importing at runtime triggers
+    # ``data.market_snapshot`` -> pandas / pyarrow / numpy. Local import at the
+    # raise site keeps the gateway sidecar's startup cheap.
+    pass
 
 from ...intents.compiler_constants import (
     SWAP_ROUTER_V1_CHAIN_OVERRIDES,
@@ -629,6 +634,8 @@ class UniswapV3Adapter:
             amount_in: Decimal = intent.amount  # type: ignore[assignment]
         elif intent.amount_usd is not None:
             # Convert USD to token amount
+            from almanak.framework.data.market_snapshot import PriceUnavailableError
+
             from_price = price_oracle.get(intent.from_token.upper())
             if not from_price:
                 raise PriceUnavailableError(

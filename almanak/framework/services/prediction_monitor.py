@@ -13,10 +13,10 @@ from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..api.timeline import TimelineEvent, TimelineEventType, add_event
+
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import PredictionSellIntent
-
-from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 
 logger = logging.getLogger(__name__)
 
@@ -771,7 +771,6 @@ class PredictionPositionMonitor:
         if result.event is None:
             return
 
-        # Map prediction events to timeline event types
         event_type_map: dict[PredictionEvent, TimelineEventType] = {
             PredictionEvent.MARKET_RESOLVED: TimelineEventType.POSITION_CLOSED,
             PredictionEvent.STOP_LOSS_TRIGGERED: TimelineEventType.RISK_GUARD_TRIGGERED,
