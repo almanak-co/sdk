@@ -156,10 +156,14 @@ class TraderJoePnLLPStrategy(IntentStrategy):
                     f"Closing LP for rebalance."
                 )
 
+                close_kwargs: dict[str, Any] = {}
+                if self._position_bin_ids:
+                    close_kwargs["protocol_params"] = {"bin_ids": list(self._position_bin_ids)}
                 return Intent.lp_close(
                     position_id="traderjoe_pnl_lp_0",
                     pool=f"{self.token_x}/{self.token_y}/{self.bin_step}",
                     protocol="traderjoe_v2",
+                    **close_kwargs,
                 )
 
             return Intent.hold(
@@ -238,7 +242,7 @@ class TraderJoePnLLPStrategy(IntentStrategy):
         self._state = state.get("state", "idle")
         ep = state.get("entry_price")
         self._entry_price = Decimal(ep) if ep else None
-        self._position_bin_ids = state.get("position_bin_ids", [])
+        self._position_bin_ids = [int(b) for b in state.get("position_bin_ids", [])]
         self._rebalance_count = state.get("rebalance_count", 0)
 
     # =========================================================================
@@ -284,10 +288,14 @@ class TraderJoePnLLPStrategy(IntentStrategy):
         if self._state not in ("active", "opening"):
             return []
 
+        close_kwargs: dict[str, Any] = {}
+        if self._position_bin_ids:
+            close_kwargs["protocol_params"] = {"bin_ids": list(self._position_bin_ids)}
         return [
             Intent.lp_close(
                 position_id="traderjoe_pnl_lp_0",
                 pool=f"{self.token_x}/{self.token_y}/{self.bin_step}",
                 protocol="traderjoe_v2",
+                **close_kwargs,
             )
         ]

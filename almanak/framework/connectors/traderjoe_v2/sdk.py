@@ -927,6 +927,12 @@ class TraderJoeV2SDK:
     ) -> tuple[int, int]:
         """Get total token amounts for a wallet's position in a pool.
 
+        Best-effort: per-bin read errors are tolerated and the bin is skipped.
+        Callers that derive slippage minimums from the returned amounts get
+        the same partial-valuation behaviour as the heuristic fallback path
+        in `get_position()`. Tracked as VIB-3757 follow-up to investigate
+        which fork-only reverts trigger the skip path and harden when safe.
+
         Args:
             pool_address: Address of the LBPair contract
             wallet_address: Address to query

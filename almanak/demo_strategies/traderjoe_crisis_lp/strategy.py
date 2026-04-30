@@ -188,10 +188,16 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
                     self._rebalance_count + 1,
                 )
 
+                close_kwargs: dict[str, Any] = {}
+                if self._position_bin_ids:
+                    close_kwargs["protocol_params"] = {
+                        "bin_ids": list(self._position_bin_ids)
+                    }
                 return Intent.lp_close(
                     position_id="traderjoe_crisis_lp_0",
                     pool=f"{self.token_x}/{self.token_y}/{self.bin_step}",
                     protocol="traderjoe_v2",
+                    **close_kwargs,
                 )
 
             return Intent.hold(
@@ -227,9 +233,16 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
 
         if self._state == "opening":
             self._state = "active"
-            if result and hasattr(result, "bin_ids"):
-                self._position_bin_ids = result.bin_ids
-            logger.info("LP opened successfully. State -> active")
+            bin_ids = getattr(result, "bin_ids", None) if result is not None else None
+            if not bin_ids and result is not None:
+                extracted = getattr(result, "extracted_data", None) or {}
+                if isinstance(extracted, dict):
+                    bin_ids = extracted.get("bin_ids")
+            self._position_bin_ids = [int(b) for b in bin_ids] if bin_ids else []
+            logger.info(
+                "LP opened successfully (%d bins). State -> active",
+                len(self._position_bin_ids),
+            )
 
         elif self._state == "closing":
             self._state = "idle"
@@ -261,7 +274,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
         self._state = state.get("state", "idle")
         ep = state.get("entry_price")
         self._entry_price = Decimal(ep) if ep else None
-        self._position_bin_ids = state.get("position_bin_ids", [])
+        self._position_bin_ids = [int(b) for b in state.get("position_bin_ids", [])]
         self._rebalance_count = state.get("rebalance_count", 0)
 
     # =========================================================================
@@ -306,10 +319,14 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
         if self._state not in ("active", "opening"):
             return []
 
+        close_kwargs: dict[str, Any] = {}
+        if self._position_bin_ids:
+            close_kwargs["protocol_params"] = {"bin_ids": list(self._position_bin_ids)}
         return [
             Intent.lp_close(
                 position_id="traderjoe_crisis_lp_0",
                 pool=f"{self.token_x}/{self.token_y}/{self.bin_step}",
                 protocol="traderjoe_v2",
+                **close_kwargs,
             )
         ]

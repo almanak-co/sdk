@@ -163,12 +163,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
             if self._loop_state == "fees_collected":
                 logger.info("Compound step 2: LP_CLOSE to free liquidity for reinvestment")
                 self._transition("closing_lp")
-                return Intent.lp_close(
-                    position_id=self.lp_pool,
-                    pool=self.lp_pool,
-                    protocol="traderjoe_v2",
-                    chain=self.chain,
-                )
+                return self._build_lp_close_intent()
 
             if self._loop_state == "lp_closed_for_compound":
                 logger.info("Compound step 3: LP_OPEN with original + collected fees")
@@ -235,12 +230,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
                     logger.warning(f"Health factor {implied_hf:.2f} < {self.health_factor_floor} -- deleveraging")
                     self._deleveraging = True
                     self._transition("closing_lp")
-                    return Intent.lp_close(
-                        position_id=self.lp_pool,
-                        pool=self.lp_pool,
-                        protocol="traderjoe_v2",
-                        chain=self.chain,
-                    )
+                    return self._build_lp_close_intent()
 
         # Auto-compound: collect fees (skip if fees too small to be worth gas)
         logger.info("Compound step 1: COLLECT_FEES from TraderJoe V2 LP")
@@ -326,6 +316,25 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
             chain=self.chain,
         )
 
+    def _build_lp_close_intent(self) -> Intent:
+        """Build LP_CLOSE intent, passing bin_ids when known so the compiler
+        targets the exact bins instead of falling back to a heuristic ±50 scan
+        around the current active_id (VIB-3741)."""
+        # `_lp_bin_ids` may carry the [-1] placeholder set when LP_OPEN
+        # succeeded but the receipt did not surface bin IDs; only forward real
+        # bin IDs to the compiler.
+        real_bin_ids = [int(b) for b in self._lp_bin_ids if int(b) >= 0]
+        kwargs: dict[str, Any] = {}
+        if real_bin_ids:
+            kwargs["protocol_params"] = {"bin_ids": real_bin_ids}
+        return Intent.lp_close(
+            position_id=self.lp_pool,
+            pool=self.lp_pool,
+            protocol="traderjoe_v2",
+            chain=self.chain,
+            **kwargs,
+        )
+
     def _create_compound_lp_open_intent(self, collateral_price: Decimal) -> Intent:
         """Reopen LP with original amounts + collected fees."""
         lp_wavax = self._lp_wavax + self._collected_fee_wavax
@@ -386,11 +395,19 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
 
             elif intent_type == "LP_OPEN":
                 self._loop_state = "active"
-                self._lp_bin_ids = [-1]  # Default: position exists but bins unknown
-                if result and hasattr(result, "extracted_data") and result.extracted_data:
-                    ed = result.extracted_data
-                    if isinstance(ed, dict) and "bin_ids" in ed:
-                        self._lp_bin_ids = ed["bin_ids"]
+                bin_ids = getattr(result, "bin_ids", None) if result is not None else None
+                if not bin_ids and result is not None:
+                    extracted = getattr(result, "extracted_data", None) or {}
+                    if isinstance(extracted, dict):
+                        bin_ids = extracted.get("bin_ids")
+                if bin_ids:
+                    self._lp_bin_ids = [int(b) for b in bin_ids]
+                else:
+                    # Position exists but bin IDs were not surfaced by the receipt.
+                    # Use the [-1] placeholder so teardown still runs; the compiler
+                    # will fall back to its heuristic scan if no real bin IDs are
+                    # available (logged at WARNING level by the compiler).
+                    self._lp_bin_ids = [-1]
 
                 if self._previous_stable_state == "active":
                     # Compound reopen succeeded -- commit the new LP amounts
@@ -516,7 +533,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
         if "lp_usdc" in state:
             self._lp_usdc = Decimal(str(state["lp_usdc"]))
         if "lp_bin_ids" in state:
-            self._lp_bin_ids = state["lp_bin_ids"]
+            self._lp_bin_ids = [int(b) for b in state["lp_bin_ids"]]
         if "compound_count" in state:
             self._compound_count = state["compound_count"]
         if "collected_fee_wavax" in state:
@@ -589,14 +606,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
 
         # Step 1: Close LP
         if self._lp_bin_ids:
-            intents.append(
-                Intent.lp_close(
-                    position_id=self.lp_pool,
-                    pool=self.lp_pool,
-                    protocol="traderjoe_v2",
-                    chain=self.chain,
-                )
-            )
+            intents.append(self._build_lp_close_intent())
 
         # Step 2: Repay borrow
         if self._borrowed_amount > 0:

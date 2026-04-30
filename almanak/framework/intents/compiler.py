@@ -4132,7 +4132,6 @@ class IntentCompiler:
             known_bin_ids = [int(bin_id) for bin_id in known_bin_ids_raw]
 
             position = None
-            used_targeted_position = False
             if known_bin_ids:
                 t0 = time.perf_counter()
                 pool_addr = tj_adapter.sdk.get_pool_address(token_x_addr, token_y_addr, bin_step)
@@ -4148,6 +4147,36 @@ class IntentCompiler:
                 if balances:
                     from almanak.framework.connectors.traderjoe_v2 import LiquidityPosition
 
+                    # Compute underlying token X/Y the position would yield so
+                    # build_remove_liquidity_transaction can derive proper
+                    # slippage-protected amount_x_min/amount_y_min. Without this,
+                    # the targeted path would fall back to amount_x=0/amount_y=0
+                    # and ship a close with no slippage protection (VIB-3741).
+                    # NOTE: get_total_position_value is best-effort — it
+                    # tolerates per-bin read errors (returning a partial sum)
+                    # so transient RPC blips during compilation don't abort
+                    # closing positions on otherwise healthy bins. The
+                    # heuristic fallback path below uses the same tolerant
+                    # pattern via tj_adapter.get_position(). Tracked as a
+                    # follow-up to harden once we understand which fork-only
+                    # reverts trigger the skip path.
+                    amount_x, amount_y = tj_adapter.sdk.get_total_position_value(
+                        pool_addr,
+                        self.wallet_address,
+                        precomputed_balances=balances,
+                    )
+                    # active_bin is informational; build_remove_liquidity_transaction
+                    # derives slippage minimums from amount_x/amount_y and uses
+                    # bin_ids/balances directly. Don't let a get_pool_info revert
+                    # block a close when we already have enough data to build it.
+                    try:
+                        active_bin = tj_adapter.sdk.get_pool_info(pool_addr).active_id
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "TraderJoe V2 get_pool_info failed in LP_CLOSE compile, proceeding with active_bin=0: %s",
+                            exc,
+                        )
+                        active_bin = 0
                     position = LiquidityPosition(
                         pool_address=pool_addr,
                         token_x=token_x_addr,
@@ -4155,17 +4184,14 @@ class IntentCompiler:
                         bin_step=bin_step,
                         bin_ids=list(balances.keys()),
                         balances=balances,
-                        amount_x=0,
-                        amount_y=0,
-                        active_bin=0,
+                        amount_x=amount_x,
+                        amount_y=amount_y,
+                        active_bin=active_bin,
                     )
-                    used_targeted_position = True
 
             if position is None:
                 # Fall back to full discovery when the strategy did not provide
                 # known bin IDs or the targeted lookup no longer finds liquidity.
-                # Note: we intentionally let build_remove_liquidity_transaction
-                # derive slippage-protected minimums for this path (below).
                 t0 = time.perf_counter()
                 position = tj_adapter.get_position(token_x_addr, token_y_addr, bin_step)
                 logger.debug(f"TraderJoe V2 get_position (LP_CLOSE): {time.perf_counter() - t0:.2f}s")
@@ -4203,18 +4229,16 @@ class IntentCompiler:
             )
             transactions.append(approve_tx_data)
 
-            # Build remove liquidity transaction - pass pre-fetched position to
-            # avoid a redundant get_position() call (saves ~50 serial RPC calls)
-            # Only bypass slippage-derived minimums (pass explicit 0) when the
-            # targeted lookup actually produced the position. If we fell back
-            # to full discovery, let the adapter compute proper slippage mins.
+            # Build remove liquidity transaction. Pass pre-fetched position so
+            # the adapter skips a redundant get_position() call (saves ~50 serial
+            # RPC calls). Both targeted (bin_ids) and discovery paths populate
+            # position.amount_x/amount_y, so the adapter computes proper
+            # slippage-protected minimums in both cases (VIB-3741).
             lp_tx = tj_adapter.build_remove_liquidity_transaction(
                 token_x=token_x_addr,
                 token_y=token_y_addr,
                 bin_step=bin_step,
                 position=position,
-                amount_x_min=0 if used_targeted_position else None,
-                amount_y_min=0 if used_targeted_position else None,
             )
 
             if lp_tx is None:

@@ -141,6 +141,7 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
         self._cooldown_remaining = 0
         self._tick_count = 0
         self._ticks_with_position = 0
+        self._position_bin_ids: list[int] = []
 
         logger.info(
             f"TraderJoeSweepLP initialized: pool={self.pool}, "
@@ -263,13 +264,17 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
 
     def _create_close_intent(self) -> Intent:
         """Create LP_CLOSE intent for TraderJoe V2 Liquidity Book."""
-        logger.info(f"LP_CLOSE: {self.pool}")
+        logger.info(f"LP_CLOSE: {self.pool} ({len(self._position_bin_ids)} bins)")
+        kwargs: dict[str, Any] = {}
+        if self._position_bin_ids:
+            kwargs["protocol_params"] = {"bin_ids": list(self._position_bin_ids)}
         return Intent.lp_close(
             position_id=f"traderjoe-lp-{self.pool.replace('/', '-')}",
             pool=self.pool,
             collect_fees=True,
             protocol="traderjoe_v2",
             chain=self.chain,
+            **kwargs,
         )
 
     # =========================================================================
@@ -292,10 +297,19 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
             self._ticks_with_position = 0
             self._lp_cycles += 1
 
-            bin_ids = getattr(result, "bin_ids", None) if result else None
+            bin_ids = getattr(result, "bin_ids", None) if result is not None else None
+            if not bin_ids and result is not None:
+                extracted = getattr(result, "extracted_data", None) or {}
+                if isinstance(extracted, dict):
+                    bin_ids = extracted.get("bin_ids")
+            self._position_bin_ids = [int(b) for b in bin_ids] if bin_ids else []
             logger.info(
                 f"LP opened in {self.pool} (cycle {self._lp_cycles})"
-                + (f", bins={bin_ids[:3]}..." if bin_ids else "")
+                + (
+                    f", bins={self._position_bin_ids[:3]}..."
+                    if self._position_bin_ids
+                    else ""
+                )
             )
             add_event(
                 TimelineEvent(
@@ -309,6 +323,7 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
 
         elif intent_type_val == "LP_CLOSE":
             self._has_position = False
+            self._position_bin_ids = []
             self._cooldown_remaining = self.reentry_cooldown
             logger.info(f"LP closed in {self.pool}, cooldown={self.reentry_cooldown} ticks")
             add_event(
@@ -348,6 +363,7 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
             "cooldown_remaining": self._cooldown_remaining,
             "tick_count": self._tick_count,
             "ticks_with_position": self._ticks_with_position,
+            "position_bin_ids": list(self._position_bin_ids),
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -361,9 +377,11 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
             self._tick_count = int(state["tick_count"])
         if "ticks_with_position" in state:
             self._ticks_with_position = int(state["ticks_with_position"])
+        self._position_bin_ids = [int(b) for b in state.get("position_bin_ids", [])]
         logger.info(
             f"Restored state: has_position={self._has_position}, "
-            f"cycles={self._lp_cycles}, cooldown={self._cooldown_remaining}"
+            f"cycles={self._lp_cycles}, cooldown={self._cooldown_remaining}, "
+            f"bin_ids={len(self._position_bin_ids)} bins"
         )
 
     # =========================================================================

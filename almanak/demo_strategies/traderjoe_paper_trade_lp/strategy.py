@@ -121,6 +121,7 @@ class TraderJoePaperTradeLPStrategy(IntentStrategy):
         # Internal state
         self._has_position = False
         self._ticks_with_position = 0
+        self._position_bin_ids: list[int] = []
 
         logger.info(
             f"TraderJoePaperTradeLP initialized: pool={self.pool}, "
@@ -227,13 +228,20 @@ class TraderJoePaperTradeLPStrategy(IntentStrategy):
 
     def _create_close_intent(self) -> Intent:
         """Create LP_CLOSE intent for TraderJoe V2."""
-        logger.info(f"LP_CLOSE: {self.pool}")
+        logger.info(f"LP_CLOSE: {self.pool} bins={self._position_bin_ids[:3]}...")
+        protocol_params: dict[str, Any] = {}
+        if self._position_bin_ids:
+            protocol_params["bin_ids"] = list(self._position_bin_ids)
+        kwargs: dict[str, Any] = {}
+        if protocol_params:
+            kwargs["protocol_params"] = protocol_params
         return Intent.lp_close(
             position_id=self._lp_position_id(),
             pool=self.pool,
             collect_fees=True,
             protocol="traderjoe_v2",
             chain=self.chain,
+            **kwargs,
         )
 
     # =========================================================================
@@ -255,7 +263,14 @@ class TraderJoePaperTradeLPStrategy(IntentStrategy):
         if intent_type_val == "LP_OPEN":
             self._has_position = True
             self._ticks_with_position = 0
-            logger.info(f"LP position opened in {self.pool}")
+            bin_ids = getattr(result, "bin_ids", None)
+            if not bin_ids:
+                extracted = getattr(result, "extracted_data", None) or {}
+                bin_ids = extracted.get("bin_ids")
+            self._position_bin_ids = [int(b) for b in bin_ids] if bin_ids else []
+            logger.info(
+                f"LP position opened in {self.pool} (bin_ids={len(self._position_bin_ids)} bins)"
+            )
             add_event(
                 TimelineEvent(
                     timestamp=datetime.now(UTC),
@@ -269,6 +284,7 @@ class TraderJoePaperTradeLPStrategy(IntentStrategy):
         elif intent_type_val == "LP_CLOSE":
             self._has_position = False
             self._ticks_with_position = 0
+            self._position_bin_ids = []
             logger.info(f"LP position closed in {self.pool}")
             add_event(
                 TimelineEvent(
@@ -288,6 +304,7 @@ class TraderJoePaperTradeLPStrategy(IntentStrategy):
         return {
             "has_position": self._has_position,
             "ticks_with_position": self._ticks_with_position,
+            "position_bin_ids": list(self._position_bin_ids),
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -295,9 +312,11 @@ class TraderJoePaperTradeLPStrategy(IntentStrategy):
             self._has_position = bool(state["has_position"])
         if "ticks_with_position" in state:
             self._ticks_with_position = int(state["ticks_with_position"])
+        self._position_bin_ids = [int(b) for b in state.get("position_bin_ids", [])]
         logger.info(
             f"Restored state: has_position={self._has_position}, "
-            f"ticks={self._ticks_with_position}"
+            f"ticks={self._ticks_with_position}, "
+            f"bin_ids={len(self._position_bin_ids)} bins"
         )
 
     # =========================================================================

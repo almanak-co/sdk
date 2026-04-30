@@ -35,6 +35,7 @@ def strategy():
     strat.rsi_overbought = Decimal("65")
     strat._has_position = False
     strat._ticks_with_position = 0
+    strat._position_bin_ids = []
     return strat
 
 

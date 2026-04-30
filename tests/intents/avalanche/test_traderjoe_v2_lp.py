@@ -561,5 +561,195 @@ class TestTraderJoeV2LPCloseIntent:
         print("\nALL CHECKS PASSED")
 
 
+@pytest.mark.avalanche
+@pytest.mark.lp
+class TestTraderJoeV2LPCloseWithBinIds:
+    """Test the VIB-3741 fix: passing bin_ids to LP_CLOSE protocol_params.
+
+    The strategy-side fix (sweep across 13 TraderJoe V2 LP strategies) is
+    only useful if the compiler honours protocol_params["bin_ids"] and the
+    resulting close burns liquidity in exactly those bins. This test
+    exercises the contract end-to-end:
+
+        1. LP_OPEN — capture bin_ids from the on-chain receipt.
+        2. LP_CLOSE with protocol_params={"bin_ids": [...]} — drive the
+           targeted withdrawal path (NOT the heuristic ±50 scan).
+        3. Assert on-chain liquidity is exactly zero across every bin the
+           position ever held — i.e., no liquidity stranded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_lp_close_with_bin_ids_zeroes_all_bins(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ):
+        """VIB-3741: explicit bin_ids close must zero on-chain liquidity in all bins."""
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_addr = tokens["USDC"]
+        wavax_addr = tokens["WAVAX"]
+        fail_if_traderjoe_pool_missing(web3, CHAIN_NAME, wavax_addr, usdc_addr, 20)
+
+        print(f"\n{'=' * 80}")
+        print("VIB-3741 Test: LP Close with explicit bin_ids zeroes all bins")
+        print(f"{'=' * 80}")
+
+        # 1. Open LP position
+        open_intent = LPOpenIntent(
+            pool=POOL,
+            amount0=LP_AMOUNT_WAVAX,
+            amount1=LP_AMOUNT_USDC,
+            range_lower=RANGE_LOWER,
+            range_upper=RANGE_UPPER,
+            protocol="traderjoe_v2",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        open_compilation = compiler.compile(open_intent)
+        assert open_compilation.status.value == "SUCCESS", f"LP Open compilation failed: {open_compilation.error}"
+        assert open_compilation.action_bundle is not None, "LP Open ActionBundle must be created"
+        open_execution = await orchestrator.execute(open_compilation.action_bundle)
+        assert open_execution.success, f"LP Open execution failed: {open_execution.error}"
+
+        # 2. Extract bin_ids from receipts
+        parser = TraderJoeV2ReceiptParser()
+        bin_ids: list[int] = []
+        for tx_result in open_execution.transaction_results:
+            if tx_result.receipt:
+                receipt_dict = tx_result.receipt.to_dict()
+                extracted = parser.extract_bin_ids(receipt_dict)
+                if extracted:
+                    bin_ids = list(extracted)
+                    break
+        assert bin_ids, "Receipt must surface bin_ids from DepositedToBins event"
+        print(f"Captured {len(bin_ids)} bin_ids from LP_OPEN receipt: {bin_ids[:5]}...")
+
+        # 3. Sanity: position is live across exactly those bins
+        position_before = _get_position_via_adapter(
+            rpc_url=anvil_rpc_url,
+            wallet=funded_wallet,
+            token_x=wavax_addr,
+            token_y=usdc_addr,
+            bin_step=BIN_STEP,
+        )
+        assert position_before is not None
+        assert set(position_before.bin_ids) == set(bin_ids), (
+            f"Adapter bin_ids ({sorted(position_before.bin_ids)}) must match "
+            f"receipt bin_ids ({sorted(bin_ids)})"
+        )
+        total_before = sum(position_before.balances.values())
+        assert total_before > 0, "Position must hold non-zero LP tokens before close"
+
+        # 4. Close LP — explicitly pass bin_ids in protocol_params (the VIB-3741 fix)
+        # Capture balances BEFORE the close so we can verify the returned-token deltas.
+        usdc_decimals = get_token_decimals(web3, usdc_addr)
+        wavax_decimals = get_token_decimals(web3, wavax_addr)
+        usdc_before_close = get_token_balance(web3, usdc_addr, funded_wallet)
+        wavax_before_close = get_token_balance(web3, wavax_addr, funded_wallet)
+
+        close_intent = LPCloseIntent(
+            position_id=POOL,
+            pool=POOL,
+            collect_fees=True,
+            protocol="traderjoe_v2",
+            chain=CHAIN_NAME,
+            protocol_params={"bin_ids": list(bin_ids)},
+        )
+        close_compilation = compiler.compile(close_intent)
+        assert close_compilation.status.value == "SUCCESS", (
+            f"LP Close compilation failed: {close_compilation.error}"
+        )
+        assert close_compilation.action_bundle is not None
+        print(
+            f"LP Close compiled with explicit bin_ids "
+            f"({len(close_compilation.action_bundle.transactions)} transactions)"
+        )
+
+        close_execution = await orchestrator.execute(close_compilation.action_bundle)
+        assert close_execution.success, f"LP Close execution failed: {close_execution.error}"
+
+        # 5. Receipt parsing layer — verify the close emitted WithdrawnFromBins
+        # and the parser extracts non-zero collected amounts.
+        found_withdrawal_event = False
+        parsed_amount0 = 0
+        parsed_amount1 = 0
+        for tx_result in close_execution.transaction_results:
+            if not tx_result.receipt:
+                continue
+            receipt_dict = tx_result.receipt.to_dict()
+            parse_result = parser.parse_receipt(receipt_dict)
+            assert parse_result.success, (
+                f"Close receipt parsing must succeed, got: {parse_result.error}"
+            )
+            for event in parse_result.events:
+                if event.event_type == TraderJoeV2EventType.WITHDRAWN_FROM_BINS:
+                    found_withdrawal_event = True
+            lp_close_data = parser.extract_lp_close_data(receipt_dict)
+            if lp_close_data:
+                parsed_amount0 += int(lp_close_data.amount0_collected or 0)
+                parsed_amount1 += int(lp_close_data.amount1_collected or 0)
+        assert found_withdrawal_event, (
+            "Close must emit a WithdrawnFromBins event (receipt-parsing layer)"
+        )
+        assert parsed_amount0 > 0 or parsed_amount1 > 0, (
+            "Parser-extracted close amounts must be non-zero "
+            f"(amount0={parsed_amount0}, amount1={parsed_amount1})"
+        )
+
+        # 6. Balance-delta layer — returned-token deltas must match parser output and
+        #    must move on at least one side (no-op guard).
+        usdc_after_close = get_token_balance(web3, usdc_addr, funded_wallet)
+        wavax_after_close = get_token_balance(web3, wavax_addr, funded_wallet)
+        usdc_returned = usdc_after_close - usdc_before_close
+        wavax_returned = wavax_after_close - wavax_before_close
+        print(f"USDC returned: {format_token_amount(usdc_returned, usdc_decimals)}")
+        print(f"WAVAX returned: {format_token_amount(wavax_returned, wavax_decimals)}")
+        assert usdc_returned >= 0 and wavax_returned >= 0, (
+            "Wallet balances must not decrease on a successful LP_CLOSE "
+            f"(usdc_delta={usdc_returned}, wavax_delta={wavax_returned})"
+        )
+        assert usdc_returned > 0 or wavax_returned > 0, (
+            "At least one token must be returned to the wallet on close (no-op guard)"
+        )
+        # Parser-extracted amounts (token X = WAVAX, token Y = USDC) should match
+        # what the wallet actually received, modulo gas and rounding noise.
+        assert wavax_returned == parsed_amount0, (
+            f"WAVAX wallet delta ({wavax_returned}) must equal parser amount0 "
+            f"({parsed_amount0})"
+        )
+        assert usdc_returned == parsed_amount1, (
+            f"USDC wallet delta ({usdc_returned}) must equal parser amount1 "
+            f"({parsed_amount1})"
+        )
+
+        # 7. Verify on-chain liquidity is exactly zero across every bin
+        position_after = _get_position_via_adapter(
+            rpc_url=anvil_rpc_url,
+            wallet=funded_wallet,
+            token_x=wavax_addr,
+            token_y=usdc_addr,
+            bin_step=BIN_STEP,
+        )
+        if position_after is not None:
+            residual_total = sum(position_after.balances.values())
+            assert residual_total == 0, (
+                f"Position must hold zero LP tokens across all bins after close, "
+                f"got residual={residual_total} across bins={sorted(position_after.bin_ids)}"
+            )
+            assert len(position_after.bin_ids) == 0, (
+                f"All bin IDs must be cleared after close, "
+                f"still holding bins={sorted(position_after.bin_ids)}"
+            )
+        print("VIB-3741 PASS: explicit bin_ids close zeroed all bins")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
