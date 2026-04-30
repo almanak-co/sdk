@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -81,7 +80,20 @@ _MISSING = "—"  # em dash: signals "not yet available"
 
 
 def _default_db_path() -> str:
-    return os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db"
+    """Resolve the canonical local DB path (VIB-3761).
+
+    Hosted mode (``AGENT_ID`` set) has no local DB; ``almanak strat pnl``
+    is a local-only command, so callers in hosted mode should not be
+    invoking this.
+    """
+    from almanak.framework.local_paths import LocalPathError, local_db_path
+
+    try:
+        return str(local_db_path())
+    except LocalPathError:
+        # Caller can pass --db explicitly; we return a sentinel that
+        # fails fast if accidentally used in hosted mode.
+        return ":hosted-mode-no-sqlite-path:"
 
 
 # ---------------------------------------------------------------------------

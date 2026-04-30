@@ -18,6 +18,7 @@ from grpc_reflection.v1alpha import reflection
 
 from almanak.core.redaction import install_redaction
 from almanak.gateway._server_start_helpers import (
+    acquire_local_db_flock,
     build_interceptors,
     build_reflection_service_names,
     initialize_instance_registry,
@@ -25,6 +26,8 @@ from almanak.gateway._server_start_helpers import (
     initialize_timeline_store,
     load_wallet_registry,
     log_pricing_source_configuration,
+    validate_deployment_invariants,
+    validate_state_schema_at_boot,
 )
 from almanak.gateway.audit import configure_structlog
 from almanak.gateway.core.settings import GatewaySettings, get_settings
@@ -210,6 +213,10 @@ class GatewayServer:
         # VIB-1280: background heartbeat TTL enforcer task
         self._heartbeat_ttl_task: asyncio.Task | None = None
 
+        # VIB-3761: handle for the local-DB single-writer flock; held for
+        # the gateway lifetime in local mode, ``None`` in hosted mode.
+        self._local_db_lock: int | None = None
+
     async def _heartbeat_ttl_loop(self, interval_seconds: int = 60, stale_threshold_seconds: int = 300) -> None:
         """Background task that persistently marks stale RUNNING entries as STALE.
 
@@ -242,10 +249,22 @@ class GatewayServer:
         ``_server_start_helpers``) so every branch can be unit-tested without
         binding a real port.
         """
+        # Phase 0: deployment-mode invariants (VIB-3760).
+        # AGENT_ID and the gateway's deployment-shape settings must agree.
+        # Runs before everything else so a misconfigured restart fails fast,
+        # before we touch storage, ports, or interceptors.
+        validate_deployment_invariants(self.settings)
+
         # Phase 1: interceptors + 2: grpc server build
         interceptors = build_interceptors(self.settings)
         self._executor = futures.ThreadPoolExecutor(max_workers=self.settings.grpc_max_workers)
         self.server = grpc.aio.server(self._executor, interceptors=interceptors)
+
+        # Phase 3.25: single-writer flock on the local DB (VIB-3761).
+        # Refuses to start a second gateway against the same DB path —
+        # OS-level enforcement of the 1 strategy = 1 DB = 1 gateway rule.
+        # No-op in hosted mode.
+        self._local_db_lock = acquire_local_db_flock(self.settings)
 
         # Phase 3: storage singletons (timeline, registry, lifecycle).
         # Registry is a process-wide singleton; the returned handle is not
@@ -254,6 +273,13 @@ class GatewayServer:
         initialize_timeline_store(self.settings, get_timeline_store)
         self._instance_registry = initialize_instance_registry(self.settings)
         lifecycle_store = initialize_lifecycle_store(self.settings)
+
+        # Phase 3.5: schema-contract validation (VIB-3763).
+        # Refuse to start when the live state backend is missing any column
+        # the SDK's accounting writers require — eager so a bad schema fails
+        # the supervisor restart loop instead of landing as silent first-
+        # iteration accounting failures.
+        await validate_state_schema_at_boot(self.settings)
 
         # Phase 4: pricing-source log
         log_pricing_source_configuration(self.settings)
@@ -549,6 +575,13 @@ class GatewayServer:
         await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
         # Reset LifecycleStore singleton so a subsequent start() gets a fresh instance
         reset_lifecycle_store()
+        # VIB-3761: release the local-DB single-writer flock so the next
+        # gateway run on the same path can acquire it. No-op in hosted mode.
+        if self._local_db_lock is not None:
+            from almanak.framework.local_paths import release_local_db_lock
+
+            release_local_db_lock(self._local_db_lock)
+            self._local_db_lock = None
 
     async def wait_for_termination(self) -> None:
         """Wait until server is terminated."""

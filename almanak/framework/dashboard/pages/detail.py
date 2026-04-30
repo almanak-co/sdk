@@ -695,42 +695,39 @@ def render_position_lifecycle(strategy: Strategy) -> None:
 def _find_state_db(strategy_id: str) -> str | None:
     """Find the SQLite state DB for a strategy.
 
-    Resolution order (deterministic-first, issue #1713):
+    Resolution order (deterministic-first, issue #1713 + VIB-3761):
 
-    1. ``ALMANAK_STATE_DB`` environment variable. Matches
-       ``state_manager.py``, ``run.py``, ``teardown/state_manager.py`` - this
-       is the canonical production override and wins unconditionally when set
-       and pointing at an existing file.
-    2. ``./almanak_state.db`` (CLI default). Matches
-       ``state_manager.StateManagerConfig.db_path`` default and is where
-       ``almanak strat run`` writes state.
-    3. Deployment-id lookup: ``~/.almanak/state/<strategy_id>/state.db`` and
-       ``~/.almanak/state/<base_name>/state.db`` (base name = strategy id with
-       the deployment suffix stripped).
-    4. Legacy flat locations: ``~/.almanak/state/state.db`` and
+    1. ``almanak.framework.local_paths.local_db_path()`` — the canonical
+       resolver shared by every other module that needs the local DB.
+       Honours ``ALMANAK_STATE_DB`` (operator override),
+       ``ALMANAK_STRATEGY_FOLDER`` (set by ``almanak strat run``),
+       ``ALMANAK_GATEWAY_DB_PATH``, and falls back to the per-user
+       utility directory. The cwd-relative ``./almanak_state.db`` legacy
+       default is removed (April 29 silent-failure root cause).
+    2. Deployment-id lookup: ``~/.almanak/state/<strategy_id>/state.db`` and
+       ``~/.almanak/state/<base_name>/state.db``.
+    3. Legacy flat locations: ``~/.almanak/state/state.db`` and
        ``./.almanak/state.db``.
 
-    When more than one candidate outside of (1)-(3) exists (i.e. multiple
-    fallback paths match), a warning is logged identifying every match; the
-    first hit is still returned so the dashboard stays usable, but the
-    operator is alerted to the ambiguity instead of the old code silently
-    picking one path from six without surfacing the conflict.
+    When more than one candidate outside of (1)-(2) exists, a warning is
+    logged identifying every match; the first hit is still returned so the
+    dashboard stays usable, but the operator is alerted to the ambiguity
+    instead of the old code silently picking one path.
     """
     import os
 
-    # 1. Canonical env var check (matches run.py / state_service.py /
-    #    state_manager.py). Explicit operator override; always wins.
-    env_db = os.environ.get("ALMANAK_STATE_DB")
-    if env_db and os.path.exists(env_db):
-        return env_db
+    # 1. Canonical local-DB resolver — single source of truth across the SDK.
+    try:
+        from almanak.framework.local_paths import LocalPathError, local_db_path
 
-    # 2. CLI default (matches StateManagerConfig.db_path default). This is
-    #    where ``almanak strat run`` places state when the env var is unset.
-    cli_default = os.path.join(".", "almanak_state.db")
-    if os.path.exists(cli_default):
-        return cli_default
+        canonical = local_db_path()
+        if canonical.exists():
+            return str(canonical)
+    except LocalPathError:
+        # Hosted mode — dashboard reads from Postgres, not SQLite.
+        return None
 
-    # 3. Deterministic deployment_id lookup. If the caller passed a full
+    # 2. Deterministic deployment_id lookup. If the caller passed a full
     #    deployment id (``StrategyName:abc123``) we prefer an exact match on
     #    that id over anything derived from the base strategy name.
     home = os.path.expanduser("~")

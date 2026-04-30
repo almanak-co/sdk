@@ -30,7 +30,6 @@ Example:
 
 import asyncio
 import logging
-import os
 import signal
 import time
 from collections.abc import Callable
@@ -49,6 +48,7 @@ if TYPE_CHECKING:
     from ..services.stuck_detector import StuckDetector
     from ..teardown import TeardownMode
     from ..vault.lifecycle import VaultLifecycleManager
+    from .teardown_commit import TeardownCommitOutcome
 
 from ..alerting.alert_manager import AlertManager
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
@@ -2016,7 +2016,10 @@ class StrategyRunner:
         In live mode: raises AccountingPersistenceError if outbox_id is None (write
         failed) or on unexpected exceptions, so run_iteration routes to
         ACCOUNTING_FAILED and alerts operators.
-        In non-live modes: logs a warning and continues (best-effort).
+        In non-live modes (paper / dry-run): logs an ERROR and continues
+        (VIB-3762 §C2 — accounting drift in any mode is operator-visible
+        ERROR, not a soft warning, because the silent-failure shape is
+        what we are removing).
         NotImplementedError from write_outbox_entry is always non-fatal (VIB-3482:
         gateway backend not yet deployed); handled inline, strategy continues.
         The async drain task is always fire-and-forget — durability is provided by
@@ -2079,8 +2082,11 @@ class StrategyRunner:
                         strategy_id=getattr(strategy, "strategy_id", ""),
                         message=f"Outbox write failed for {ledger_entry_id!r} — accounting event will be lost",
                     )
-                logger.warning(
-                    "_write_outbox_and_fire_processor: outbox write returned None for %s — drain skipped",
+                # VIB-3762 §C2: outbox drift is operator-visible ERROR in
+                # paper/dry-run, not WARNING — accounting drift in any mode
+                # is the silent-failure class we are removing.
+                logger.error(
+                    "_write_outbox_and_fire_processor: outbox write returned None for %s — drain skipped (non-live)",
                     ledger_entry_id,
                 )
         except AccountingPersistenceError:
@@ -2095,7 +2101,40 @@ class StrategyRunner:
                     message=f"_write_outbox_and_fire_processor failed for {ledger_entry_id!r}",
                     cause=e,
                 ) from e
-            logger.warning("_write_outbox_and_fire_processor failed (non-blocking)", exc_info=True)
+            # VIB-3762 §C2: lift non-live outbox failures to ERROR.
+            logger.error("_write_outbox_and_fire_processor failed (non-live)", exc_info=True)
+
+    async def commit_teardown_intent(
+        self,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        *,
+        execution_result: Any,
+        execution_context: Any,
+        bundle_metadata: dict[str, Any] | None = None,
+        teardown_cycle_id: str,
+    ) -> "TeardownCommitOutcome":
+        """Run the per-intent teardown commit pipeline (VIB-3773 Phase 0).
+
+        Thin shim over :func:`runner.teardown_commit.commit_teardown_intent`.
+        Mirrors :py:meth:`_single_chain_handle_success`'s post-execution body
+        (enrich → ledger → outbox+fire → sidecar) but with degraded-but-
+        continue semantics — never raises. See the helper module's docstring
+        for the rationale (P0-2 from Codex review).
+        """
+        from .teardown_commit import (
+            commit_teardown_intent as _commit_teardown_intent_impl,
+        )
+
+        return await _commit_teardown_intent_impl(
+            self,
+            strategy,
+            intent,
+            execution_result=execution_result,
+            execution_context=execution_context,
+            bundle_metadata=bundle_metadata,
+            teardown_cycle_id=teardown_cycle_id,
+        )
 
     def _compute_outbox_position_key(
         self,
@@ -2254,10 +2293,12 @@ class StrategyRunner:
     def _is_managed_deployment(self) -> bool:
         """Return True if running as a deployed agent (not local development).
 
-        The deployer injects AGENT_ID into pod containers. Local runs don't
-        have this env var, so this is a clean, zero-config detection mechanism.
+        Delegates to `framework.deployment.is_hosted()` — `AGENT_ID` is the
+        single deployment-mode signal across the SDK.
         """
-        return bool(os.environ.get("AGENT_ID", "").strip())
+        from almanak.framework.deployment import is_hosted
+
+        return is_hosted()
 
     def setup_signal_handlers(self) -> None:
         """Set up signal handlers for graceful shutdown.
@@ -3427,11 +3468,45 @@ class StrategyRunner:
                 logger.warning(f"Failed to acknowledge teardown request: {e}")
 
         # Import TeardownMode here to avoid circular imports
+        from ..deployment import is_hosted
+        from ..local_paths import LocalPathError
         from ..teardown import TeardownMode, get_teardown_state_manager
 
-        # Get the requested teardown mode from the request
-        manager = get_teardown_state_manager()
-        request = manager.get_active_request(strategy_id)
+        # Get the requested teardown mode from the request. The local
+        # teardown state manager is SQLite-backed (VIB-3761) and only
+        # exists in local mode; in hosted mode the teardown channel
+        # lives in the gateway/Postgres, so the helper raises
+        # ``LocalPathError``.
+        #
+        # KNOWN GAP — hosted-mode operator-mode lookup not yet wired
+        # (VIB-3777, follow-up to this PR): a hosted-mode runner has
+        # no in-process path to read the operator's chosen teardown
+        # mode, so we default to ``SOFT`` (graceful). When the
+        # ``should_teardown()`` strategy hook fires in hosted mode,
+        # that's almost always a strategy-self-signalled graceful
+        # unwind — SOFT is the right default for that case. The gap
+        # is a hosted-mode HARD/emergency request from the dashboard
+        # API: it lands in Postgres but the runner does not read
+        # there yet. Logging at WARNING so the gap is visible in
+        # production logs until the gateway-backed lookup is added.
+        #
+        # In *local* mode, a ``LocalPathError`` here is genuinely
+        # unexpected (path-helper misconfiguration); re-raise so the
+        # operator sees it rather than silently downgrading to SOFT.
+        try:
+            manager = get_teardown_state_manager()
+            request = manager.get_active_request(strategy_id)
+        except LocalPathError:
+            if not is_hosted():
+                raise
+            logger.warning(
+                "_check_teardown_requested[%s]: hosted mode — local teardown "
+                "state manager unavailable. Defaulting to SOFT mode (VIB-3777 "
+                "tracks adding the gateway-backed lookup so HARD requests "
+                "made via the dashboard API reach hosted runners).",
+                strategy_id,
+            )
+            request = None
         mode = request.mode if request else TeardownMode.SOFT
 
         logger.info(f"Teardown requested for {strategy_id} (mode={mode.value})")

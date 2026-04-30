@@ -71,13 +71,19 @@ class TestResolveDbPath:
     def test_none_returns_per_user_default_when_home_writable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """Default (None, no env, no XDG) resolves to ~/.almanak/almanak_state.db.
+        """Default (None, no env, no XDG) resolves under the per-user utility dir.
 
-        Production expectation: runner launched from a strategy dir and API
-        launched from repo root must converge on the same file regardless of
-        cwd — a per-user path achieves this.
+        VIB-3761: ``TeardownStateManager._resolve_db_path`` delegates to
+        ``almanak.framework.local_paths.local_db_path()``. With no env
+        overrides set, the canonical location is
+        ``~/.local/share/almanak/utility/almanak_state.db`` so the runner
+        (launched from a strategy dir) and the API (launched from the repo
+        root) converge on the same file regardless of cwd.
         """
+        monkeypatch.delenv("AGENT_ID", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         # Path.home() caches; use monkeypatch to override resolution.
@@ -85,29 +91,46 @@ class TestResolveDbPath:
 
         result = TeardownStateManager._resolve_db_path(None)
 
-        assert result == tmp_path / ".almanak" / "almanak_state.db"
+        assert result == tmp_path / ".local" / "share" / "almanak" / "utility" / "almanak_state.db"
 
     def test_none_uses_xdg_data_home_when_set(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """XDG_DATA_HOME is honoured ahead of ~/.almanak."""
+        """``XDG_DATA_HOME`` is honoured ahead of ``~/.local/share``."""
         xdg_dir = tmp_path / "xdg"
+        monkeypatch.delenv("AGENT_ID", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
         monkeypatch.setenv("XDG_DATA_HOME", str(xdg_dir))
 
         result = TeardownStateManager._resolve_db_path(None)
 
-        assert result == xdg_dir / "almanak" / "almanak_state.db"
+        assert result == xdg_dir / "almanak" / "utility" / "almanak_state.db"
 
-    def test_none_falls_back_to_tmp_when_home_not_writable(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_none_returns_per_user_default_when_mkdir_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """Falls back to /tmp when the per-user path is not writable."""
+        """A read-only home is best-effort; ``local_db_path`` still returns
+        the canonical per-user path so SQLite surfaces the failure at
+        connect time.
+
+        VIB-3761 explicitly removed the cwd-relative fallback (``./almanak_state.db``)
+        and the implicit ``/tmp`` rescue — those silently masked
+        misconfiguration. The new contract is "log the OSError, return
+        the canonical path, let SQLite raise" so operators see the
+        actual failure mode.
+        """
+        monkeypatch.delenv("AGENT_ID", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         with patch.object(Path, "mkdir", side_effect=OSError("Read-only file system")):
             result = TeardownStateManager._resolve_db_path(None)
-        assert result == Path("/tmp/almanak_state.db")
+        assert result == tmp_path / ".local" / "share" / "almanak" / "utility" / "almanak_state.db"
 
     def test_explicit_path_bypasses_fallback(self):
         """Explicit db_path is returned directly without fallback logic."""

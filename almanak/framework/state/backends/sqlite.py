@@ -43,6 +43,23 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from ..state_manager import StateConflictError, StateData, StateTier
 
+
+def _default_sqlite_db_path() -> str:
+    """Resolve the canonical local DB path (VIB-3761).
+
+    Defers the import to dataclass-construction time so importing this
+    module does not require the framework deployment helper to be
+    importable at module load (matters during hosted-mode boot before
+    settings are realized).
+    """
+    from almanak.framework.local_paths import LocalPathError, local_db_path
+
+    try:
+        return str(local_db_path())
+    except LocalPathError:
+        return ":hosted-mode-no-sqlite-path:"
+
+
 if TYPE_CHECKING:
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
     from almanak.framework.observability.ledger import LedgerEntry
@@ -97,7 +114,7 @@ class SQLiteConfig:
         cache_size: SQLite cache size in pages (negative for KB).
     """
 
-    db_path: str = "./almanak_state.db"
+    db_path: str = field(default_factory=lambda: _default_sqlite_db_path())
     timeout: float = 30.0
     isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = None
     check_same_thread: bool = False

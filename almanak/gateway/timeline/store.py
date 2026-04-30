@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sqlite3
 import threading
 from collections import defaultdict
@@ -196,12 +195,13 @@ class TimelineStore:
         when the ``AGENT_ID`` env var is set (K8s pods), all metrics_db
         keys use that value so lifecycle, state, and timeline tables are
         consistent.  In local dev (no env var), passthrough.
+
+        Delegates env-var reading to `framework.deployment.agent_id()` —
+        `AGENT_ID` is the single deployment-mode signal across the SDK.
         """
-        env_agent_id = os.environ.get("AGENT_ID")
-        if env_agent_id is None:
-            return strategy_id
-        resolved = env_agent_id.strip()
-        return resolved or strategy_id
+        from almanak.framework.deployment import agent_id
+
+        return agent_id() or strategy_id
 
     # =========================================================================
     # PostgreSQL backend (deployed mode)

@@ -106,9 +106,18 @@ class TestSQLiteConfig:
     """Tests for SQLiteConfig."""
 
     def test_default_config(self):
-        """Test default configuration values."""
+        """Test default configuration values.
+
+        VIB-3761: db_path now resolves through ``local_paths.local_db_path``;
+        the cwd-relative ``./almanak_state.db`` legacy default was the proximate
+        cause of April 29's silent accounting failure and is removed.
+        """
+        from almanak.framework.local_paths import local_db_path
+
         config = SQLiteConfig()
-        assert config.db_path == "./almanak_state.db"
+        assert config.db_path == str(local_db_path())
+        # Critical regression guard: the cwd-relative default must not return.
+        assert config.db_path != "./almanak_state.db"
         assert config.timeout == 30.0
         assert config.wal_mode is True
         assert config.busy_timeout == 5000

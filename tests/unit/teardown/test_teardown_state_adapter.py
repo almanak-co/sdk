@@ -90,14 +90,24 @@ class TestPathResolution:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """With no explicit path, no ALMANAK_STATE_DB, no XDG, fall back to a
-        stable per-user path so runner+API converge regardless of cwd."""
+        stable per-user path so runner+API converge regardless of cwd.
+
+        VIB-3761: the canonical resolver returns
+        ``~/.local/share/almanak/utility/almanak_state.db``. The
+        previous ``~/.almanak/almanak_state.db`` shape was specific to
+        the old teardown adapter; the unified contract uses XDG-style
+        ``~/.local/share`` so it sits next to other per-user data.
+        """
+        monkeypatch.delenv("AGENT_ID", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         resolved = TeardownStateManager._resolve_db_path(None)
 
-        assert resolved == tmp_path / ".almanak" / "almanak_state.db"
+        assert resolved == tmp_path / ".local" / "share" / "almanak" / "utility" / "almanak_state.db"
 
 
 # -----------------------------------------------------------------------------

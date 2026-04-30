@@ -32,6 +32,13 @@ from .canary import (
     DeployCanaryResult,
     PromotionCriteria,
 )
+from .mode import (
+    DeploymentMode,
+    agent_id,
+    deployment_mode,
+    is_hosted,
+    is_local,
+)
 
 __all__ = [
     "CanaryDeployment",
@@ -45,4 +52,10 @@ __all__ = [
     "CanaryEventType",
     "CanaryComparison",
     "PromotionCriteria",
+    # Deployment-mode helpers (VIB-3759 — AGENT_ID single signal).
+    "agent_id",
+    "deployment_mode",
+    "is_hosted",
+    "is_local",
+    "DeploymentMode",
 ]

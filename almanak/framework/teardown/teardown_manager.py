@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from almanak.framework.execution.orchestrator import ExecutionOrchestrator
     from almanak.framework.intents.compiler import IntentCompiler
+    from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
 from almanak.framework.teardown.config import TeardownConfig
@@ -225,6 +226,7 @@ class TeardownManager:
         config: TeardownConfig | None = None,
         orchestrator: "ExecutionOrchestrator | None" = None,
         compiler: "IntentCompiler | None" = None,
+        runner_helpers: "TeardownRunnerHelpers | None" = None,
     ):
         """Initialize the teardown manager.
 
@@ -234,12 +236,24 @@ class TeardownManager:
             config: Teardown configuration
             orchestrator: Execution orchestrator for real transaction execution
             compiler: Intent compiler to convert intents to ActionBundles
+            runner_helpers: VIB-3773 — callable bag exposing
+                ``commit_teardown_intent`` and
+                ``capture_teardown_snapshot_with_accounting`` pre-bound to
+                a :class:`StrategyRunner`. When provided, ``_execute_intents``
+                drives the full per-intent commit pipeline (enrich → ledger
+                → outbox+fire → sidecar) after every successful on-chain
+                execution. ``None`` retains pre-VIB-3773 behaviour (no
+                accounting writes from this lane) so legacy unit tests that
+                don't construct a runner keep working.
         """
+        from .runner_helpers import TeardownRunnerHelpers
+
         self.state_manager = state_manager
         self.alert_manager = alert_manager
         self.config = config or TeardownConfig.default()
         self.orchestrator = orchestrator
         self.compiler = compiler
+        self.runner_helpers = runner_helpers or TeardownRunnerHelpers()
 
         # Initialize sub-managers
         self.safety_guard = SafetyGuard(self.config)
@@ -687,6 +701,19 @@ class TeardownManager:
         total_costs = Decimal("0")
         final_balances: dict[str, Decimal] = {}
 
+        # VIB-3773: stable cycle id for every accounting row written by this
+        # teardown — both ledger/outbox (per-intent commit) and snapshot/
+        # metrics (pre/post bracket) stamp on it via the runner helpers.
+        # Picked up by ``commit_teardown_intent``'s contextvar set, and the
+        # outer ``execute_teardown_via_manager`` also sets
+        # ``runner._last_cycle_id`` to the same value (P1-4).
+        teardown_cycle_id = f"teardown-{teardown_id}"
+
+        # VIB-3773: aggregate degraded-write records emitted by per-intent
+        # commit calls. Surfaced on TeardownResult.accounting_degraded /
+        # accounting_degraded_count for operator visibility + reconciliation.
+        accounting_degraded_records: list[Any] = []
+
         for i, intent in enumerate(intents[start_from_index:], start=start_from_index):
             # Update progress
             progress_pct = int((i / len(intents)) * 100)
@@ -922,6 +949,32 @@ class TeardownManager:
                             f"Intent {intent_index + 1}/{len(intents)} executed successfully. "
                             f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
                         )
+
+                        # VIB-3773: drive the runner's full commit pipeline
+                        # (enrich → ledger → outbox+fire → sidecar) for this
+                        # successful on-chain teardown intent. The helper has
+                        # degraded-but-continue semantics — failures land in
+                        # the deferred-write log, never raise — so the
+                        # slippage manager never sees an accounting failure
+                        # and the next teardown intent runs regardless.
+                        if self.runner_helpers.has_commit:
+                            commit_outcome = await self.runner_helpers.commit(  # type: ignore[misc]
+                                strategy,
+                                intent_to_exec,
+                                execution_result=exec_result,
+                                execution_context=context,
+                                bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
+                                teardown_cycle_id=teardown_cycle_id,
+                            )
+                            if commit_outcome.accounting_degraded:
+                                accounting_degraded_records.extend(commit_outcome.degraded_writes)
+                                logger.error(
+                                    "Teardown intent %d/%d accounting degraded — %s",
+                                    intent_index + 1,
+                                    len(intents),
+                                    commit_outcome.degraded_reason or "unknown",
+                                )
+
                         return ExecutionAttempt(
                             success=True,
                             slippage_used=slippage,
@@ -1033,6 +1086,8 @@ class TeardownManager:
                             "Wait & Escalate to next level",
                             "Cancel",
                         ],
+                        accounting_degraded=bool(accounting_degraded_records),
+                        accounting_degraded_count=len(accounting_degraded_records),
                     )
 
             # Update completed count and persist teardown progress so that
@@ -1074,6 +1129,8 @@ class TeardownManager:
             total_costs_usd=total_costs,
             final_balances=final_balances,
             error=None if failed == 0 else f"{failed} intents failed",
+            accounting_degraded=bool(accounting_degraded_records),
+            accounting_degraded_count=len(accounting_degraded_records),
         )
 
     async def _persist_state(

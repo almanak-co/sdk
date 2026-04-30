@@ -87,8 +87,28 @@ async def test_sqlite_config_reads_env_var(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sqlite_config_default_without_env_var(monkeypatch):
-    """SQLiteConfigLight should default to ./almanak_state.db without env var."""
+async def test_sqlite_config_default_without_env_var(monkeypatch, tmp_path):
+    """SQLiteConfigLight defaults to the per-user utility DB path (VIB-3761).
+
+    The cwd-relative ``./almanak_state.db`` legacy default is removed —
+    the canonical resolver returns
+    ``$XDG_DATA_HOME/almanak/utility/almanak_state.db`` (or the
+    ``~/.local/share`` equivalent) so multiple strategies launched from
+    the same cwd cannot collide on a single SQLite file. Sentinel
+    ``:hosted-mode-no-sqlite-path:`` is reserved for hosted-mode
+    construction (``AGENT_ID`` set).
+    """
+    from pathlib import Path
+
+    monkeypatch.delenv("AGENT_ID", raising=False)
     monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
+    monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+    monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
     config = SQLiteConfigLight()
-    assert config.db_path == "./almanak_state.db"
+
+    expected = tmp_path / ".local" / "share" / "almanak" / "utility" / "almanak_state.db"
+    assert config.db_path == str(expected)

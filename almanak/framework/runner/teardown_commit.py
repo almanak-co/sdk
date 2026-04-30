@@ -1,0 +1,287 @@
+"""Teardown lane commit pipeline — VIB-3773 Phase 0.
+
+Per-intent twin of :py:meth:`StrategyRunner._single_chain_handle_success`'s
+post-execution body. Runs the same four steps (enrich → ledger → outbox+fire
+→ sidecar) **but with degraded-but-continue semantics**:
+
+* The iteration lane raises :class:`AccountingPersistenceError` when any
+  writer fails in live mode (VIB-3762 §C). That contract is correct for
+  iteration — running the next iteration on broken accounting compounds
+  the damage, so halting is safer than continuing.
+
+* The teardown lane inverts the priority. Teardown's first job is to
+  *remove on-chain risk*. If LP_CLOSE succeeds on-chain but the ledger
+  write fails, halting now would strand a partially-unwound position
+  (REPAY/WITHDRAW would never run). So the teardown commit pipeline
+  **never raises**: failures are captured into a
+  :class:`TeardownCommitOutcome`, recorded into the deferred-write log,
+  and the next risk-reducing intent runs.
+
+The deferred-write log (``almanak.framework.accounting.deferred_log``)
+is the durable backstop. An operator (or a future
+``almanak ax accounting reconcile`` CLI) replays those records into the
+state store after the chain-side work is done.
+
+Cycle-id handling
+-----------------
+``commit_teardown_intent`` stamps the cycle_id contextvar with the supplied
+``teardown_cycle_id`` for the duration of its work. Phase 3 wiring in
+``execute_teardown_via_manager`` also sets it at the outer level (paired with
+``runner._last_cycle_id`` — see :file:`runner_state.py:486`); this helper
+re-applies it locally so unit tests / direct callers don't have to.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from ..accounting.deferred_log import (
+    DeferredWrite,
+)
+from ..accounting.deferred_log import (
+    append as deferred_append,
+)
+from ..observability.context import get_cycle_id, set_cycle_id
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..intents.vocabulary import AnyIntent
+    from .runner_models import StrategyProtocol
+    from .strategy_runner import StrategyRunner
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TeardownCommitOutcome:
+    """Outcome of the per-intent teardown commit pipeline.
+
+    Returned by :func:`commit_teardown_intent` for every successful on-chain
+    teardown intent. Carries the IDs the caller needs (ledger_entry_id) plus
+    a structured degradation report for the TeardownManager loop and the
+    eventual TeardownResult.
+
+    Attributes
+    ----------
+    ledger_entry_id:
+        The persisted ``LedgerEntry.id`` if the ledger write succeeded,
+        otherwise ``None``. Outbox + accounting-event writes only fire when
+        this is non-None (mirrors the iteration lane's gate at
+        :file:`strategy_runner.py:2879`).
+    accounting_degraded:
+        ``True`` iff any of the four pipeline steps (enrich, ledger, outbox,
+        sidecar) failed. Drives the TeardownResult's degraded flag and
+        operator-visible alerting.
+    degraded_reason:
+        Compact summary of which steps failed, suitable for log lines and
+        TeardownResult.error context. ``None`` when ``accounting_degraded``
+        is ``False``.
+    degraded_writes:
+        The :class:`DeferredWrite` records the helper appended to the
+        deferred-write log. Surfaced for tests and richer TeardownResult
+        propagation; the TeardownManager loop only needs the count.
+    """
+
+    ledger_entry_id: str | None
+    accounting_degraded: bool
+    degraded_reason: str | None
+    degraded_writes: tuple[DeferredWrite, ...] = field(default_factory=tuple)
+
+
+def _intent_type_str(intent: Any) -> str | None:
+    """Stringify an intent's ``intent_type`` field. Mirrors the runner's
+    inline pattern at :file:`strategy_runner.py:1942`.
+    """
+    it = getattr(intent, "intent_type", None)
+    if it is None:
+        return None
+    return it.value if hasattr(it, "value") else str(it)
+
+
+def _first_tx_hash(result: Any) -> str | None:
+    """First on-chain tx hash from a successful execution result, or None.
+
+    Mirrors :func:`almanak.framework.observability.ledger._extract_tx_and_gas`
+    so the deferred-log row uses the same value the ledger row would have
+    used had the write succeeded.
+    """
+    if not result:
+        return None
+    tx_results = getattr(result, "transaction_results", None)
+    if not tx_results:
+        return None
+    tx = getattr(tx_results[0], "tx_hash", "") or ""
+    return tx or None
+
+
+async def commit_teardown_intent(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    intent: AnyIntent,
+    *,
+    execution_result: Any,
+    execution_context: Any,
+    bundle_metadata: dict[str, Any] | None = None,
+    teardown_cycle_id: str,
+) -> TeardownCommitOutcome:
+    """Run the full success-path commit pipeline for one teardown intent.
+
+    Mirrors :py:meth:`StrategyRunner._single_chain_handle_success`'s body
+    for steps 1–4 (enrich → ledger → outbox+fire → sidecar) but **never
+    raises**. Step failures are captured into the returned outcome; the
+    next step still runs where it can (e.g. ledger failure means we skip
+    outbox+fire for that intent — outbox needs ``ledger_entry_id``).
+
+    Parameters
+    ----------
+    runner:
+        The :class:`StrategyRunner` that owns the writers. Passed
+        explicitly (not implicit ``self``) so the function is easy to plumb
+        as a callable into the teardown lane and to fake in tests.
+    strategy:
+        The strategy being torn down — used for ``strategy_id``,
+        ``deployment_id``, ``chain``, ``wallet_address``.
+    intent:
+        The teardown intent that just executed on-chain.
+    execution_result:
+        The orchestrator's :class:`ExecutionResult` (success). Will be
+        enriched in place; the enriched copy is what flows into the
+        ledger / sidecar writes.
+    execution_context:
+        :class:`ExecutionContext` for the receipt parser. Required by
+        :class:`ResultEnricher`.
+    bundle_metadata:
+        ``ActionBundle.metadata`` from the teardown compiler. Threaded into
+        :func:`ResultEnricher.enrich` for VIB-3203 realized-slippage math.
+    teardown_cycle_id:
+        Stable cycle id for the teardown — typically
+        ``f"teardown-{teardown_id}"``. Set on the contextvar for the
+        duration of the helper so the underlying writers stamp the same
+        value on their rows.
+    """
+    deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+    intent_type = _intent_type_str(intent)
+    tx_hash = _first_tx_hash(execution_result)
+    strategy_id = getattr(strategy, "strategy_id", "") or ""
+
+    degraded_records: list[DeferredWrite] = []
+    degraded_reasons: list[str] = []
+
+    def _record(kind: str, err: BaseException, *, ledger_entry_id: str | None = None) -> None:
+        """Append a deferred-log record and remember the reason."""
+        rec = DeferredWrite.now(
+            kind=kind,
+            strategy_id=strategy_id,
+            deployment_id=deployment_id,
+            cycle_id=teardown_cycle_id,
+            intent_type=intent_type,
+            tx_hash=tx_hash,
+            ledger_entry_id=ledger_entry_id,
+            error=str(err) or err.__class__.__name__,
+        )
+        deferred_append(rec)
+        degraded_records.append(rec)
+        degraded_reasons.append(f"{kind}: {err.__class__.__name__}: {err}")
+
+    # Save + swap cycle_id — restored in finally. Phase 3 wiring also sets
+    # this at the outer level; resetting to ``saved`` is a no-op there.
+    saved_cycle_id = get_cycle_id()
+    set_cycle_id(teardown_cycle_id)
+
+    ledger_entry_id: str | None = None
+    enriched_result = execution_result
+    try:
+        # ----- Step 1: ResultEnricher (best-effort) ----------------------
+        try:
+            from ..execution.result_enricher import ResultEnricher
+
+            enricher = ResultEnricher(live_mode=runner._is_live_mode())
+            enriched_result = enricher.enrich(
+                execution_result,
+                intent,
+                execution_context,
+                bundle_metadata=bundle_metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 — never propagate
+            logger.error(
+                "commit_teardown_intent: enrichment failed for %s/%s: %s",
+                strategy_id,
+                intent_type or "unknown-intent",
+                exc,
+                exc_info=True,
+            )
+            _record("enrich", exc)
+
+        # ----- Step 2: ledger entry --------------------------------------
+        try:
+            ledger_entry_id = await runner._write_ledger_entry(strategy, intent, result=enriched_result, success=True)
+        except Exception as exc:  # noqa: BLE001 — never propagate
+            logger.error(
+                "commit_teardown_intent: ledger write failed for %s/%s tx=%s: %s",
+                strategy_id,
+                intent_type or "unknown-intent",
+                tx_hash or "-",
+                exc,
+                exc_info=True,
+            )
+            _record("ledger", exc)
+
+        # ----- Step 3: outbox + fire processor ---------------------------
+        if ledger_entry_id:
+            try:
+                await runner._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
+            except Exception as exc:  # noqa: BLE001 — never propagate
+                logger.error(
+                    "commit_teardown_intent: outbox+fire failed for %s ledger=%s: %s",
+                    strategy_id,
+                    ledger_entry_id,
+                    exc,
+                    exc_info=True,
+                )
+                _record("outbox", exc, ledger_entry_id=ledger_entry_id)
+
+        # ----- Step 4: sidecar (best-effort) -----------------------------
+        try:
+            from ..accounting.sidecar import AccountingSidecarWriter
+
+            chain = getattr(strategy, "chain", "") or getattr(runner.config, "chain", "")
+            AccountingSidecarWriter().append(
+                strategy_id=strategy_id,
+                intent=intent,
+                result=enriched_result,
+                chain=chain,
+            )
+        except Exception as exc:  # noqa: BLE001 — never propagate
+            logger.error(
+                "commit_teardown_intent: sidecar append failed for %s: %s",
+                strategy_id,
+                exc,
+                exc_info=True,
+            )
+            _record("sidecar", exc, ledger_entry_id=ledger_entry_id)
+    finally:
+        # Restore the contextvar. ``set_cycle_id`` accepts ``str``; for
+        # ``None`` we use ``clear_cycle_id``-equivalent semantics
+        # (the underlying ContextVar holds None at default).
+        if saved_cycle_id is None:
+            from ..observability.context import clear_cycle_id
+
+            clear_cycle_id()
+        else:
+            set_cycle_id(saved_cycle_id)
+
+    accounting_degraded = bool(degraded_records)
+    degraded_reason = "; ".join(degraded_reasons) if degraded_reasons else None
+    return TeardownCommitOutcome(
+        ledger_entry_id=ledger_entry_id,
+        accounting_degraded=accounting_degraded,
+        degraded_reason=degraded_reason,
+        degraded_writes=tuple(degraded_records),
+    )
+
+
+__all__ = [
+    "TeardownCommitOutcome",
+    "commit_teardown_intent",
+]

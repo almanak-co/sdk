@@ -374,7 +374,9 @@ async def _persist_unavailable_on_failure(
     except AccountingPersistenceError:
         raise
     except Exception as persist_err:
-        logger.warning("Failed to persist UNAVAILABLE snapshot: %s", persist_err)
+        # VIB-3762 §C2: an UNAVAILABLE snapshot fallback that itself fails is
+        # double accounting drift and must surface at ERROR.
+        logger.error("Failed to persist UNAVAILABLE snapshot: %s", persist_err, exc_info=True)
 
 
 async def capture_portfolio_snapshot(
@@ -556,7 +558,9 @@ async def update_portfolio_metrics(
             # VIB-3157: propagate so the runner's ACCOUNTING_FAILED path fires.
             raise
         except Exception as e:
-            logger.warning(f"Failed to save portfolio metrics: {e}")
+            # VIB-3762 §C2: any accounting drift surfaces at ERROR level so
+            # operators see it on the dashboard, not buried in WARNING logs.
+            logger.error("Failed to save portfolio metrics for %s: %s", strategy_id, e, exc_info=True)
 
 
 # -------------------------------------------------------------------------

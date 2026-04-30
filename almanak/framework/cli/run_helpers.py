@@ -598,7 +598,10 @@ def _resolve_identity(
     # tables (including timeline_events) are migrated consistently with _db_lock.
     migrated = False
     if deployment_id != config_display_name:
-        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
+        # VIB-3761: canonical local-DB resolver.
+        from almanak.framework.local_paths import local_db_path
+
+        state_db_path = local_db_path()
         if state_db_path.exists():
             try:
                 import asyncio as _asyncio_backfill
@@ -627,7 +630,9 @@ def _resolve_identity(
     # On mainnet, only clear the current strategy's state (preserve other strategies).
     strategy_id = strategy_config["strategy_id"]
     if fresh:
-        state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
+        from almanak.framework.local_paths import local_db_path
+
+        state_db_path = local_db_path()
         if state_db_path.exists():
             try:
                 import sqlite3
@@ -2679,15 +2684,25 @@ def _run_once(
                 except Exception as e:
                     logger.warning(f"Failed to restore copy trading state: {e}")
 
-            result = await runner.run_iteration(strategy_instance)
+            # VIB-3762: route --once snapshot persistence through the
+            # mode-aware wrapper so accounting failures surface the same
+            # way as continuous-mode failures (live -> ACCOUNTING_FAILED,
+            # paper/dry-run -> ERROR log + continue). Direct calls to
+            # ``_capture_portfolio_snapshot`` were the bypass that hid
+            # April 29's silent accounting failures.
+            import time as _time
 
-            # Capture portfolio snapshot after --once iteration
-            # (run_loop does this automatically but run_iteration does not)
-            if runner.config.enable_state_persistence:
-                await runner._capture_portfolio_snapshot(
-                    strategy=strategy_instance,
-                    iteration_number=runner._total_iterations,
-                )
+            from ..runner._run_loop_helpers import capture_snapshot_with_accounting
+
+            iteration_start_monotonic = _time.monotonic()
+            result = await runner.run_iteration(strategy_instance)
+            result = await capture_snapshot_with_accounting(
+                runner=runner,
+                strategy=strategy_instance,
+                strategy_id=strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME,
+                result=result,
+                iteration_start_monotonic=iteration_start_monotonic,
+            )
 
             # Emit structured iteration summary for JSONL log analysis
             runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))

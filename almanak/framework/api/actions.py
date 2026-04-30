@@ -251,9 +251,14 @@ def _load_strategy_state_from_db(strategy_id: str) -> StrategyState | None:
         StrategyState if found, None otherwise
     """
     import sqlite3
-    from pathlib import Path
 
-    state_db = Path("./almanak_state.db")
+    # VIB-3761: canonical local-DB resolver.
+    from almanak.framework.local_paths import LocalPathError, local_db_path
+
+    try:
+        state_db = local_db_path()
+    except LocalPathError:
+        return None
     if not state_db.exists():
         return None
 

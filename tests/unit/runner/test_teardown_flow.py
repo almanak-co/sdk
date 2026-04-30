@@ -1011,6 +1011,13 @@ def _make_teardown_manager_class_mock(
     mgr.compiler = MagicMock()
     mgr.alert_manager = MagicMock()
     mgr.alert_manager.send_teardown_complete = AsyncMock()
+    # VIB-3773: characterization tests pre-date the runner-helpers bag.
+    # Setting both ``has_*`` to False emulates the legacy "no accounting
+    # writes from the teardown lane" path. Production wiring populates a
+    # real ``TeardownRunnerHelpers`` via ``build_runner_helpers``.
+    mgr.runner_helpers = MagicMock()
+    mgr.runner_helpers.has_commit = False
+    mgr.runner_helpers.has_snapshot = False
     # safety_guard.validate_teardown_request is sync
     validation = SafetyValidation(
         all_passed=safety_passed,

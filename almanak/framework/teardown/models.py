@@ -321,6 +321,13 @@ class TeardownResult:
     error: str | None = None
     recovery_options: list[str] = field(default_factory=list)
 
+    # VIB-3773: accounting-degraded teardown — chain-side work succeeded but
+    # one or more accounting writes failed and were recorded into the
+    # deferred-write log. The teardown loop continued (degraded-but-continue
+    # contract); operator must reconcile via the deferred log + outbox tail.
+    accounting_degraded: bool = False
+    accounting_degraded_count: int = 0
+
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal."""
         for attr in ["starting_value_usd", "final_value_usd", "total_costs_usd"]:

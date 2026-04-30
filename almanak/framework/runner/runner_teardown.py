@@ -370,12 +370,44 @@ async def execute_teardown(
     Returns:
         IterationResult with teardown status
     """
+    from ..deployment import is_hosted
+    from ..local_paths import LocalPathError
     from ..teardown import get_teardown_state_manager
     from .runner_models import IterationResult, IterationStatus
 
     strategy_id = strategy.strategy_id
-    manager = get_teardown_state_manager()
-    request = manager.get_active_request(strategy_id)
+    # The local teardown state manager is the cross-process approval
+    # channel between the SDK CLI/API and the runner — it lives in
+    # SQLite next to the runner's local DB (VIB-3761). In hosted mode
+    # the channel is owned by the gateway/Postgres, so the local
+    # manager is not instantiated and this helper raises
+    # ``LocalPathError``. Treat hosted mode as "no pending operator
+    # request" — auto-mode below will derive ``is_auto_mode=True`` from
+    # ``request is None`` and the rest of the unwind proceeds.
+    #
+    # In *local* mode, ``LocalPathError`` is genuinely unexpected — it
+    # means a path-resolution helper rejected the call for a reason
+    # other than "hosted mode" (e.g., a misconfigured strategy folder).
+    # Re-raise so the operator sees the misconfiguration instead of
+    # silently disabling the operator-approval flow.
+    manager: Any = None
+    request: Any = None
+    try:
+        manager = get_teardown_state_manager()
+        request = manager.get_active_request(strategy_id)
+    except LocalPathError:
+        # Local mode: ``LocalPathError`` here means a path-helper rejected
+        # the call for a reason other than "hosted mode" (typically a
+        # misconfigured ``ALMANAK_STRATEGY_FOLDER``). Re-raise so the
+        # operator sees the misconfiguration rather than silently
+        # disabling the operator-approval flow.
+        if not is_hosted():
+            raise
+        logger.debug(
+            "execute_teardown[%s]: local teardown state manager unavailable "
+            "(hosted mode); proceeding with auto-mode unwind",
+            strategy_id,
+        )
 
     # Step T1: Create market snapshot (SAME as normal decide() path)
     teardown_market = None
@@ -557,6 +589,15 @@ async def execute_teardown_via_manager(
     # can reflect FAILED into both `state_manager` (teardown_requests) and
     # the adapter row (teardown_execution_state). The helper handles both.
     teardown_state = None
+    # VIB-3773: track cycle-id swap state so the ``finally`` clause restores
+    # the runner's surfaces even on the exception path. ``None`` sentinels
+    # mean "no swap performed yet" — we only restore what we set.
+    saved_last_cycle_id: str | None = None
+    saved_ctx_cycle_id: str | None = None
+    cycle_id_swapped = False
+    pre_bracket_outcome = None
+    post_bracket_outcome = None
+
     try:
         # Phase 3: fetch positions (or return early/fallback).
         positions, early = await _h.fetch_positions_or_fallback(
@@ -583,8 +624,44 @@ async def execute_teardown_via_manager(
         # mypy so downstream helpers can treat it as non-optional.
         assert teardown_state is not None
 
+        # VIB-3773: swap cycle id on BOTH surfaces (P1-4 — runner_state.py:486
+        # reads ``runner._last_cycle_id`` first, then falls back to the
+        # contextvar). Without updating ``_last_cycle_id`` the snapshot/metrics
+        # rows would be stamped with the iteration's cycle id, not the
+        # teardown's. Restored in the ``finally`` clause.
+        teardown_cycle_id = f"teardown-{teardown_state.teardown_id}"
+        from ..observability.context import (
+            get_cycle_id,
+            set_cycle_id,
+        )
+
+        saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+        saved_ctx_cycle_id = get_cycle_id()
+        runner._last_cycle_id = teardown_cycle_id
+        set_cycle_id(teardown_cycle_id)
+        cycle_id_swapped = True
+
         # Phase 6: price oracle resolution (pure helper).
         price_oracle = _h.resolve_price_oracle(teardown_market)
+
+        # VIB-3773 Phase 6.5: pre-teardown snapshot bracket. Fires once,
+        # before the first intent runs, so operators see "starting
+        # balances at teardown_t0" in ``portfolio_snapshots`` /
+        # ``portfolio_metrics``. Degraded-but-continue: a backend write
+        # failure here logs ERROR + appends to deferred-write log; the
+        # teardown still runs.
+        if teardown_mgr.runner_helpers.has_snapshot:
+            pre_bracket_outcome = await teardown_mgr.runner_helpers.capture_snapshot(
+                strategy,
+                teardown_cycle_id=teardown_cycle_id,
+                pre_teardown=True,
+            )
+            if pre_bracket_outcome.accounting_degraded:
+                logger.error(
+                    "Pre-teardown snapshot accounting degraded for %s — %s",
+                    strategy_id,
+                    pre_bracket_outcome.degraded_reason or "unknown",
+                )
 
         # Phase 7: execute intents + post-execution verify.
         teardown_result = await _h.execute_and_verify(
@@ -603,6 +680,34 @@ async def execute_teardown_via_manager(
             state_manager,
         )
 
+        # VIB-3773 Phase 7.5: post-teardown snapshot bracket. Fires after
+        # the unwind (and the verifier) completes so the SDK records
+        # final wallet state — the row that fund-NAV / dashboards
+        # actually need post-shutdown. Same degraded-but-continue
+        # contract.
+        if teardown_mgr.runner_helpers.has_snapshot:
+            post_bracket_outcome = await teardown_mgr.runner_helpers.capture_snapshot(
+                strategy,
+                teardown_cycle_id=teardown_cycle_id,
+                pre_teardown=False,
+            )
+            if post_bracket_outcome.accounting_degraded:
+                logger.error(
+                    "Post-teardown snapshot accounting degraded for %s — %s",
+                    strategy_id,
+                    post_bracket_outcome.degraded_reason or "unknown",
+                )
+
+        # VIB-3773: fold the snapshot-bracket degraded signals into the
+        # TeardownResult. Per-intent commits already wrote their flags
+        # inside ``_execute_intents``; the brackets are additive.
+        bracket_failures = sum(
+            1 for o in (pre_bracket_outcome, post_bracket_outcome) if o is not None and o.accounting_degraded
+        )
+        if bracket_failures:
+            teardown_result.accounting_degraded = True
+            teardown_result.accounting_degraded_count += bracket_failures
+
         # Phase 8: alert + cleanup (best effort, swallow exceptions).
         await _h.send_alert_and_cleanup(teardown_mgr, teardown_result, teardown_state.teardown_id)
 
@@ -617,6 +722,23 @@ async def execute_teardown_via_manager(
             teardown_state_adapter,
             e,
         )
+    finally:
+        # VIB-3773: restore both cycle-id surfaces no matter how we exit
+        # (success, return-early, or exception). Skipping this would leak
+        # ``teardown-...`` cycle ids onto subsequent iteration rows.
+        if cycle_id_swapped:
+            from ..observability.context import (
+                clear_cycle_id as _clear_cycle_id,
+            )
+            from ..observability.context import (
+                set_cycle_id as _set_cycle_id,
+            )
+
+            runner._last_cycle_id = saved_last_cycle_id or ""
+            if saved_ctx_cycle_id is None:
+                _clear_cycle_id()
+            else:
+                _set_cycle_id(saved_ctx_cycle_id)
 
     # Phase 9: map TeardownResult -> IterationResult + terminal side effects.
     return _h.map_teardown_result(runner, strategy, start_time, teardown_result, teardown_mode, request, state_manager)
@@ -642,13 +764,151 @@ async def execute_teardown_inline(
     orchestrator type or missing compiler dependencies).
 
     Executes teardown intents sequentially via _execute_single_chain.
+
+    VIB-3773: this lane reuses the runner's iteration-lane writers
+    (``_execute_single_chain`` → ``_write_ledger_entry`` →
+    ``_write_outbox_and_fire_processor`` → sidecar) so ledger / position
+    event / outbox / sidecar all fire. Two gaps closed here:
+
+    1. Snapshot/metrics weren't written — the iteration wrapper that
+       drives ``capture_snapshot_with_accounting`` is at run_loop level,
+       not inside ``_execute_single_chain``. We bracket the inline loop
+       with the same teardown snapshot helper Lane B uses.
+    2. Live-mode AccountingPersistenceError would have halted the
+       unwind (iteration semantics). Teardown's degraded-but-continue
+       contract (P0-2) requires we catch + log + record + continue.
     """
-    from .runner_models import IterationResult, IterationStatus
+    import uuid
+
+    from ..accounting.deferred_log import append_now as _deferred_append_now
+    from ..observability.context import (
+        clear_cycle_id,
+        get_cycle_id,
+        set_cycle_id,
+    )
+    from ..teardown.runner_helpers import build_runner_helpers
 
     strategy_id = strategy.strategy_id
 
+    # VIB-3773: dual cycle-id swap so ledger/outbox/snapshot rows carry the
+    # teardown's cycle id, not the iteration that triggered the inline path.
+    # Per blueprint 27 §teardown-cycle-id contract, every teardown row must
+    # carry ``cycle_id = f"teardown-{teardown_id}"`` (canonical format
+    # consumed by reconciliation queries). When the runner is invoked
+    # without a persisted ``TeardownRequest`` (no operator-initiated
+    # request, e.g. strategy-self-signalled hosted teardown), synthesize a
+    # UUID so the lane still produces a unique correlation id — but keep
+    # the ``teardown-`` prefix and avoid the ``-inline-`` infix that the
+    # earlier draft used; reconciliation walks ``cycle_id LIKE 'teardown-%'``
+    # and any divergence breaks correlation across the 5 accounting tables.
+    teardown_id = getattr(request, "teardown_id", None) or str(uuid.uuid4())
+    teardown_cycle_id = f"teardown-{teardown_id}"
+    saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+    saved_ctx_cycle_id = get_cycle_id()
+    runner._last_cycle_id = teardown_cycle_id
+    set_cycle_id(teardown_cycle_id)
+
+    # VIB-3773: snapshot bracket (degraded-but-continue, never raises).
+    helpers = build_runner_helpers(runner)
+    accounting_degraded_count = 0
+
+    try:
+        if helpers.has_snapshot:
+            pre_outcome = await helpers.capture_snapshot(  # type: ignore[misc]
+                strategy,
+                teardown_cycle_id=teardown_cycle_id,
+                pre_teardown=True,
+            )
+            if pre_outcome.accounting_degraded:
+                accounting_degraded_count += 1
+                logger.error(
+                    "🛑 Pre-teardown (inline) snapshot accounting degraded for %s — %s",
+                    strategy_id,
+                    pre_outcome.degraded_reason or "unknown",
+                )
+
+        result, inline_degraded = await _execute_teardown_inline_body(
+            runner,
+            strategy,
+            teardown_intents,
+            teardown_market,
+            start_time,
+            request,
+            state_manager,
+            teardown_cycle_id=teardown_cycle_id,
+            deferred_append=_deferred_append_now,
+        )
+        # ``_execute_teardown_inline_body`` returns its own IterationResult
+        # alongside the per-intent inline_degraded_count; we only need to
+        # fire the post-snapshot bracket and tally degraded counts.
+        # Capture-failures in the body are accumulated through the same
+        # channel as bracket failures.
+        accounting_degraded_count += inline_degraded
+
+        if helpers.has_snapshot:
+            post_outcome = await helpers.capture_snapshot(  # type: ignore[misc]
+                strategy,
+                teardown_cycle_id=teardown_cycle_id,
+                pre_teardown=False,
+            )
+            if post_outcome.accounting_degraded:
+                accounting_degraded_count += 1
+                logger.error(
+                    "🛑 Post-teardown (inline) snapshot accounting degraded for %s — %s",
+                    strategy_id,
+                    post_outcome.degraded_reason or "unknown",
+                )
+        if accounting_degraded_count and getattr(result, "error", None) is None:
+            # Annotate the IterationResult so operators see the degraded
+            # signal without needing to grep the deferred log.
+            result.error = (
+                f"accounting_degraded={accounting_degraded_count} (chain-side OK; "
+                "see accounting_deferred.jsonl for failed writes)"
+            )
+        return result
+    finally:
+        # Restore both cycle-id surfaces no matter how we exit.
+        runner._last_cycle_id = saved_last_cycle_id
+        if saved_ctx_cycle_id is None:
+            clear_cycle_id()
+        else:
+            set_cycle_id(saved_ctx_cycle_id)
+
+
+async def _execute_teardown_inline_body(
+    runner: Any,
+    strategy: StrategyProtocol,
+    teardown_intents: list,
+    teardown_market: Any | None,
+    start_time: datetime,
+    request: Any | None,
+    state_manager: Any,
+    *,
+    teardown_cycle_id: str,
+    deferred_append: Any,
+) -> tuple[IterationResult, int]:
+    """Inner loop of the inline teardown — the body that the brackets wrap.
+
+    Catches per-intent ``AccountingPersistenceError`` so the chain-side
+    unwind continues even when the runner's iteration-lane writers raise
+    in live mode. The deferred-write log is the durable backstop;
+    operators reconcile via that + outbox tail (or a future
+    ``almanak ax accounting reconcile``).
+
+    Returns the iteration result paired with the per-intent
+    ``inline_degraded_count`` accumulated while looping. The bracket
+    caller adds this to the snapshot-bracket degraded count to produce
+    the final ``accounting_degraded_count`` for the inline lane.
+    """
+    from ..state.exceptions import AccountingPersistenceError
+    from .runner_models import IterationResult, IterationStatus
+
+    strategy_id = strategy.strategy_id
+    deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+
+    inline_degraded_count = 0
     all_success = True
-    last_result = None
+    last_result: IterationResult | None = None
     for i, intent in enumerate(teardown_intents):
         logger.info(f"🛑 Executing teardown intent {i + 1}/{len(teardown_intents)}: {intent.intent_type.value}")
 
@@ -704,18 +964,62 @@ async def execute_teardown_inline(
                 # No token field — let compiler handle natively (e.g., shares="all")
                 logger.debug(f"🛑 Teardown intent {i + 1}: no token field, passing to compiler as-is")
 
-        result = await runner._execute_single_chain(
-            strategy=strategy,
-            intent=intent_to_execute,
-            start_time=start_time,
-            total_intents=1,
-            market=teardown_market,
-        )
+        try:
+            result = await runner._execute_single_chain(
+                strategy=strategy,
+                intent=intent_to_execute,
+                start_time=start_time,
+                total_intents=1,
+                market=teardown_market,
+            )
+        except AccountingPersistenceError as acc_err:
+            # VIB-3773: iteration-lane writers raise on failure; teardown
+            # MUST continue. Convert into a synthetic success-shaped result
+            # (the chain-side TX already landed by the time the writer
+            # raised) and record into the deferred-write log.
+            logger.error(
+                "🛑 Teardown intent %d/%d (inline) — accounting persistence failed but chain-side OK: %s",
+                i + 1,
+                len(teardown_intents),
+                acc_err,
+            )
+            inline_degraded_count += 1
+            # Deferred-log writes are the durable backstop, but the
+            # backstop itself can fail (disk full, log rotation race).
+            # Swallow that secondary failure too — halting the unwind
+            # because the *log* of the original failure could not be
+            # written would re-introduce the silent-failure shape we
+            # eliminated. Operators see the chain-side OK + ERROR log.
+            try:
+                deferred_append(
+                    kind=str(acc_err.write_kind) if acc_err.write_kind else "ledger",
+                    strategy_id=strategy_id,
+                    deployment_id=deployment_id,
+                    cycle_id=teardown_cycle_id,
+                    intent_type=getattr(intent_to_execute.intent_type, "value", str(intent_to_execute.intent_type)),
+                    error=str(acc_err),
+                    extra={"phase": "inline-per-intent"},
+                )
+            except Exception:  # noqa: BLE001 — never propagate
+                logger.exception(
+                    "🛑 Teardown intent %d/%d (inline) — deferred-write log append failed; "
+                    "original error=%s; continuing teardown",
+                    i + 1,
+                    len(teardown_intents),
+                    acc_err,
+                )
+            # Synthetic success — the unwind continues.
+            result = IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=intent_to_execute,
+                strategy_id=strategy_id,
+                duration_ms=runner._calculate_duration_ms(start_time),
+            )
         last_result = result
         if not result.success:
             all_success = False
             logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
-            break  # Stop on first failure
+            break  # Stop on first chain-side failure
 
     if last_result:
         if all_success:
@@ -731,7 +1035,7 @@ async def execute_teardown_inline(
             if request:
                 _safe_mark(state_manager, "mark_failed", strategy_id, error=last_result.error or "execution failed")
             runner._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
-        return last_result
+        return last_result, inline_degraded_count
 
     # Edge case: no intents executed (all positions already closed)
     logger.info(f"🛑 {strategy_id} teardown: all positions already closed, shutting down")
@@ -740,12 +1044,13 @@ async def execute_teardown_inline(
     runner._record_success()
     if request:
         _safe_mark(state_manager, "mark_completed", strategy_id, result={"reason": "all_positions_already_closed"})
-    return IterationResult(
+    final_result = IterationResult(
         status=IterationStatus.TEARDOWN,
         intent=None,
         strategy_id=strategy_id,
         duration_ms=runner._calculate_duration_ms(start_time),
     )
+    return final_result, inline_degraded_count
 
 
 # -------------------------------------------------------------------------

@@ -188,7 +188,7 @@ def find_strategy_dir(strategy_name: str) -> Path | None:
     ]
 
     # Tier directories that contain nested strategies
-    tier_dirs = ["poster_child", "production", "incubating", "demo", "alpha_team", "tests"]
+    tier_dirs = ["poster_child", "production", "incubating", "demo", "alpha_team", "tests", "accounting"]
 
     # Add tiered paths: strategies/<tier>/<name>
     for tier in tier_dirs:
@@ -1325,6 +1325,15 @@ def run(
         teardown_after=teardown_after,
     )
 
+    # VIB-3761: anchor every local artifact (DB, logs, lock) to the
+    # strategy's folder so 10 strategies launched from the same cwd cannot
+    # collide on a shared ./almanak_state.db (the April 29 silent-failure
+    # root cause). The env var is set ONLY when the operator did not
+    # already set it explicitly so test/operator overrides win.
+    _resolved_strategy_folder = Path(working_dir).expanduser().resolve()
+    if _resolved_strategy_folder.is_dir() and not os.environ.get("ALMANAK_STRATEGY_FOLDER"):
+        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(_resolved_strategy_folder)
+
     # Gateway setup (phase 2 helper): managed auto-start or external connect.
     (
         gateway_client,
@@ -1480,7 +1489,10 @@ def run(
     strategy_id = strategy_config["strategy_id"]
 
     # Detect RESUME vs FRESH START (phase 9 helper).
-    state_db_path = Path(os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
+    # VIB-3761: canonical local-DB resolver.
+    from almanak.framework.local_paths import local_db_path as _local_db_path
+
+    state_db_path = _local_db_path()
     resume_info = _detect_state_resume(state_db_path, strategy_id)
     is_resume = resume_info.is_resume
     existing_state_info: dict[str, Any] | None = (

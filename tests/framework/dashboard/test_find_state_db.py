@@ -1,16 +1,18 @@
-"""Unit tests for ``_find_state_db`` (issue #1713).
+"""Unit tests for ``_find_state_db`` (issue #1713 + VIB-3761).
 
-Covers the deterministic-first resolution order introduced by the dashboard
-latent-bug-bundle fix:
+Covers the deterministic-first resolution order:
 
-1. ``ALMANAK_STATE_DB`` env var wins unconditionally when the file exists.
-2. ``./almanak_state.db`` (CLI default) is preferred over any ``~/.almanak/..``
-   candidate when present.
-3. Per-deployment-id lookup (``~/.almanak/state/<id>/state.db``) is preferred
-   over legacy flat locations, and the full deployment id is checked before
-   the base strategy name when the id contains a colon.
-4. Multiple legacy flat locations present -> warning logged listing every
-   match; first candidate still returned so the dashboard stays usable.
+1. ``ALMANAK_STATE_DB`` env var wins unconditionally when the file exists
+   (delegated to ``almanak.framework.local_paths.local_db_path``).
+2. The cwd-relative ``./almanak_state.db`` legacy default is **removed**
+   in VIB-3761 (April 29 silent-failure root cause). Callers without an
+   explicit env var fall through to the per-deployment lookup below.
+3. Per-deployment-id lookup (``~/.almanak/state/<id>/state.db``) is
+   preferred over legacy flat locations, and the full deployment id is
+   checked before the base strategy name when the id contains a colon.
+4. Multiple legacy flat locations present -> warning logged listing
+   every match; first candidate still returned so the dashboard stays
+   usable.
 5. No candidate exists -> ``None``.
 """
 
@@ -33,14 +35,22 @@ def isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ``./almanak_state.db`` and ``~/.almanak/state/...`` layout, which would
     make the assertions flaky on every machine. We point both ``cwd`` and
     ``HOME`` at a throwaway temp directory so each test sees a pristine
-    filesystem.
+    filesystem. ``Path.home`` is monkey-patched too because the canonical
+    ``local_db_path`` resolver consults it (not just ``$HOME``).
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     # On some platforms ``os.path.expanduser`` consults ``USERPROFILE`` too.
     monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    # VIB-3761: clear all path env vars so the resolver returns the
+    # per-user utility default, which lands under our fake home.
+    monkeypatch.delenv("AGENT_ID", raising=False)
     monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
+    monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+    monkeypatch.delenv("ALMANAK_GATEWAY_DB_PATH", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -60,30 +70,41 @@ def test_find_state_db_env_var_wins_over_every_other_candidate(
     assert _find_state_db("AaveYieldStrategy:abc123") == str(env_db)
 
 
-def test_find_state_db_env_var_missing_file_falls_through_to_default(
+def test_find_state_db_env_var_missing_file_falls_through_to_deployment_lookup(
     isolated_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``ALMANAK_STATE_DB`` set to a non-existent file falls through."""
+    """``ALMANAK_STATE_DB`` set to a non-existent file falls through to the
+    per-deployment lookup.
+
+    VIB-3761: a stray ``./almanak_state.db`` is no longer a candidate —
+    the cwd-relative legacy default was removed. With no other DB
+    present, the resolver returns ``None`` and the dashboard renders the
+    no-data state.
+    """
+    # A cwd-relative file used to win here; under VIB-3761 it must be
+    # ignored because relying on cwd was the April 29 silent-failure
+    # root cause.
     (isolated_cwd / "almanak_state.db").touch()
     monkeypatch.setenv("ALMANAK_STATE_DB", str(isolated_cwd / "does_not_exist.db"))
 
     result = _find_state_db("AaveYieldStrategy:abc123")
 
-    assert result == os.path.join(".", "almanak_state.db")
+    assert result is None
 
 
-def test_find_state_db_cli_default_is_preferred_over_home_locations(isolated_cwd: Path) -> None:
-    """The canonical CLI default path wins over any ``~/.almanak/...`` candidate."""
+def test_find_state_db_deployment_lookup_wins_over_cwd_legacy(isolated_cwd: Path) -> None:
+    """Per-deployment ``~/.almanak/state/<id>/state.db`` wins; the cwd
+    legacy ``./almanak_state.db`` is no longer a candidate (VIB-3761)."""
+    # The cwd-relative file must NOT be picked up.
     (isolated_cwd / "almanak_state.db").touch()
 
-    # Also populate the per-deployment location - cli default still wins.
     home_dir = isolated_cwd / "home" / ".almanak" / "state" / "AaveYieldStrategy:abc123"
     home_dir.mkdir(parents=True)
     (home_dir / "state.db").touch()
 
     result = _find_state_db("AaveYieldStrategy:abc123")
 
-    assert result == os.path.join(".", "almanak_state.db")
+    assert result == str(home_dir / "state.db")
 
 
 def test_find_state_db_deployment_id_lookup_preferred_over_base_name(isolated_cwd: Path) -> None:

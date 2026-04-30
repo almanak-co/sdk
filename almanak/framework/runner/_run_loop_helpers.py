@@ -25,6 +25,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
@@ -330,6 +331,198 @@ async def capture_snapshot_with_accounting(
             acc_err,
         )
     return result
+
+
+@dataclass(frozen=True)
+class TeardownSnapshotOutcome:
+    """Outcome of a single pre- or post-teardown snapshot bracket.
+
+    See :func:`capture_teardown_snapshot_with_accounting` for the contract.
+    Returned to the caller in lieu of raising on failure.
+
+    Attributes
+    ----------
+    snapshot_captured:
+        ``True`` iff a non-throttled, non-skipped snapshot was actually
+        persisted. Cosmetic — used for assertions in tests; the absence of
+        a snapshot in normal operation is rarely worth alerting on (e.g.
+        ``enable_state_persistence=False`` returns ``False`` here).
+    accounting_degraded:
+        ``True`` iff a writer failure occurred. The caller (Phase 3 wiring)
+        bumps the TeardownResult's degraded counter on this signal.
+    degraded_reason:
+        Compact summary of the failure for log lines and TeardownResult
+        context. ``None`` when ``accounting_degraded`` is ``False``.
+    phase:
+        ``"pre"`` for the bracket call before the first teardown intent,
+        ``"post"`` for the bracket after the last intent. Echoed back so
+        callers can route both invocations through the same code without
+        bookkeeping.
+    """
+
+    snapshot_captured: bool
+    accounting_degraded: bool
+    degraded_reason: str | None
+    phase: str
+
+
+async def capture_teardown_snapshot_with_accounting(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    *,
+    teardown_cycle_id: str,
+    pre_teardown: bool,
+) -> TeardownSnapshotOutcome:
+    """Bracket a teardown with snapshot + metrics writes (VIB-3773 Phase 2).
+
+    Teardown twin of :func:`capture_snapshot_with_accounting`. Differs in
+    two important ways:
+
+    1. **Never raises.** The teardown lane diverges from VIB-3762's halt-
+       on-write-failure contract because halting mid-unwind would strand a
+       partially-closed position. Failures are captured into the returned
+       :class:`TeardownSnapshotOutcome` and recorded in the deferred-write
+       log. The teardown loop continues either way.
+    2. **Stamps the cycle id on both surfaces** (P1-4 — see
+       :file:`runner_state.py:486` which prefers ``runner._last_cycle_id``
+       over the contextvar). For the duration of the snapshot capture we
+       set both to ``teardown_cycle_id`` and restore them in ``finally``,
+       so the resulting ``portfolio_snapshots`` / ``portfolio_metrics``
+       rows carry the teardown's cycle id rather than the iteration's.
+
+    The snapshot is forced (``force_snapshot=True``) — teardown brackets
+    are always meaningful. The throttle that protects the iteration loop
+    from a snapshot every cycle is irrelevant here.
+
+    Parameters
+    ----------
+    runner:
+        StrategyRunner instance owning the state manager + valuer.
+    strategy:
+        Strategy being torn down.
+    teardown_cycle_id:
+        Stable cycle id (e.g. ``f"teardown-{teardown_id}"``). Stamped onto
+        both ``runner._last_cycle_id`` and the cycle-id contextvar.
+    pre_teardown:
+        ``True`` for the bracket call before the first teardown intent;
+        ``False`` for the post-teardown bracket. Echoed back via
+        :class:`TeardownSnapshotOutcome.phase`.
+    """
+    from ..accounting.deferred_log import append_now as _deferred_append_now
+    from ..observability.context import (
+        clear_cycle_id,
+        get_cycle_id,
+        set_cycle_id,
+    )
+    from .runner_state import capture_portfolio_snapshot
+
+    phase = "pre" if pre_teardown else "post"
+
+    if not runner.config.enable_state_persistence:
+        # Persistence disabled — nothing to write, nothing to degrade.
+        return TeardownSnapshotOutcome(
+            snapshot_captured=False,
+            accounting_degraded=False,
+            degraded_reason=None,
+            phase=phase,
+        )
+
+    saved_ctx_cycle_id = get_cycle_id()
+    saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+
+    set_cycle_id(teardown_cycle_id)
+    runner._last_cycle_id = teardown_cycle_id
+
+    snapshot_captured = False
+    accounting_degraded = False
+    degraded_reason: str | None = None
+
+    deployment_id = getattr(strategy, "deployment_id", "") or getattr(strategy, "strategy_id", "") or ""
+    strategy_id = getattr(strategy, "strategy_id", "") or ""
+
+    def _append_deferred_safely(*, error: str, extra: dict[str, str]) -> None:
+        """Wrap the deferred-log append so even *its* failure cannot raise.
+
+        VIB-3773 contract: teardown's snapshot bracket is degraded-but-
+        continue. The deferred-write log is the durable backstop for
+        failed accounting writes — but the backstop itself can fail
+        (disk full, permission error, race on log rotation). If we let
+        that bubble up, the unwind halts mid-flight, which is exactly
+        the silent-failure shape we are eliminating. Log the secondary
+        failure at ERROR (operators still need to know the durable
+        backstop dropped a record) and continue.
+        """
+        try:
+            _deferred_append_now(
+                kind="snapshot",
+                strategy_id=strategy_id,
+                deployment_id=deployment_id,
+                cycle_id=teardown_cycle_id,
+                error=error,
+                extra=extra,
+            )
+        except Exception:  # noqa: BLE001 — never propagate
+            logger.exception(
+                "capture_teardown_snapshot_with_accounting[%s]: deferred-write log "
+                "append failed for %s; original error=%s; continuing teardown",
+                phase,
+                strategy_id,
+                error,
+            )
+
+    try:
+        try:
+            snapshot = await capture_portfolio_snapshot(
+                runner,
+                strategy,
+                iteration_number=runner._total_iterations,
+                force_snapshot=True,
+            )
+            snapshot_captured = snapshot is not None
+        except AccountingPersistenceError as acc_err:
+            accounting_degraded = True
+            degraded_reason = (
+                f"snapshot/{phase}: AccountingPersistenceError (write_kind={acc_err.write_kind}): {acc_err}"
+            )
+            logger.error(
+                "capture_teardown_snapshot_with_accounting[%s]: persistence failed for %s "
+                "(write_kind=%s) — recording deferred + continuing teardown: %s",
+                phase,
+                strategy_id,
+                acc_err.write_kind,
+                acc_err,
+            )
+            _append_deferred_safely(
+                error=str(acc_err),
+                extra={"phase": phase, "write_kind": str(acc_err.write_kind)},
+            )
+        except Exception as exc:  # noqa: BLE001 — never propagate
+            accounting_degraded = True
+            degraded_reason = f"snapshot/{phase}: {type(exc).__name__}: {exc}"
+            logger.error(
+                "capture_teardown_snapshot_with_accounting[%s]: snapshot capture failed for %s: %s",
+                phase,
+                strategy_id,
+                exc,
+                exc_info=True,
+            )
+            _append_deferred_safely(
+                error=str(exc),
+                extra={"phase": phase},
+            )
+    finally:
+        if saved_ctx_cycle_id is None:
+            clear_cycle_id()
+        else:
+            set_cycle_id(saved_ctx_cycle_id)
+        runner._last_cycle_id = saved_last_cycle_id
+
+    return TeardownSnapshotOutcome(
+        snapshot_captured=snapshot_captured,
+        accounting_degraded=accounting_degraded,
+        degraded_reason=degraded_reason,
+        phase=phase,
+    )
 
 
 async def handle_iteration_failure(

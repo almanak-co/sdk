@@ -254,14 +254,13 @@ def resolve_agent_id(strategy_id: str) -> str:
     This ensures all data paths (state, registry, timeline) use the platform
     identifier consistently. In local mode, AGENT_ID is not set and the
     original strategy_id passes through unchanged.
-    """
-    import os
 
-    env_agent_id = os.environ.get("AGENT_ID")
-    if env_agent_id is None:
-        return strategy_id
-    resolved = env_agent_id.strip()
-    return resolved or strategy_id
+    Delegates env-var reading to `framework.deployment.agent_id()` —
+    `AGENT_ID` is the single deployment-mode signal across the SDK.
+    """
+    from almanak.framework.deployment import agent_id
+
+    return agent_id() or strategy_id
 
 
 def validate_strategy_id(strategy_id: str, field: str = "strategy_id") -> str:

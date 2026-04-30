@@ -97,6 +97,22 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
     lifecycle_factory = MagicMock(return_value=fake_lifecycle_store)
     monkeypatch.setattr("almanak.gateway._server_start_helpers.get_lifecycle_store", lifecycle_factory)
 
+    # Schema-contract validator (VIB-3763): touches SQLite/Postgres in
+    # production. Replace with an AsyncMock so boot tests never hit storage.
+    schema_validator = AsyncMock()
+    monkeypatch.setattr(
+        "almanak.gateway.server.validate_state_schema_at_boot",
+        schema_validator,
+    )
+
+    # Local-DB flock (VIB-3761): touches the filesystem in production.
+    # Replace with a no-op so boot tests never write a real lock file.
+    flock_acquire = MagicMock(return_value=None)
+    monkeypatch.setattr(
+        "almanak.gateway.server.acquire_local_db_flock",
+        flock_acquire,
+    )
+
     # Servicer classes — replace with MagicMock so construction never touches
     # the network (e.g. ExecutionServiceServicer spins up aiohttp sessions).
     for cls_name in (
@@ -132,6 +148,7 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
         "registry_factory": registry_factory,
         "timeline_factory": timeline_factory,
         "lifecycle_factory": lifecycle_factory,
+        "schema_validator": schema_validator,
         "metrics_factory": metrics_factory,
         "metrics_server": fake_metrics_server,
         "pb2_grpc": mock_pb2_grpc,
@@ -319,10 +336,16 @@ class TestServerAndExecutorBuild:
 class TestStorageBootstrap:
     @pytest.mark.asyncio
     async def test_timeline_store_postgres_when_database_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # VIB-3760: hosted-mode (Postgres) requires AGENT_ID + auth_token.
+        monkeypatch.setenv("AGENT_ID", "agent-test")
         mocks = _install_bootstrap_patches(monkeypatch)
         with patch("almanak.gateway.server.asyncio.create_task") as create_task:
             create_task.side_effect = _fake_create_task
-            settings = _make_settings(database_url="postgres://x/y")
+            settings = _make_settings(
+                database_url="postgres://x/y",
+                auth_token="tok",  # noqa: S106
+                allow_insecure=False,
+            )
             server = _make_server(settings)
             await server.start()
         mocks["timeline_factory"].assert_called_once_with(database_url="postgres://x/y")
@@ -377,10 +400,17 @@ class TestStorageBootstrap:
     async def test_lifecycle_store_receives_database_url_and_sqlite_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # VIB-3760: hosted-mode (Postgres) requires AGENT_ID + auth_token.
+        monkeypatch.setenv("AGENT_ID", "agent-test")
         mocks = _install_bootstrap_patches(monkeypatch)
         with patch("almanak.gateway.server.asyncio.create_task") as create_task:
             create_task.side_effect = _fake_create_task
-            settings = _make_settings(database_url="postgres://x/y", gateway_db_path="/tmp/gw.db")
+            settings = _make_settings(
+                database_url="postgres://x/y",
+                gateway_db_path="/tmp/gw.db",
+                auth_token="tok",  # noqa: S106
+                allow_insecure=False,
+            )
             server = _make_server(settings)
             await server.start()
         mocks["lifecycle_factory"].assert_called_once_with(

@@ -52,6 +52,80 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Phase 0: deployment-mode invariants (VIB-3760, plan §A4)
+# ---------------------------------------------------------------------------
+def validate_deployment_invariants(settings: GatewaySettings) -> None:
+    """Refuse to start when ``AGENT_ID`` and the gateway's deployment-shape
+    settings disagree.
+
+    ``AGENT_ID`` is the single deployment-mode signal (see
+    ``almanak.framework.deployment``). Every other env var is *configuration
+    within* a mode and must be consistent with the chosen mode:
+
+    Hosted (``AGENT_ID`` set):
+      * ``ALMANAK_GATEWAY_DATABASE_URL`` MUST be set (Postgres backend required).
+      * ``ALMANAK_GATEWAY_ALLOW_INSECURE`` MUST NOT be true.
+      * ``ALMANAK_GATEWAY_AUTH_TOKEN`` MUST be set.
+
+    Local (``AGENT_ID`` unset):
+      * ``ALMANAK_GATEWAY_DATABASE_URL`` MUST NOT be set. Silent fallback to
+        SQLite when DATABASE_URL is set was the April 29 silent-failure class
+        and is removed by design.
+
+    All mismatches detected on a single boot are reported in one error so the
+    operator can fix every issue in one pass instead of N restart cycles.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    def _present(value: str | None) -> bool:
+        """Treat whitespace-only strings as unset.
+
+        ``ALMANAK_GATEWAY_DATABASE_URL=" "`` would otherwise pass the
+        invariant guard with a value that is unusable in practice —
+        defeats the "fail fast on bad deployment shape" goal of plan §A4.
+        """
+        return value is not None and bool(value.strip())
+
+    errors: list[str] = []
+    if is_hosted():
+        if not _present(settings.database_url):
+            errors.append(
+                "AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_DATABASE_URL is unset. "
+                "Hosted mode requires the metrics-database Postgres URL. "
+                "Set ALMANAK_GATEWAY_DATABASE_URL or unset AGENT_ID to run local."
+            )
+        if settings.allow_insecure:
+            errors.append(
+                "AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_ALLOW_INSECURE=true. "
+                "Hosted mode forbids insecure operation. "
+                "Unset ALMANAK_GATEWAY_ALLOW_INSECURE."
+            )
+        if not _present(settings.auth_token):
+            errors.append(
+                "AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_AUTH_TOKEN is unset. "
+                "Hosted mode requires an auth token. "
+                "Set ALMANAK_GATEWAY_AUTH_TOKEN."
+            )
+    else:
+        if _present(settings.database_url):
+            errors.append(
+                "ALMANAK_GATEWAY_DATABASE_URL is set but AGENT_ID is not. "
+                "Either unset DATABASE_URL (run local) or set AGENT_ID (run hosted). "
+                "Silent fallback removed because it hides bad configs."
+            )
+
+    if not errors:
+        return
+
+    if len(errors) == 1:
+        detail = errors[0]
+    else:
+        detail = "multiple deployment-config mismatches detected:\n  - " + "\n  - ".join(errors)
+
+    raise RuntimeError(f"Gateway startup aborted: {detail}")
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: interceptor chain
 # ---------------------------------------------------------------------------
 def _handle_insecure_mode(settings: GatewaySettings) -> None:
@@ -180,6 +254,105 @@ def initialize_lifecycle_store(settings: GatewaySettings) -> Any:
     )
     logger.debug("LifecycleStore initialized")
     return store
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.25: local-DB single-writer flock (VIB-3761, plan §B)
+# ---------------------------------------------------------------------------
+def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
+    """Refuse to start a second gateway against the same local DB path.
+
+    OS-level enforcement of the 1 strategy = 1 DB = 1 gateway invariant.
+    No-op in hosted mode (Postgres has its own concurrency model).
+
+    Also emits a one-time operator instruction when a legacy
+    ``./almanak_state.db`` is detected in cwd (plan §7 R1 — instructions
+    only, no auto-mv).
+
+    Returns the lock handle for the caller to keep alive for the gateway
+    lifetime; ``None`` in hosted mode.
+
+    Mode is determined by ``is_hosted()`` (the single permitted reader
+    of ``AGENT_ID``), not by ``settings.database_url`` — they should
+    agree, but ``validate_deployment_invariants`` is the place that
+    enforces the agreement; this helper consumes the canonical signal.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        return None
+
+    from almanak.framework.local_paths import (
+        acquire_local_db_lock,
+        local_db_path,
+        warn_if_legacy_cwd_db_exists,
+    )
+
+    warn_if_legacy_cwd_db_exists(logger)
+    db_path = local_db_path()
+    handle = acquire_local_db_lock(db_path)
+    logger.info("Local DB flock acquired on %s (single-writer guard)", db_path)
+    return handle
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.5: schema-contract validation (VIB-3763, plan §D)
+# ---------------------------------------------------------------------------
+async def validate_state_schema_at_boot(settings: GatewaySettings) -> None:
+    """Refuse to start when the state backend is missing required columns.
+
+    Eager — runs in the boot phase, not at first-iteration write — so a
+    schema drift fails the supervisor restart loop immediately rather than
+    landing as a silent first-iteration accounting failure (the April 29
+    silent-failure class).
+
+    SQLite (local) is migrate-then-validate: in-code migrations are run
+    first because SQLite is SDK-owned and self-heals forward; if a
+    required column is still missing AFTER migration, the SDK build is
+    broken and the gateway refuses to start.
+
+    Postgres (hosted) is validate-only: the metrics-database repo owns
+    schema; the gateway never mutates it (CLAUDE.md). On drift, refuse
+    with a message that points to the metrics-database repo.
+    """
+    from almanak.framework.deployment import is_hosted
+    from almanak.framework.state.schema_validator import (
+        validate_postgres_schema_or_raise,
+        validate_sqlite_schema_or_raise,
+    )
+
+    if is_hosted():
+        # ``validate_deployment_invariants`` already refuses to start
+        # hosted-mode without ``database_url``; the explicit guard here
+        # is defence-in-depth for direct unit-test calls that build a
+        # ``GatewaySettings`` and skip Phase 0.
+        if settings.database_url is None or not settings.database_url.strip():
+            raise RuntimeError(
+                "Gateway startup aborted: AGENT_ID is set (hosted mode) but ALMANAK_GATEWAY_DATABASE_URL is unset."
+            )
+        await validate_postgres_schema_or_raise(settings.database_url.strip())
+        return
+
+    # Local SQLite: ensure migrations have run on the same DB the runner
+    # will write to before we introspect. Resolve via the canonical helper
+    # (VIB-3761) so this matches state_service.py's resolution exactly.
+    from almanak.framework.local_paths import local_db_path
+    from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+    db_path = str(local_db_path())
+    store = SQLiteStore(SQLiteConfig(db_path=db_path))
+    try:
+        await store.initialize()
+    finally:
+        # Release the migration connection so the validator opens its own
+        # short-lived read-only handle. Best-effort: a close failure should
+        # not mask a schema-contract violation.
+        try:
+            await store.close()
+        except Exception:
+            logger.debug("SQLiteStore.close() raised during boot validator", exc_info=True)
+
+    validate_sqlite_schema_or_raise(db_path)
 
 
 # ---------------------------------------------------------------------------

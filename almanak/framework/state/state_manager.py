@@ -32,7 +32,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,6 +49,28 @@ from .exceptions import (  # noqa: E402 (re-exported for callers)
     AccountingPersistenceError,
     AccountingWriteKind,
 )
+
+
+def _default_local_db_path_str() -> str:
+    """Resolve the local SQLite path via the canonical helper (VIB-3761).
+
+    Wrapped so the import (and the hosted-mode check inside the helper) is
+    deferred to dataclass construction rather than module load — this
+    matters because ``StateManagerConfig`` is constructed in hosted mode
+    even though its ``db_path`` is unused there. We swallow
+    :class:`LocalPathError` so a hosted-mode construction does not fail
+    just because someone touched the SQLite default; the path simply
+    isn't used in that mode.
+    """
+    from almanak.framework.local_paths import LocalPathError, local_db_path
+
+    try:
+        return str(local_db_path())
+    except LocalPathError:
+        # Hosted mode — caller will use the Postgres backend. Return a
+        # sentinel that fails loudly if accidentally used.
+        return ":hosted-mode-no-sqlite-path:"
+
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +357,7 @@ class SQLiteConfigLight:
         wal_mode: Enable WAL mode for better concurrent read performance.
     """
 
-    db_path: str = field(default_factory=lambda: os.environ.get("ALMANAK_STATE_DB") or "./almanak_state.db")
+    db_path: str = field(default_factory=lambda: _default_local_db_path_str())
     wal_mode: bool = True
 
 

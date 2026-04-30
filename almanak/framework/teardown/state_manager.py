@@ -20,7 +20,6 @@ This decoupled design allows multiple triggers:
 import asyncio
 import json
 import logging
-import os
 import random
 import sqlite3
 import time
@@ -124,40 +123,28 @@ class TeardownStateManager:
     def _resolve_db_path(db_path: str | Path | None) -> Path:
         """Resolve database path, converging runner and API on the same file.
 
-        Precedence:
-        1. Explicit ``db_path`` argument
-        2. ``ALMANAK_STATE_DB`` environment variable — the recommended way to
-           make the path explicit in production deployments
-        3. ``$XDG_DATA_HOME/almanak/almanak_state.db`` when XDG is set (Linux)
-        4. ``~/.almanak/almanak_state.db`` — stable per-user default that
-           converges regardless of cwd (runner launched from a strategy dir,
-           API launched from repo root, CLI from anywhere)
-        5. ``/tmp/almanak_state.db`` as last resort when home is not writable
+        Precedence (VIB-3761 — single source of truth):
+        1. Explicit ``db_path`` argument.
+        2. ``almanak.framework.local_paths.local_db_path()`` — the canonical
+           helper. Honours ``ALMANAK_STATE_DB``, ``ALMANAK_STRATEGY_FOLDER``,
+           ``ALMANAK_GATEWAY_DB_PATH``, falls back to the per-user utility
+           directory.
 
         **Never CWD-relative.** Runner is documented to be launched from a
         strategy directory, while API/CLI processes are often started from
-        the repo root — a CWD-relative default silently opens different SQLite
-        files per process, which breaks the approval channel entirely.
+        the repo root — a CWD-relative default silently opens different
+        SQLite files per process, which breaks the approval channel entirely
+        (April 29 silent-failure root cause).
         """
         if db_path is not None:
             return Path(db_path)
 
-        env_path = os.environ.get(_DB_PATH_ENV_VAR)
-        if env_path:
-            return Path(env_path)
+        # VIB-3761: delegate to the canonical resolver. Hosted mode raises
+        # LocalPathError; the teardown manager is local-only so we treat
+        # that as a programmer error by letting it propagate.
+        from almanak.framework.local_paths import local_db_path
 
-        xdg_data_home = os.environ.get("XDG_DATA_HOME")
-        if xdg_data_home:
-            candidate = Path(xdg_data_home) / "almanak" / "almanak_state.db"
-        else:
-            candidate = Path.home() / ".almanak" / "almanak_state.db"
-
-        try:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            candidate.touch(exist_ok=True)
-            return candidate
-        except OSError:
-            return Path("/tmp/almanak_state.db")
+        return local_db_path()
 
     def _init_db(self) -> None:
         """Initialize the database schema."""

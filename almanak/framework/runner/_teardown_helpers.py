@@ -162,7 +162,14 @@ def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tu
     filesystem path; otherwise fall through to the adapter's default
     resolution (which honours ``ALMANAK_STATE_DB``). Returns the pair
     ``(teardown_manager, teardown_state_adapter)``.
+
+    VIB-3773: builds a :class:`TeardownRunnerHelpers` bag and threads it
+    into the manager so per-intent commit + pre/post snapshot bracket
+    fire on the runner's full accounting pipeline. Without this, the
+    teardown lane bypasses every accounting writer (the original April-29
+    silent-failure class).
     """
+    from ..teardown.runner_helpers import build_runner_helpers
     from ..teardown.state_manager import TeardownStateAdapter
     from ..teardown.teardown_manager import TeardownManager
 
@@ -174,6 +181,7 @@ def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tu
         compiler=compiler,
         alert_manager=runner.alert_manager,
         state_manager=teardown_state_adapter,
+        runner_helpers=build_runner_helpers(runner),
     )
     return teardown_mgr, teardown_state_adapter
 

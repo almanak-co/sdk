@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -215,8 +214,15 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 database_url=self.settings.database_url,
             )
         else:
+            # VIB-3761: route through the canonical local-path helper so
+            # every site that resolves the SQLite DB agrees. The
+            # cwd-relative ``./almanak_state.db`` default is removed —
+            # ALMANAK_STATE_DB / ALMANAK_STRATEGY_FOLDER / ALMANAK_GATEWAY_DB_PATH
+            # / utility default per ``almanak.framework.local_paths``.
+            from almanak.framework.local_paths import local_db_path
+
             backend_type = WarmBackendType.SQLITE
-            db_path = os.environ.get("ALMANAK_STATE_DB", "./almanak_state.db")
+            db_path = str(local_db_path())
             config = StateManagerConfig(
                 warm_backend=backend_type,
                 sqlite_config=SQLiteConfigLight(db_path=db_path),

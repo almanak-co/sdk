@@ -2020,7 +2020,9 @@ class IntentCompiler:
         # No gateway client configured — only allowed in local dev.
         # In managed deployments the deployer always injects a gateway client;
         # this guard catches misconfiguration.
-        if os.environ.get("AGENT_ID"):
+        from almanak.framework.deployment import is_hosted
+
+        if is_hosted():
             raise RuntimeError(
                 "Enso route request failed: no gateway client configured. "
                 "In deployed mode, all Enso API calls must go through the gateway."
