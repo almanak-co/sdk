@@ -838,6 +838,11 @@ class AerodromeAdapter:
         amount_b: Decimal,
         slippage_bps: int | None = None,
         recipient: str | None = None,
+        *,
+        amount_a_wei: int | None = None,
+        amount_b_wei: int | None = None,
+        amount_a_min_wei: int | None = None,
+        amount_b_min_wei: int | None = None,
     ) -> CLLiquidityResult:
         """Build Slipstream CL add liquidity transactions.
 
@@ -850,10 +855,26 @@ class AerodromeAdapter:
             tick_spacing: Pool tick spacing
             tick_lower: Lower tick bound (must be multiple of tick_spacing)
             tick_upper: Upper tick bound (must be multiple of tick_spacing)
-            amount_a: Desired amount of token_a (in token units)
-            amount_b: Desired amount of token_b (in token units)
-            slippage_bps: Slippage tolerance in basis points (unused for LP, kept for API compat)
+            amount_a: Desired amount of token_a (in token units). The wei
+                conversion uses this value ONLY when the wei-overload kwargs
+                are NOT supplied; in the wei-overload path this value is
+                unused, but the parameter remains required by the type
+                signature — pass ``Decimal(0)`` if you have no Decimal value.
+            amount_b: See ``amount_a``.
+            slippage_bps: Slippage tolerance in basis points. Used for the
+                fallback mins formula only when ``amount_*_min_wei`` are not
+                supplied. Defaults to ``config.default_slippage_bps``.
             recipient: Address to receive the NFT position (default: wallet_address)
+            amount_a_wei: Already-converted token_a amount in wei. Wei-overload
+                path skips Decimal→wei conversion. Must be paired with
+                ``amount_b_wei``, ``amount_a_min_wei`` and ``amount_b_min_wei``.
+            amount_b_wei: See ``amount_a_wei``.
+            amount_a_min_wei: Pre-computed minimum token_a amount in wei.
+                Bypasses the broken raw-amount × (1 - slippage) formula. Used
+                by the IntentCompiler after slot0 recomputation so that mins
+                are derived from pool-aligned amounts, not the oracle inputs.
+                Must be paired with the other three wei overload kwargs.
+            amount_b_min_wei: See ``amount_a_min_wei``.
 
         Returns:
             CLLiquidityResult with transaction data
@@ -872,25 +893,80 @@ class AerodromeAdapter:
             token_a_address = self._resolve_token(token_a)
             token_b_address = self._resolve_token(token_b)
 
-            # Get token decimals
-            token_a_decimals = self._get_token_decimals(token_a)
-            token_b_decimals = self._get_token_decimals(token_b)
+            # Resolve wei amounts and (optional) overridden mins. Use direct
+            # is-not-None checks rather than a tuple-of-bools so mypy narrows
+            # int | None to int inside the wei-overload branch.
+            amount_a_wei_resolved: int
+            amount_b_wei_resolved: int
+            a_min_override: int | None
+            b_min_override: int | None
+            if (
+                amount_a_wei is not None
+                and amount_b_wei is not None
+                and amount_a_min_wei is not None
+                and amount_b_min_wei is not None
+            ):
+                # Money-critical path: validate the wei-overload invariants
+                # before they reach mint calldata. A negative wei value or
+                # min > desired produces malformed calldata or a guaranteed
+                # on-chain revert; fail-fast at compile time so the operator
+                # gets a clear error instead of a wasted gas + tx revert.
+                if amount_a_wei < 0 or amount_b_wei < 0 or amount_a_min_wei < 0 or amount_b_min_wei < 0:
+                    return CLLiquidityResult(
+                        success=False,
+                        error="Wei-overload amounts/mins must be non-negative.",
+                    )
+                if amount_a_min_wei > amount_a_wei or amount_b_min_wei > amount_b_wei:
+                    return CLLiquidityResult(
+                        success=False,
+                        error=(
+                            "Wei-overload mins must be <= desired amounts "
+                            f"(got amount_a={amount_a_wei}/min={amount_a_min_wei}, "
+                            f"amount_b={amount_b_wei}/min={amount_b_min_wei})."
+                        ),
+                    )
+                use_wei_overload = True
+                amount_a_wei_resolved = amount_a_wei
+                amount_b_wei_resolved = amount_b_wei
+                a_min_override = amount_a_min_wei
+                b_min_override = amount_b_min_wei
+            elif (
+                amount_a_wei is None and amount_b_wei is None and amount_a_min_wei is None and amount_b_min_wei is None
+            ):
+                use_wei_overload = False
+                a_min_override = None
+                b_min_override = None
+                # Get token decimals
+                token_a_decimals = self._get_token_decimals(token_a)
+                token_b_decimals = self._get_token_decimals(token_b)
 
-            # Convert amounts to wei
-            amount_a_wei = int(amount_a * Decimal(10**token_a_decimals))
-            amount_b_wei = int(amount_b * Decimal(10**token_b_decimals))
+                # Convert amounts to wei
+                amount_a_wei_resolved = int(amount_a * Decimal(10**token_a_decimals))
+                amount_b_wei_resolved = int(amount_b * Decimal(10**token_b_decimals))
+            else:
+                return CLLiquidityResult(
+                    success=False,
+                    error=(
+                        "Wei-overload requires all of amount_a_wei, amount_b_wei, "
+                        "amount_a_min_wei, amount_b_min_wei to be provided together."
+                    ),
+                )
 
             # Sort tokens: Slipstream (V3-style) requires token0 < token1 by address
             if token_a_address.lower() <= token_b_address.lower():
                 token0_address = token_a_address
                 token1_address = token_b_address
-                amount0_desired = amount_a_wei
-                amount1_desired = amount_b_wei
+                amount0_desired = amount_a_wei_resolved
+                amount1_desired = amount_b_wei_resolved
+                amount0_min_override = a_min_override
+                amount1_min_override = b_min_override
             else:
                 token0_address = token_b_address
                 token1_address = token_a_address
-                amount0_desired = amount_b_wei
-                amount1_desired = amount_a_wei
+                amount0_desired = amount_b_wei_resolved
+                amount1_desired = amount_a_wei_resolved
+                amount0_min_override = b_min_override
+                amount1_min_override = a_min_override
 
             cl_nft_address = self.addresses["cl_nft"]
 
@@ -915,8 +991,16 @@ class AerodromeAdapter:
 
             # Build mint transaction.
             # amount0_min / amount1_min protect against price movement between compile and execution.
-            amount0_min = int(amount0_desired * (10000 - slippage_bps) // 10000)
-            amount1_min = int(amount1_desired * (10000 - slippage_bps) // 10000)
+            # When the caller supplies pool-aligned mins (e.g. compiler post slot0 recomputation),
+            # use them as-is; otherwise fall back to the legacy basis-points formula.
+            amount0_min: int
+            amount1_min: int
+            if use_wei_overload and amount0_min_override is not None and amount1_min_override is not None:
+                amount0_min = amount0_min_override
+                amount1_min = amount1_min_override
+            else:
+                amount0_min = int(amount0_desired * (10000 - slippage_bps) // 10000)
+                amount1_min = int(amount1_desired * (10000 - slippage_bps) // 10000)
             mint_tx_dict = self.sdk.build_cl_mint_tx(
                 token0=token0_address,
                 token1=token1_address,

@@ -799,6 +799,36 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
                 intent_id=intent.intent_id,
             )
 
+        # Convert oracle-derived amounts to wei. Token order is canonical here
+        # (token0 < token1 enforced above), so amount0 corresponds to token0.
+        amount0_desired = int(intent.amount0 * Decimal(10**token0_info.decimals))
+        amount1_desired = int(intent.amount1 * Decimal(10**token1_info.decimals))
+
+        # Align desired amounts to the pool's current sqrtPriceX96 (slot0).
+        # Slipstream pools are V3-shaped, so the V3 recompute helper applies
+        # directly. Without this, oracle/pool price divergence causes the
+        # NonfungiblePositionManager to revert with "Price slippage check"
+        # because the actual amounts taken by the pool fall below the mins.
+        recomputed_or_fail = compiler._maybe_recompute_lp_amounts_from_slot0(
+            pool_check=pool_check,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            amount0_desired=amount0_desired,
+            amount1_desired=amount1_desired,
+            intent_id=intent.intent_id,
+        )
+        if isinstance(recomputed_or_fail, CompilationResult):
+            return recomputed_or_fail
+        amount0_desired, amount1_desired = recomputed_or_fail
+
+        # LP slippage-based minimums computed from POOL-ALIGNED amounts, not
+        # oracle inputs. Matches the V3 path (compiler.py:_compile_lp_open_v3_body).
+        amount0_min, amount1_min = compiler._compute_lp_slippage_mins(
+            intent=intent,
+            amount0_desired=amount0_desired,
+            amount1_desired=amount1_desired,
+        )
+
         # Create Aerodrome adapter
         config = AerodromeConfig(
             chain=compiler.chain,
@@ -809,7 +839,9 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         )
         adapter = AerodromeAdapter(config)
 
-        # Build CL mint transactions
+        # Build CL mint transactions. Pass corrected wei amounts and pre-computed
+        # mins via the wei-overload kwargs so the adapter does NOT re-derive
+        # mins from raw (uncorrected) amounts.
         cl_result = adapter.add_cl_liquidity(
             token_a=token0_symbol,
             token_b=token1_symbol,
@@ -819,6 +851,10 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             amount_a=intent.amount0,
             amount_b=intent.amount1,
             recipient=compiler.wallet_address,
+            amount_a_wei=amount0_desired,
+            amount_b_wei=amount1_desired,
+            amount_a_min_wei=amount0_min,
+            amount_b_min_wei=amount1_min,
         )
 
         if not cl_result.success:
@@ -845,6 +881,14 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
                 "tick_upper": tick_upper,
                 "amount0": str(intent.amount0),
                 "amount1": str(intent.amount1),
+                # Wei-denominated post-recompute values, matching the V3 metadata
+                # shape. Required by orchestrator._preflight_lp_open_requirements
+                # which reads amount0_desired/amount1_desired (in wei) to validate
+                # wallet balance before submission.
+                "amount0_desired": str(amount0_desired),
+                "amount1_desired": str(amount1_desired),
+                "amount0_min": str(amount0_min),
+                "amount1_min": str(amount1_min),
                 "protocol": "aerodrome_slipstream",
                 "token_id": None,
                 "nft_manager": cl_nft,

@@ -1133,6 +1133,107 @@ class TestCompileLPOpenSlot0Recompute:
         assert result.action_bundle.metadata["amount1_desired"] == "200"
 
 
+class TestCompileLPOpenSlipstreamSlot0Recompute:
+    """VIB-3737 regression: Aerodrome Slipstream LP_OPEN must align desired
+    amounts to the pool's slot0 sqrtPriceX96 and derive the on-chain mins
+    from those pool-aligned amounts (NOT the raw oracle inputs).
+
+    Before this fix, the slipstream compile path bypassed the V3 slot0
+    recompute helper and the adapter then rebuilt mins from the raw amounts
+    using a flat basis-points formula, causing on-chain "Price slippage check"
+    reverts whenever the oracle ratio diverged from the pool ratio.
+    """
+
+    @patch("almanak.framework.connectors.aerodrome.AerodromeAdapter")
+    @patch("almanak.framework.intents.pool_validation.fetch_v3_pool_sqrt_price_x96")
+    @patch("almanak.framework.intents.pool_validation.validate_aerodrome_cl_pool")
+    def test_slot0_recompute_flows_into_adapter_and_metadata(
+        self,
+        mock_validate_cl: MagicMock,
+        mock_fetch_slot0: MagicMock,
+        mock_adapter_cls: MagicMock,
+    ) -> None:
+        """Recomputed amounts (sentinel 100, 200) must reach the adapter call
+        AND the action-bundle metadata; mins must be derived from those
+        sentinels, not from intent.amount0 / intent.amount1.
+        """
+
+        mock_validate_cl.return_value = _mock_pool_validation_ok(
+            pool_address="0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
+        )
+        # Plausible sqrtPriceX96 (~1:1); recompute_lp_amounts is mocked out so
+        # the actual value doesn't drive arithmetic, only branch entry.
+        mock_fetch_slot0.return_value = (int(2**96), 0)
+
+        adapter_instance = MagicMock(name="AerodromeAdapterInstance")
+        cl_result = MagicMock(name="CLLiquidityResult")
+        cl_result.success = True
+        # One mint tx is enough to satisfy the action-bundle assembly.
+        mint_tx = MagicMock(name="mint-tx")
+        mint_tx.gas_estimate = 500_000
+        mint_tx.tx_type = "add_liquidity"
+        mint_tx.to_dict.return_value = {"type": "add_liquidity"}
+        cl_result.transactions = [mint_tx]
+        adapter_instance.add_cl_liquidity.return_value = cl_result
+        mock_adapter_cls.return_value = adapter_instance
+
+        compiler = _make_compiler(chain="base")
+
+        with (
+            patch.object(compiler, "_resolve_token", side_effect=lambda sym: {"USDC": _USDC, "WETH": _WETH}[sym]),
+            patch(
+                "almanak.framework.intents.lp_math.recompute_lp_amounts",
+                return_value=(100, 200),
+            ) as mock_recompute,
+        ):
+            intent = _make_lp_intent(
+                pool="USDC/WETH/200",
+                amount0=Decimal("1"),  # 1 USDC
+                amount1=Decimal("0.0005"),  # 0.0005 WETH
+                # Tick bounds aligned to tick_spacing=200, lower < upper.
+                range_lower=Decimal("-200"),
+                range_upper=Decimal("200"),
+                protocol="aerodrome_slipstream",
+            )
+            result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+
+        mock_fetch_slot0.assert_called_once()
+        mock_recompute.assert_called_once()
+
+        # The recomputed sentinels (100, 200) must flow into the adapter call
+        # via the wei-overload kwargs, not the raw Decimal amount_a / amount_b.
+        adapter_instance.add_cl_liquidity.assert_called_once()
+        kwargs = adapter_instance.add_cl_liquidity.call_args.kwargs
+        assert kwargs["amount_a_wei"] == 100, "Pool-aligned amount0 must reach adapter as amount_a_wei"
+        assert kwargs["amount_b_wei"] == 200, "Pool-aligned amount1 must reach adapter as amount_b_wei"
+
+        # Mins must be derived from the POST-RECOMPUTE amounts (100, 200), NOT
+        # from the raw intent.amount0 / intent.amount1 (1 USDC = 1_000_000 wei,
+        # 0.0005 WETH = 5e14 wei). This is the heart of the VIB-3737 fix.
+        assert kwargs["amount_a_min_wei"] is not None
+        assert kwargs["amount_b_min_wei"] is not None
+        assert kwargs["amount_a_min_wei"] <= 100, (
+            f"amount_a_min_wei={kwargs['amount_a_min_wei']} exceeds the post-recompute "
+            "amount0=100 — mins were derived from raw amounts, regression of VIB-3737"
+        )
+        assert kwargs["amount_b_min_wei"] <= 200, (
+            f"amount_b_min_wei={kwargs['amount_b_min_wei']} exceeds the post-recompute "
+            "amount1=200 — mins were derived from raw amounts, regression of VIB-3737"
+        )
+
+        # Metadata must expose the pool-aligned wei amounts (and mins) so the
+        # orchestrator's _preflight_lp_open_requirements balance check can find
+        # amount0_desired / amount1_desired (matching V3 metadata shape).
+        metadata = result.action_bundle.metadata
+        assert metadata["amount0_desired"] == "100"
+        assert metadata["amount1_desired"] == "200"
+        assert metadata["amount0_min"] == str(kwargs["amount_a_min_wei"])
+        assert metadata["amount1_min"] == str(kwargs["amount_b_min_wei"])
+        assert metadata["protocol"] == "aerodrome_slipstream"
+
+
 class TestCompileLPOpenTickSpacing:
     """Tick alignment uses the correct spacing per fee tier."""
 
