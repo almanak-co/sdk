@@ -490,6 +490,76 @@ EventCallback = Callable[[ExecutionEventType, dict[str, Any]], None]
 # =============================================================================
 
 
+# Lending protocols whose metadata encodes amounts already in wei. Every other
+# lending protocol (morpho, morpho_blue, compound_v3, curvance, ...) ships
+# human-readable amounts in metadata that must be multiplied by 10**decimals
+# to compare against on-chain ``balanceOf`` values. This set is the single
+# source of truth used by both the description formatter and the pre-flight
+# balance checker — keep them in sync. (VIB-3747)
+_WEI_LENDING_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "spark", "radiant_v2"})
+
+# SWAP compilers that ship the input amount as a human-readable Decimal in
+# metadata (``"amount_in": str(amount_decimal)``) instead of the wei-encoded
+# default. Curve and Aerodrome diverged from the wei convention used by every
+# other SWAP compiler (Uniswap V3, Enso, LiFi, Pendle, SushiSwap V3, ...).
+# Adding a new SWAP protocol that uses human Decimals? Add it here AND match
+# the wider pattern in ``compiler_*.py`` — both sites must agree or the
+# description will mis-render. (VIB-3747)
+_HUMAN_AMOUNT_SWAP_PROTOCOLS: frozenset[str] = frozenset({"curve", "aerodrome"})
+
+
+def _normalize_protocol_key(protocol: Any) -> str:
+    """Normalise a protocol identifier to its canonical lowercase-snake key.
+
+    Compiler ``protocol`` metadata values use canonical lowercase keys
+    (``"aave_v3"``, ``"morpho_blue"``, ``"uniswap_v3"``), but legacy /
+    hand-built bundles and dashboard surfaces may carry display-name
+    variants (``"Aave V3"``, ``"AAVE_V3"``, ``"morpho-blue"``). To keep
+    the description formatter and the pre-flight balance checker from
+    drifting on those variants, normalise both at the same boundary:
+
+    - lowercase
+    - strip surrounding whitespace
+    - convert spaces and hyphens to underscores
+
+    Returns ``""`` for non-string inputs so callers can short-circuit
+    without raising on malformed metadata. (VIB-3747)
+    """
+    if not isinstance(protocol, str):
+        return ""
+    return protocol.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _lending_amount_is_wei(protocol: Any) -> bool:
+    """Whether the lending metadata for ``protocol`` is wei-encoded.
+
+    Mirrors the normalisation done at the pre-flight collector
+    boundary (``_preflight_collect_requirements`` -> protocol passed
+    through ``_normalize_protocol_key``) so the description path can
+    never silently disagree with the balance-check path on the wei /
+    human classification, regardless of caller casing or formatting.
+    """
+    return _normalize_protocol_key(protocol) in _WEI_LENDING_PROTOCOLS
+
+
+def _swap_amount_is_wei(protocol: Any) -> bool:
+    """Whether the SWAP metadata for ``protocol`` is wei-encoded.
+
+    Same normalisation contract as ``_lending_amount_is_wei``. The
+    default is ``True`` (wei) when the protocol is missing / unrecognised
+    -- only Curve and Aerodrome diverged from the wei convention; every
+    other SWAP compiler (Uniswap V3, Enso, LiFi, Pendle, SushiSwap V3,
+    ...) ships wei.
+    """
+    key = _normalize_protocol_key(protocol)
+    if not key:
+        # Default to wei when protocol is missing/None: matches the
+        # legacy code path that always tried to scale large amounts by
+        # 10**decimals when ``token_data`` was present.
+        return True
+    return key not in _HUMAN_AMOUNT_SWAP_PROTOCOLS
+
+
 def _get_token_symbol(token_data: Any) -> str:
     """Extract token symbol from various formats."""
     if isinstance(token_data, dict):
@@ -507,12 +577,33 @@ def _get_token_decimals(token_data: Any) -> int:
     return 18  # Default to 18 decimals (ETH standard)
 
 
-def _format_amount(amount: Any, token_data: Any = None) -> str:
-    """Format amount for display, converting from wei if needed.
+def _format_amount(amount: Any, token_data: Any = None, *, is_wei: bool = True) -> str:
+    """Format amount for display, converting from wei to human units.
+
+    VIB-3747: previously this used a magnitude-based heuristic
+    (``amount > 1_000_000_000``) to decide whether to scale by
+    ``10**decimals``. That broke for 6-decimal tokens (USDC/USDT/USDC.e)
+    at small dollar values: ``$100 USDC = 100_000_000`` raw is below the
+    1e9 threshold, so the formatter printed ``100,000,000 USDC`` instead
+    of ``100 USDC``. The misleading log was reported as a fictitious
+    ``1e6`` amount-inflation bug. The fix is to honour an explicit
+    ``is_wei`` flag from the caller (the ``_describe_*`` helpers know the
+    metadata convention for their domain — SWAP/LP are always wei,
+    lending depends on protocol) instead of guessing.
 
     Args:
-        amount: Raw amount (possibly in wei)
-        token_data: Token dict containing decimals info
+        amount: Raw amount. When ``is_wei=True`` (the default) this is
+            interpreted as base-units (wei) and divided by ``10**decimals``
+            from ``token_data`` before formatting. When ``is_wei=False``
+            the value is treated as already-human and printed verbatim.
+        token_data: Token dict containing ``decimals`` info. Required when
+            ``is_wei=True`` and the value would be scaled. If missing or
+            malformed, defaults to 18 decimals (the ETH-family default,
+            same as ``_get_token_decimals``).
+        is_wei: Whether ``amount`` is encoded in wei (default True).
+            Pass False for protocols that ship human-readable amounts in
+            metadata (e.g. ``morpho_blue``, ``compound_v3``, ``curvance``).
+            See ``_WEI_LENDING_PROTOCOLS`` for the canonical list.
     """
     if not amount:
         return ""
@@ -522,8 +613,11 @@ def _format_amount(amount: Any, token_data: Any = None) -> str:
         if isinstance(amount, int | float | Decimal):
             amount = Decimal(str(amount))
 
-            # If amount is very large (likely wei), convert using decimals
-            if amount > 1_000_000_000 and token_data:
+            # Wei-encoded values are always scaled by ``10**decimals``;
+            # human-readable values are printed as-is. Avoid the previous
+            # magnitude heuristic — it under-scaled 6-decimal tokens at
+            # small dollar amounts (the $100 USDC = 100_000_000 case).
+            if is_wei and token_data:
                 decimals = _get_token_decimals(token_data)
                 amount = amount / Decimal(10**decimals)
 
@@ -551,11 +645,14 @@ def _describe_swap(metadata: dict[str, Any], protocol: str) -> str:
     to_token_data = metadata.get("to_token", {})
     from_token = _get_token_symbol(from_token_data)
     to_token = _get_token_symbol(to_token_data)
-    # ``amount_in`` is the canonical key emitted by the SWAP compiler
-    # (``almanak/framework/intents/compiler.py``); ``from_amount`` and ``amount``
-    # are kept for legacy / manually-constructed bundles.
+    # ``amount_in`` is the canonical key emitted by the SWAP compilers
+    # (``almanak/framework/intents/compiler*.py``); ``from_amount`` and
+    # ``amount`` are legacy aliases kept for manually-constructed bundles.
+    # Most SWAP compilers store wei (``str(amount_in)``); Curve and
+    # Aerodrome diverged and ship human Decimals (``str(amount_decimal)``).
+    # See ``_HUMAN_AMOUNT_SWAP_PROTOCOLS`` for the canonical list.
     raw_amount = metadata.get("amount_in", metadata.get("from_amount", metadata.get("amount", "")))
-    amount = _format_amount(raw_amount, from_token_data)
+    amount = _format_amount(raw_amount, from_token_data, is_wei=_swap_amount_is_wei(protocol))
 
     if amount and from_token and to_token:
         desc = f"Swap {amount} {from_token} \u2192 {to_token}"
@@ -569,7 +666,17 @@ def _describe_swap(metadata: dict[str, Any], protocol: str) -> str:
 def _describe_supply(metadata: dict[str, Any], protocol: str) -> str:
     supply_token_data = metadata.get("supply_token", {})
     supply_token = _get_token_symbol(supply_token_data)
-    amount = _format_amount(metadata.get("supply_amount", ""), supply_token_data)
+    # Lending metadata encoding splits by protocol family — keep the
+    # description formatter aligned with ``_preflight_supply_requirements``
+    # so a $100 USDC supply on Aave V3 prints "100 USDC" (wei) and on
+    # Morpho Blue prints "100 USDC" (already human). Drift between these
+    # two sites is what surfaced as the VIB-3747 cosmetic regression;
+    # ``_lending_amount_is_wei`` mirrors the lowercase normalisation done
+    # by ``_preflight_collect_requirements`` so display-cased protocol
+    # strings ("Aave V3") can't reintroduce the drift.
+    amount = _format_amount(
+        metadata.get("supply_amount", ""), supply_token_data, is_wei=_lending_amount_is_wei(protocol)
+    )
 
     if amount and supply_token:
         desc = f"Supply {amount} {supply_token} as collateral"
@@ -585,7 +692,9 @@ def _describe_borrow(metadata: dict[str, Any], protocol: str) -> str:
     collateral_token_data = metadata.get("collateral_token", {})
     borrow_token = _get_token_symbol(borrow_token_data)
     collateral_token = _get_token_symbol(collateral_token_data)
-    borrow_amount = _format_amount(metadata.get("borrow_amount", ""), borrow_token_data)
+    borrow_amount = _format_amount(
+        metadata.get("borrow_amount", ""), borrow_token_data, is_wei=_lending_amount_is_wei(protocol)
+    )
 
     if borrow_amount and borrow_token:
         desc = f"Borrow {borrow_amount} {borrow_token}"
@@ -601,7 +710,7 @@ def _describe_borrow(metadata: dict[str, Any], protocol: str) -> str:
 def _describe_repay(metadata: dict[str, Any], protocol: str) -> str:
     repay_token_data = metadata.get("repay_token", {})
     repay_token = _get_token_symbol(repay_token_data)
-    amount = _format_amount(metadata.get("repay_amount", ""), repay_token_data)
+    amount = _format_amount(metadata.get("repay_amount", ""), repay_token_data, is_wei=_lending_amount_is_wei(protocol))
 
     if amount and repay_token:
         desc = f"Repay {amount} {repay_token}"
@@ -615,7 +724,9 @@ def _describe_repay(metadata: dict[str, Any], protocol: str) -> str:
 def _describe_withdraw(metadata: dict[str, Any], protocol: str) -> str:
     withdraw_token_data = metadata.get("withdraw_token", {})
     withdraw_token = _get_token_symbol(withdraw_token_data)
-    amount = _format_amount(metadata.get("withdraw_amount", ""), withdraw_token_data)
+    amount = _format_amount(
+        metadata.get("withdraw_amount", ""), withdraw_token_data, is_wei=_lending_amount_is_wei(protocol)
+    )
 
     if amount and withdraw_token:
         desc = f"Withdraw {amount} {withdraw_token}"
@@ -659,7 +770,12 @@ def _describe_perp_open(metadata: dict[str, Any], protocol: str) -> str:
     leverage = metadata.get("leverage", "")
     collateral_token_data = metadata.get("collateral_token", {})
     collateral_token = _get_token_symbol(collateral_token_data)
-    collateral_amount = _format_amount(metadata.get("collateral_amount", ""), collateral_token_data)
+    # PERP_OPEN metadata stores ``str(intent.collateral_amount)`` — the
+    # human-readable Decimal from the user-facing intent (see
+    # ``IntentCompiler._compile_perp_open`` and ``DriftAdapter``). Wei
+    # conversion happens internally before contract calls but is never
+    # exposed in metadata.
+    collateral_amount = _format_amount(metadata.get("collateral_amount", ""), collateral_token_data, is_wei=False)
 
     if collateral_amount and collateral_token:
         desc = f"Open {direction}: {collateral_amount} {collateral_token}"
@@ -681,7 +797,9 @@ def _describe_perp_close(metadata: dict[str, Any], protocol: str) -> str:
 def _describe_bridge(metadata: dict[str, Any], protocol: str, chain: str) -> str:
     token_data = metadata.get("token", {})
     token = _get_token_symbol(token_data)
-    amount = _format_amount(metadata.get("amount", ""), token_data)
+    # Bridge metadata stores amounts as already-human Decimal strings
+    # (see ``IntentCompiler._compile_bridge``: ``"amount": str(amount_decimal)``).
+    amount = _format_amount(metadata.get("amount", ""), token_data, is_wei=False)
     from_chain = metadata.get("from_chain", "")
     to_chain = metadata.get("to_chain", chain)
 
@@ -749,11 +867,9 @@ def _generate_intent_description(action_bundle: "ActionBundle") -> str:
 # =============================================================================
 
 
-# Lending protocols whose metadata encodes amounts already in wei.  Every other
-# protocol (morpho, morpho_blue, compound_v3, ...) ships human-readable amounts
-# that must be multiplied by 10**decimals before comparing against on-chain
-# ``balanceOf``.
-_WEI_LENDING_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "spark", "radiant_v2"})
+# ``_WEI_LENDING_PROTOCOLS`` is declared near the top of the file (next to
+# the description formatter) so it's available to both pre-flight and
+# description code paths. Same metadata-encoding rule applies here.
 
 # ``balanceOf(address)`` function selector (first 4 bytes of keccak256).
 _ERC20_BALANCE_OF_SELECTOR: bytes = bytes.fromhex("70a08231")
@@ -823,7 +939,7 @@ def _preflight_requirement_from(
     )
 
 
-def _preflight_swap_requirements(metadata: dict, _protocol: str) -> list[_Requirement]:
+def _preflight_swap_requirements(metadata: dict, protocol: str) -> list[_Requirement]:
     """Collect SWAP intent requirements.
 
     For multi-step bundles (e.g. Pendle pre-swap routing) the
@@ -831,10 +947,17 @@ def _preflight_swap_requirements(metadata: dict, _protocol: str) -> list[_Requir
     won't exist in the wallet until the pre-swap tx has run.  When present,
     ``original_from_token``/``original_amount_in`` pin the token the wallet
     actually holds today and must win (VIB-2533).
+
+    VIB-3747: Curve and Aerodrome SWAP compilers ship ``amount_in`` as a
+    human-readable Decimal (``str(amount_decimal)``) instead of wei. The
+    description formatter and pre-flight check must agree on the
+    encoding -- otherwise a Curve $100 USDC swap would skip the balance
+    check entirely (100 raw treated as 100 wei = 1e-16 USDC, always
+    passes). ``_swap_amount_is_wei`` mirrors the description path.
     """
     swap_token = metadata.get("original_from_token") or metadata.get("from_token", {})
     swap_amount = metadata.get("original_amount_in") or metadata.get("amount_in")
-    req = _preflight_requirement_from(swap_token, swap_amount)
+    req = _preflight_requirement_from(swap_token, swap_amount, is_wei=_swap_amount_is_wei(protocol))
     return [req] if req is not None else []
 
 
@@ -854,11 +977,10 @@ def _preflight_lp_open_requirements(metadata: dict, _protocol: str) -> list[_Req
 
 def _preflight_supply_requirements(metadata: dict, protocol: str) -> list[_Requirement]:
     """Collect SUPPLY intent requirements."""
-    is_wei = protocol in _WEI_LENDING_PROTOCOLS
     req = _preflight_requirement_from(
         metadata.get("supply_token", {}),
         metadata.get("supply_amount"),
-        is_wei=is_wei,
+        is_wei=_lending_amount_is_wei(protocol),
     )
     return [req] if req is not None else []
 
@@ -871,22 +993,20 @@ def _preflight_repay_requirements(metadata: dict, protocol: str) -> list[_Requir
     """
     if metadata.get("repay_full"):
         return []
-    is_wei = protocol in _WEI_LENDING_PROTOCOLS
     req = _preflight_requirement_from(
         metadata.get("repay_token", {}),
         metadata.get("repay_amount"),
-        is_wei=is_wei,
+        is_wei=_lending_amount_is_wei(protocol),
     )
     return [req] if req is not None else []
 
 
 def _preflight_borrow_requirements(metadata: dict, protocol: str) -> list[_Requirement]:
     """Collect BORROW intent requirements (collateral token balance)."""
-    is_wei = protocol in _WEI_LENDING_PROTOCOLS
     req = _preflight_requirement_from(
         metadata.get("collateral_token", {}),
         metadata.get("collateral_amount"),
-        is_wei=is_wei,
+        is_wei=_lending_amount_is_wei(protocol),
     )
     return [req] if req is not None else []
 
@@ -912,7 +1032,11 @@ def _preflight_collect_requirements(action_bundle: ActionBundle) -> list[_Requir
     """
     metadata = action_bundle.metadata or {}
     intent_type = (action_bundle.intent_type or "").upper()
-    protocol = (metadata.get("protocol") or "").lower()
+    # Normalise via the same helper used by ``_lending_amount_is_wei`` /
+    # ``_swap_amount_is_wei`` so a display-name variant (``"Aave V3"``,
+    # ``"morpho-blue"``) classifies the same way in the balance check
+    # as it does in the description formatter. (VIB-3747)
+    protocol = _normalize_protocol_key(metadata.get("protocol"))
 
     collector = _PREFLIGHT_COLLECTORS.get(intent_type)
     if collector is None:
