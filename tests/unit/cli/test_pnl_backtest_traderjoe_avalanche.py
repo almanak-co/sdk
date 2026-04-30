@@ -18,6 +18,14 @@ from decimal import Decimal
 import pytest
 from click.testing import CliRunner
 
+# Importing the strategy module triggers the @almanak_strategy decorator
+# and registers ``demo_traderjoe_pnl_lp`` in STRATEGY_REGISTRY. Without
+# this side-effect import the registry stays empty for this strategy
+# (``almanak/demo_strategies/`` is NOT auto-discovered the way
+# ``./strategies/`` is — see ``framework/strategies/_auto_discover_strategies``).
+from almanak.demo_strategies.traderjoe_pnl_lp.strategy import (  # noqa: F401
+    TraderJoePnLLPStrategy,
+)
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.cli.backtest import backtest
 from almanak.framework.strategies import get_strategy, list_strategies

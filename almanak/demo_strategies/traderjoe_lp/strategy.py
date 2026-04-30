@@ -144,6 +144,7 @@ from almanak.framework.connectors.traderjoe_v2 import BIN_ID_OFFSET
 
 # Logging utilities for user-friendly output
 from almanak.framework.utils.log_formatters import format_token_amount_human
+from almanak.framework.utils.persistence import safe_int_list
 
 # Logger for debugging and monitoring
 logger = logging.getLogger(__name__)
@@ -514,8 +515,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         if callable(parent_load_state):
             parent_load_state(state)
 
-        raw_bin_ids = state.get("position_bin_ids", []) if state else []
-        self._position_bin_ids = [int(bin_id) for bin_id in raw_bin_ids]
+        # safe_int_list: drop malformed entries with a warning rather
+        # than aborting load_persistent_state on bad data (VIB-3757).
+        self._position_bin_ids = safe_int_list(
+            state.get("position_bin_ids") if state else None,
+            name="position_bin_ids",
+        )
         if self._position_bin_ids:
             logger.info("Restored TraderJoe LP bin_ids from state: %s...", self._position_bin_ids[:3])
 

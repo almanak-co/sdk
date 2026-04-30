@@ -33,6 +33,7 @@ from typing import Any
 
 from almanak.framework.intents import Intent
 from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+from almanak.framework.utils.persistence import safe_int_list
 
 logger = logging.getLogger(__name__)
 
@@ -242,8 +243,14 @@ class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
         parent_load_state = getattr(super(), "load_persistent_state", None)
         if callable(parent_load_state):
             parent_load_state(state)
-        raw_bin_ids = state.get("position_bin_ids", []) if state else []
-        self._position_bin_ids = [int(b) for b in raw_bin_ids]
+        # Use ``safe_int_list`` so a malformed entry in persisted state
+        # logs a warning and is dropped, rather than aborting the entire
+        # ``load_persistent_state`` call and blocking strategy recovery
+        # at boot. (VIB-3757.)
+        self._position_bin_ids = safe_int_list(
+            state.get("position_bin_ids") if state else None,
+            name="position_bin_ids",
+        )
         if self._position_bin_ids:
             logger.info("Restored TraderJoe LP bin_ids from state: %s...", self._position_bin_ids[:3])
 

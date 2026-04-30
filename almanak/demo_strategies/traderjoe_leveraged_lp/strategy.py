@@ -46,6 +46,7 @@ from almanak.framework.strategies import (
     almanak_strategy,
 )
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
+from almanak.framework.utils.persistence import safe_int_list
 
 if TYPE_CHECKING:
     from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
@@ -533,7 +534,7 @@ class TraderJoeLeveragedLPStrategy(IntentStrategy):
         if "lp_usdc" in state:
             self._lp_usdc = Decimal(str(state["lp_usdc"]))
         if "lp_bin_ids" in state:
-            self._lp_bin_ids = [int(b) for b in state["lp_bin_ids"]]
+            self._lp_bin_ids = safe_int_list(state["lp_bin_ids"], name="lp_bin_ids")
         if "compound_count" in state:
             self._compound_count = state["compound_count"]
         if "collected_fee_wavax" in state:

@@ -73,6 +73,7 @@ from almanak.framework.strategies import (
     almanak_strategy,
 )
 from almanak.framework.utils.log_formatters import format_token_amount_human
+from almanak.framework.utils.persistence import safe_int_list
 
 logger = logging.getLogger(__name__)
 
@@ -377,7 +378,11 @@ class TraderJoeSweepLPStrategy(IntentStrategy):
             self._tick_count = int(state["tick_count"])
         if "ticks_with_position" in state:
             self._ticks_with_position = int(state["ticks_with_position"])
-        self._position_bin_ids = [int(b) for b in state.get("position_bin_ids", [])]
+        # safe_int_list: drop malformed entries with a warning rather
+        # than aborting load_persistent_state on bad data (VIB-3757).
+        self._position_bin_ids = safe_int_list(
+            state.get("position_bin_ids"), name="position_bin_ids"
+        )
         logger.info(
             f"Restored state: has_position={self._has_position}, "
             f"cycles={self._lp_cycles}, cooldown={self._cooldown_remaining}, "

@@ -64,6 +64,7 @@ from almanak.framework.strategies import (
     MarketSnapshot,
     almanak_strategy,
 )
+from almanak.framework.utils.persistence import safe_int_list
 
 logger = logging.getLogger(__name__)
 
@@ -274,7 +275,11 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
         self._state = state.get("state", "idle")
         ep = state.get("entry_price")
         self._entry_price = Decimal(ep) if ep else None
-        self._position_bin_ids = [int(b) for b in state.get("position_bin_ids", [])]
+        # safe_int_list: drop malformed entries with a warning rather
+        # than aborting load_persistent_state on bad data (VIB-3757).
+        self._position_bin_ids = safe_int_list(
+            state.get("position_bin_ids"), name="position_bin_ids"
+        )
         self._rebalance_count = state.get("rebalance_count", 0)
 
     # =========================================================================

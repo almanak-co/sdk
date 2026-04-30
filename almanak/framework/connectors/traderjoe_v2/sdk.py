@@ -924,24 +924,81 @@ class TraderJoeV2SDK:
         pool_address: str,
         wallet_address: str,
         precomputed_balances: dict[int, int] | None = None,
+        *,
+        strict: bool = False,
+        sanity_floor: float = 0.9,
     ) -> tuple[int, int]:
         """Get total token amounts for a wallet's position in a pool.
 
-        Best-effort: per-bin read errors are tolerated and the bin is skipped.
-        Callers that derive slippage minimums from the returned amounts get
-        the same partial-valuation behaviour as the heuristic fallback path
-        in `get_position()`. Tracked as VIB-3757 follow-up to investigate
-        which fork-only reverts trigger the skip path and harden when safe.
+        Computes per-bin share of LBPair reserves: for each bin where the
+        wallet holds LB tokens, reads the bin's reserves and total supply
+        and accumulates the wallet's share. Returns ``(total_x, total_y)``
+        in raw units.
+
+        Failure modes & ``strict`` parameter:
+            VIB-3757 investigation discovered that the historical "best-effort"
+            behaviour (silently skipping bins on revert) was masking a real
+            bug: the LBPair ABI declared ``getBin(uint256)`` while the
+            deployed contract is ``getBin(uint24)``, so the function selector
+            was wrong and EVERY call reverted. The function returned
+            ``(0, 0)`` for every position, and any caller deriving slippage
+            minimums from this got zero protection.
+
+            With the ABI fixed to ``uint24``, well-behaved RPCs should not
+            revert — this is the strict path. ``strict=True`` raises on the
+            first per-bin read error so a caller deriving money-critical
+            values (e.g. slippage minimums) fails loudly instead of silently
+            shipping a position close with no slippage protection.
+
+            ``strict=False`` (default for backward compatibility) keeps the
+            tolerant per-bin behaviour but applies a sanity floor: if more
+            than ``(1 - sanity_floor)`` of the queried bins fail, the
+            function raises rather than returning a misleading partial
+            valuation. ``sanity_floor=0.9`` means at least 90% of bins must
+            succeed; below that we treat the result as untrustworthy.
+
+            **Practical effect of the 0.9 default on small positions**:
+            because the threshold is a ratio, small-N positions effectively
+            behave like ``strict=True`` for any per-bin failure:
+
+                | bins | success ratio after 1 failure | passes 0.9 floor? |
+                | ---- | ----------------------------- | ----------------- |
+                |   5  | 4/5 = 80%                     | NO  -> raises     |
+                |   9  | 8/9 = 89%                     | NO  -> raises     |
+                |  10  | 9/10 = 90%                    | YES -> warns      |
+                |  21  | 20/21 = 95%                   | YES -> warns      |
+
+            Real TJ V2 LP positions are typically 5-21 bins, so callers
+            should expect any single per-bin RPC blip on a sub-10-bin
+            position to surface as a ``RuntimeError`` rather than a
+            silently degraded valuation. With the ABI selector now correct,
+            well-behaved RPCs do not revert here, so this is rare in
+            practice — but the failure mode IS now loud.
 
         Args:
-            pool_address: Address of the LBPair contract
-            wallet_address: Address to query
-            precomputed_balances: Optional pre-fetched bin balances to avoid a
-                redundant get_position_balances() call (pass the result from a
-                prior call to get_position_balances).
+            pool_address: Address of the LBPair contract.
+            wallet_address: Address to query.
+            precomputed_balances: Optional pre-fetched bin balances to
+                avoid a redundant ``get_position_balances()`` call (pass
+                the result from a prior call).
+            strict: When ``True``, raise on the first per-bin read error.
+                When ``False`` (default), tolerate per-bin reverts up to
+                the ``sanity_floor`` threshold.
+            sanity_floor: Minimum fraction of bins that must succeed when
+                ``strict=False`` (default 0.9). Below this threshold the
+                method raises ``RuntimeError`` rather than returning a
+                misleading partial valuation. Set to 0 to restore the
+                original silent-degradation behaviour (NOT recommended for
+                money-critical callers).
 
         Returns:
-            Tuple of (amount_x, amount_y) the wallet would receive if removing all liquidity
+            Tuple of (amount_x, amount_y) the wallet would receive if
+            removing all liquidity.
+
+        Raises:
+            RuntimeError: When ``strict=True`` and any per-bin call reverts,
+                or when ``strict=False`` and the success ratio falls below
+                ``sanity_floor``.
         """
         balances = (
             precomputed_balances
@@ -955,11 +1012,11 @@ class TraderJoeV2SDK:
         pair = self.get_pair_contract(pool_address)
         total_x = 0
         total_y = 0
+        failed_bins: list[tuple[int, str]] = []
 
         t0 = time.perf_counter()
         for bin_id, balance in balances.items():
             try:
-                # Get bin reserves and total supply to calculate share
                 bin_reserves = pair.functions.getBin(bin_id).call()
                 bin_reserve_x = bin_reserves[0]
                 bin_reserve_y = bin_reserves[1]
@@ -971,8 +1028,61 @@ class TraderJoeV2SDK:
                     share_y = (balance * bin_reserve_y) // total_supply
                     total_x += share_x
                     total_y += share_y
-            except Exception:
-                continue
-        logger.debug(f"Position value calculation ({len(balances)} bins): {time.perf_counter() - t0:.2f}s")
+            except Exception as exc:  # noqa: BLE001 — RPC-level error
+                if strict:
+                    raise RuntimeError(
+                        f"get_total_position_value: per-bin read failed for "
+                        f"bin_id={bin_id} on pool {pool_address} (strict=True): {exc}"
+                    ) from exc
+                failed_bins.append((bin_id, type(exc).__name__))
+
+        logger.debug(
+            "Position value calculation (%d/%d bins ok): %.2fs",
+            len(balances) - len(failed_bins),
+            len(balances),
+            time.perf_counter() - t0,
+        )
+
+        # Sanity floor for non-strict mode: too many failures → caller's
+        # slippage protection would be silently degraded. Raise instead so
+        # the compiler can surface the issue rather than ship a close with
+        # near-zero amount_x_min/amount_y_min.
+        if not strict and failed_bins:
+            success_ratio = (len(balances) - len(failed_bins)) / len(balances)
+            if success_ratio < sanity_floor:
+                samples = ", ".join(f"{bid}({err})" for bid, err in failed_bins[:5])
+                # Surface the failure as a structured ERROR so on-call sees
+                # how often the new sanity-floor abort fires in production.
+                # Without this, a noisy RPC turns into "the strategy keeps
+                # raising RuntimeError" with no protocol-layer context.
+                logger.error(
+                    "get_total_position_value sanity-floor abort: pool=%s "
+                    "success_ratio=%.1f%% sanity_floor=%.0f%% failed=%d/%d "
+                    "samples=%s",
+                    pool_address,
+                    success_ratio * 100,
+                    sanity_floor * 100,
+                    len(failed_bins),
+                    len(balances),
+                    samples,
+                )
+                raise RuntimeError(
+                    f"get_total_position_value: only {success_ratio:.1%} of "
+                    f"{len(balances)} bins returned data on pool {pool_address} "
+                    f"(sanity_floor={sanity_floor:.0%}). "
+                    f"Refusing to return a partial valuation that would silently "
+                    f"degrade slippage protection. Failed samples: {samples}"
+                )
+            # Some failures, but above the floor — note them for operator visibility.
+            logger.warning(
+                "get_total_position_value: %d/%d bins failed on pool %s "
+                "(success_ratio=%.1f%%, above sanity_floor=%.0f%%). Continuing "
+                "with partial valuation.",
+                len(failed_bins),
+                len(balances),
+                pool_address,
+                success_ratio * 100,
+                sanity_floor * 100,
+            )
 
         return total_x, total_y

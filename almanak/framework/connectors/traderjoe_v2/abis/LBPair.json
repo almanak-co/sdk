@@ -148,7 +148,7 @@
   },
   {
     "inputs": [
-      {"internalType": "uint256", "name": "id", "type": "uint256"}
+      {"internalType": "uint24", "name": "id", "type": "uint24"}
     ],
     "name": "getBin",
     "outputs": [
