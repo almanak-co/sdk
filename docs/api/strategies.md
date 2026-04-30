@@ -68,6 +68,156 @@ class MyStrategy(IntentStrategy):
 !!! warning "Always query on-chain state"
     `get_open_positions()` must query live on-chain balances, not cached values. Stale data can cause teardown to skip positions or attempt to close positions that no longer exist.
 
+## Testing with `force_action`
+
+Real strategies gate their `decide()` output behind signals — RSI thresholds, MACD crosses, balance checks, cooldowns. That makes them hard to test on a forked block where those signals may not fire. The convention is a `force_action` config field that **bypasses signal gates** and lets you drive a known intent through the production code path.
+
+```python
+@dataclass
+class MyStrategyConfig:
+    # Production tuning
+    rsi_oversold: int = 30
+    rsi_overbought: int = 70
+    trade_size_usd: Decimal = Decimal("100")
+    # Testing affordance — empty in production
+    force_action: str = ""
+
+class MyStrategy(IntentStrategy):
+    def __init__(self, config, ...):
+        super().__init__(...)
+        self.force_action = str(self.get_config("force_action", "") or "").lower()
+        # ... other config fields ...
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        # Test affordance: short-circuit BEFORE any signal logic.
+        if self.force_action:
+            return self._forced_intent(market)
+
+        # Production decide() begins here.
+        rsi = market.indicators.rsi(self.base_token, ...)
+        if rsi.value < self.rsi_oversold:
+            return Intent.swap(...)
+        return Intent.hold(reason="No signal")
+
+    def _forced_intent(self, market: MarketSnapshot) -> Intent:
+        """Map free-form force_action strings to concrete Intents.
+
+        Values are strategy-specific. Pick names that match what each branch
+        DOES (verbs: "buy", "sell", "open", "close", "supply"), not internal
+        state machine values.
+        """
+        if self.force_action == "buy":
+            return Intent.swap(
+                from_token=self.quote_token,
+                to_token=self.base_token,
+                amount_usd=self.trade_size_usd,
+                protocol=self.protocol,
+                chain=self.chain,
+            )
+        if self.force_action == "sell":
+            return Intent.swap(
+                from_token=self.base_token,
+                to_token=self.quote_token,
+                amount="all",
+                protocol=self.protocol,
+                chain=self.chain,
+            )
+        raise ValueError(f"Unknown force_action: {self.force_action!r}")
+```
+
+### Driving force_action from the CLI
+
+The `almanak strat test` command mutates `force_action` between iterations and runs each through the production code path on a managed Anvil fork:
+
+```bash
+# Single forced action
+almanak strat test --actions buy --teardown --json
+
+# Multiple actions in sequence (one iteration each)
+almanak strat test --actions open,collect_fees --teardown --json
+
+# Teardown only (no force_actions)
+almanak strat test --teardown --json
+```
+
+The CLI emits structured JSON: every step's `status`, `failure_logs`, and a `summary.all_passed` bool. See [CLI Reference: strat test](../cli/strat-test.md) for full flag docs.
+
+### Authoring rules
+
+| Rule | Why |
+|---|---|
+| **Values are free-form strings, strategy-specific.** Pick names that describe the action verb (`"buy"`, `"open"`, `"supply"`, `"close"`), not state-machine internals (`"phase_2"`, `"step_3a"`). | Anyone reading your code (or grepping `_forced_intent` to find supported values) should be able to map name → intent shape without context. |
+| **One value per non-HOLD intent type.** If your strategy emits both `Intent.lp_open` and `Intent.swap`, expose both as force_action values (e.g. `"open"` and `"buy"`). | Each path needs to be drivable independently. Missing branches mean missing test coverage. |
+| **Each branch must produce a non-HOLD Intent.** If a forced branch returns `Intent.hold(...)`, the test passes silently without exercising the path you wanted. | The whole point of force_action is to bypass gates — returning HOLD defeats it. |
+| **Order matters; document prerequisites.** `force_action="close"` requires an open position; `force_action="collect_fees"` requires an LP NFT. | The CLI runs values in `--actions` order against one Anvil instance, so prereqs must be driven first. |
+| **Skip values that overlap with `generate_teardown_intents()`.** If teardown emits an unwind swap, don't drive the same intent via `--actions` — the position will be closed before teardown runs. | `--teardown` is the canonical unwind path; double-driving it leaves teardown nothing to do. |
+| **Empty default in config (`force_action: str = ""`).** Production deploys must run signal-gated logic; force_action is testing-only. | A non-empty default would bypass signals in production and execute on every iteration. |
+
+### Example: LP strategy with three force_action values
+
+```python
+def _forced_intent(self, market: MarketSnapshot) -> Intent:
+    if self.force_action == "open":
+        # Opens an LP position.
+        return Intent.lp_open(
+            pool=self.pool,
+            amount0=self.amount0,
+            amount1=self.amount1,
+            range_lower=self._compute_lower(market),
+            range_upper=self._compute_upper(market),
+            protocol=self.protocol,
+            chain=self.chain,
+        )
+    if self.force_action == "collect_fees":
+        # Collects fees on an existing position. Drive AFTER "open".
+        return Intent.lp_collect_fees(
+            pool=self.pool,
+            position_id=self.force_position_id or self._position_id,
+            protocol=self.protocol,
+            chain=self.chain,
+        )
+    if self.force_action == "close":
+        # Closes the position. SKIP this in --actions; teardown emits the same intent.
+        return Intent.lp_close(
+            pool=self.pool,
+            position_id=self.force_position_id or self._position_id,
+            protocol=self.protocol,
+            chain=self.chain,
+        )
+    raise ValueError(f"Unknown force_action: {self.force_action!r}")
+```
+
+CLI to test the lifecycle without double-closing:
+
+```bash
+almanak strat test --actions open,collect_fees --teardown --json
+# `close` is skipped from --actions because teardown emits Intent.lp_close
+```
+
+### Companion override fields
+
+Strategies that track on-chain identifiers (NFT IDs, vault shares) often need a paired override so a forced action can target an existing position rather than the strategy's cached state:
+
+```python
+@dataclass
+class MyLPConfig:
+    force_action: str = ""
+    force_position_id: str | None = None  # override the cached self._position_id
+
+# In _forced_intent:
+position_id = self.force_position_id or self._position_id
+```
+
+Only add fields like this when a forced branch genuinely needs them. A swap-only strategy doesn't track position IDs, so it shouldn't carry `force_position_id`.
+
+### Common mistakes
+
+- **Returning `Intent.hold()` from a forced branch** — the test passes vacuously, you haven't tested anything.
+- **Using state-machine values as force_action names** (`"phase_b"`, `"step_3"`) — opaque to anyone trying to figure out what each value does.
+- **Forgetting to short-circuit at the top of `decide()`** — if signal gates run before the force_action check, the gate's HOLD return value wins and the forced intent never fires.
+- **Reusing values that teardown emits** — running `--actions close --teardown` unwinds the position twice (or once and then has nothing to test on teardown).
+- **Setting `force_action` in the production config** — bypasses every safety gate in deployment. Always default to `""`.
+
 ## State Persistence
 
 Strategies that track internal state across iterations (position IDs, phase tracking, trade counters) must implement two hooks so that state survives restarts.

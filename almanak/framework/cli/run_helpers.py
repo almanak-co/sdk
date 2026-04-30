@@ -2784,6 +2784,327 @@ def _run_once(
 
 
 # ---------------------------------------------------------------------------
+# Test lifecycle — drive force_action sequence + optional teardown
+# ---------------------------------------------------------------------------
+
+
+def _run_test_lifecycle(
+    *,
+    runner: Any,
+    strategy_instance: Any,
+    state_manager: Any,
+    cleanup_fn: Callable[[], Coroutine[Any, Any, None]],
+    actions: list[str],
+    teardown: bool,
+    json_output: bool,
+) -> int:
+    """Execute a force-action lifecycle test.
+
+    Drives each value in ``actions`` as a single ``--once`` iteration with
+    ``strategy_instance.force_action`` mutated between iterations, optionally
+    followed by a teardown iteration. State (position id, on-chain side
+    effects, runner cycle counter) flows through naturally because all
+    iterations share one strategy instance.
+
+    Stops on the first failed iteration (fail-fast). Always runs cleanup.
+
+    Returns:
+        Exit code: ``0`` if every iteration (and the teardown, if requested)
+        passed, ``1`` otherwise.
+    """
+    import asyncio
+    import json
+    import logging as _logging
+
+    from ..runner import IterationStatus
+    from ..runner.runner_models import IterationResult
+
+    class _BufferingHandler(_logging.Handler):
+        """Captures WARN+ERROR log records into a ring buffer for later inspection.
+
+        Used to attach framework-side diagnostics (REVERT DIAGNOSTIC blocks,
+        non-retryable error notices, gas warnings, etc.) to failed steps in
+        the JSON output. Successful steps don't carry this data — it would
+        bloat the response.
+        """
+
+        def __init__(self, max_records: int = 200) -> None:
+            super().__init__(level=_logging.WARNING)
+            # Each record carries a monotonic id so per-step slicing stays correct
+            # even after the ring buffer has dropped older entries (id != list index).
+            self.records: list[tuple[int, str]] = []
+            self.next_id = 0
+            self.max_records = max_records
+
+        def emit(self, record: _logging.LogRecord) -> None:
+            try:
+                msg = self.format(record)
+            except Exception:
+                msg = record.getMessage()
+            if len(self.records) >= self.max_records:
+                self.records.pop(0)
+            self.records.append((self.next_id, msg))
+            self.next_id += 1
+
+        def slice_since(self, cursor: int) -> list[str]:
+            """Return all records emitted since the given cursor (monotonic id)."""
+            return [msg for idx, msg in self.records if idx >= cursor]
+
+    log_buffer = _BufferingHandler(max_records=200)
+    log_buffer.setFormatter(_logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    _logging.getLogger().addHandler(log_buffer)
+
+    # Owned at the outer scope so the exception handler below can salvage
+    # whatever steps completed before run_iteration() raised.
+    action_results: list[dict] = []
+    teardown_result_dict: dict | None = None
+
+    async def run_lifecycle_with_cleanup() -> tuple[list[dict], dict | None]:
+        nonlocal action_results, teardown_result_dict
+        gateway_integration_ready = False
+        try:
+            runner.setup_gateway_integration(strategy_instance)
+            gateway_integration_ready = True
+
+            # Mirror _run_once state hooks: restore persisted strategy state and
+            # copy-trading cursor before any iteration, so test runs see the same
+            # startup conditions production does. load_state_async failures must
+            # propagate (fatal in _run_once); copy-trading restore is best-effort
+            # (also matches _run_once).
+            if hasattr(strategy_instance, "load_state_async"):
+                await strategy_instance.load_state_async()
+            activity_provider = getattr(strategy_instance, "_wallet_activity_provider", None)
+            if activity_provider is not None:
+                try:
+                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    if ct_state is not None and "copy_trading_state" in ct_state.state:
+                        activity_provider.set_state(ct_state.state["copy_trading_state"])
+                except Exception as e:
+                    logger.warning(f"Failed to restore copy trading state: {e}")
+
+            # Single predicate: an action passes iff status is SUCCESS or HOLD.
+            # Used identically by per-step failure_logs, fail-fast, and the final
+            # summary so the three never disagree.
+            action_pass_statuses = (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value)
+            for action in actions:
+                strategy_instance.force_action = action
+                if not json_output:
+                    click.echo(f"\n→ force_action={action!r}")
+                logs_before = log_buffer.next_id
+                try:
+                    result = await runner.run_iteration(strategy_instance)
+                    # Capture portfolio snapshot per iteration (mirrors _run_once).
+                    # Snapshot failures must propagate; matches _run_once semantics.
+                    if runner.config.enable_state_persistence:
+                        await runner._capture_portfolio_snapshot(
+                            strategy=strategy_instance,
+                            iteration_number=runner._total_iterations,
+                        )
+                    runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
+                except Exception as exc:
+                    # Record the raise as a synthetic failed step and break — but DO NOT
+                    # propagate; the teardown block below must still run so positions
+                    # opened by prior successful actions get unwound. Use IterationResult
+                    # so the step shape matches normal steps from result.to_dict().
+                    logger.exception("run_iteration raised for action %r", action)
+                    synthetic = IterationResult(
+                        status=IterationStatus.STRATEGY_ERROR,
+                        error=f"run_iteration raised: {exc!r}",
+                        strategy_id=getattr(strategy_instance, "strategy_id", "") or "",
+                    )
+                    action_results.append(
+                        {
+                            "action": action,
+                            **synthetic.to_dict(),
+                            "failure_logs": log_buffer.slice_since(logs_before),
+                        }
+                    )
+                    if not json_output:
+                        click.echo(f"  raised: {exc!r}", err=True)
+                    break
+                entry = {"action": action, **result.to_dict()}
+                action_passed = result.status.value in action_pass_statuses
+                if not action_passed:
+                    entry["failure_logs"] = log_buffer.slice_since(logs_before)
+                action_results.append(entry)
+                if not action_passed:
+                    if not json_output:
+                        click.echo(f"  failed: {result.error or result.status.value}", err=True)
+                    break  # fail-fast
+
+            # Always run teardown when requested — even if an earlier action
+            # failed, we still want to clean up any positions opened by prior
+            # successful actions in this run. Teardown is a no-op for
+            # strategies whose generate_teardown_intents returns [] when no
+            # position is open.
+            if teardown:
+                from almanak.framework.teardown import get_teardown_state_manager
+                from almanak.framework.teardown.models import TeardownMode, TeardownRequest
+
+                strategy_instance.force_action = ""
+                strategy_id = strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME
+                if not json_output:
+                    click.echo("\n→ teardown")
+                # Capture log cursor BEFORE create_request so a state-manager
+                # failure here (locked DB / schema mismatch) is also surfaced as
+                # a synthetic teardown step instead of escaping to the outer handler.
+                logs_before = log_buffer.next_id
+                try:
+                    get_teardown_state_manager().create_request(
+                        TeardownRequest(
+                            strategy_id=strategy_id,
+                            mode=TeardownMode.SOFT,
+                            reason="strat test --teardown",
+                            requested_by="cli",
+                        )
+                    )
+                    td_result = await runner.run_iteration(strategy_instance)
+                    runner._emit_iteration_summary(td_result, chain=getattr(strategy_instance, "chain", None))
+                except Exception as exc:
+                    # Materialize a failed teardown step instead of letting the
+                    # exception escape — symmetric with the action loop above so
+                    # JSON consumers see the failure_logs and a teardown step entry.
+                    # Use IterationResult so the step shape matches normal steps.
+                    logger.exception("teardown raised (create_request or run_iteration)")
+                    synthetic = IterationResult(
+                        status=IterationStatus.STRATEGY_ERROR,
+                        error=f"run_iteration raised: {exc!r}",
+                        strategy_id=getattr(strategy_instance, "strategy_id", "") or "",
+                    )
+                    teardown_result_dict = {
+                        "action": "teardown",
+                        **synthetic.to_dict(),
+                        "failure_logs": log_buffer.slice_since(logs_before),
+                    }
+                    if not json_output:
+                        click.echo(f"  teardown raised: {exc!r}", err=True)
+                else:
+                    teardown_result_dict = {"action": "teardown", **td_result.to_dict()}
+                    teardown_passed = td_result.status.value == IterationStatus.TEARDOWN.value
+                    if not teardown_passed:
+                        teardown_result_dict["failure_logs"] = log_buffer.slice_since(logs_before)
+                        if not json_output:
+                            click.echo(
+                                f"  teardown failed: {td_result.error or td_result.status.value}",
+                                err=True,
+                            )
+
+            # Persist copy trading cursor state (mirrors _run_once).
+            if activity_provider is not None:
+                try:
+                    ct_state = await state_manager.load_state(strategy_instance.strategy_id)
+                    if ct_state is None:
+                        from almanak.framework.state.state_manager import StateData
+
+                        ct_state = StateData(
+                            strategy_id=strategy_instance.strategy_id,
+                            version=0,
+                            state={},
+                        )
+                    ct_state.state["copy_trading_state"] = activity_provider.get_state()
+                    await state_manager.save_state(ct_state, expected_version=ct_state.version)
+                except Exception as e:
+                    logger.warning(f"Failed to persist copy trading state: {e}")
+
+            if hasattr(strategy_instance, "flush_pending_saves"):
+                try:
+                    await strategy_instance.flush_pending_saves()
+                except Exception as e:
+                    logger.warning(f"Error flushing pending saves: {e}")
+
+            return action_results, teardown_result_dict
+        finally:
+            try:
+                if gateway_integration_ready:
+                    runner.teardown_gateway_integration(strategy_instance.strategy_id)
+            finally:
+                await cleanup_fn()
+
+    try:
+        action_results, teardown_result_dict = asyncio.run(run_lifecycle_with_cleanup())
+    except Exception as e:
+        logger.exception("Test lifecycle failed")
+        if json_output:
+            partial_steps: list[dict] = list(action_results)
+            if teardown_result_dict is not None:
+                partial_steps.append(teardown_result_dict)
+            # Reflect the real per-step pass state so summary doesn't contradict steps —
+            # the exception itself (e.g. flush_pending_saves / cleanup) may have fired
+            # AFTER all action and teardown iterations already passed.
+            partial_actions_ok = all(
+                step["status"] in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value) for step in action_results
+            )
+            if not teardown:
+                partial_teardown_ok: bool | None = None
+            elif teardown_result_dict is None:
+                partial_teardown_ok = False
+            else:
+                partial_teardown_ok = teardown_result_dict["status"] == IterationStatus.TEARDOWN.value
+            click.echo(
+                json.dumps(
+                    {
+                        "summary": {
+                            "all_passed": False,  # exception always means run failed overall
+                            "skipped": False,
+                            "skip_reason": None,
+                            "steps_run": len(partial_steps),
+                            "actions_passed": partial_actions_ok,
+                            "teardown_passed": partial_teardown_ok,
+                            "error": str(e),
+                        },
+                        "steps": partial_steps,
+                    },
+                    default=str,  # mirror success path — preserve datetime/Decimal/etc.
+                )
+            )
+        else:
+            click.echo(f"Error running test lifecycle: {e}", err=True)
+        return 1
+    finally:
+        _logging.getLogger().removeHandler(log_buffer)
+
+    # teardown_passed is None ("not applicable") when --teardown wasn't requested,
+    # True when teardown ran and reached IterationStatus.TEARDOWN, False otherwise.
+    # Same convention as the exception path, so JSON consumers see one shape.
+    teardown_ok: bool | None
+    if not teardown:
+        teardown_ok = None
+    elif teardown_result_dict is None:
+        teardown_ok = False  # asked for but never executed (logic error)
+    else:
+        teardown_ok = teardown_result_dict["status"] == IterationStatus.TEARDOWN.value
+    # all([]) is True — teardown-only runs (no actions) correctly identity to True here
+    # and rely on teardown_ok for the final verdict.
+    actions_ok = all(r["status"] in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value) for r in action_results)
+    # Treat teardown_ok=None (not applicable) as a non-blocker for all_passed.
+    all_passed = actions_ok and (teardown_ok is None or teardown_ok)
+
+    if json_output:
+        steps: list[dict] = list(action_results)
+        if teardown_result_dict is not None:
+            steps.append(teardown_result_dict)
+        payload = {
+            "strategy_id": getattr(strategy_instance, "strategy_id", None) or strategy_instance.STRATEGY_NAME,
+            "summary": {
+                "all_passed": all_passed,
+                "steps_run": len(steps),
+                "actions_passed": actions_ok,
+                "teardown_passed": teardown_ok,
+            },
+            "steps": steps,
+        }
+        click.echo(json.dumps(payload, indent=2, default=str))
+    else:
+        click.echo()
+        if all_passed:
+            click.echo("Test lifecycle passed.")
+        else:
+            click.echo("Test lifecycle failed.")
+
+    return 0 if all_passed else 1
+
+
+# ---------------------------------------------------------------------------
 # Phase 16 — Continuous execution
 # ---------------------------------------------------------------------------
 

@@ -1249,6 +1249,11 @@ def run(
     max_iterations: int | None = None,
     teardown_after: bool = False,
     strategy_id_override: str | None = None,
+    # Internal-only (not exposed as click flags). Used by `almanak strat test`
+    # to drive a force-action lifecycle through this command's setup pipeline
+    # without duplicating it. Do not set from the CLI.
+    test_actions: list[str] | None = None,
+    test_json: bool = False,
 ) -> None:
     """
     Run a strategy from its working directory.
@@ -1573,7 +1578,19 @@ def run(
     )
 
     # Run strategy (phase 15/16 helpers).
-    if once:
+    if test_actions is not None:
+        from .run_helpers import _run_test_lifecycle
+
+        exit_code = _run_test_lifecycle(
+            runner=runner,
+            strategy_instance=strategy_instance,
+            state_manager=state_manager,
+            cleanup_fn=cleanup_resources,
+            actions=test_actions,
+            teardown=teardown_after,
+            json_output=test_json,
+        )
+    elif once:
         exit_code = _run_once(
             runner=runner,
             strategy_instance=strategy_instance,

@@ -1120,6 +1120,243 @@ def new(ctx, name, working_dir, template, chain):
         sys.exit(1)
 
 
+def _strat_test_skip_reason(working_dir: str, config_file: str | None) -> str | None:
+    """Return a reason string if the strategy's chain isn't Anvil-forkable, else None.
+
+    Only catches non-EVM / unknown chains. RPC misconfig surfaces as a normal error
+    from anvil boot — agents handle that case via their own skip rules. Honors the
+    same config formats `strat run` does (JSON / YAML, scalar or list `chains`).
+    """
+    if config_file:
+        cfg_path: Path | None = Path(config_file)
+    else:
+        work = Path(working_dir).resolve()
+        cfg_path = next(
+            (p for name in ("config.json", "config.yaml", "config.yml") if (p := work / name).exists()),
+            None,
+        )
+    if cfg_path is None or not cfg_path.exists():
+        return None
+    try:
+        cfg = _load_cli_config(str(cfg_path))
+    except Exception:
+        return None
+
+    raw_chains = cfg.get("chains")
+    if isinstance(raw_chains, str):
+        chains: list[str] = [raw_chains]
+    elif isinstance(raw_chains, list):
+        chains = [str(c) for c in raw_chains]
+    elif cfg.get("chain"):
+        chains = [str(cfg["chain"])]
+    else:
+        chains = []
+
+    from almanak.core.constants import resolve_chain_name
+    from almanak.framework.anvil.fork_manager import CHAIN_IDS
+
+    for chain in chains:
+        # Canonicalize aliases (eth → ethereum, avax → avalanche, bnb → bsc) the same
+        # way the run path does, so configs using aliases aren't falsely skipped.
+        try:
+            normalized = resolve_chain_name(chain)
+        except ValueError:
+            normalized = chain.lower()
+        if normalized not in CHAIN_IDS:
+            return f"chain '{chain}' is not Anvil-forkable (not in CHAIN_IDS)"
+    return None
+
+
+@strat.command("test")
+@click.option(
+    "--working-dir",
+    "-d",
+    type=click.Path(exists=True),
+    default=".",
+    help="Working directory containing the strategy files. Defaults to the current directory.",
+)
+@click.option(
+    "--config",
+    "-c",
+    "config_file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to strategy config JSON file (overrides the one in --working-dir).",
+)
+@click.option(
+    "--actions",
+    "actions",
+    type=str,
+    default="",
+    help="Comma-separated force_action values to drive (e.g. 'open,collect' or 'supply'). "
+    "Run in the order given. Each value mutates strategy.force_action between iterations; "
+    "in-memory strategy state (position id, etc.) flows through naturally. "
+    "Skip values that match what generate_teardown_intents() emits — let --teardown handle those.",
+)
+@click.option(
+    "--teardown",
+    is_flag=True,
+    default=False,
+    help="After the action sequence completes, run a teardown iteration that closes any "
+    "open positions via the strategy's generate_teardown_intents().",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit a structured JSON result on stdout. The structured payload is the LAST "
+    "top-level JSON object in stdout — startup/setup diagnostics from the framework's "
+    "anvil + gateway boot may print human-readable lines BEFORE it. Parsers should "
+    "extract the final JSON object (e.g. `python -c 'import json,sys; "
+    "...JSONDecoder().raw_decode(...)'`), not assume stdout is JSON-only. "
+    "Exit code is 0 if every step passed (or run was skipped), non-zero otherwise.",
+)
+@click.option(
+    "--anvil-port",
+    "anvil_ports",
+    multiple=True,
+    help="Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.",
+)
+@click.option(
+    "--gateway-host",
+    type=str,
+    default="127.0.0.1",
+    help="Gateway sidecar hostname.",
+)
+@click.option(
+    "--gateway-port",
+    type=int,
+    default=50051,
+    help="Gateway sidecar gRPC port.",
+)
+@click.pass_context
+def strategy_test(
+    ctx,
+    working_dir,
+    config_file,
+    actions,
+    teardown,
+    json_output,
+    anvil_ports,
+    gateway_host,
+    gateway_port,
+):
+    """Run a force-action lifecycle test for a strategy on a managed Anvil fork.
+
+    Drives each --actions value through the production code path (managed gateway +
+    Anvil + funding) as a separate iteration, then optionally exercises teardown.
+    Designed for automated test agents that need end-to-end verification without
+    orchestrating Anvil/gateway/funding by hand.
+
+    Always runs on --network anvil with --once + --fresh semantics.
+
+    Examples:
+
+        almanak strat test --actions supply --teardown --json
+        almanak strat test --actions open,collect --teardown
+        almanak strat test --actions supply,withdraw    # no teardown
+        almanak strat test --teardown                   # teardown only (no force_actions)
+    """
+    parsed_actions = [a.strip() for a in (actions or "").split(",") if a.strip()]
+    if not parsed_actions and not teardown:
+        raise click.ClickException("strat test needs at least one of: --actions <csv> or --teardown")
+
+    # Match strategy_run() — load strategy-local .env so test runs see the same
+    # environment overrides the production run path does.
+    env_file = Path(working_dir) / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+        click.echo(f"Loaded environment from: {env_file}")
+
+    install_redaction()
+
+    skip_reason = _strat_test_skip_reason(working_dir, config_file)
+    if skip_reason is not None:
+        if json_output:
+            click.echo(
+                json.dumps(
+                    {
+                        "summary": {
+                            "all_passed": None,
+                            "skipped": True,
+                            "skip_reason": skip_reason,
+                            "steps_run": 0,
+                            "actions_passed": None,
+                            "teardown_passed": None,
+                        },
+                        "steps": [],
+                    }
+                )
+            )
+        else:
+            click.echo(f"SKIP: {skip_reason}", err=True)
+        sys.exit(0)
+
+    try:
+        ctx.invoke(
+            framework_run_cmd,
+            config_file=config_file,
+            once=True,
+            interval=DEFAULT_STRAT_RUN_INTERVAL,
+            dry_run=False,
+            list_all=False,
+            verbose=False,
+            debug=False,
+            dashboard=False,
+            dashboard_port=8501,
+            simulate_tx=None,
+            network="anvil",
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            no_gateway=False,
+            # Don't override copy_mode — let it stay None so strategy config decides
+            # (shadow / replay / live). strat test exposes no copy-mode flag.
+            copy_mode=None,
+            copy_shadow=False,
+            copy_replay_file=None,
+            copy_strict=False,
+            wallet="default",
+            log_file=None,
+            reset_fork=False,
+            max_iterations=None,
+            teardown_after=teardown,
+            working_dir=working_dir,
+            strategy_id_override=None,
+            anvil_ports=anvil_ports,
+            test_actions=parsed_actions,
+            test_json=json_output,
+            fresh=True,
+        )
+    except click.Abort:
+        sys.exit(1)
+    except Exception as e:
+        if json_output:
+            click.echo(
+                json.dumps(
+                    {
+                        "summary": {
+                            "all_passed": False,
+                            "skipped": False,
+                            "skip_reason": None,
+                            "steps_run": 0,
+                            "actions_passed": False,
+                            "teardown_passed": False if teardown else None,
+                            "error": str(e),
+                        },
+                        "steps": [],
+                    }
+                )
+            )
+        else:
+            format_output(
+                status="error",
+                title="Strategy test failed",
+                key_value_pairs={"Error": str(e)},
+            )
+        sys.exit(1)
+
+
 @strat.command("run")
 @click.option(
     "--working-dir",
