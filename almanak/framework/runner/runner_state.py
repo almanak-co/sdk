@@ -18,6 +18,7 @@ from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from ..state.exceptions import AccountingPersistenceError
 from ..state.state_manager import StateData, StateNotFoundError
 from .reconciliation import BalanceSnapshot, build_reconciliation_report
+from .runner_models import IterationStatus
 
 if TYPE_CHECKING:
     from ..execution.orchestrator import ExecutionResult
@@ -1032,6 +1033,55 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
     if clob_status is not None:
         optional_clob_fields["clob_status"] = clob_status
 
+    # VIB-3754: trade-effective gate. The runner returns IterationStatus.SUCCESS
+    # whenever the success path completes without raising — but several real
+    # failure modes reach that path with no tx_hash, no CLOB order_id, and no
+    # accounting write (e.g., a connector that swallows a sub-error, an empty
+    # action bundle slipping through, a dry-run masquerading as live). Those
+    # rows look identical to a healthy SUCCESS in dashboards, so operators
+    # silently accept "deployed_usd > 0 with 0 events" as real activity.
+    #
+    # Re-classify SUCCESS → EXECUTION_NOOP at the LOG layer when the
+    # iteration produced none of:
+    #   - on-chain transaction hash (txs_sent > 0)
+    #   - CLOB order_id (off-chain prediction order accepted by the matcher)
+    #
+    # Skip the gate for:
+    #   - dry_run (DRY_RUN runs intentionally produce no tx)
+    #   - HOLD intents (legitimately no-op)
+    #   - non-SUCCESS statuses (failure paths already classified correctly)
+    #   - missing/unknown intent_type (caller didn't compile an intent — usually
+    #     copy-trading or a no-action callback flow that doesn't intend to trade)
+    #
+    # IMPORTANT: this is a LOG-only re-classification. ``result.status`` is
+    # left untouched so circuit-breaker / metrics / state-persistence keep
+    # treating it as SUCCESS — the goal is operator visibility, not changing
+    # control flow.
+    log_status = result.status.value
+    noop_reason: str | None = None
+    if (
+        result.status == IterationStatus.SUCCESS
+        and not runner.config.dry_run
+        and intent_type not in (None, "HOLD")
+        and txs_sent == 0
+        and order_id is None
+    ):
+        log_status = IterationStatus.EXECUTION_NOOP.value
+        noop_reason = (
+            "SUCCESS reported but no on-chain tx_hash and no CLOB order_id "
+            "captured — iteration produced no trade-effective output"
+        )
+        logger.warning(
+            "Faux SUCCESS detected (VIB-3754): re-classifying iteration_summary status to "
+            "EXECUTION_NOOP — strategy_id=%s decision=%s txs_sent=0",
+            result.strategy_id,
+            intent_type,
+        )
+
+    optional_gate_fields: dict[str, str] = {}
+    if noop_reason is not None:
+        optional_gate_fields["noop_reason"] = noop_reason
+
     logger.info(
         "iteration_summary",
         event_type="iteration_summary",
@@ -1045,11 +1095,12 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
         txs_sent=txs_sent,
         tx_hashes=tx_hashes,
         gas_used=gas_used,
-        status=result.status.value,
+        status=log_status,
         duration_ms=round(result.duration_ms, 1),
         hold_reason=hold_reason,
         hold_reason_code=hold_reason_code,
         reconciliation_ok=reconciliation_ok,
         error=result.error,
         **optional_clob_fields,
+        **optional_gate_fields,
     )

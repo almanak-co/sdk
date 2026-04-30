@@ -278,9 +278,15 @@ def test_prediction_buy_without_extracted_data_is_graceful():
     assert record["decision"] == "PREDICTION_BUY"
     assert "order_id" not in record
     assert "clob_status" not in record
-    # Existing fields still present and accurate.
-    assert record["status"] == "SUCCESS"
     assert record["tx_hashes"] == []
+    # VIB-3754: SUCCESS without tx_hash AND without CLOB order_id is exactly
+    # the faux-SUCCESS scenario the trade-effective gate guards against. A
+    # PREDICTION_BUY where the matcher never returned an identifier produced
+    # no trade-effective output, so the iteration_summary log status must be
+    # re-classified to EXECUTION_NOOP. (in-memory result.status remains
+    # SUCCESS so circuit-breaker / metrics wiring is untouched.)
+    assert record["status"] == "EXECUTION_NOOP"
+    assert "noop_reason" in record
 
 
 def test_prediction_buy_with_only_clob_status_omits_order_id():
@@ -303,6 +309,10 @@ def test_prediction_buy_with_only_clob_status_omits_order_id():
 
     assert record["clob_status"] == "FAILED"
     assert "order_id" not in record
+    # VIB-3754: ``clob_status="FAILED"`` is not trade-effective (no order_id,
+    # no tx_hash) — the matcher rejected the order. Re-classify to
+    # EXECUTION_NOOP at the log layer.
+    assert record["status"] == "EXECUTION_NOOP"
 
 
 # ---------------------------------------------------------------------------

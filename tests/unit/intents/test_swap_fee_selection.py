@@ -421,3 +421,234 @@ class TestCompilerSwapMetadata:
         assert metadata["pool_selection_mode"] == "fixed"
         assert metadata["selected_fee_tier"] == 500
         assert metadata["fee_selection_source"] == "fixed_config"
+
+
+class TestAlgebraQuoter:
+    """Validate the Algebra V1.9 (Camelot V3) quoter path — VIB-3750.
+
+    The Algebra quoter has a different ABI from Uniswap V3's QuoterV2:
+    flat args (no struct), no `fee` parameter, returns ``(amountOut, fee)``
+    where the fee is the dynamic fee the pool would charge.
+    """
+
+    @staticmethod
+    def _make_fake_algebra_web3(
+        amount_out: int,
+        dynamic_fee: int = 100,
+        *,
+        recorder: list[tuple[str, str, int, int]] | None = None,
+        raise_exc: type[BaseException] | None = None,
+    ) -> SimpleNamespace:
+        """Build a fake `web3` module exposing the Algebra quoter ABI."""
+
+        class FakeHTTPProvider:
+            def __init__(self, url: str, request_kwargs: dict[str, object] | None = None) -> None:
+                pass
+
+        class FakeFunctionCall:
+            def __init__(
+                self,
+                token_in: str,
+                token_out: str,
+                amt_in: int,
+                limit: int,
+            ) -> None:
+                self._args = (token_in, token_out, amt_in, limit)
+
+            def call(self) -> tuple[int, int]:
+                if recorder is not None:
+                    recorder.append(self._args)
+                if raise_exc is not None:
+                    raise raise_exc("simulated quoter failure")
+                return amount_out, dynamic_fee
+
+        class FakeFunctions:
+            @staticmethod
+            def quoteExactInputSingle(token_in: str, token_out: str, amt_in: int, limit: int) -> FakeFunctionCall:
+                return FakeFunctionCall(token_in, token_out, amt_in, limit)
+
+        class FakeContract:
+            functions = FakeFunctions()
+
+        class FakeEth:
+            @staticmethod
+            def contract(address: str, abi: list[dict[str, object]]) -> FakeContract:
+                # Sanity check: assert ABI is the Algebra flat-args form
+                func_abi = abi[0]
+                input_types = [i["type"] for i in func_abi["inputs"]]
+                assert input_types == ["address", "address", "uint256", "uint160"], (
+                    f"Algebra quoter must use flat-args ABI; got {input_types}"
+                )
+                output_types = [o["type"] for o in func_abi["outputs"]]
+                assert output_types == ["uint256", "uint16"], (
+                    f"Algebra quoter must return (amountOut, fee); got {output_types}"
+                )
+                return FakeContract()
+
+        class FakeWeb3:
+            HTTPProvider = FakeHTTPProvider
+
+            def __init__(self, _provider: FakeHTTPProvider) -> None:
+                self.eth = FakeEth()
+
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def to_checksum_address(address: str) -> str:
+                return address
+
+        return SimpleNamespace(Web3=FakeWeb3)
+
+    def test_camelot_quoter_populates_amount_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Algebra-style quoter call returns amountOut + dynamic fee."""
+        recorder: list[tuple[str, str, int, int]] = []
+        fake = self._make_fake_algebra_web3(
+            amount_out=22_073_113_969_137_859,
+            dynamic_fee=100,
+            recorder=recorder,
+        )
+        monkeypatch.setitem(sys.modules, "web3", fake)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="camelot",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",  # WETH
+            50_000_000,
+        )
+
+        # Quoter result is recorded so the price-impact guard can run
+        assert adapter.get_quoted_amount_out() == 22_073_113_969_137_859
+        # Algebra quoter is invoked exactly once (no per-fee-tier loop)
+        assert len(recorder) == 1
+        # And called with the flat-args signature (no fee parameter)
+        token_in, token_out, amt_in, limit = recorder[0]
+        assert token_in.lower() == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert token_out.lower() == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+        assert amt_in == 50_000_000
+        assert limit == 0
+
+        sel = adapter.last_fee_selection
+        assert sel["source"] == "algebra_quoter"
+        assert sel["protocol_family"] == "algebra_v1_9"
+        assert sel["selected_fee_tier"] == 100  # The dynamic fee returned by the pool
+        assert sel["candidate_fee_tiers"] == []  # Algebra has no fee tiers
+        assert sel["quoted_amount_out"] == 22_073_113_969_137_859
+
+    def test_camelot_quoter_zero_amount_distinguished_from_unreachable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the quoter returns 0, leave amount as None but record the typed source.
+
+        This is critical for ops: "quoter returned 0" means "pool has no
+        liquidity at this size" — distinct from "RPC unreachable" which
+        means "we don't know". Both fail-closed via the price-impact guard,
+        but the metadata source must distinguish them so logs / metrics can.
+        """
+        fake = self._make_fake_algebra_web3(amount_out=0, dynamic_fee=100)
+        monkeypatch.setitem(sys.modules, "web3", fake)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="camelot",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            50_000_000,
+        )
+
+        # NOT silently defaulted to 0 — left None so the price-impact guard fails closed
+        assert adapter.get_quoted_amount_out() is None
+        assert adapter.last_fee_selection["source"] == "algebra_quoter_returned_zero"
+        assert adapter.last_fee_selection["dynamic_fee"] == 100
+
+    def test_camelot_quoter_call_failure_distinct_from_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """RPC failure is recorded with a distinct source from 'returned zero'."""
+        fake = self._make_fake_algebra_web3(amount_out=0, raise_exc=RuntimeError)
+        monkeypatch.setitem(sys.modules, "web3", fake)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="camelot",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            50_000_000,
+        )
+
+        assert adapter.get_quoted_amount_out() is None
+        assert adapter.last_fee_selection["source"] == "algebra_quoter_call_failed"
+        assert "simulated quoter failure" in adapter.last_fee_selection["error"]
+
+    def test_camelot_offline_no_rpc_no_quoter_call(self) -> None:
+        """When no RPC and no gateway are configured, quoter is not attempted."""
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="camelot",
+            pool_selection_mode="auto",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            50_000_000,
+        )
+
+        assert adapter.get_quoted_amount_out() is None
+        # Source records "unavailable" rather than "call_failed" so ops sees
+        # this as a config/env issue, not an RPC outage.
+        assert adapter.last_fee_selection["source"] == "algebra_quoter_unavailable"
+
+    def test_camelot_quoter_address_registered(self) -> None:
+        """Camelot V3 quoter is registered in SWAP_QUOTER_ADDRESSES['arbitrum']."""
+        from almanak.framework.intents.compiler_constants import SWAP_QUOTER_ADDRESSES
+
+        assert SWAP_QUOTER_ADDRESSES["arbitrum"]["camelot"] == "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E"
+
+    def test_camelot_swap_compile_succeeds_with_quoter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """End-to-end: a Camelot swap compiles successfully when the quoter answers.
+
+        Reproduces VIB-3750: pre-fix the price-impact guard rejected camelot
+        with "quoter returned no amount". Post-fix the Algebra quoter feeds
+        ``last_quoted_amount_out`` into the guard and compilation succeeds.
+        """
+        fake = self._make_fake_algebra_web3(amount_out=22_073_113_969_137_859, dynamic_fee=100)
+        monkeypatch.setitem(sys.modules, "web3", fake)
+
+        compiler = IntentCompiler(
+            chain="arbitrum",
+            config=IntentCompilerConfig(
+                allow_placeholder_prices=True,
+                swap_pool_selection_mode="auto",
+            ),
+            rpc_url="https://example-rpc",
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("50"),
+            max_slippage=Decimal("0.05"),
+            protocol="camelot",
+        )
+        result = compiler.compile(intent)
+
+        assert result.status.value == "SUCCESS", result.error
+        assert result.action_bundle is not None
+        md = result.action_bundle.metadata
+        assert md["protocol"] == "camelot"
+        assert md["fee_selection_source"] == "algebra_quoter"
+        # The router used must be the Camelot V3 SwapRouter
+        assert md["router"].lower() == "0x1f721e2e82f6676fce4ea07a5958cf098d339e18"
+
+        # The swap TX uses the Algebra exactInputSingle selector
+        swap_tx = result.action_bundle.transactions[-1]
+        assert swap_tx["data"].startswith("0xbc651188")

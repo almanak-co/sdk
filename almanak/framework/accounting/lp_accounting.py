@@ -136,7 +136,7 @@ def _to_human(raw: int | None, decimals: int) -> Decimal | None:
     return Decimal(str(raw)) / scale
 
 
-def _compute_cost_basis(
+def compute_lp_cost_basis(
     amount0: Decimal | None,
     amount1: Decimal | None,
     token0: str,
@@ -148,23 +148,46 @@ def _compute_cost_basis(
     Returns None when price_oracle is unavailable, any non-None amount lacks a price,
     or both amounts are None (no legs contributed — not a concrete zero basis).
     price_oracle keys are uppercase token symbols (e.g. "WETH", "USDC").
+
+    Public canonical implementation — also imported by
+    ``framework.accounting.category_handlers.lp_handler``. The leading-underscore
+    alias ``_compute_cost_basis`` is preserved for one release as an internal
+    back-compat shim and may be removed in a future cleanup.
     """
     if not price_oracle:
         return None
     total = Decimal(0)
     has_any = False
-    for amt, sym in ((amount0, token0.upper()), (amount1, token1.upper())):
+    # ``token0`` / ``token1`` are typed as ``str`` upstream but a malformed
+    # ledger row could carry ``None``. Guard with ``(t or "")`` to keep the
+    # function fail-closed (returns None) instead of raising AttributeError.
+    for amt, sym in ((amount0, (token0 or "").upper()), (amount1, (token1 or "").upper())):
         if amt is None:
             continue
         price = price_oracle.get(sym)
         if price is None:
             return None
         try:
-            total += amt * Decimal(str(price))
+            decimal_price = Decimal(str(price))
+        except Exception:  # noqa: BLE001
+            return None
+        # Reject non-finite prices (NaN / Infinity) — they would propagate
+        # through arithmetic into a NaN total and silently corrupt accounting.
+        if not decimal_price.is_finite():
+            return None
+        try:
+            total += amt * decimal_price
             has_any = True
         except Exception:  # noqa: BLE001
             return None
+    if has_any and not total.is_finite():
+        return None
     return total if has_any else None
+
+
+# Back-compat alias — preserved so an in-flight or in-review caller that imported
+# the leading-underscore symbol does not break. Prefer ``compute_lp_cost_basis``.
+_compute_cost_basis = compute_lp_cost_basis
 
 
 def build_lp_accounting_event(

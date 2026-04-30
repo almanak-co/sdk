@@ -515,6 +515,302 @@ class TestHandleLpOpen:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# VIB-3756: cost_basis_usd computation from price_inputs_json
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandleLpCostBasisUsd:
+    """Regression: LP_OPEN events used to hard-code ``cost_basis_usd=None`` so
+    LP NFT mints rendered as deployed_usd=$0 in QA dashboards. The handler
+    now sums ``token0_amount * price0 + token1_amount * price1`` from the
+    ``price_inputs_json`` captured at execution time (matches swap_handler).
+    """
+
+    def test_lp_open_with_both_token_prices_computes_cost_basis(self) -> None:
+        """Happy path: both prices present, decimals known → HIGH confidence."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        # USDC ≈ $1.00, WETH ≈ $3000.00; 100 USDC + 0.05 WETH = $250.
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="100.0",
+            amount_out="0.05",
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd == Decimal("250.00")
+        assert result.confidence.value == "HIGH"
+        assert result.unavailable_reason == ""
+
+    def test_lp_open_with_one_token_unpriced_returns_none_not_zero(self) -> None:
+        """Per repo rule: wrong is worse than absent. Missing price for one leg
+        returns ``cost_basis_usd=None`` and a structured reason — NOT $0.
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        # WETH is missing from the oracle.
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="100.0",
+            amount_out="0.05",
+            price_inputs_json=json.dumps({"USDC": "1.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd is None, "Missing leg price must produce None, not 0"
+        assert "WETH" in result.unavailable_reason
+        # Decimals are still known — confidence stays HIGH on the unit amounts.
+        assert result.confidence.value == "HIGH"
+
+    def test_lp_open_with_no_price_inputs_returns_none(self) -> None:
+        """Empty price_inputs_json (older ledger rows / paper trading) → None."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",
+            token_out="DAI",
+            amount_in="100.0",
+            amount_out="100.0",
+            price_inputs_json="",
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd is None
+        assert "no price_inputs_json" in result.unavailable_reason
+
+    def test_lp_open_case_insensitive_price_lookup(self) -> None:
+        """token_in/out are uppercased by the handler; price oracle stores upper symbols."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        # Lowercase tokens in the row, uppercase in the oracle.
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="usdc",  # gets uppercased to USDC
+            token_out="dai",  # → DAI
+            amount_in="100.0",
+            amount_out="100.0",
+            price_inputs_json=json.dumps({"USDC": "1.00", "DAI": "1.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd == Decimal("200.00")
+
+    def test_lp_close_with_prices_also_computes_value(self) -> None:
+        """LP_CLOSE re-uses cost_basis_usd as the exit value at the close event."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool2",
+            market_id="0xpool2",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="120.0",
+            amount_out="0.04",
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.event_type == LPEventType.LP_CLOSE.value
+        # 120 USDC + 0.04 * 3000 WETH = 240
+        assert result.cost_basis_usd == Decimal("240.00")
+
+    def test_lp_open_with_decimals_assumed_skips_pricing(self) -> None:
+        """When token decimals had to be assumed (resolver miss) we still skip
+        pricing — amounts may be off by 1e12 for 6-decimal tokens, so a
+        confidently wrong USD figure is worse than None.
+        """
+        from unittest.mock import patch
+
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        # extracted_data_json forces the resolver path; resolver returns None
+        # → assumed_decimals = True.
+        extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "amount0": "100000000",
+                "amount1": "50000000000000000000",
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="WEIRD",
+            token_out="UNKNOWN",
+            extracted_data_json=extracted,
+            price_inputs_json=json.dumps({"WEIRD": "1.0", "UNKNOWN": "1.0"}),
+        )
+
+        # Resolver returns None → assumed_decimals=True
+        mock_resolver = MagicMock(resolve=MagicMock(return_value=None))
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
+            result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        # Pricing intentionally skipped because decimals are unreliable.
+        assert result.cost_basis_usd is None
+        assert result.confidence.value == "ESTIMATED"
+
+    def test_lp_open_zero_amount_legs_returns_none(self) -> None:
+        """Both amounts empty/zero → ``_compute_cost_basis`` returns None
+        (not a concrete zero basis — there were no legs to price).
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",
+            token_out="DAI",
+            amount_in="",  # empty
+            amount_out="",
+            price_inputs_json=json.dumps({"USDC": "1.00", "DAI": "1.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd is None
+        assert result.unavailable_reason is not None
+        assert "no resolvable amount legs" in result.unavailable_reason
+
+    def test_lp_open_with_invalid_price_returns_none_and_reason(self) -> None:
+        """``price_inputs_json`` carries a non-numeric string → fail-closed
+        with an "invalid prices" reason, distinct from the "missing prices"
+        bucket. Operators triaging a $None deployed_usd column need to know
+        whether the producer dropped the price entirely or wrote a bad one.
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",  # noqa: S106 — token symbol, not a credential
+            token_out="WETH",  # noqa: S106 — token symbol, not a credential
+            amount_in="100000000",
+            amount_out="50000000000000000000",
+            price_inputs_json=json.dumps({"USDC": "abc", "WETH": "3000.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd is None
+        assert result.confidence.value == "HIGH"
+        assert result.unavailable_reason is not None
+        assert "invalid prices" in result.unavailable_reason
+        assert "USDC" in result.unavailable_reason
+
+    def test_lp_open_with_nan_price_returns_none_and_reason(self) -> None:
+        """``price_inputs_json`` carries a NaN → ``_safe_decimal`` rejects it
+        as non-finite. Same fail-closed shape as the "abc" case.
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="USDC",  # noqa: S106 — token symbol, not a credential
+            token_out="WETH",  # noqa: S106 — token symbol, not a credential
+            amount_in="100000000",
+            amount_out="50000000000000000000",
+            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "NaN"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd is None
+        assert result.unavailable_reason is not None
+        assert "invalid prices" in result.unavailable_reason
+        assert "WETH" in result.unavailable_reason
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Unit tests: handle_perp
 # ──────────────────────────────────────────────────────────────────────────────
 

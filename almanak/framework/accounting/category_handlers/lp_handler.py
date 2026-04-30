@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.accounting.ids import make_accounting_event_id
-from almanak.framework.accounting.lp_accounting import LPAccountingEvent
+from almanak.framework.accounting.lp_accounting import LPAccountingEvent, compute_lp_cost_basis
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
 
 logger = logging.getLogger(__name__)
@@ -228,8 +228,85 @@ def handle_lp(
         amount_out_str=ledger_row.get("amount_out") or "",
     )
 
-    confidence = AccountingConfidence.ESTIMATED if assumed_decimals else AccountingConfidence.HIGH
-    unavailable_reason = "token decimals assumed; LP amounts are estimated" if assumed_decimals else ""
+    # ── USD pricing (VIB-3756) ───────────────────────────────────────────────
+    # The handler used to hard-code ``cost_basis_usd=None`` which downstream
+    # dashboards (QA harness deployed_usd column, position-PnL reporter)
+    # render as "$0.00". That made an LP_OPEN that *did* mint an NFT and fire
+    # accounting events look like a $0 deposit.
+    #
+    # ``price_inputs_json`` is captured at execution time (VIB-3480 audit-grade
+    # replay) and contains uppercase token-symbol → USD-price entries. Reusing
+    # the live-builder's ``compute_lp_cost_basis`` keeps the same fail-closed
+    # contract as ``swap_handler.py``: any non-None amount whose price is
+    # missing returns None for the whole sum (NOT 0). Decimals-assumed events
+    # also bypass pricing because amounts can be off by 1e12 for 6-decimal
+    # tokens — pricing them would print confidently wrong USD numbers.
+    price_oracle = _parse_price_oracle(ledger_row.get("price_inputs_json") or "")
+    cost_basis_usd: Decimal | None = None
+    pricing_unavailable_reason = ""
+    if not assumed_decimals:
+        cost_basis_usd = compute_lp_cost_basis(amount0, amount1, token0, token1, price_oracle)
+        if cost_basis_usd is None:
+            # Distinguish "no price oracle attached" from "price-oracle present but
+            # one of token0/token1 was missing a quote". Operators triaging a
+            # $None deployed_usd column need this disambiguation.
+            if not price_oracle:
+                pricing_unavailable_reason = (
+                    f"{intent_type_str} cost_basis_usd unavailable: no price_inputs_json on ledger row"
+                )
+            else:
+                missing: list[str] = []
+                invalid: list[str] = []
+                # ``token0`` / ``token1`` are typed as ``str`` upstream but a
+                # malformed ledger row could carry ``None``. ``(t or "")`` keeps
+                # the diagnostic alive without raising AttributeError.
+                token_pairs = (
+                    (amount0, (token0 or "").upper()),
+                    (amount1, (token1 or "").upper()),
+                )
+                for amt, sym in token_pairs:
+                    if amt is None:
+                        continue
+                    raw = price_oracle.get(sym)
+                    if raw is None:
+                        missing.append(sym or "?")
+                        continue
+                    if _safe_decimal(raw) is None:
+                        invalid.append(sym or "?")
+                if missing:
+                    pricing_unavailable_reason = (
+                        f"{intent_type_str} cost_basis_usd unavailable: missing prices in "
+                        f"price_inputs_json: {', '.join(missing)}"
+                    )
+                elif invalid:
+                    # ``price_inputs_json`` carried a key for the token but its
+                    # value was non-numeric / NaN / Infinity. Surface this as
+                    # distinct from "missing" so operators can tell whether the
+                    # producer side dropped a price entirely or wrote a bad one.
+                    pricing_unavailable_reason = (
+                        f"{intent_type_str} cost_basis_usd unavailable: invalid prices in "
+                        f"price_inputs_json: {', '.join(invalid)}"
+                    )
+                else:
+                    # Defensive: covers the "both legs are None amounts" case
+                    # where compute_lp_cost_basis returns None but neither the
+                    # missing nor invalid bucket fired. Without this, operators
+                    # see cost_basis_usd=None with no explanation.
+                    pricing_unavailable_reason = (
+                        f"{intent_type_str} cost_basis_usd unavailable: no resolvable amount legs"
+                    )
+
+    if assumed_decimals:
+        confidence = AccountingConfidence.ESTIMATED
+        unavailable_reason = "token decimals assumed; LP amounts are estimated"
+    elif cost_basis_usd is None and pricing_unavailable_reason:
+        # Decimals are known but pricing is missing — still HIGH confidence on
+        # the unit amounts (those are correct), but flag the dollar field.
+        confidence = AccountingConfidence.HIGH
+        unavailable_reason = pricing_unavailable_reason
+    else:
+        confidence = AccountingConfidence.HIGH
+        unavailable_reason = ""
 
     # ── Identity / ID ────────────────────────────────────────────────────────
     _id_seed = tx_hash or ledger_entry_id or position_key
@@ -257,7 +334,7 @@ def handle_lp(
         amount0=amount0,
         amount1=amount1,
         lp_token_amount=None,
-        cost_basis_usd=None,
+        cost_basis_usd=cost_basis_usd,
         realized_pnl_usd=None,
         fees0_collected=fees0,
         fees1_collected=fees1,

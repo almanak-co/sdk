@@ -367,6 +367,13 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
         "sushiswap_v3": "0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1",
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+        # Camelot V3 (Algebra V1.9) Quoter — VIB-3750.
+        # Algebra-style ABI (no fee tier param, no struct):
+        #   quoteExactInputSingle(address tokenIn, address tokenOut,
+        #                         uint256 amountIn, uint160 limitSqrtPrice)
+        #     -> (uint256 amountOut, uint16 fee)
+        # Source: https://docs.camelot.exchange/contracts/amm-v3/deployed-contracts
+        "camelot": "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E",
     },
     "optimism": {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",

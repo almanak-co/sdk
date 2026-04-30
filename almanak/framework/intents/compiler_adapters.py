@@ -345,6 +345,21 @@ class DefaultSwapAdapter:
 
     def _select_fee_tier(self, from_token: str, to_token: str, amount_in: int) -> int:
         """Select fee tier using fixed mode, on-chain quotes, or safe heuristic fallback."""
+        # Algebra V1.9 forks (Camelot) have NO fee tiers — pools use a single
+        # dynamic fee determined by the pool's volatility model. The Algebra
+        # quoter ABI also differs from Uniswap V3's QuoterV2 (no `fee` arg, no
+        # struct), so dispatch to a dedicated quoter path that populates
+        # ``last_quoted_amount_out`` for the price-impact guard. The Algebra
+        # swap calldata encoder ignores the return value (``get_swap_calldata``
+        # short-circuits to the Algebra encoding), but we still surface the
+        # actual dynamic fee resolved by the quoter so callers / telemetry that
+        # cache or log ``_cached_fee`` see the real value rather than 0.
+        # Returns 0 only when the quoter genuinely could not resolve a fee
+        # (offline, unconfigured, RPC failure, or zero-liquidity).
+        if self.protocol in SWAP_ROUTER_ALGEBRA_PROTOCOLS:
+            self._quote_algebra_swap(from_token, to_token, amount_in)
+            return int(self.last_fee_selection.get("selected_fee_tier") or 0)
+
         candidates = self._supported_fee_tiers()
         if self.pool_selection_mode == "fixed":
             if not candidates or self.fixed_fee_tier is None or self.fixed_fee_tier not in candidates:
@@ -600,6 +615,165 @@ class DefaultSwapAdapter:
         return {
             "fee_tier": int(best["fee_tier"]),
             "quoted_candidates": quoted_candidates,
+        }
+
+    def _quote_algebra_swap(self, from_token: str, to_token: str, amount_in: int) -> None:
+        """Quote a swap on Algebra V1.9 forks (Camelot V3) — VIB-3750.
+
+        Algebra differs from Uniswap V3 in two important ways:
+
+          1. **No fee tiers.** Pools have a single dynamic fee determined by the
+             pool's volatility oracle. The quoter does not accept a `fee` argument
+             and instead returns the fee that *would* be charged.
+          2. **Different ABI.** Both args are flat (no struct):
+
+                 quoteExactInputSingle(
+                     address tokenIn,
+                     address tokenOut,
+                     uint256 amountIn,
+                     uint160 limitSqrtPrice,
+                 ) -> (uint256 amountOut, uint16 fee)
+
+        We populate ``last_quoted_amount_out`` so the compiler's price-impact
+        guard runs identically to the Uniswap-V3 path. ``last_fee_selection`` is
+        populated with diagnostic context (the dynamic fee returned by the
+        quoter) but the value is not used to encode calldata — Algebra's swap
+        encoder ignores fees entirely (see ``get_swap_calldata`` Algebra branch).
+
+        On a "quoter returned 0" outcome we leave ``last_quoted_amount_out``
+        as ``None`` (which the price-impact guard surfaces as the typed
+        ``QUOTER_MISSING_FAIL_CLOSED`` error) AND record
+        ``"source": "quoter_returned_zero"`` in ``last_fee_selection`` so
+        downstream logs / metrics distinguish "no liquidity" (zero amount with
+        a successful call) from "quoter unreachable" (RPC failure).
+
+        On any RPC / decode error we fall back to ``last_quoted_amount_out=None``
+        — same fail-closed behaviour as the Uniswap path. We never silently
+        default to 0.
+        """
+        # Always seed last_fee_selection so callers always see a record of
+        # what was attempted (matches the V3 path's invariants).
+        self.last_fee_selection = {
+            "mode": self.pool_selection_mode,
+            "source": "algebra_quoter_unavailable",
+            "selected_fee_tier": None,
+            "candidate_fee_tiers": [],
+            "protocol_family": "algebra_v1_9",
+        }
+
+        if self.gateway_client is None and not self.rpc_url:
+            # Offline path — leave quoter result as None. The price-impact guard
+            # in ``check_price_impact`` distinguishes offline_mode from
+            # online-but-quoter-missing and handles each correctly.
+            return
+
+        quoter_address = SWAP_QUOTER_ADDRESSES.get(self.chain, {}).get(self.protocol)
+        if not quoter_address:
+            self.last_fee_selection["source"] = "algebra_quoter_unconfigured"
+            logger.warning(
+                "Algebra quoter not configured for protocol=%s on chain=%s — "
+                "swap compilation will fail-closed via price-impact guard. "
+                "Add an entry to SWAP_QUOTER_ADDRESSES to enable.",
+                self.protocol,
+                self.chain,
+            )
+            return
+
+        try:
+            from web3 import Web3
+        except ImportError:
+            return
+
+        if self.gateway_client is not None and getattr(self.gateway_client, "is_connected", False):
+            from almanak.framework.web3.gateway_provider import get_gateway_web3
+
+            web3 = get_gateway_web3(
+                self.gateway_client,
+                chain=self.chain,
+                request_timeout=self.rpc_timeout,
+            )
+        else:
+            if self.rpc_url is None:
+                return
+            web3 = Web3(
+                Web3.HTTPProvider(
+                    self.rpc_url,
+                    request_kwargs={"timeout": self.rpc_timeout},
+                )
+            )
+        if not web3.is_connected():
+            return
+
+        # Algebra V3 quoter ABI — flat args, returns (amountOut, fee).
+        # Source: docs.algebra.finance + Camelot deployed-contracts page.
+        algebra_quoter_abi = [
+            {
+                "inputs": [
+                    {"internalType": "address", "name": "tokenIn", "type": "address"},
+                    {"internalType": "address", "name": "tokenOut", "type": "address"},
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint160", "name": "limitSqrtPrice", "type": "uint160"},
+                ],
+                "name": "quoteExactInputSingle",
+                "outputs": [
+                    {"internalType": "uint256", "name": "amountOut", "type": "uint256"},
+                    {"internalType": "uint16", "name": "fee", "type": "uint16"},
+                ],
+                "stateMutability": "nonpayable",
+                "type": "function",
+            }
+        ]
+
+        try:
+            quoter = web3.eth.contract(
+                address=web3.to_checksum_address(quoter_address),
+                abi=algebra_quoter_abi,
+            )
+            from_addr = web3.to_checksum_address(from_token)
+            to_addr = web3.to_checksum_address(to_token)
+            amount_out, dynamic_fee = quoter.functions.quoteExactInputSingle(from_addr, to_addr, amount_in, 0).call()
+        except Exception as exc:
+            # RPC / decode failure — leave last_quoted_amount_out as None so
+            # the price-impact guard short-circuits to fail-closed. Distinct
+            # from "quoter returned 0" below.
+            self.last_fee_selection["source"] = "algebra_quoter_call_failed"
+            self.last_fee_selection["error"] = str(exc)
+            logger.debug(
+                "Algebra quoter call failed for protocol=%s chain=%s: %s",
+                self.protocol,
+                self.chain,
+                exc,
+            )
+            return
+
+        amount_out = int(amount_out)
+        if amount_out <= 0:
+            # Successful call but zero output — pool has no liquidity at this
+            # size. Surface the distinct signal in last_fee_selection and let
+            # the price-impact guard fail-closed via QUOTER_MISSING_FAIL_CLOSED.
+            self.last_fee_selection["source"] = "algebra_quoter_returned_zero"
+            self.last_fee_selection["dynamic_fee"] = int(dynamic_fee)
+            logger.warning(
+                "Algebra quoter returned amountOut=0 for %s on %s "
+                "(quoter=%s, fee=%s). Likely cause: pool has no liquidity at the "
+                "requested size for this token pair.",
+                self.protocol,
+                self.chain,
+                quoter_address,
+                int(dynamic_fee),
+            )
+            return
+
+        self.last_quoted_amount_out = amount_out
+        self.last_fee_selection = {
+            "mode": self.pool_selection_mode,
+            "source": "algebra_quoter",
+            # Algebra has no caller-selected fee tier; record the dynamic fee
+            # returned by the pool so logs surface what was actually quoted.
+            "selected_fee_tier": int(dynamic_fee),
+            "candidate_fee_tiers": [],
+            "protocol_family": "algebra_v1_9",
+            "quoted_amount_out": amount_out,
         }
 
     def estimate_gas(self, from_token: str, to_token: str) -> int:

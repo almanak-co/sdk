@@ -269,6 +269,14 @@ class IterationStatus(StrEnum):
     # (ledger / snapshot / metrics) failed. Runner halts the iteration and
     # alerts the operator so the books are reconciled before resuming.
     ACCOUNTING_FAILED = "ACCOUNTING_FAILED"
+    # VIB-3754: the runner reported SUCCESS for a non-HOLD intent in live mode
+    # but no trade-effective evidence was produced — no on-chain tx_hash, no
+    # CLOB order_id, no extracted_data signalling an off-chain order matched.
+    # Surfaced as a re-classification ONLY at the iteration_summary log layer
+    # (the in-memory IterationResult.status stays SUCCESS so the circuit
+    # breaker / metrics / state-persistence wiring is untouched). This keeps
+    # operator dashboards from showing a green row that produced nothing.
+    EXECUTION_NOOP = "EXECUTION_NOOP"
 
 
 @dataclass

@@ -1773,6 +1773,20 @@ class IntentCompiler:
         intent_id: str,
     ) -> CompilationResult | None:
         """Validate V3-style pool existence after fee-tier selection. Returns FAILED or None."""
+        # Algebra V1.9 protocols (Camelot V3) have a different factory ABI
+        # (poolByPair(tokenA, tokenB)) and dynamic fees, so the V3
+        # `getPool(tokenA, tokenB, fee)` selector cannot be used. The Algebra
+        # quoter call performed during fee-tier selection already exercises
+        # the pool — a non-zero `last_quoted_amount_out` proves both
+        # existence and minimum liquidity at the requested size, and a
+        # quoter that returns 0 / errors is surfaced via the
+        # price-impact guard's QUOTER_MISSING_FAIL_CLOSED branch. Skip the
+        # V3-style validation here to avoid a misleading PROTOCOL_UNKNOWN
+        # warning. (VIB-3750)
+
+        if protocol in SWAP_ROUTER_ALGEBRA_PROTOCOLS:
+            return None
+
         selected_fee = adapter.last_fee_selection.get("selected_fee_tier")
         if selected_fee is None:
             return None
