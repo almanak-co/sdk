@@ -191,15 +191,36 @@ class GatewayPolymarketClient:
             self._raise_rpc_error("CreateAndPostOrder RPC failed", exc.details(), status_code=None)
         if not response.success:
             self._raise_rpc_error("CreateAndPostOrder failed", response.error)
+        # VIB-3710: surface gateway-side setup transactions (approvals + wrap)
+        # and operator fee_pusd through the OrderResponse model. Gateways
+        # older than VIB-3710 omit both fields — proto's default values
+        # (empty repeated, empty string) flow through cleanly to None / [].
+        # CodeRabbit thread 5: project the caller-known ``side`` and
+        # ``token_id`` into the dict — ``OrderResponse.from_api_response``
+        # otherwise defaults ``side="BUY"`` and ``market=""`` (see
+        # ``models.py``), silently deserializing every SELL response as a BUY.
         return OrderResponse.from_api_response(
             {
                 "orderID": response.order_id,
                 "status": response.status,
+                "side": side,
+                "market": token_id,
                 "price": response.price,
                 "size": response.size,
                 "filledSize": response.size_matched,
                 "avgPrice": response.avg_fill_price,
                 "createdAt": response.created_at,
+                "setup_txs": [
+                    {
+                        "tx_hash": tx.tx_hash,
+                        "description": tx.description,
+                        "gas_used": tx.gas_used,
+                        "gas_price_wei": tx.gas_price_wei,
+                        "total_cost_wei": tx.total_cost_wei,
+                    }
+                    for tx in response.setup_txs
+                ],
+                "fee_pusd": response.fee_pusd or None,
             }
         )
 
@@ -719,14 +740,33 @@ class GatewayPolymarketClient:
             self._raise_rpc_error("CreateAndPostMarketOrder RPC failed", exc.details(), status_code=None)
         if not response.success:
             self._raise_rpc_error("CreateAndPostMarketOrder failed", response.error)
+        # VIB-3710: same setup_txs / fee_pusd surfacing as CreateAndPostOrder.
+        # Market orders go through the same _ensure_wallet_ready path
+        # server-side (CreateAndPostMarketOrder delegates to CreateAndPostOrder).
+        # CodeRabbit thread 5: project ``side`` and ``token_id`` into the dict
+        # so a SELL market order does not deserialize as BUY (the
+        # ``from_api_response`` defaults are ``side="BUY"`` / ``market=""``).
         return OrderResponse.from_api_response(
             {
                 "orderID": response.order_id,
                 "status": response.status,
+                "side": side,
+                "market": token_id,
                 "price": response.price,
                 "size": response.size,
                 "filledSize": response.size_matched,
                 "avgPrice": response.avg_fill_price,
                 "createdAt": response.created_at,
+                "setup_txs": [
+                    {
+                        "tx_hash": tx.tx_hash,
+                        "description": tx.description,
+                        "gas_used": tx.gas_used,
+                        "gas_price_wei": tx.gas_price_wei,
+                        "total_cost_wei": tx.total_cost_wei,
+                    }
+                    for tx in response.setup_txs
+                ],
+                "fee_pusd": response.fee_pusd or None,
             }
         )

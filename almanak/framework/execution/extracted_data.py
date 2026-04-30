@@ -333,6 +333,41 @@ class StakeData:
 
 
 @dataclass(frozen=True)
+class PredictionSetupTx:
+    """Per-tx record of a Polymarket V2 on-chain setup transaction (VIB-3710).
+
+    Mirrors :class:`almanak.framework.connectors.polymarket.models.SetupTxInfo`
+    but lives in the framework execution layer so consumers downstream of the
+    enricher (strategy callbacks, accounting handler) do not need to import
+    from the connector. The connector-side struct is the wire model; this
+    struct is the framework-side projection that flows on
+    :class:`PredictionFill`.
+
+    Attributes:
+        tx_hash: 0x-prefixed Polygon tx hash for the approval / wrap.
+        description: Human-readable label (e.g. ``"Approve pUSD → CTF V2 exchange"``).
+        gas_used: Receipt ``gasUsed`` (gas units consumed).
+        gas_price_wei: Effective gas price in wei (string-encoded for Decimal precision).
+        total_cost_wei: ``gas_used * gas_price_wei`` (string-encoded for precision).
+    """
+
+    tx_hash: str
+    description: str
+    gas_used: int
+    gas_price_wei: str
+    total_cost_wei: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tx_hash": self.tx_hash,
+            "description": self.description,
+            "gas_used": self.gas_used,
+            "gas_price_wei": self.gas_price_wei,
+            "total_cost_wei": self.total_cost_wei,
+        }
+
+
+@dataclass(frozen=True)
 class PredictionFill:
     """Extracted Polymarket CLOB fill data (VIB-3218).
 
@@ -342,6 +377,12 @@ class PredictionFill:
     size -- not the actual fill -- so partial IOC fills and unfilled GTC
     limits both got booked as full positions. This struct carries the actual
     fill amount from the CLOB response back to the strategy.
+
+    VIB-3710 extension: also carries the gateway-side setup transactions
+    (approvals + source-asset → pUSD wrap) and the operator fee charged at
+    match time. The downstream prediction handler folds both into a
+    fully-loaded cost basis so realized PnL on SELL/REDEEM is no longer
+    systematically optimistic.
 
     Attributes:
         filled_shares: Shares actually filled at response time. 0 means the
@@ -357,6 +398,12 @@ class PredictionFill:
             ("matched", "live", "unmatched", "delayed", …). The typed status
             is on :class:`ClobExecutionResult`; this field is a hint for
             logging / diagnostics without reaching into extracted_data.
+        setup_txs: On-chain setup transactions submitted by the gateway
+            before this order. Empty list when allowances were already in
+            place AND no wrap was needed. (VIB-3710)
+        fee_pusd: pUSD operator fee charged at match time, in human units.
+            None when the order did not match (no fee yet) or when the CLOB
+            response did not carry a fee field. (VIB-3710)
 
     Example::
 
@@ -375,6 +422,8 @@ class PredictionFill:
     avg_fill_price: Decimal | None = None
     order_id: str | None = None
     status: str | None = None
+    setup_txs: tuple[PredictionSetupTx, ...] = ()
+    fee_pusd: Decimal | None = None
 
     @property
     def is_filled(self) -> bool:
@@ -399,6 +448,8 @@ class PredictionFill:
             "avg_fill_price": str(self.avg_fill_price) if self.avg_fill_price is not None else None,
             "order_id": self.order_id,
             "status": self.status,
+            "setup_txs": [tx.to_dict() for tx in self.setup_txs],
+            "fee_pusd": str(self.fee_pusd) if self.fee_pusd is not None else None,
         }
 
 
@@ -675,6 +726,7 @@ __all__ = [
     "PerpData",
     "StakeData",
     "PredictionFill",
+    "PredictionSetupTx",
     "ProtocolFees",
     "BridgeData",
 ]

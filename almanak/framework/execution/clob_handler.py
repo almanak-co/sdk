@@ -432,6 +432,15 @@ class ClobExecutionResult:
     fills: list[ClobFill] = field(default_factory=list)
     error: str | None = None
     submitted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # VIB-3710: gateway-side setup transactions (approvals + source-asset →
+    # pUSD wrap) submitted before this order. Stored as a list of dicts here
+    # (the connector dataclass would force a connector import on every result
+    # consumer). The clob_handler converts them to typed PredictionSetupTx
+    # when projecting onto PredictionFill.
+    setup_txs: list[dict[str, Any]] = field(default_factory=list)
+    # VIB-3710: pUSD operator fee charged at match time. None when the order
+    # did not match or when the response did not carry a fee field.
+    fee_pusd: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -445,6 +454,8 @@ class ClobExecutionResult:
             "fills": [f.to_dict() for f in self.fills],
             "error": self.error,
             "submitted_at": self.submitted_at.isoformat(),
+            "setup_txs": list(self.setup_txs),
+            "fee_pusd": str(self.fee_pusd) if self.fee_pusd is not None else None,
         }
 
     def to_prediction_fill(self) -> "PredictionFill | None":
@@ -454,17 +465,33 @@ class ClobExecutionResult:
         intent where the requested size is the current position balance,
         derived at compile time but not persisted on the bundle). In that
         case strategies should read post-execution wallet balances instead.
+
+        VIB-3710: also propagates setup_txs + fee_pusd onto the PredictionFill
+        so the enricher and prediction handler downstream can fold gas + fees
+        into the position's loaded cost basis.
         """
-        from almanak.framework.execution.extracted_data import PredictionFill
+        from almanak.framework.execution.extracted_data import PredictionFill, PredictionSetupTx
 
         if self.requested_size is None:
             return None
+        setup_tx_objs = tuple(
+            PredictionSetupTx(
+                tx_hash=str(entry.get("tx_hash", "")),
+                description=str(entry.get("description", "")),
+                gas_used=int(entry.get("gas_used", 0) or 0),
+                gas_price_wei=str(entry.get("gas_price_wei", "0")),
+                total_cost_wei=str(entry.get("total_cost_wei", "0")),
+            )
+            for entry in self.setup_txs
+        )
         return PredictionFill(
             filled_shares=self.filled_size,
             requested_shares=self.requested_size,
             avg_fill_price=self.avg_fill_price,
             order_id=self.order_id,
             status=self.status.value,
+            setup_txs=setup_tx_objs,
+            fee_pusd=self.fee_pusd,
         )
 
 
@@ -659,6 +686,23 @@ class ClobActionHandler:
                 order_type_hint=order_type_hint,
             )
 
+            # VIB-3710: capture gateway-side setup_txs (approvals + wrap) and
+            # operator fee_pusd. We store setup_txs as plain dicts here to
+            # keep the result struct connector-agnostic; the typed conversion
+            # to PredictionSetupTx happens in to_prediction_fill().
+            setup_txs_raw: list[dict[str, Any]] = []
+            for tx in getattr(order_response, "setup_txs", None) or []:
+                setup_txs_raw.append(
+                    {
+                        "tx_hash": getattr(tx, "tx_hash", ""),
+                        "description": getattr(tx, "description", ""),
+                        "gas_used": int(getattr(tx, "gas_used", 0) or 0),
+                        "gas_price_wei": str(getattr(tx, "gas_price_wei", "0")),
+                        "total_cost_wei": str(getattr(tx, "total_cost_wei", "0")),
+                    }
+                )
+            fee_pusd = _parse_decimal(getattr(order_response, "fee_pusd", None))
+
             # VIB-3218: ``success`` is what the runner uses to decide whether
             # to call ``on_intent_executed(success=True, ...)``, write a
             # positive ledger entry, and emit a "transaction confirmed"
@@ -689,6 +733,8 @@ class ClobActionHandler:
                 requested_size=requested_size,
                 error=error,
                 submitted_at=datetime.now(UTC),
+                setup_txs=setup_txs_raw,
+                fee_pusd=fee_pusd,
             )
 
         except Exception as e:

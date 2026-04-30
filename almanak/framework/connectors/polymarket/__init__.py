@@ -148,6 +148,7 @@ from .models import (
     PriceHistory,
     PriceHistoryInterval,
     PriceLevel,
+    SetupTxInfo,
     SignatureType,
     SignedOrder,
     TokenPrice,
@@ -272,6 +273,7 @@ __all__ = [
     "SignedOrder",
     "OrderResponse",
     "OpenOrder",
+    "SetupTxInfo",
     # Positions & Trades
     "Position",
     "Trade",

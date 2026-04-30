@@ -17,6 +17,7 @@ from almanak.framework.accounting.models import (
     AccountingConfidence,
     LendingAccountingEvent,
     PendleAccountingEvent,
+    PredictionAccountingEvent,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
@@ -27,7 +28,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AccountingEvent = (
-    LendingAccountingEvent | PendleAccountingEvent | LPAccountingEvent | PerpAccountingEvent | VaultAccountingEvent
+    LendingAccountingEvent
+    | PendleAccountingEvent
+    | LPAccountingEvent
+    | PerpAccountingEvent
+    | VaultAccountingEvent
+    | PredictionAccountingEvent
 )
 
 

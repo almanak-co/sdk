@@ -283,6 +283,20 @@ class ResultEnricher:
         if not spec:
             return result  # No fields to extract (e.g., HOLD)
 
+        # VIB-3706: Off-chain extraction for Polymarket CLOB orders.
+        # PREDICTION_BUY / PREDICTION_SELL submit off-chain via the CLOB API
+        # — there are no on-chain receipts to parse. The fill data lives on
+        # ``result.prediction_fill`` (set by the runner's CLOB branch in
+        # _single_chain_execute_clob). We pull the spec fields from there
+        # plus ``bundle_metadata["market_id"]`` BEFORE the on-chain receipt
+        # collection runs, so a missing receipt cannot silently drop the
+        # enrichment data the strategy needs to book the position.
+        # PREDICTION_REDEEM stays on the on-chain CTF receipt path because
+        # redemption is an on-chain merge call.
+        offchain_extracted: set[str] = set()
+        if intent_type in ("PREDICTION_BUY", "PREDICTION_SELL"):
+            offchain_extracted = self._extract_offchain_prediction_fields(result, intent, intent_type, bundle_metadata)
+
         # Get protocol from intent, falling back to context (intent may be frozen with protocol=None)
         intent_protocol = self._get_protocol(intent)
         context_protocol = getattr(context, "protocol", None)
@@ -298,71 +312,95 @@ class ResultEnricher:
             if bridge_name:
                 protocol = str(bridge_name).lower()
 
+        # VIB-3706: When off-chain extraction has already populated some
+        # fields (PREDICTION_BUY/SELL CLOB path), we still want to fall
+        # through to the summary log even if the on-chain receipt path is
+        # unavailable (no protocol resolvable, no parser registered, no
+        # receipts). Track parser availability without short-circuiting.
+        parser: Any = None
+
         if not protocol:
-            logger.debug(f"Enrichment skipped: protocol=None on both intent and context (intent_type={intent_type})")
-            return result
-        logger.debug(
-            f"Enrichment: intent_type={intent_type}, protocol={protocol} "
-            f"(from={'intent' if intent_protocol else 'context'}), "
-            f"chain={context.chain}, fields={spec}"
-        )
-
-        # VIB-2581: Skip enrichment for Solana chains when no Solana-specific parser
-        # exists. Without this guard, Solana TXs (with string instruction logs) get routed
-        # to EVM parsers (expecting dict logs with 'topics'), producing 40+ warnings like
-        # "Failed to parse log: 'str' object has no attribute 'get'".
-        chain_str = str(getattr(context, "chain", "")).lower()
-        is_solana = "solana" in chain_str
-
-        # Get parser for protocol
-        try:
-            parser = self.parser_registry.get(protocol, chain=context.chain)
-        except ValueError as e:
-            warning = f"Parser not found for {protocol}: {e}"
-            logger.info(warning)
-            result.extraction_warnings.append(warning)
-            return result
-
-        # Guard: don't run EVM parsers on Solana receipts
-        parser_name = type(parser).__name__.lower()
-        solana_parsers = {
-            "jupiterreceiptparser",
-            "kaminoreceiptparser",
-            "raydiumreceiptparser",
-            "meteorareceiptparser",
-            "orcareceiptparser",
-            "jupiterlendreceiptparser",
-        }
-        if is_solana and parser_name not in solana_parsers:
+            logger.debug(f"Enrichment: protocol=None on both intent and context (intent_type={intent_type})")
+        else:
             logger.debug(
-                f"Enrichment skipped: EVM parser {type(parser).__name__} is not compatible "
-                f"with Solana chain receipts (protocol={protocol})"
+                f"Enrichment: intent_type={intent_type}, protocol={protocol} "
+                f"(from={'intent' if intent_protocol else 'context'}), "
+                f"chain={context.chain}, fields={spec}"
             )
-            return result
-        logger.debug(f"Enrichment: using parser {type(parser).__name__} for protocol={protocol}")
 
-        # Collect receipts from successful transactions
-        receipts = self._collect_receipts(result)
-        if not receipts:
-            logger.debug(
-                f"Enrichment skipped: no receipts in execution result (intent_type={intent_type}, protocol={protocol})"
-            )
-            return result
-        logger.debug(f"Enrichment: found {len(receipts)} receipt(s) to process")
+            # VIB-2581: Skip enrichment for Solana chains when no Solana-specific parser
+            # exists. Without this guard, Solana TXs (with string instruction logs) get routed
+            # to EVM parsers (expecting dict logs with 'topics'), producing 40+ warnings like
+            # "Failed to parse log: 'str' object has no attribute 'get'".
+            chain_str = str(getattr(context, "chain", "")).lower()
+            is_solana = "solana" in chain_str
 
-        # Install a temporary parse_receipt cache to avoid redundant parsing.
-        # Without this, each extract_* method calls parse_receipt() independently,
-        # meaning the same receipt is parsed N times for N extraction fields
-        # (e.g., 5x for PERP_OPEN with position_id, size_delta, collateral, entry_price, leverage).
-        self._install_parse_cache(parser)
-        try:
-            # Extract each field in the spec
-            for field in spec:
-                self._extract_field(
-                    result, parser, receipts, field, intent_type, protocol, bundle_metadata=bundle_metadata
-                )
-        finally:
-            self._remove_parse_cache(parser)
+            # Get parser for protocol
+            try:
+                parser = self.parser_registry.get(protocol, chain=context.chain)
+            except ValueError as e:
+                warning = f"Parser not found for {protocol}: {e}"
+                logger.info(warning)
+                result.extraction_warnings.append(warning)
+                parser = None
+
+            if parser is not None:
+                # Guard: don't run EVM parsers on Solana receipts
+                parser_name = type(parser).__name__.lower()
+                solana_parsers = {
+                    "jupiterreceiptparser",
+                    "kaminoreceiptparser",
+                    "raydiumreceiptparser",
+                    "meteorareceiptparser",
+                    "orcareceiptparser",
+                    "jupiterlendreceiptparser",
+                }
+                if is_solana and parser_name not in solana_parsers:
+                    logger.debug(
+                        f"Enrichment skipped: EVM parser {type(parser).__name__} is not compatible "
+                        f"with Solana chain receipts (protocol={protocol})"
+                    )
+                    parser = None
+                else:
+                    logger.debug(f"Enrichment: using parser {type(parser).__name__} for protocol={protocol}")
+
+        # Collect receipts and run the on-chain extraction pass when we have
+        # both a usable parser and at least one receipt. Off-chain enrichment
+        # (above) is already attached to ``result`` regardless.
+        if parser is not None:
+            receipts = self._collect_receipts(result)
+            if not receipts:
+                if not offchain_extracted:
+                    logger.debug(
+                        f"Enrichment skipped: no receipts in execution result "
+                        f"(intent_type={intent_type}, protocol={protocol})"
+                    )
+                    return result
+            else:
+                logger.debug(f"Enrichment: found {len(receipts)} receipt(s) to process")
+
+                # On-chain extraction skips fields already populated off-chain so
+                # the CLOB-authoritative values are not overwritten by speculative
+                # log parsing. For non-prediction intents ``offchain_extracted`` is
+                # empty and the full spec runs as before.
+                onchain_spec = [f for f in spec if f not in offchain_extracted]
+
+                # Install a temporary parse_receipt cache to avoid redundant parsing.
+                # Without this, each extract_* method calls parse_receipt() independently,
+                # meaning the same receipt is parsed N times for N extraction fields
+                # (e.g., 5x for PERP_OPEN with position_id, size_delta, collateral, entry_price, leverage).
+                self._install_parse_cache(parser)
+                try:
+                    # Extract each field in the (possibly filtered) on-chain spec
+                    for field in onchain_spec:
+                        self._extract_field(
+                            result, parser, receipts, field, intent_type, protocol, bundle_metadata=bundle_metadata
+                        )
+                finally:
+                    self._remove_parse_cache(parser)
+        elif not offchain_extracted:
+            # No parser AND no off-chain extraction — nothing to log, return.
+            return result
 
         # Log enrichment summary with actual extracted values
         extracted_parts = []
@@ -379,12 +417,428 @@ class ResultEnricher:
                 f"(protocol={protocol}, chain={context.chain})"
             )
         if missing_fields:
+            parser_label = type(parser).__name__ if parser is not None else "offchain"
             logger.debug(
                 f"Enrichment: fields not extracted for {intent_type}: {', '.join(missing_fields)} "
-                f"(protocol={protocol}, parser={type(parser).__name__})"
+                f"(protocol={protocol}, parser={parser_label})"
             )
 
         return result
+
+    def _extract_offchain_prediction_fields(
+        self,
+        result: ExecutionResult,
+        intent: Any,
+        intent_type: str,
+        bundle_metadata: dict[str, Any] | None,
+    ) -> set[str]:
+        """Extract Polymarket CLOB fill data for PREDICTION_BUY / PREDICTION_SELL.
+
+        VIB-3706 introduced this off-chain path because Polymarket CLOB
+        orders submit off-chain and produce no on-chain receipts; the runner
+        attaches a :class:`PredictionFill` to ``result.prediction_fill`` in
+        :meth:`StrategyRunner._single_chain_execute_clob`.
+
+        VIB-3708: rather than read ``prediction_fill`` directly here (which
+        forks parsing logic between the enricher and the parser), this
+        method now constructs an ``OrderResponse``-shaped dict from
+        ``prediction_fill`` + ``bundle_metadata`` + ``extracted_data["order_id"]``
+        and routes it through
+        :meth:`PolymarketReceiptParser.parse_order_response` to obtain a
+        typed :class:`TradeResult`. The resulting fields are then mapped to
+        the spec keys (``outcome_tokens_received`` / ``cost_basis`` /
+        ``market_id`` for BUY, ``outcome_tokens_sold`` / ``proceeds`` /
+        ``market_id`` for SELL).
+
+        Single source of truth: any future edge case (partial fills,
+        explicit fees, fee-adjusted cost basis) is handled inside the
+        parser, not duplicated here.
+
+        Fallback: if the parser raises or returns an unsuccessful
+        ``TradeResult``, the method falls back to reading ``prediction_fill``
+        directly (the VIB-3706 behavior) and emits a warning. This
+        preserves VIB-3706's data-preservation guarantee — a parser bug
+        cannot silently drop the only fill data the strategy will ever see.
+
+        When ``prediction_fill`` is missing or unfilled (rejected order or
+        resting GTC), the method attaches ``market_id`` if available and
+        emits a structured ``extraction_warnings`` entry so downstream
+        accounting cannot silently mistake a no-op for a fill. The data
+        flow is deliberately one-way: this method writes into
+        ``extracted_data`` and ``extraction_warnings`` only; it never
+        raises.
+
+        Args:
+            result: ExecutionResult to mutate.
+            intent: The PredictionBuyIntent / PredictionSellIntent. Used as
+                a fallback source of ``market_id`` when bundle_metadata is
+                absent or incomplete.
+            intent_type: Either ``"PREDICTION_BUY"`` or ``"PREDICTION_SELL"``.
+            bundle_metadata: ``ActionBundle.metadata`` from the polymarket
+                adapter. The compiler always sets ``market_id`` here (see
+                ``polymarket/adapter.py``).
+
+        Returns:
+            Set of spec field names successfully populated. Used by the
+            caller so the on-chain receipt pass (if any) does not overwrite
+            CLOB-authoritative values.
+        """
+        # Resolve market_id with bundle_metadata-then-intent fallback. The
+        # adapter always writes market_id into metadata in the BUY/SELL
+        # compile paths, but be defensive in case a bespoke compile path
+        # ever omits it.
+        market_id: str | None = None
+        if bundle_metadata:
+            raw_mid = bundle_metadata.get("market_id")
+            if raw_mid is not None and raw_mid != "":
+                market_id = str(raw_mid)
+        if market_id is None:
+            intent_mid = getattr(intent, "market_id", None)
+            if intent_mid is not None and intent_mid != "":
+                market_id = str(intent_mid)
+
+        prediction_fill = getattr(result, "prediction_fill", None)
+
+        # Field labels per spec (BUY vs SELL). PREDICTION_REDEEM is not
+        # routed here — it stays on the on-chain CTF receipt path.
+        if intent_type == "PREDICTION_BUY":
+            shares_field = "outcome_tokens_received"
+            value_field = "cost_basis"
+        else:  # PREDICTION_SELL
+            shares_field = "outcome_tokens_sold"
+            value_field = "proceeds"
+
+        extracted: set[str] = set()
+
+        # Always attach market_id when we can — even an unfilled order needs
+        # it for downstream identification.
+        if market_id is not None:
+            result.extracted_data["market_id"] = market_id
+            extracted.add("market_id")
+        else:
+            warning = f"Enrichment incomplete: {intent_type} has no market_id (missing from bundle_metadata and intent)"
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+
+        if prediction_fill is None:
+            warning = f"Enrichment incomplete: {intent_type} has no prediction_fill data, order may have been rejected"
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        # Build the OrderResponse-shaped dict the parser expects. Side is
+        # derived from intent_type so the parser receives a complete view
+        # even if the runner did not echo it back on PredictionFill.
+        order_dict = self._build_clob_order_dict(
+            intent_type=intent_type,
+            prediction_fill=prediction_fill,
+            market_id=market_id,
+            order_id_fallback=result.extracted_data.get("order_id"),
+        )
+
+        # Try the parser-routed path first. Any failure (parser raises, or
+        # returns success=False) drops to the direct prediction_fill
+        # fallback below — VIB-3706's data-preservation guarantee must
+        # survive a parser bug.
+        trade_result = None
+        try:
+            from almanak.framework.connectors.polymarket.receipt_parser import (
+                PolymarketReceiptParser,
+            )
+
+            parser = PolymarketReceiptParser()
+            trade_result = parser.parse_order_response(order_dict)
+        except Exception as exc:
+            warning = (
+                f"Enrichment fallback: {intent_type} parser.parse_order_response "
+                f"raised ({type(exc).__name__}: {exc}); falling back to direct prediction_fill read"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            trade_result = None
+
+        if trade_result is None or not trade_result.success:
+            if trade_result is not None and not trade_result.success:
+                warning = (
+                    f"Enrichment fallback: {intent_type} parser returned unsuccessful "
+                    f"TradeResult (error={trade_result.error}); falling back to direct prediction_fill read"
+                )
+                logger.warning(warning)
+                result.extraction_warnings.append(warning)
+            extracted |= self._extract_from_prediction_fill_direct(
+                result, intent_type, prediction_fill, shares_field, value_field
+            )
+            return extracted
+
+        # Map the parser's TradeResult onto the spec keys. The parser's
+        # ``filled_size`` and ``avg_price`` are the canonical post-parse
+        # values — derive shares + USD value from them so any future parser
+        # adjustment (e.g. fee-adjusted basis) flows here automatically.
+        filled_shares = trade_result.filled_size
+        avg_price = trade_result.avg_price
+
+        if filled_shares <= 0:
+            # Zero-fill = order rejected (IOC unmatched) or resting (GTC live).
+            # Surface as a structured warning so the strategy / accounting
+            # cannot silently book a position from a no-op submission. The
+            # parser preserves the lifecycle status string so the warning
+            # carries the same diagnostics as the direct-read path.
+            status = trade_result.status or "unknown"
+            warning = (
+                f"Enrichment incomplete: {intent_type} prediction_fill has "
+                f"filled_shares=0 (status={status}); no fill to extract"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        # Successful fill — populate shares + USD value fields.
+        result.extracted_data[shares_field] = filled_shares
+        extracted.add(shares_field)
+
+        if avg_price is None or avg_price <= 0:
+            # Filled but no average price — should not happen for a
+            # non-zero fill that the parser successfully parsed, but treat
+            # as an accounting gap rather than fabricating $0.
+            warning = (
+                f"Enrichment incomplete: {intent_type} prediction_fill.filled_shares={filled_shares} "
+                f"but avg_fill_price is missing or zero — cannot compute {value_field}"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        # cost_basis (BUY) / proceeds (SELL) = filled_shares * avg_price in
+        # USDC. Polymarket prices are 0.01 tick, sizes are share-count
+        # Decimals — straight Decimal multiplication preserves precision.
+        usd_value = filled_shares * avg_price
+        result.extracted_data[value_field] = usd_value
+        extracted.add(value_field)
+
+        # VIB-3710: surface gateway-side setup_tx gas + operator fee_pusd onto
+        # extracted_data so the prediction handler can fold them into a
+        # fully-loaded cost basis. Only meaningful for BUY (the gateway never
+        # submits setup_txs on a SELL — allowances are already in place from
+        # the first BUY) but kept symmetric so a SELL that did wrap (rare
+        # edge case) still attributes its gas correctly.
+        gas_extracted = self._extract_offchain_prediction_costs(
+            result=result,
+            intent_type=intent_type,
+            prediction_fill=prediction_fill,
+            bundle_metadata=bundle_metadata,
+        )
+        extracted |= gas_extracted
+
+        return extracted
+
+    def _extract_offchain_prediction_costs(
+        self,
+        *,
+        result: ExecutionResult,
+        intent_type: str,
+        prediction_fill: Any,
+        bundle_metadata: dict[str, Any] | None,
+    ) -> set[str]:
+        """Extract gateway setup_tx gas + operator fee_pusd from prediction_fill.
+
+        VIB-3710: writes the following keys onto ``result.extracted_data`` when
+        present:
+
+          - ``setup_tx_count`` (int): number of approval / wrap txs the gateway
+            submitted before this order.
+          - ``gas_cost_native_wei`` (Decimal): aggregate MATIC wei spent on
+            setup transactions. Always present when ``setup_tx_count > 0``.
+          - ``gas_cost_usd`` (Decimal | None): same value converted via the
+            compiler-resolved MATIC USD price. None when the price could not
+            be resolved (a structured warning is appended to
+            ``extraction_warnings``).
+          - ``fee_pusd`` (Decimal): operator fee. Only written when the fill
+            carried a non-None ``fee_pusd``.
+
+        Spec-field-set returned by this method is informational — the keys
+        above are NOT in EXTRACTION_SPECS (they are loaded-cost extras, not
+        intent-required fields), so the on-chain receipt pass cannot
+        accidentally clobber them.
+        """
+        extracted: set[str] = set()
+
+        setup_txs = getattr(prediction_fill, "setup_txs", None) or ()
+        if setup_txs:
+            total_wei = Decimal("0")
+            for tx in setup_txs:
+                try:
+                    total_wei += Decimal(str(getattr(tx, "total_cost_wei", "0") or "0"))
+                except (InvalidOperation, ValueError, ArithmeticError):
+                    continue
+            result.extracted_data["setup_tx_count"] = len(setup_txs)
+            result.extracted_data["gas_cost_native_wei"] = total_wei
+            extracted.add("setup_tx_count")
+            extracted.add("gas_cost_native_wei")
+
+            # Resolve MATIC USD price from compiler bundle_metadata. Missing
+            # or unparseable price degrades gracefully — gas_cost_usd stays
+            # None, the basis row records gas_cost_usd=None, and the
+            # accounting handler can still record everything else without
+            # fabricating a USD figure from nothing.
+            matic_price: Decimal | None = None
+            if bundle_metadata:
+                raw_price = bundle_metadata.get("native_token_price_usd")
+                if raw_price not in (None, ""):
+                    try:
+                        candidate = Decimal(str(raw_price))
+                        if candidate > 0:
+                            matic_price = candidate
+                    except (InvalidOperation, ValueError, ArithmeticError):
+                        matic_price = None
+
+            if matic_price is not None:
+                gas_cost_usd = (total_wei / Decimal(10**18)) * matic_price
+                result.extracted_data["gas_cost_usd"] = gas_cost_usd
+                extracted.add("gas_cost_usd")
+            else:
+                # None signals "unknown" — distinct from Decimal("0") (which
+                # would mean "we measured zero gas"). The handler treats None
+                # as gas_cost_usd=0 in the basis sum but logs the gap.
+                warning = (
+                    f"Enrichment incomplete: {intent_type} setup_tx gas attributed "
+                    f"to native units (gas_cost_native_wei={total_wei}) but "
+                    "MATIC USD price was not resolvable; gas_cost_usd omitted"
+                )
+                logger.warning(warning)
+                result.extraction_warnings.append(warning)
+
+        fee_pusd = getattr(prediction_fill, "fee_pusd", None)
+        if fee_pusd is not None:
+            try:
+                fee_decimal = Decimal(str(fee_pusd))
+                if fee_decimal >= 0:
+                    result.extracted_data["fee_pusd"] = fee_decimal
+                    extracted.add("fee_pusd")
+            except (InvalidOperation, ValueError, ArithmeticError):
+                pass
+
+        return extracted
+
+    @staticmethod
+    def _build_clob_order_dict(
+        intent_type: str,
+        prediction_fill: Any,
+        market_id: str | None,
+        order_id_fallback: str | None,
+    ) -> dict[str, Any]:
+        """Construct an OrderResponse-shaped dict for parse_order_response.
+
+        Mirrors the CLOB API response shape documented on
+        :meth:`PolymarketReceiptParser.parse_order_response` — populated from
+        the runner-attached :class:`PredictionFill` plus compiler-side
+        bundle_metadata. The parser tolerates missing fields, but we
+        provide them all so log messages and edge cases line up with
+        production responses.
+
+        ``side`` is derived from intent_type because PredictionFill does
+        not echo it; ``createdAt`` is intentionally omitted because the
+        runner does not capture submission time on the fill struct (the
+        parser handles a missing timestamp gracefully).
+        """
+        # Order ID: prefer the value the runner stamped on extracted_data
+        # (set in StrategyRunner._single_chain_execute_clob from
+        # clob_result.order_id) and fall back to PredictionFill.order_id.
+        order_id = order_id_fallback or getattr(prediction_fill, "order_id", None)
+        side = "BUY" if intent_type == "PREDICTION_BUY" else "SELL"
+
+        # Numeric fields — pass through as strings so the parser can do its
+        # own Decimal coercion uniformly with real CLOB responses.
+        filled_shares_raw = getattr(prediction_fill, "filled_shares", Decimal("0"))
+        requested_shares_raw = getattr(prediction_fill, "requested_shares", Decimal("0"))
+        avg_fill_price_raw = getattr(prediction_fill, "avg_fill_price", None)
+        status = getattr(prediction_fill, "status", None) or "UNKNOWN"
+
+        order_dict: dict[str, Any] = {
+            "orderID": order_id,
+            "status": status,
+            "side": side,
+            # ``size`` is the *requested* size on a CLOB order; the parser
+            # does not currently use it for value derivation, but it is
+            # part of the documented shape — populate so edge cases that
+            # later read it (e.g. partial-fill detection) work.
+            "size": str(requested_shares_raw),
+            "filledSize": str(filled_shares_raw),
+        }
+        if avg_fill_price_raw is not None:
+            order_dict["avgPrice"] = str(avg_fill_price_raw)
+            # parse_order_response falls back to ``price`` when avgPrice is
+            # missing; mirror avgPrice here so the fallback path also
+            # produces the same value if avgPrice is ever stripped.
+            order_dict["price"] = str(avg_fill_price_raw)
+        if market_id is not None:
+            order_dict["market"] = market_id
+        return order_dict
+
+    @staticmethod
+    def _extract_from_prediction_fill_direct(
+        result: ExecutionResult,
+        intent_type: str,
+        prediction_fill: Any,
+        shares_field: str,
+        value_field: str,
+    ) -> set[str]:
+        """Direct prediction_fill -> extracted_data fallback (VIB-3706 path).
+
+        Used only when the parser-routed path fails. Mirrors the original
+        VIB-3706 logic exactly so the user-visible result is identical to
+        the pre-3708 behavior on a parser bug.
+        """
+        extracted: set[str] = set()
+
+        try:
+            filled_shares = Decimal(str(prediction_fill.filled_shares))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            warning = (
+                f"Enrichment incomplete: {intent_type} prediction_fill.filled_shares "
+                f"could not be coerced to Decimal: {exc}"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        if filled_shares <= 0:
+            status = getattr(prediction_fill, "status", None) or "unknown"
+            warning = (
+                f"Enrichment incomplete: {intent_type} prediction_fill has "
+                f"filled_shares=0 (status={status}); no fill to extract"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        result.extracted_data[shares_field] = filled_shares
+        extracted.add(shares_field)
+
+        avg_price_raw = getattr(prediction_fill, "avg_fill_price", None)
+        if avg_price_raw is None:
+            warning = (
+                f"Enrichment incomplete: {intent_type} prediction_fill.filled_shares={filled_shares} "
+                f"but avg_fill_price is None — cannot compute {value_field}"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        try:
+            avg_fill_price = Decimal(str(avg_price_raw))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            warning = (
+                f"Enrichment incomplete: {intent_type} prediction_fill.avg_fill_price "
+                f"could not be coerced to Decimal: {exc}"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return extracted
+
+        usd_value = filled_shares * avg_fill_price
+        result.extracted_data[value_field] = usd_value
+        extracted.add(value_field)
+        return extracted
 
     def _extract_field(
         self,

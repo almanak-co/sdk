@@ -345,6 +345,14 @@ class PolymarketAdapter:
                 },
             )
 
+            # VIB-3710: thread the native (MATIC) USD price through the bundle
+            # so the result enricher can convert wrap/approval gas costs from
+            # wei → USD without needing a fresh price oracle round-trip. Use
+            # ``MarketSnapshot.price`` when available; absent / failing
+            # snapshot leaves the field unset and the enricher records
+            # gas_cost_native only with a structured warning.
+            native_price_str = self._matic_price_str(market_snapshot)
+
             return ActionBundle(
                 intent_type=IntentType.PREDICTION_BUY.value,
                 transactions=[],  # CLOB orders are off-chain
@@ -368,6 +376,7 @@ class PolymarketAdapter:
                     },
                     "protocol": "polymarket",
                     "chain": "polygon",
+                    "native_token_price_usd": native_price_str,
                 },
             )
 
@@ -478,6 +487,12 @@ class PolymarketAdapter:
                 },
             )
 
+            # VIB-3710: surface MATIC USD price for parity with the BUY path —
+            # SELL orders almost never trigger setup_txs (allowances already
+            # applied from the first BUY) but the field stays consistent for
+            # the enricher's wei → USD conversion in the rare case they do.
+            native_price_str = self._matic_price_str(market_snapshot)
+
             return ActionBundle(
                 intent_type=IntentType.PREDICTION_SELL.value,
                 transactions=[],  # CLOB orders are off-chain
@@ -501,6 +516,7 @@ class PolymarketAdapter:
                     },
                     "protocol": "polymarket",
                     "chain": "polygon",
+                    "native_token_price_usd": native_price_str,
                 },
             )
 
@@ -732,6 +748,31 @@ class PolymarketAdapter:
         if expiration_hours is None or expiration_hours <= 0:
             return 0
         return int(datetime.now(UTC).timestamp()) + (expiration_hours * 3600)
+
+    @staticmethod
+    def _matic_price_str(market_snapshot: MarketSnapshot | None) -> str:
+        """Resolve the MATIC USD price from the snapshot, returning a string.
+
+        VIB-3710: the result enricher uses this to convert wrap-tx +
+        approval-tx gas costs from wei → USD. Returns ``""`` (empty) when
+        the snapshot is absent OR the lookup fails — the enricher then
+        records ``gas_cost_native`` only and emits a structured warning so
+        the missing USD value is visible in iteration logs rather than
+        silently lost.
+
+        Note: the gateway-boundary rule applies. ``MarketSnapshot.price``
+        already routes through the gateway's ``MarketService`` — there is
+        no direct external HTTP call here.
+        """
+        if market_snapshot is None:
+            return ""
+        try:
+            price = market_snapshot.price("MATIC")
+        except Exception:  # noqa: BLE001 — snapshot lookups have many failure modes; degrade gracefully
+            return ""
+        if price is None or price <= 0:
+            return ""
+        return str(price)
 
     # =========================================================================
     # CLOB Pre-Flight Validation (VIB-3140)

@@ -978,6 +978,14 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
     txs_planned = 0
     txs_sent = 0
     gas_used = 0
+    # VIB-3709: Off-chain CLOB orders (PREDICTION_BUY / PREDICTION_SELL on
+    # Polymarket) succeed without producing a tx_hash. Operators triaging
+    # from logs need the CLOB order_id + matcher status as the actionable
+    # identifier, so surface them on the iteration_summary when present.
+    # Additive only: omit the keys entirely for non-prediction intents and
+    # for predictions where extraction failed (graceful degradation).
+    order_id: str | None = None
+    clob_status: str | None = None
     if result.execution_result:
         er = result.execution_result
         if hasattr(er, "transaction_results") and er.transaction_results:
@@ -991,6 +999,18 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
             txs_planned = max(txs_planned, len(er.receipts))
         txs_planned = max(txs_planned, txs_sent)
         gas_used = getattr(er, "total_gas_used", 0) or 0
+        # Only consult extracted_data for off-chain prediction intents
+        # (PREDICTION_BUY / PREDICTION_SELL). PREDICTION_REDEEM is on-chain
+        # so tx_hashes already carries the actionable identifier; we don't
+        # surface order_id/clob_status for it.
+        if intent_type in ("PREDICTION_BUY", "PREDICTION_SELL"):
+            extracted = getattr(er, "extracted_data", None) or {}
+            order_id_value = extracted.get("order_id")
+            clob_status_value = extracted.get("clob_status")
+            if order_id_value:
+                order_id = str(order_id_value)
+            if clob_status_value:
+                clob_status = str(clob_status_value)
 
     # Extract reconciliation status (tri-state: None=unchecked, True=clean, False=mismatch)
     # VIB-3158: a report is only "clean" when there is neither an incident
@@ -1003,6 +1023,14 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
         has_incident = bool(recon.get("incident", False))
         has_warnings = bool(recon.get("warnings"))
         reconciliation_ok = not has_incident and not has_warnings
+
+    # Build optional CLOB fields conditionally so non-prediction intents
+    # (and predictions where extraction failed) don't get empty keys.
+    optional_clob_fields: dict[str, str] = {}
+    if order_id is not None:
+        optional_clob_fields["order_id"] = order_id
+    if clob_status is not None:
+        optional_clob_fields["clob_status"] = clob_status
 
     logger.info(
         "iteration_summary",
@@ -1023,4 +1051,5 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
         hold_reason_code=hold_reason_code,
         reconciliation_ok=reconciliation_ok,
         error=result.error,
+        **optional_clob_fields,
     )

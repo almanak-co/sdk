@@ -35,7 +35,7 @@ from decimal import Decimal
 from enum import Enum, StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -836,6 +836,46 @@ class SignedOrder:
         }
 
 
+@dataclass(frozen=True)
+class SetupTxInfo:
+    """Per-tx record of a Polymarket V2 on-chain setup transaction (VIB-3710).
+
+    The gateway's ``_ensure_wallet_ready`` may submit up to 5 ERC-20 approvals
+    plus 1 source-asset → pUSD wrap on the first BUY for a wallet. These cost
+    real MATIC and structurally attribute to the position whose first BUY
+    triggered them. The strategy-side ``OrderResponse`` carries one
+    ``SetupTxInfo`` per setup tx so the downstream prediction handler can
+    fold the gas spend into the position's loaded cost basis.
+
+    Attributes:
+        tx_hash: 0x-prefixed Polygon tx hash.
+        description: Human-readable label produced by the CTF SDK
+            (e.g. ``"Approve pUSD → CTF V2 exchange"``).
+        gas_used: Receipt ``gasUsed`` (units of gas consumed).
+        gas_price_wei: Effective gas price in wei (post-London EIP-1559 takes
+            ``effectiveGasPrice``; pre-London / Anvil falls back to the
+            tx-level ``gasPrice`` / ``maxFeePerGas``). Decimal-encoded as a
+            string to preserve precision through proto / JSON.
+        total_cost_wei: ``gas_used * gas_price_wei`` — the wallet's MATIC
+            outflow on this tx, in wei. Decimal-encoded as a string.
+    """
+
+    tx_hash: str
+    description: str
+    gas_used: int
+    gas_price_wei: str
+    total_cost_wei: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tx_hash": self.tx_hash,
+            "description": self.description,
+            "gas_used": self.gas_used,
+            "gas_price_wei": self.gas_price_wei,
+            "total_cost_wei": self.total_cost_wei,
+        }
+
+
 class OrderResponse(BaseModel):
     """Response from order submission.
 
@@ -843,7 +883,16 @@ class OrderResponse(BaseModel):
     submission time) and, when available, ``avgPrice`` (volume-weighted fill
     price). These fields are the basis for distinguishing "order accepted"
     from "order filled" in downstream execution (VIB-3218).
+
+    VIB-3710: also carries (a) ``setup_txs`` — the on-chain approval / wrap
+    transactions the gateway submitted before this order, populated only when
+    ``_ensure_wallet_ready`` actually had work to do; and (b) ``fee_pusd`` —
+    the operator-set fee charged at match time, which is NOT part of the
+    signed order payload and so cannot be derived strategy-side without the
+    gateway surfacing it explicitly.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     order_id: str = Field(description="Order ID")
     status: OrderStatus = Field(description="Order status")
@@ -860,6 +909,25 @@ class OrderResponse(BaseModel):
         ),
     )
     created_at: datetime | None = Field(default=None, description="Creation time")
+    setup_txs: list[SetupTxInfo] = Field(
+        default_factory=list,
+        description=(
+            "On-chain setup transactions (approvals + source-asset → pUSD wrap) "
+            "submitted by the gateway before this order. Empty when allowances "
+            "were already in place AND no wrap was needed. Populated exactly "
+            "once per order (VIB-3710)."
+        ),
+    )
+    fee_pusd: Decimal | None = Field(
+        default=None,
+        description=(
+            "pUSD operator fee charged at match time, in human units (6 dp). "
+            "None when the order did not match (no fee charged) or when the "
+            "CLOB response did not carry a fee field. Distinct from any "
+            "signed-order fee — V2 fees are operator-set, not part of the "
+            "EIP-712 payload (VIB-3710)."
+        ),
+    )
 
     @classmethod
     def from_api_response(cls, data: dict) -> "OrderResponse":
@@ -901,6 +969,41 @@ class OrderResponse(BaseModel):
             except (ValueError, ArithmeticError):
                 avg_fill_price = None
 
+        # VIB-3710: optional setup_txs / fee_pusd carried by the gateway-routed
+        # response shape (these never appear in raw CLOB JSON — the gateway
+        # synthesises them server-side and re-shapes the dict before this
+        # parser runs). Tolerant of missing fields so direct CLOB callers
+        # still work unchanged.
+        setup_txs_raw = data.get("setup_txs") or []
+        setup_txs: list[SetupTxInfo] = []
+        for entry in setup_txs_raw:
+            try:
+                setup_txs.append(
+                    SetupTxInfo(
+                        tx_hash=str(entry.get("tx_hash", "")),
+                        description=str(entry.get("description", "")),
+                        gas_used=int(entry.get("gas_used", 0) or 0),
+                        gas_price_wei=str(entry.get("gas_price_wei", "0")),
+                        total_cost_wei=str(entry.get("total_cost_wei", "0")),
+                    )
+                )
+            except (TypeError, ValueError, AttributeError):
+                # Malformed entry — drop it rather than crash the whole order
+                # response; under-attribution beats losing the response.
+                continue
+
+        fee_pusd_raw = data.get("fee_pusd")
+        if fee_pusd_raw in (None, ""):
+            fee_pusd_raw = data.get("fee")  # raw CLOB JSON fallback for direct callers
+        fee_pusd: Decimal | None = None
+        if fee_pusd_raw not in (None, ""):
+            try:
+                value = Decimal(str(fee_pusd_raw))
+                if value >= 0:
+                    fee_pusd = value
+            except (ValueError, ArithmeticError):
+                fee_pusd = None
+
         return cls(
             # Gamma responses alternate between `orderID` and `orderId`.
             order_id=data.get("orderID") or data.get("orderId", ""),
@@ -912,6 +1015,8 @@ class OrderResponse(BaseModel):
             filled_size=Decimal(str(data.get("filledSize", "0"))),
             avg_fill_price=avg_fill_price,
             created_at=created_at,
+            setup_txs=setup_txs,
+            fee_pusd=fee_pusd,
         )
 
 

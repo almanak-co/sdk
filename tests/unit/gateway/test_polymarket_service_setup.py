@@ -13,6 +13,7 @@ separately.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
@@ -216,7 +217,7 @@ class TestEnsureWalletReady:
         servicer._polygon_web3 = MagicMock()
 
         # Make the tx submission take a beat so the second call queues on the lock.
-        async def slow_submit(_tx: TransactionData) -> str:
+        async def slow_submit(_tx: TransactionData, _setup_txs: list[dict[str, Any]]) -> str:
             await asyncio.sleep(0.01)
             return "0xhash"
 

@@ -19,7 +19,7 @@ import logging
 import os
 import time
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 import aiohttp
@@ -120,7 +120,13 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         # servicer = one signer). Reset whenever the cache is invalidated.
         self._cached_pusd_balance: int | None = None
         self._cached_pusd_balance_block: int | None = None
-
+        # VIB-3710: setup-tx attribution is request-scoped — each
+        # ``CreateAndPostOrder`` invocation owns a local
+        # ``setup_txs: list[dict[str, Any]]`` that ``_ensure_wallet_ready``
+        # populates and the RPC drains into the response. NO instance-level
+        # ledger: a shared ``_pending_setup_txs`` would race across concurrent
+        # order RPCs (request A's approvals leaking into request B's response,
+        # corrupting basis attribution across positions).
         self._private_key = settings.private_key or settings.polymarket_private_key
         self._wallet_address = self._resolve_signer_address()
         self._funder_address = self._resolve_funder_address()
@@ -481,7 +487,11 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             "maxPriorityFeePerGas": max_priority_fee,
         }
 
-    async def _sign_and_submit_setup_tx(self, tx_data: TransactionData) -> str:
+    async def _sign_and_submit_setup_tx(
+        self,
+        tx_data: TransactionData,
+        setup_txs: list[dict[str, Any]],
+    ) -> str:
         """Sign a setup transaction with the gateway's key and broadcast.
 
         Returns the tx hash (0x-prefixed). Waits for the receipt and raises
@@ -491,6 +501,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         fork) before broadcasting, and uses EIP-1559 gas fields with a
         Polygon-safe priority floor (30 gwei). Falls back to legacy
         ``gasPrice`` when the chain doesn't expose ``baseFeePerGas``.
+
+        VIB-3710: after the receipt confirms, append a record
+        ``{tx_hash, description, gas_used, gas_price_wei, total_cost_wei}``
+        to the caller-supplied ``setup_txs`` list so the calling order RPC
+        can attribute the MATIC gas spend to the position whose first BUY
+        triggered the setup. The list is request-scoped (owned by the
+        ``CreateAndPostOrder`` invocation) so concurrent order RPCs never
+        cross-contaminate each other's attribution. The price is derived
+        from EIP-1559 ``effectiveGasPrice`` when the receipt exposes it
+        (post-London), with a fallback to the ``gasPrice`` / ``maxFeePerGas``
+        we put on the tx so legacy / Anvil receipts still produce a non-None
+        value.
         """
         web3 = self._get_polygon_web3()
         wallet = self._wallet_address
@@ -522,10 +544,54 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         if receipt.status != 1:
             raise ValueError(f"Polymarket setup tx reverted: {tx_hex} ({tx_data.description})")
         logger.info("polymarket setup tx confirmed: %s — %s", tx_hex, tx_data.description)
+
+        # VIB-3710: extract gas accounting from the receipt and pin it to the
+        # in-flight order. ``effectiveGasPrice`` is post-London canon; fall back
+        # to whatever price we placed on the tx (maxFeePerGas under EIP-1559,
+        # gasPrice under legacy) when the receipt does not expose it. Any
+        # arithmetic failure (mock receipts, missing fields) silently records
+        # 0 so accounting can still see the tx happened — under-attribution is
+        # safer than crashing the order RPC after the chain spend.
+        try:
+            gas_used = int(getattr(receipt, "gasUsed", 0) or 0)
+        except (TypeError, ValueError):
+            gas_used = 0
+        gas_price_wei = 0
+        try:
+            eff_price = getattr(receipt, "effectiveGasPrice", None)
+            if eff_price is None and isinstance(receipt, dict):
+                eff_price = receipt.get("effectiveGasPrice")
+            if eff_price is not None:
+                gas_price_wei = int(eff_price)
+            else:
+                # Pre-London / Anvil: prefer maxFeePerGas as the EIP-1559
+                # upper bound paid; fall back to legacy gasPrice we set.
+                gas_price_wei = int(gas_fields.get("maxFeePerGas") or gas_fields.get("gasPrice") or 0)
+        except (TypeError, ValueError):
+            gas_price_wei = 0
+        total_cost_wei = gas_used * gas_price_wei
+        setup_txs.append(
+            {
+                "tx_hash": tx_hex,
+                "description": tx_data.description or "",
+                "gas_used": gas_used,
+                "gas_price_wei": str(gas_price_wei),
+                "total_cost_wei": str(total_cost_wei),
+            }
+        )
+
         return tx_hex
 
-    async def _ensure_wallet_ready(self, min_pusd_units: int = 0) -> None:
+    async def _ensure_wallet_ready(self, min_pusd_units: int = 0) -> list[dict[str, Any]]:
         """Idempotent on-chain wallet setup for Polymarket V2 trading.
+
+        Returns a request-scoped ``setup_txs`` list — one entry per approval /
+        wrap submitted on this call. Always returns a list (possibly empty);
+        the caller embeds the records into the order RPC response so gas spent
+        is attributed exactly to the order whose first BUY paid for it. Each
+        invocation owns its own list, so concurrent ``CreateAndPostOrder`` /
+        ``CreateAndPostMarketOrder`` calls cannot leak attribution into each
+        other's responses.
 
         - First call: submits the V2 5-tx approval set (only the missing legs).
         - SELL orders (``min_pusd_units == 0``): no pUSD balance read — the
@@ -550,8 +616,14 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         leave the actual funder unprepared. Refuse early in that case rather
         than silently approving the wrong account.
         """
+        # Request-scoped ledger: never an instance attribute. Each invocation
+        # builds its own list, hands it to ``_sign_and_submit_setup_tx`` for
+        # population, and returns it to the caller. Concurrent calls cannot
+        # cross-contaminate.
+        setup_txs: list[dict[str, Any]] = []
+
         if not self._wallet_address or not self._private_key:
-            return  # signing disabled — no auto-setup possible
+            return setup_txs  # signing disabled — no auto-setup possible
 
         if self._funder_address and self._funder_address.lower() != self._wallet_address.lower():
             raise ValueError(
@@ -571,13 +643,13 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 if tx_data_list:
                     logger.info("Applying %d Polymarket V2 approvals for %s", len(tx_data_list), wallet)
                     for tx_data in tx_data_list:
-                        await self._sign_and_submit_setup_tx(tx_data)
+                        await self._sign_and_submit_setup_tx(tx_data, setup_txs)
                 self._allowances_applied = True
 
             # SELL short-circuit: no pUSD math, no balance read, return after
             # allowances are in place. Saves one ERC20 balanceOf call per SELL.
             if min_pusd_units <= 0:
-                return
+                return setup_txs
 
             pusd_balance = await self._get_pusd_balance_cached(ctf, web3, wallet, min_pusd_units)
             if pusd_balance < min_pusd_units:
@@ -595,7 +667,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                     pusd_balance / 10**6,
                 )
                 wrap_tx = ctf.build_wrap_to_pusd_tx(wallet, deficit)
-                await self._sign_and_submit_setup_tx(wrap_tx)
+                await self._sign_and_submit_setup_tx(wrap_tx, setup_txs)
                 # Optimistic cache update — receipt confirmed the wrap landed
                 # (``_sign_and_submit_setup_tx`` raises on revert), so the new
                 # pUSD balance is at least cached + deficit. Re-anchor to the
@@ -606,6 +678,8 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                     self._cached_pusd_balance_block = int(raw_block)
                 except Exception:  # noqa: BLE001
                     self._cached_pusd_balance_block = None
+
+        return setup_txs
 
     async def _get_pusd_balance_cached(  # noqa: ANN001
         self,
@@ -1152,8 +1226,10 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 # asset → pUSD if the wallet doesn't hold enough collateral. SELL
                 # consumes shares (CTF), so pUSD isn't required — but allowances
                 # still need to be in place for the V2 exchange to pull shares.
+                # Returns a request-scoped list of setup-tx records so concurrent
+                # order RPCs cannot leak attribution into each other's responses.
                 min_pusd = self._required_pusd_units_for_buy(request.price, request.size) if side == "BUY" else 0
-                await self._ensure_wallet_ready(min_pusd_units=min_pusd)
+                setup_txs_records = await self._ensure_wallet_ready(min_pusd_units=min_pusd)
 
                 response = await asyncio.to_thread(
                     client.create_and_post_order,
@@ -1167,6 +1243,29 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 )
             finally:
                 client.close()
+            # VIB-3710: setup_txs_records is the request-scoped list owned by
+            # this RPC invocation — no shared mutable state to drain, so each
+            # order's response carries only the gas it actually paid for.
+            setup_txs_proto = [
+                gateway_pb2.PolymarketSetupTx(
+                    tx_hash=record["tx_hash"],
+                    description=record["description"],
+                    gas_used=int(record["gas_used"]),
+                    gas_price_wei=record["gas_price_wei"],
+                    total_cost_wei=record["total_cost_wei"],
+                )
+                for record in setup_txs_records
+            ]
+            # VIB-3710: surface operator fee from the OrderResponse model. The
+            # underlying ClobClient.create_and_post_order parses POST /order's
+            # raw JSON into OrderResponse; ``fee_pusd`` reads either the
+            # explicit ``fee_pusd`` field or the legacy ``fee`` field on that
+            # response (see OrderResponse.from_api_response). When neither is
+            # present (orders that have not yet matched, or a CLOB API that
+            # omits the field), surface "" so the wire shape is unambiguous —
+            # the strategy-side parser maps "" to None.
+            fee_pusd_response = getattr(response, "fee_pusd", None)
+            fee_pusd_str = str(fee_pusd_response) if fee_pusd_response is not None else ""
             return gateway_pb2.PolymarketOrderResponse(
                 order_id=response.order_id,
                 status=response.status.value,
@@ -1176,8 +1275,14 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 avg_fill_price=str(response.avg_fill_price) if response.avg_fill_price is not None else "",
                 created_at=response.created_at.isoformat() if response.created_at else "",
                 success=True,
+                setup_txs=setup_txs_proto,
+                fee_pusd=fee_pusd_str,
             )
         except (InvalidOperation, ValueError) as e:
+            # No shared ledger to drain — setup_txs_records is request-scoped
+            # and was either consumed in the response above or is unreferenced
+            # if we never reached the success branch. Any setup txs that
+            # confirmed before this exception are local to this call only.
             return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
         except Exception as e:
             logger.exception("Failed to create order through gateway Polymarket client")

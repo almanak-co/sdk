@@ -626,6 +626,17 @@ class PolymarketReceiptParser:
 
         Fill notifications are received when an order is matched.
 
+        .. note::
+           This method is parser-API surface for callers that subscribe to
+           Polymarket's CLOB fill stream (a separate websocket channel
+           from the order-submission response). The SDK does not currently
+           consume that stream — the runner attaches a
+           :class:`PredictionFill` from the order-submission response
+           instead, which the enricher routes through
+           :meth:`parse_order_response`. This method is kept on the
+           parser API so the parsing logic stays in one place when fill-
+           stream consumption is added (VIB-3708 follow-up).
+
         Args:
             notification: Fill notification from CLOB
 
@@ -683,6 +694,16 @@ class PolymarketReceiptParser:
 
     def parse_order_status(self, status_response: dict[str, Any]) -> TradeResult:
         """Parse a CLOB order status query response.
+
+        .. note::
+           Parser-API surface for status polling. The current SDK polling
+           path (:meth:`PolymarketClobClient.get_order`) builds an
+           :class:`OpenOrder` directly from the API response without going
+           through the parser. This method is kept available so future
+           polling consumers (VIB-3708 follow-up) can route through the
+           parser for consistent edge-case handling — it simply delegates
+           to :meth:`parse_order_response` because the response shape is
+           identical.
 
         Args:
             status_response: Order status response from CLOB

@@ -2086,6 +2086,24 @@ class StrategyRunner:
                 )
                 return position_key, vault_address
 
+            # Prediction (PREDICTION_BUY / PREDICTION_SELL / PREDICTION_REDEEM) — VIB-3707.
+            # Per-(market_id, outcome) aggregate position. PREDICTION_REDEEM intents
+            # may carry outcome=None when redeeming all winning positions; in that
+            # case we cannot key the position_key here — the handler falls back to
+            # extracted_data/position_key reconstruction or surfaces an unavailable
+            # event.
+            if t in {"PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"}:
+                market_id = str(getattr(intent, "market_id", "") or "")
+                outcome_raw = getattr(intent, "outcome", None)
+                outcome = str(outcome_raw) if outcome_raw is not None else ""
+                proto_norm = protocol or "polymarket"
+                position_key = (
+                    f"prediction:{proto_norm}:{chain.lower()}:{wallet_address.lower()}:{market_id}:{outcome}"
+                    if market_id and outcome and chain and wallet_address
+                    else ""
+                )
+                return position_key, market_id
+
         except Exception:
             logger.debug("_compute_outbox_position_key failed", exc_info=True)
 

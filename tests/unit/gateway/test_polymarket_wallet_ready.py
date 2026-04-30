@@ -554,8 +554,12 @@ class TestSignAndSubmitChainIdGate:
             "almanak.gateway.services.polymarket_service.get_rpc_url",
             return_value="https://polygon-rpc.example.com",
         ), pytest.raises(ValueError, match="expected polygon mainnet"):
+            # VIB-3710: _sign_and_submit_setup_tx now takes a request-scoped
+            # setup_txs list as a second positional arg. The chain-id assertion
+            # raises BEFORE any append, so the list stays empty regardless.
             await servicer._sign_and_submit_setup_tx(
-                TransactionData(to="0xabc", data="0x", gas_estimate=80_000, description="approve")
+                TransactionData(to="0xabc", data="0x", gas_estimate=80_000, description="approve"),
+                [],
             )
 
         # Critically: no signing-pre-flight RPCs were made.

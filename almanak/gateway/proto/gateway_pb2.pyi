@@ -1386,7 +1386,7 @@ Global___GetAccountingEventsResponse: _TypeAlias = GetAccountingEventsResponse  
 class SaveOutboxEntryRequest(_message.Message):
     """Accounting outbox messages — mirrors the accounting_outbox table in
     metrics-database (PR #24). PG primary key is ledger_entry_id; the proto
-    exposes it as outbox_id so drain_one stays compatible with the SQLite path.
+    also exposes it as "id" so drain_one stays compatible with the SQLite path.
     """
 
     DESCRIPTOR: _descriptor.Descriptor
@@ -5317,6 +5317,8 @@ class PolymarketOrderResponse(_message.Message):
     SIZE_FIELD_NUMBER: _builtins.int
     AVG_FILL_PRICE_FIELD_NUMBER: _builtins.int
     CREATED_AT_FIELD_NUMBER: _builtins.int
+    SETUP_TXS_FIELD_NUMBER: _builtins.int
+    FEE_PUSD_FIELD_NUMBER: _builtins.int
     order_id: _builtins.str
     status: _builtins.str
     """"LIVE", "MATCHED", "CANCELLED", etc."""
@@ -5329,6 +5331,23 @@ class PolymarketOrderResponse(_message.Message):
     size: _builtins.str
     avg_fill_price: _builtins.str
     created_at: _builtins.str
+    fee_pusd: _builtins.str
+    """VIB-3710: pUSD fee charged by the Polymarket operator at match time.
+    Decimal string in pUSD (6-decimal) human units, e.g. "0.012345". Empty
+    string when the order did not match (no fee yet) or when the response
+    body did not carry an explicit fee field. Distinct from any signed-order
+    fee — V2 fees are operator-set at match time and are NOT part of the
+    EIP-712 payload.
+    """
+    @_builtins.property
+    def setup_txs(self) -> _containers.RepeatedCompositeFieldContainer[Global___PolymarketSetupTx]:
+        """VIB-3710: on-chain setup transactions submitted by _ensure_wallet_ready
+        (token approvals + source-asset wrap to pUSD) before this order. Empty
+        when allowances were already in place AND no wrap was needed. Populated
+        exactly once per order — drained server-side after each response is built
+        so the next order does not double-count the same gas spend.
+        """
+
     def __init__(
         self,
         *,
@@ -5343,11 +5362,50 @@ class PolymarketOrderResponse(_message.Message):
         size: _builtins.str = ...,
         avg_fill_price: _builtins.str = ...,
         created_at: _builtins.str = ...,
+        setup_txs: _abc.Iterable[Global___PolymarketSetupTx] | None = ...,
+        fee_pusd: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["avg_fill_price", b"avg_fill_price", "created_at", b"created_at", "error", b"error", "error_code", b"error_code", "order_id", b"order_id", "price", b"price", "size", b"size", "size_matched", b"size_matched", "status", b"status", "success", b"success", "transact_time", b"transact_time"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["avg_fill_price", b"avg_fill_price", "created_at", b"created_at", "error", b"error", "error_code", b"error_code", "fee_pusd", b"fee_pusd", "order_id", b"order_id", "price", b"price", "setup_txs", b"setup_txs", "size", b"size", "size_matched", b"size_matched", "status", b"status", "success", b"success", "transact_time", b"transact_time"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PolymarketOrderResponse: _TypeAlias = PolymarketOrderResponse  # noqa: Y015
+
+@_typing.final
+class PolymarketSetupTx(_message.Message):
+    """VIB-3710: per-tx record of a Polymarket V2 setup transaction (token
+    approval or pUSD wrap) submitted by the gateway before an order. The
+    strategy container uses these to attribute MATIC gas spend to the
+    position whose first BUY triggered the setup.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    DESCRIPTION_FIELD_NUMBER: _builtins.int
+    GAS_USED_FIELD_NUMBER: _builtins.int
+    GAS_PRICE_WEI_FIELD_NUMBER: _builtins.int
+    TOTAL_COST_WEI_FIELD_NUMBER: _builtins.int
+    tx_hash: _builtins.str
+    description: _builtins.str
+    """e.g. "Approve pUSD → CTF V2 exchange" """
+    gas_used: _builtins.int
+    gas_price_wei: _builtins.str
+    """Decimal string for precision"""
+    total_cost_wei: _builtins.str
+    """gas_used * gas_price (Decimal string)"""
+    def __init__(
+        self,
+        *,
+        tx_hash: _builtins.str = ...,
+        description: _builtins.str = ...,
+        gas_used: _builtins.int = ...,
+        gas_price_wei: _builtins.str = ...,
+        total_cost_wei: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["description", b"description", "gas_price_wei", b"gas_price_wei", "gas_used", b"gas_used", "total_cost_wei", b"total_cost_wei", "tx_hash", b"tx_hash"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PolymarketSetupTx: _TypeAlias = PolymarketSetupTx  # noqa: Y015
 
 @_typing.final
 class PolymarketCancelOrderRequest(_message.Message):

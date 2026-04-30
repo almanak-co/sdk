@@ -1670,6 +1670,31 @@ message PolymarketOrderResponse {
   string size = 9;
   string avg_fill_price = 10;
   string created_at = 11;
+  // VIB-3710: on-chain setup transactions submitted by _ensure_wallet_ready
+  // (token approvals + source-asset wrap to pUSD) before this order. Empty
+  // when allowances were already in place AND no wrap was needed. Populated
+  // exactly once per order — drained server-side after each response is built
+  // so the next order does not double-count the same gas spend.
+  repeated PolymarketSetupTx setup_txs = 12;
+  // VIB-3710: pUSD fee charged by the Polymarket operator at match time.
+  // Decimal string in pUSD (6-decimal) human units, e.g. "0.012345". Empty
+  // string when the order did not match (no fee yet) or when the response
+  // body did not carry an explicit fee field. Distinct from any signed-order
+  // fee — V2 fees are operator-set at match time and are NOT part of the
+  // EIP-712 payload.
+  string fee_pusd = 13;
+}
+
+// VIB-3710: per-tx record of a Polymarket V2 setup transaction (token
+// approval or pUSD wrap) submitted by the gateway before an order. The
+// strategy container uses these to attribute MATIC gas spend to the
+// position whose first BUY triggered the setup.
+message PolymarketSetupTx {
+  string tx_hash = 1;
+  string description = 2;          // e.g. "Approve pUSD → CTF V2 exchange"
+  uint64 gas_used = 3;
+  string gas_price_wei = 4;        // Decimal string for precision
+  string total_cost_wei = 5;       // gas_used * gas_price (Decimal string)
 }
 
 message PolymarketCancelOrderRequest {

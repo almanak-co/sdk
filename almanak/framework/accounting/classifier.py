@@ -13,6 +13,7 @@ class AccountingCategory(StrEnum):
     PERP = "perp"
     VAULT = "vault"
     SWAP = "swap"
+    PREDICTION = "prediction"
     NO_ACCOUNTING = "no_accounting"
 
 
@@ -22,6 +23,7 @@ _PERP_TYPES: frozenset[str] = frozenset({"PERP_OPEN", "PERP_CLOSE", "PERP_INCREA
 _VAULT_TYPES: frozenset[str] = frozenset(
     {"VAULT_DEPOSIT", "VAULT_WITHDRAW", "VAULT_REDEEM", "VAULT_HARVEST", "VAULT_REALLOCATE"}
 )
+_PREDICTION_TYPES: frozenset[str] = frozenset({"PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"})
 _NO_ACCOUNTING_TYPES: frozenset[str] = frozenset(
     {
         "BRIDGE",
@@ -44,6 +46,7 @@ def classify(intent_type: str, protocol: str = "", token_out: str = "") -> Accou
     - lp:       LP_OPEN, LP_CLOSE, LP_COLLECT_FEES  (non-Pendle protocols)
     - perp:     PERP_OPEN/CLOSE/INCREASE/DECREASE/LIQUIDATE  (any protocol)
     - vault:    VAULT_DEPOSIT/WITHDRAW/REDEEM/HARVEST/REALLOCATE  (any protocol)
+    - prediction: PREDICTION_BUY/PREDICTION_SELL/PREDICTION_REDEEM  (any protocol)
     - pendle_pt: SWAP with "pendle" in protocol AND token_out starts with "PT-"
     - swap:     SWAP  (all other cases)
     - no_accounting: unrecognised intent types
@@ -51,6 +54,12 @@ def classify(intent_type: str, protocol: str = "", token_out: str = "") -> Accou
     Pendle PT classification uses the "PT-" symbol prefix as a fast-path
     heuristic (correct for all current Pendle markets). A token-registry-based
     check is deferred until VIB-3476.
+
+    Prediction-market routing covers Polymarket BUY/SELL/REDEEM (VIB-3707).
+    Prior to VIB-3707 these intents fell through to NO_ACCOUNTING and were
+    silently dropped by processor._dispatch — leaving the framework with no
+    cost-basis or realized-PnL record on prediction-market trades. The
+    handler lives at category_handlers/prediction_handler.py.
     """
     t = intent_type.upper()
     p = protocol.lower()
@@ -65,6 +74,8 @@ def classify(intent_type: str, protocol: str = "", token_out: str = "") -> Accou
         return AccountingCategory.PERP
     if t in _VAULT_TYPES:
         return AccountingCategory.VAULT
+    if t in _PREDICTION_TYPES:
+        return AccountingCategory.PREDICTION
     if t == "SWAP":
         if "pendle" in p and token_out.upper().startswith("PT-"):
             return AccountingCategory.PENDLE_PT

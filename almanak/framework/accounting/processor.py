@@ -197,6 +197,7 @@ class AccountingProcessor:
         from almanak.framework.accounting.category_handlers.lp_handler import handle_lp
         from almanak.framework.accounting.category_handlers.pendle_handler import handle_pendle_lp, handle_pendle_pt
         from almanak.framework.accounting.category_handlers.perp_handler import handle_perp
+        from almanak.framework.accounting.category_handlers.prediction_handler import handle_prediction
         from almanak.framework.accounting.category_handlers.swap_handler import handle_swap
         from almanak.framework.accounting.category_handlers.vault_handler import handle_vault
 
@@ -221,6 +222,8 @@ class AccountingProcessor:
             return handle_vault(outbox_row, ledger_row)
         if category == AccountingCategory.SWAP:
             return handle_swap(outbox_row, ledger_row, self._basis_store)
+        if category == AccountingCategory.PREDICTION:
+            return handle_prediction(outbox_row, ledger_row, self._basis_store)
         # NO_ACCOUNTING — no event written
         return None
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 MATCHING_POLICY_VERSION = 2
@@ -290,6 +290,46 @@ class FIFOBasisStore:
                 )
                 replayed += 1
 
+            elif event_type in (
+                "PREDICTION_OPEN",
+                "PREDICTION_INCREASE",
+                "PREDICTION_REDUCE",
+                "PREDICTION_CLOSE",
+                "PREDICTION_REDEEM",
+            ):
+                # Replay prediction-market aggregate from the post-trade
+                # snapshot stored on the event (position_size_after,
+                # position_basis_after). We assign the snapshot directly
+                # rather than re-applying record_prediction_buy /
+                # match_prediction_sell because:
+                #   1. Events are processed in timestamp ASC order — the
+                #      latest event for a (market, outcome) wins.
+                #   2. A snapshot-based replay survives missed intermediate
+                #      events (e.g. policy-v1 records) without compounding
+                #      drift from re-derivation.
+                pos_key = payload.get("position_key") or position_key
+                if not pos_key:
+                    continue
+                size_after = _parse_decimal(payload.get("position_size_after"))
+                basis_after = _parse_decimal(payload.get("position_basis_after"))
+                if size_after is None or basis_after is None:
+                    continue
+                k = self._prediction_key(deployment_id, pos_key)
+                # Position closed (zero size) — drop the row entirely so
+                # match_prediction_sell on a closed position correctly
+                # returns "no prior basis" rather than a stale zero row.
+                if size_after <= Decimal("0"):
+                    self._lots.pop(k, None)
+                else:
+                    self._lots[k] = [
+                        {
+                            "kind": "prediction",
+                            "size": size_after,
+                            "basis": basis_after,
+                        }
+                    ]
+                replayed += 1
+
         if replayed:
             _log.info("FIFOBasisStore: reconstructed %d lot operations from accounting_events", replayed)
         if _v1_skipped:
@@ -503,6 +543,226 @@ class FIFOBasisStore:
             }
         )
         return effective_lot_id
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Prediction-market aggregation (VIB-3707)
+    #
+    # Unlike FIFO lot tracking used for BORROW/REPAY/PT/SWAP, prediction-market
+    # positions are aggregated weighted-average per (market_id, outcome). Repeat
+    # BUYs combine into one running aggregate (size, basis); SELLs and REDEEMs
+    # consume that aggregate proportionally.
+    #
+    # The same `_lots` dict is reused as the in-memory backing store. A
+    # prediction key holds at most ONE row representing the current aggregate
+    # — not a list of lots — distinguished by the row dict keys
+    # ("size" / "basis" / "kind"="prediction"). Persistence backend is
+    # untouched: rows are reconstructed from PREDICTION_* accounting events
+    # on startup via reconstruct_from_events.
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _prediction_key(self, deployment_id: str, position_key: str) -> str:
+        """Composite key for the prediction aggregate row.
+
+        position_key already encodes (market_id, outcome) — no token leg here
+        because prediction shares are tracked as a single conditional position,
+        not a token balance.
+        """
+        return f"{deployment_id}|prediction|{position_key}"
+
+    def get_prediction_position(
+        self,
+        deployment_id: str,
+        position_key: str,
+    ) -> tuple[Decimal, Decimal] | None:
+        """Return (size, basis_usd) for the open aggregate, or None if no row."""
+        key = self._prediction_key(deployment_id, position_key)
+        row_list = self._lots.get(key)
+        if not row_list:
+            return None
+        row = row_list[0]
+        size = row.get("size", Decimal("0"))
+        basis = row.get("basis", Decimal("0"))
+        if not isinstance(size, Decimal):
+            size = Decimal(str(size))
+        if not isinstance(basis, Decimal):
+            basis = Decimal(str(basis))
+        return size, basis
+
+    def record_prediction_buy(
+        self,
+        deployment_id: str,
+        position_key: str,
+        shares: Decimal,
+        cost_basis_usd: Decimal,
+        gas_cost_usd: Decimal = Decimal("0"),
+        fee_pusd: Decimal = Decimal("0"),
+    ) -> tuple[Decimal, Decimal, bool]:
+        """Apply a PREDICTION_BUY to the weighted-average aggregate.
+
+        Returns (new_size, new_basis_usd, is_open) where is_open is True when
+        this was the first BUY for the (market_id, outcome) — used by the
+        handler to choose between PREDICTION_OPEN and PREDICTION_INCREASE.
+
+        Weighted-average accounting: averaging up combines size and basis
+        directly (basis is in USD terms, so summation already yields the
+        correct aggregate cost). Average price = new_basis / new_size.
+
+        VIB-3710: ``gas_cost_usd`` and ``fee_pusd`` are accumulated alongside
+        ``cost_basis_usd`` into a separate ``loaded_extras`` field on the
+        aggregate. SELL/REDEEM uses
+        ``fully_loaded_basis = basis + loaded_extras`` to compute realized
+        PnL — proportionally consumed on partial sells the same way the bare
+        basis is. Defaults to ``Decimal("0")`` so existing callers (and
+        replay paths that lack the new fields) keep their current arithmetic
+        unchanged. None / negative values are clamped to 0 to keep the
+        invariant that fully_loaded_basis ≥ basis.
+        """
+        # Clamp non-positive extras to zero so a buggy upstream measurement
+        # cannot silently subtract from realized PnL.
+        if gas_cost_usd is None or gas_cost_usd < 0:
+            gas_cost_usd = Decimal("0")
+        if fee_pusd is None or fee_pusd < 0:
+            fee_pusd = Decimal("0")
+        loaded_extras_delta = gas_cost_usd + fee_pusd
+
+        key = self._prediction_key(deployment_id, position_key)
+        existing = self._lots.get(key)
+        if not existing:
+            self._lots[key] = [
+                {
+                    "kind": "prediction",
+                    "size": shares,
+                    "basis": cost_basis_usd,
+                    # VIB-3710: gas + fees accumulated separately from the
+                    # headline pUSD basis. SELL/REDEEM consumes both
+                    # proportionally so realized PnL reflects the truly
+                    # fully-loaded cost. Average-up sums these alongside
+                    # basis (NOT a weighted-average — adding the cost of
+                    # the second BUY's setup-txs to the position is the
+                    # actually-incurred spend, not a "blend").
+                    "loaded_extras": loaded_extras_delta,
+                }
+            ]
+            return shares, cost_basis_usd, True
+
+        row = existing[0]
+        old_size = row.get("size", Decimal("0"))
+        old_basis = row.get("basis", Decimal("0"))
+        old_extras = row.get("loaded_extras", Decimal("0"))
+        if not isinstance(old_size, Decimal):
+            old_size = Decimal(str(old_size))
+        if not isinstance(old_basis, Decimal):
+            old_basis = Decimal(str(old_basis))
+        if not isinstance(old_extras, Decimal):
+            old_extras = Decimal(str(old_extras))
+        new_size = old_size + shares
+        new_basis = old_basis + cost_basis_usd
+        row["size"] = new_size
+        row["basis"] = new_basis
+        row["loaded_extras"] = old_extras + loaded_extras_delta
+        return new_size, new_basis, False
+
+    def get_prediction_loaded_extras(
+        self,
+        deployment_id: str,
+        position_key: str,
+    ) -> Decimal:
+        """Return the per-position cumulative gas + fee accumulator (VIB-3710).
+
+        Returns ``Decimal("0")`` when no aggregate row exists or when an
+        existing row predates VIB-3710 (no ``loaded_extras`` key) — both
+        cases are equivalent to "no extras attributed yet".
+        """
+        key = self._prediction_key(deployment_id, position_key)
+        existing = self._lots.get(key)
+        if not existing:
+            return Decimal("0")
+        row = existing[0]
+        extras = row.get("loaded_extras", Decimal("0"))
+        if not isinstance(extras, Decimal):
+            try:
+                extras = Decimal(str(extras))
+            except (InvalidOperation, ValueError):
+                return Decimal("0")
+        return extras
+
+    def match_prediction_sell(
+        self,
+        deployment_id: str,
+        position_key: str,
+        shares_sold: Decimal,
+        proceeds_usd: Decimal,
+    ) -> tuple[Decimal | None, Decimal, Decimal, bool]:
+        """Apply a PREDICTION_SELL (or REDEEM) to the aggregate.
+
+        Returns (realized_pnl_usd, new_size, new_basis_usd, is_close).
+
+        - realized_pnl_usd is None when no prior basis was recorded — the
+          caller MUST surface this as an accounting gap (e.g. the strategy
+          was deployed with an existing on-chain position).
+        - Proportional basis consumption: cost_consumed =
+          (shares_sold/old_size) * fully_loaded_basis  where
+          fully_loaded_basis = basis + loaded_extras (gas + fees) [VIB-3710].
+          realized = proceeds - cost_consumed.
+        - Position is fully closed (basis row deleted, is_close=True) when
+          the post-trade size is non-positive (within Decimal epsilon).
+        - Partial sells decrement the row in place — basis AND loaded_extras
+          shrink proportionally so a later sell of the rest produces the
+          arithmetically expected residual realized PnL.
+
+        The handler uses this for both PREDICTION_SELL and PREDICTION_REDEEM
+        — REDEEM is structurally a sell where proceeds = CTF payout and the
+        position always closes.
+        """
+        key = self._prediction_key(deployment_id, position_key)
+        existing = self._lots.get(key)
+        if not existing:
+            return None, Decimal("0"), Decimal("0"), True
+
+        row = existing[0]
+        old_size = row.get("size", Decimal("0"))
+        old_basis = row.get("basis", Decimal("0"))
+        old_extras = row.get("loaded_extras", Decimal("0"))
+        if not isinstance(old_size, Decimal):
+            old_size = Decimal(str(old_size))
+        if not isinstance(old_basis, Decimal):
+            old_basis = Decimal(str(old_basis))
+        if not isinstance(old_extras, Decimal):
+            old_extras = Decimal(str(old_extras))
+
+        if old_size <= 0:
+            # Stale zero row — treat as no prior basis.
+            self._lots.pop(key, None)
+            return None, Decimal("0"), Decimal("0"), True
+
+        # Clamp shares_sold to old_size: an over-sell (e.g. SELL "all" mismatch)
+        # consumes the whole basis rather than producing negative size or a
+        # cost-consumed > basis.
+        consumed_shares = min(shares_sold, old_size)
+        share_fraction = consumed_shares / old_size
+        # VIB-3710: realized PnL must be measured against the fully-loaded
+        # basis. Both legs are consumed proportionally so partial-then-full
+        # sells produce the same total realized PnL as a single full sell.
+        fully_loaded_basis = old_basis + old_extras
+        cost_consumed = share_fraction * fully_loaded_basis
+        realized_pnl = proceeds_usd - cost_consumed
+
+        new_size = old_size - consumed_shares
+        new_basis = old_basis - (share_fraction * old_basis)
+        new_extras = old_extras - (share_fraction * old_extras)
+
+        # Decimal epsilon — anything within 1e-9 share is considered zero.
+        # Prediction-market share counts are USDC-tick aware (4-decimal),
+        # so 1e-9 is comfortably below any real residual.
+        epsilon = Decimal("1e-9")
+        if new_size <= epsilon:
+            self._lots.pop(key, None)
+            return realized_pnl, Decimal("0"), Decimal("0"), True
+
+        row["size"] = new_size
+        row["basis"] = new_basis
+        row["loaded_extras"] = new_extras
+        return realized_pnl, new_size, new_basis, False
 
     def match_swap_disposal(
         self,

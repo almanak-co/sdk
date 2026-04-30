@@ -69,11 +69,36 @@ class SwapEventType(StrEnum):
     SWAP = "SWAP"
 
 
+class PredictionEventType(StrEnum):
+    """Lifecycle events for prediction-market positions (VIB-3707).
+
+    PREDICTION_OPEN  — first BUY for a (market_id, outcome) — opens the position.
+    PREDICTION_INCREASE — subsequent BUY on an existing position (averaging up).
+    PREDICTION_REDUCE — partial SELL (position size > 0 after).
+    PREDICTION_CLOSE — full SELL that zeros the position.
+    PREDICTION_REDEEM — on-chain CTF redemption after market resolution; always closes.
+    """
+
+    PREDICTION_OPEN = "PREDICTION_OPEN"
+    PREDICTION_INCREASE = "PREDICTION_INCREASE"
+    PREDICTION_REDUCE = "PREDICTION_REDUCE"
+    PREDICTION_CLOSE = "PREDICTION_CLOSE"
+    PREDICTION_REDEEM = "PREDICTION_REDEEM"
+
+
 # Union of all valid accounting event type strings — used by the gateway
 # whitelist (state_service.py) and the AccountingProcessor classifier.
 ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
     e.value
-    for cls in (LendingEventType, PendleEventType, LPEventType, PerpEventType, VaultEventType, SwapEventType)
+    for cls in (
+        LendingEventType,
+        PendleEventType,
+        LPEventType,
+        PerpEventType,
+        VaultEventType,
+        SwapEventType,
+        PredictionEventType,
+    )
     for e in cls
 )
 
@@ -405,6 +430,103 @@ class SwapAccountingEvent:
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason", ""),
             swap_position_key=d.get("swap_position_key", ""),
+            schema_version=schema_version,
+        )
+
+
+@dataclass
+class PredictionAccountingEvent:
+    """Accounting event emitted after a prediction-market intent (VIB-3707).
+
+    Captures cost-basis (BUY) and realized PnL (SELL/REDEEM) for Polymarket
+    PREDICTION_BUY / PREDICTION_SELL / PREDICTION_REDEEM intents.
+
+    Position state is keyed by (market_id, outcome) — one weighted-average
+    aggregate per (market_id, outcome) pair. Averaging-up via repeat BUYs
+    rolls into the same aggregate (event_type=PREDICTION_INCREASE);
+    partial SELLs reduce the aggregate (PREDICTION_REDUCE); a SELL that
+    zeros the position emits PREDICTION_CLOSE; on-chain redemption emits
+    PREDICTION_REDEEM and always zeros the position.
+
+    Design rules (mirrors SwapAccountingEvent):
+    - None = unmeasured / unavailable. Decimal("0") = measured zero.
+    - realized_pnl_usd is None when no prior basis row existed for the
+      position (e.g. the strategy was deployed with an existing on-chain
+      position the framework never recorded a BUY for). Callers must NOT
+      treat None as zero — it signals "PnL unknown for this disposal."
+    - position_size_after / position_basis_after capture the post-trade
+      aggregate so reconstruction-from-events can restore in-memory state.
+    """
+
+    identity: AccountingIdentity
+    event_type: PredictionEventType
+    position_key: str  # prediction:<protocol>:<chain>:<wallet>:<market_id>:<outcome>
+    market_id: str
+    outcome: str  # "YES" / "NO"
+    intent_type: str  # PREDICTION_BUY / PREDICTION_SELL / PREDICTION_REDEEM
+    # Per-trade fields. shares_delta and usd_delta are the absolute trade
+    # sizes (always >= 0); the sign is implied by event_type. realized_pnl_usd
+    # is populated only on SELL/REDEEM (None on BUY).
+    shares_delta: Decimal
+    usd_delta: Decimal
+    realized_pnl_usd: Decimal | None
+    # Post-trade aggregate snapshot (used by reconstruct_from_events).
+    position_size_after: Decimal
+    position_basis_after: Decimal
+    gas_usd: Decimal | None = None
+    confidence: AccountingConfidence = AccountingConfidence.HIGH
+    unavailable_reason: str = ""
+    schema_version: int = 1
+
+    def to_payload_json(self) -> str:
+        def _enc(v: Any) -> Any:
+            if isinstance(v, Decimal):
+                return str(v)
+            if isinstance(v, AccountingConfidence | PredictionEventType):
+                return v.value
+            return v
+
+        d = {
+            "event_type": self.event_type.value,
+            "position_key": self.position_key,
+            "market_id": self.market_id,
+            "outcome": self.outcome,
+            "intent_type": self.intent_type,
+            "shares_delta": _enc(self.shares_delta),
+            "usd_delta": _enc(self.usd_delta),
+            "realized_pnl_usd": _enc(self.realized_pnl_usd),
+            "position_size_after": _enc(self.position_size_after),
+            "position_basis_after": _enc(self.position_basis_after),
+            "gas_usd": _enc(self.gas_usd),
+            "confidence": self.confidence.value,
+            "unavailable_reason": self.unavailable_reason,
+            "schema_version": self.schema_version,
+        }
+        return json.dumps(d)
+
+    @classmethod
+    def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> PredictionAccountingEvent:
+        d = json.loads(payload)
+        schema_version = _validate_schema_version(d, "PredictionAccountingEvent")
+        return cls(
+            identity=identity,
+            event_type=PredictionEventType(d["event_type"]),
+            position_key=d.get("position_key", ""),
+            market_id=d.get("market_id", ""),
+            outcome=d.get("outcome", ""),
+            intent_type=d.get("intent_type", ""),
+            shares_delta=Decimal(d["shares_delta"]) if d.get("shares_delta") is not None else Decimal("0"),
+            usd_delta=Decimal(d["usd_delta"]) if d.get("usd_delta") is not None else Decimal("0"),
+            realized_pnl_usd=_dec(d.get("realized_pnl_usd")),
+            position_size_after=(
+                Decimal(d["position_size_after"]) if d.get("position_size_after") is not None else Decimal("0")
+            ),
+            position_basis_after=(
+                Decimal(d["position_basis_after"]) if d.get("position_basis_after") is not None else Decimal("0")
+            ),
+            gas_usd=_dec(d.get("gas_usd")),
+            confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
+            unavailable_reason=d.get("unavailable_reason", ""),
             schema_version=schema_version,
         )
 
