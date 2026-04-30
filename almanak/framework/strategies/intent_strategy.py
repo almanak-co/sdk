@@ -2073,6 +2073,10 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._wallet_activity_provider = wallet_activity_provider
         self._prediction_provider: Any | None = None
         self._indicator_provider: IndicatorProvider | None = None
+        # VIB-3783: per-strategy OHLCV deduper, set by _wire_indicators when
+        # indicators are wired. Its cache is cleared per iteration in
+        # create_market_snapshot() to match _macd_cache / _atr_cache lifetimes.
+        self._ohlcv_dedup_provider: Any | None = None
         self._multi_dex_service: Any | None = None
         self._rate_monitor: Any | None = None
         self._funding_rate_provider: Any | None = None
@@ -2665,6 +2669,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Returns:
             MarketSnapshot (or MultiChainMarketSnapshot for multi-chain strategies)
         """
+        # VIB-3783: clear the per-strategy OHLCV deduper cache at the start of
+        # each iteration so we coalesce within an iteration but always refetch
+        # between iterations. This matches the per-iteration lifetime of the
+        # _macd_cache / _atr_cache dicts on MarketSnapshot.
+        if self._ohlcv_dedup_provider is not None:
+            self._ohlcv_dedup_provider.clear()
+
         # Check if this is a multi-chain strategy
         if self.is_multi_chain():
             chains = self.get_supported_chains()

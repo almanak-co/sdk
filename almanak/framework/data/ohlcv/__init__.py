@@ -17,6 +17,7 @@ from almanak.framework.data.ohlcv.binance_provider import (
     BINANCE_SYMBOL_MAP,
     BinanceOHLCVProvider,
 )
+from almanak.framework.data.ohlcv.dedup_provider import DedupingOHLCVProvider
 from almanak.framework.data.ohlcv.gateway_data_adapter import (
     GatewayOHLCVDataProvider,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "TOKEN_TO_BINANCE_SYMBOL",
     "BinanceOHLCVProvider",
     "BINANCE_SYMBOL_MAP",
+    "DedupingOHLCVProvider",
     "GeckoTerminalOHLCVProvider",
     "GapStrategy",
     "OHLCVModule",

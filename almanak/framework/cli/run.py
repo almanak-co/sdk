@@ -64,6 +64,7 @@ from ..data.indicators.sync_wrappers import (
 )
 from ..data.interfaces import BalanceProvider as BalanceProviderInterface
 from ..data.interfaces import PriceOracle
+from ..data.ohlcv.dedup_provider import DedupingOHLCVProvider
 from ..data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider, GeckoTerminalGatewayDataProvider
 from ..data.ohlcv.gateway_provider import GatewayGeckoTerminalOHLCVProvider, GatewayOHLCVProvider
 from ..data.ohlcv.ohlcv_router import OHLCVRouter
@@ -695,16 +696,23 @@ def _wire_indicators(
     balance_provider: BalanceProviderInterface,
 ) -> None:
     """Create indicator calculators and inject providers into a strategy instance."""
-    rsi_calculator = RSICalculator(ohlcv_provider=ohlcv_provider)
-    macd_calculator = MACDCalculator(ohlcv_provider=ohlcv_provider)
-    bb_calculator = BollingerBandsCalculator(ohlcv_provider=ohlcv_provider)
-    stoch_calculator = StochasticCalculator(ohlcv_provider=ohlcv_provider)
-    atr_calculator = ATRCalculator(ohlcv_provider=ohlcv_provider)
-    ma_calculator = MovingAverageCalculator(ohlcv_provider=ohlcv_provider)
-    adx_calculator = ADXCalculator(ohlcv_provider=ohlcv_provider)
-    obv_calculator = OBVCalculator(ohlcv_provider=ohlcv_provider)
-    cci_calculator = CCICalculator(ohlcv_provider=ohlcv_provider)
-    ichimoku_calculator = IchimokuCalculator(ohlcv_provider=ohlcv_provider)
+    # VIB-3783 stop-gap: wrap the routed OHLCV provider in a per-strategy
+    # request-coalescing dedup layer. Multiple indicators (e.g. MACD limit=85
+    # plus ATR limit=34) for the same token in a single decide() call would
+    # otherwise trigger two upstream fetches. The wrapper's cache is cleared
+    # per-iteration via IntentStrategy.create_market_snapshot() so subsequent
+    # iterations get fresh data.
+    deduped_ohlcv_provider = DedupingOHLCVProvider(ohlcv_provider)
+    rsi_calculator = RSICalculator(ohlcv_provider=deduped_ohlcv_provider)
+    macd_calculator = MACDCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    bb_calculator = BollingerBandsCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    stoch_calculator = StochasticCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    atr_calculator = ATRCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    ma_calculator = MovingAverageCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    adx_calculator = ADXCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    obv_calculator = OBVCalculator(ohlcv_provider=deduped_ohlcv_provider)
+    cci_calculator = CCICalculator(ohlcv_provider=deduped_ohlcv_provider)
+    ichimoku_calculator = IchimokuCalculator(ohlcv_provider=deduped_ohlcv_provider)
 
     if hasattr(strategy_instance, "_price_oracle"):
         sync_price_oracle = create_sync_price_oracle_func(price_oracle)
@@ -723,6 +731,9 @@ def _wire_indicators(
             cci=create_sync_cci_func(cci_calculator),
             ichimoku=create_sync_ichimoku_func(ichimoku_calculator),
         )
+        # VIB-3783: expose the dedup wrapper so create_market_snapshot() can
+        # clear its cache at the start of each iteration.
+        strategy_instance._ohlcv_dedup_provider = deduped_ohlcv_provider
         click.echo("  Providers injected into strategy (RSI + full indicator suite incl. ADX/OBV/CCI/Ichimoku)")
 
 
