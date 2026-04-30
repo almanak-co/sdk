@@ -36,12 +36,15 @@ write contract is unaffected.
 """
 
 import json
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -301,13 +304,31 @@ def _extract_tokens_and_amounts(intent: Any, result: Any) -> _TokensAndAmounts:
     return _extract_from_intent_fallback(intent)
 
 
-def _extract_tx_and_gas(result: Any) -> tuple[str, int, str]:
+def _extract_tx_and_gas(
+    result: Any,
+    *,
+    chain: str = "",
+    price_oracle: dict[str, Any] | None = None,
+) -> tuple[str, int, str]:
     """Phase gamma -- (tx_hash, gas_used, gas_usd) from the result envelope.
 
     - ``tx_hash`` = ``result.transaction_results[0].tx_hash or ""`` when the
       list is non-empty; empty-list or missing attr -> ``""``.
     - ``gas_used`` = ``result.total_gas_used or 0`` (None coalesces to 0).
-    - ``gas_usd`` = ``str(result.gas_cost_usd)`` when not None; else ``""``.
+    - ``gas_usd``: when the result carries a pre-computed ``gas_cost_usd``
+      (e.g. ResultEnricher's prediction-handler path that already did the
+      conversion against a compiler-resolved price) we honour it. Otherwise
+      we compute it from ``result.total_gas_cost_wei × native_token_usd``
+      via :func:`compute_gas_usd` — this closes the swap/LP/perp/vault gap
+      where ``transaction_ledger.gas_usd`` was always ``""`` because no
+      writer multiplied the wei figure by the native-token USD price
+      (April 30 audit item #3).
+
+    The function returns ``""`` when the oracle cannot resolve the native
+    token's price — distinct from ``"0"`` (measured-zero gas) and aligned
+    with the lending lane's ``_amount_to_usd`` which returns ``None`` on
+    missing prices.  A single WARN is logged at the call site (not here)
+    so we never spam the loop.
     """
     if not result:
         return ("", 0, "")
@@ -318,9 +339,32 @@ def _extract_tx_and_gas(result: Any) -> tuple[str, int, str]:
         tx_hash = tx_results[0].tx_hash or ""
 
     gas_used = getattr(result, "total_gas_used", 0) or 0
-    gas_cost = getattr(result, "gas_cost_usd", None)
-    gas_usd = str(gas_cost) if gas_cost is not None else ""
-    return (tx_hash, gas_used, gas_usd)
+
+    # 1. Honour a pre-computed gas_cost_usd if the upstream writer set one
+    #    (today: ResultEnricher's prediction-handler path; tomorrow: any
+    #    enricher that has its own price source). This preserves backward
+    #    compatibility for the small set of intent types that already had
+    #    gas_usd populated, AND lets the universal swap/LP path below take
+    #    over for everyone else.
+    gas_cost_usd_attr = getattr(result, "gas_cost_usd", None)
+    if gas_cost_usd_attr is not None:
+        return (tx_hash, gas_used, str(gas_cost_usd_attr))
+
+    # 2. Universal path: compute gas_usd from total_gas_cost_wei × native USD
+    #    price. We import lazily so the observability module stays free of
+    #    the accounting package as a hard import-time dependency (the layers
+    #    are siblings; cycles here are easy to introduce by accident).
+    from almanak.framework.accounting.gas_pricing import compute_gas_usd
+
+    gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+    gas_cost = compute_gas_usd(
+        gas_cost_wei=gas_cost_wei,
+        chain=chain,
+        price_oracle=price_oracle,
+    )
+    if gas_cost is None:
+        return (tx_hash, gas_used, "")
+    return (tx_hash, gas_used, str(gas_cost))
 
 
 def _coalesce_error(success: bool, error: str, result: Any) -> str:
@@ -379,6 +423,7 @@ def build_ledger_entry(
     chain: str = "",
     success: bool = True,
     error: str = "",
+    price_oracle: dict[str, Any] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
 
@@ -386,6 +431,15 @@ def build_ledger_entry(
     (swap_amounts, lp_close_data, etc.) so callers don't need to
     know the extraction details. Sequences the phase helpers
     alpha -> beta -> gamma -> delta -> epsilon; see module docstring.
+
+    ``price_oracle`` is a flat ``{symbol: usd_price}`` dict — typically
+    ``state.price_oracle`` from the strategy_runner.  When supplied, the
+    gamma phase computes ``gas_usd`` from ``total_gas_cost_wei × native_usd``
+    via ``accounting.gas_pricing.compute_gas_usd``.  Without it,
+    ``gas_usd`` falls back to ``""`` (which is what the column held before
+    the April 30 audit identified the gap).  A WARN is logged when the
+    oracle is supplied but cannot resolve the native-token price — once
+    per ledger write, never per helper invocation.
     """
     intent_type = _extract_intent_type(intent)
     (
@@ -396,7 +450,42 @@ def build_ledger_entry(
         effective_price,
         slippage_bps,
     ) = _extract_tokens_and_amounts(intent, result)
-    tx_hash, gas_used, gas_usd = _extract_tx_and_gas(result)
+    tx_hash, gas_used, gas_usd = _extract_tx_and_gas(
+        result,
+        chain=chain,
+        price_oracle=price_oracle,
+    )
+    if (
+        result is not None
+        and gas_usd == ""
+        and (getattr(result, "total_gas_cost_wei", None) or 0) > 0
+        and price_oracle is not None
+    ):
+        # Conversion is empty even though the oracle was supplied. Two
+        # paths reach here today:
+        #   (a) the native token's USD price genuinely isn't in the oracle —
+        #       the original case this WARN was added for;
+        #   (b) the chain is non-EVM (``solana``) — the helper fails closed
+        #       on lamport vs wei unit mismatch by design.
+        # The original WARN message named (a) as the cause; emitting it on
+        # (b) would mislead operators ("missing SOL price" when the SOL
+        # price IS in the oracle but the unit conversion path isn't yet
+        # supported). Gate the WARN on (a) only.
+        from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+        native_symbol = native_token_for_chain(chain)
+        oracle_has_native = any(
+            price_oracle.get(key) is not None for key in (native_symbol.upper(), native_symbol, native_symbol.lower())
+        )
+        if not oracle_has_native:
+            logger.warning(
+                "ledger gas_usd unavailable: chain=%s native_token=%s missing from price_oracle "
+                "(strategy_id=%s, cycle_id=%s); transaction_ledger.gas_usd will be empty for this row",
+                chain,
+                native_symbol,
+                strategy_id,
+                cycle_id,
+            )
     final_error = _coalesce_error(success, error, result)
     extracted_data_json = _build_extracted_data_json(result)
     protocol = getattr(intent, "protocol", "") or ""

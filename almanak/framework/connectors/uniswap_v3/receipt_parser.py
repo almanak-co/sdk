@@ -23,7 +23,12 @@ from almanak.framework.execution.extract_result import (
 )
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
+    from almanak.framework.execution.extracted_data import (
+        LPCloseData,
+        LPOpenData,
+        ProtocolFees,
+        SwapAmounts,
+    )
 from almanak.framework.utils.log_formatters import (
     format_gas_cost,
     format_slippage_bps,
@@ -45,6 +50,9 @@ EVENT_TOPICS: dict[str, str] = {
     "Flash": "0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+    # NonfungiblePositionManager.IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+    # keccak("IncreaseLiquidity(uint256,uint128,uint256,uint256)")
+    "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
 }
 
 # Uniswap V3 NonfungiblePositionManager addresses (varies by chain; forks use different addresses)
@@ -356,6 +364,7 @@ class UniswapV3ReceiptParser:
             "tick_lower",
             "tick_upper",
             "liquidity",
+            "lp_open_data",  # NonfungiblePositionManager.IncreaseLiquidity (LP_OPEN)
             "lp_close_data",
             "protocol_fees",  # VIB-3204 — extract_protocol_fees implemented below
         }
@@ -1061,6 +1070,32 @@ class UniswapV3ReceiptParser:
             return ExtractMissing(reason="no Collect/Burn event in receipt")
         return ExtractOk(value=value)
 
+    def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPOpenData]:
+        """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-3159.
+
+        Distinguishes "no IncreaseLiquidity event" (benign — e.g. LP_OPEN
+        that failed mid-bundle) from "parser crashed". Both are returned
+        as ``None`` by the legacy method, which forces the enricher to
+        treat genuine parse failures as missing data — exactly the
+        ghost-position class of bug VIB-3159 addresses.
+        """
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            logs = receipt.get("logs", [])
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not logs:
+            return ExtractMissing(reason="no logs in receipt")
+        try:
+            value = self.extract_lp_open_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no IncreaseLiquidity event from position manager")
+        return ExtractOk(value=value)
+
     def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_liquidity` — see VIB-3159."""
         err = self._strict_parse(receipt)
@@ -1430,6 +1465,148 @@ class UniswapV3ReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract liquidity: {e}")
             return None
+
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:
+        """Extract LP open data from a transaction receipt.
+
+        Looks for ``IncreaseLiquidity`` events emitted by the Uniswap V3
+        NonfungiblePositionManager (and its forks listed in
+        ``POSITION_MANAGER_ADDRESSES``) when an LP position is opened or
+        topped up. The event signature is::
+
+            IncreaseLiquidity(
+                uint256 indexed tokenId,
+                uint128 liquidity,
+                uint256 amount0,
+                uint256 amount1,
+            )
+
+        Layout (after VIB-3658 / April 30 audit item #4):
+
+        - ``topics[0]``: keccak topic0 (constant)
+        - ``topics[1]``: NFT ``tokenId`` (indexed uint256)
+        - ``data``: ``liquidity`` (uint128, padded to 32 bytes)
+            + ``amount0`` (uint256) + ``amount1`` (uint256)
+
+        Behavior contract:
+
+        - Returns ``LPOpenData`` populated with the raw on-chain ints
+          (``position_id``, ``liquidity``, ``amount0``, ``amount1``).
+          The accounting handler (``lp_handler.py``) is responsible for
+          decimal-scaling and USD valuation — this parser stays raw so
+          tests don't have to mock the token resolver and the gateway
+          price oracle.
+        - Returns ``None`` when no ``IncreaseLiquidity`` log is present
+          (e.g. an LP_OPEN that failed mid-bundle, or a non-NPM contract
+          path) — never raises.
+        - The ``IncreaseLiquidity`` event is emitted by the NPM for
+          ``mint()`` AND ``increaseLiquidity()`` calls. We accept either:
+          a fresh-mint NPM emits the same event right after the ERC-721
+          ``Transfer(0x0, owner, tokenId)``.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``LPOpenData`` if an ``IncreaseLiquidity`` event is present,
+            ``None`` otherwise.
+        """
+        from almanak.framework.execution.extracted_data import LPOpenData
+
+        # No outer ``try/except Exception`` here. The fail-closed variant
+        # ``extract_lp_open_data_result`` is the documented entry point for
+        # callers that need parser-crash vs. event-missing disambiguation
+        # (VIB-3159 / Blueprint 19). A blanket-catch in this method would
+        # collapse "parser crashed on a malformed receipt" into "no event
+        # present" and re-introduce the ghost-position class of bug. Let
+        # genuinely unexpected exceptions propagate; the ``_result``
+        # wrapper converts them to ``ExtractError``. The legacy callers
+        # that call this method directly are receipt-shape tests with
+        # well-formed inputs — they cannot trip the propagation path.
+        logs = receipt.get("logs") or []
+        if not logs:
+            return None
+
+        increase_topic = EVENT_TOPICS["IncreaseLiquidity"].lower()
+
+        # Position manager address for this chain — log filter so we
+        # don't accidentally pick up an unrelated contract that happens
+        # to share the topic0 (e.g. a custom router with its own event
+        # of the same shape). Falls back to the canonical Uniswap V3
+        # NPM address if the chain isn't registered.
+        position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
+        if not position_manager:
+            position_manager = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
+
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+                data = log.get("data", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+                data = getattr(log, "data", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+
+            if address != position_manager:
+                continue
+
+            # IncreaseLiquidity needs at least topic0 + tokenId
+            if len(topics) < 2:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+
+            if first_topic != increase_topic:
+                continue
+
+            # tokenId is indexed → topics[1]
+            token_id_topic = topics[1]
+            if isinstance(token_id_topic, bytes):
+                token_id_topic = "0x" + token_id_topic.hex()
+            token_id_topic = str(token_id_topic)
+            if not token_id_topic.startswith("0x"):
+                token_id_topic = "0x" + token_id_topic
+
+            try:
+                token_id = int(token_id_topic, 16)
+            except (ValueError, TypeError):
+                # Malformed indexed topic on an otherwise-matched event
+                # is a known shape we want to skip-not-crash; the next
+                # log might be a legitimate match.
+                continue
+
+            # data: liquidity (uint128 — left-padded to 32 bytes),
+            # amount0 (uint256), amount1 (uint256). Each field starts
+            # on a 32-byte boundary; HexDecoder handles 0x-prefix.
+            normalized = HexDecoder.normalize_hex(data)
+            if not normalized or normalized == "0x":
+                continue
+
+            liquidity = HexDecoder.decode_uint128(normalized, 0)
+            amount0 = HexDecoder.decode_uint256(normalized, 32)
+            amount1 = HexDecoder.decode_uint256(normalized, 64)
+
+            logger.info(
+                f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} amount0={amount0} amount1={amount1}"
+            )
+            return LPOpenData(
+                position_id=token_id,
+                liquidity=liquidity,
+                amount0=amount0,
+                amount1=amount1,
+            )
+
+        return None
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from transaction receipt.

@@ -787,6 +787,67 @@ class GatewayClient:
             logger.warning(f"QueryPositionLiquidity RPC error: {e}")
             return None
 
+    def query_position_tokens_owed(
+        self,
+        chain: str,
+        position_manager: str,
+        token_id: int,
+    ) -> tuple[int, int] | None:
+        """Query Uniswap V3 ``positions(tokenId).tokensOwed{0,1}`` via gateway.
+
+        Used by the teardown verifier to confirm that a Uniswap V3 LP position
+        has zero residual fees / withdrawn-but-uncollected liquidity. A
+        position can be "closed" in two ways: the NFT is burnt (tokenId no
+        longer exists, query returns "invalid token id") OR the position is
+        still owned with ``liquidity == 0`` AND ``tokensOwed{0,1} == 0``.
+
+        Args:
+            chain: Chain identifier (e.g., "arbitrum", "base").
+            position_manager: NFT Position Manager contract address.
+            token_id: Position NFT token ID.
+
+        Returns:
+            ``(tokens_owed0, tokens_owed1)`` on success.
+            ``(0, 0)`` when the gateway reports the position is closed
+            (invalid token id / position not found — the canonical revert
+            from ``positions(tokenId)`` after the NFT is burnt).
+            ``None`` when the gateway/RPC call could not be completed —
+            callers MUST treat ``None`` as "unknown, fail closed" rather
+            than "no fees owed".
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            response = self._rpc_stub.QueryPositionTokensOwed(
+                gateway_pb2.PositionTokensOwedRequest(
+                    chain=chain,
+                    position_manager=position_manager,
+                    token_id=token_id,
+                ),
+                timeout=self.config.timeout,
+            )
+            if response.success:
+                tokens_owed0 = int(response.tokens_owed0) if response.tokens_owed0 else 0
+                tokens_owed1 = int(response.tokens_owed1) if response.tokens_owed1 else 0
+                return tokens_owed0, tokens_owed1
+            error_msg = response.error or ""
+            error_lower = error_msg.lower()
+            if "invalid token id" in error_lower or "position not found" in error_lower:
+                logger.info(
+                    "QueryPositionTokensOwed indicates closed position; treating tokens owed as 0",
+                    extra={"token_id": token_id, "error": error_msg},
+                )
+                return 0, 0
+            logger.warning(f"QueryPositionTokensOwed failed: {error_msg}")
+            return None
+        except grpc.RpcError as e:
+            logger.warning(f"QueryPositionTokensOwed RPC error: {e}")
+            return None
+
 
 # =============================================================================
 # Singleton accessor for convenience

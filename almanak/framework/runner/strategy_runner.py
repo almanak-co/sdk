@@ -1833,6 +1833,7 @@ class StrategyRunner:
         result: Any | None,
         success: bool,
         error: str = "",
+        price_oracle: dict | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -1841,6 +1842,13 @@ class StrategyRunner:
         ``AccountingPersistenceError`` so the caller (run_iteration) can halt
         the cycle and alert the operator. In paper/dry-run mode we log ERROR
         and continue -- the drift is visible but does not block the loop.
+
+        ``price_oracle`` (VIB-3658 sequel — April 30 audit #3): when the
+        caller has the per-cycle price oracle in scope (e.g.
+        ``state.price_oracle``) it should pass it so ``transaction_ledger.gas_usd``
+        gets populated.  Callers that don't have it (slippage circuit-breaker
+        path, recon-failure path) skip the conversion — gas_usd stays empty
+        and the operator sees the same diagnostic that lent before.
         """
 
         try:
@@ -1857,6 +1865,7 @@ class StrategyRunner:
                 chain=chain,
                 success=success,
                 error=error,
+                price_oracle=price_oracle,
             )
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
@@ -3011,9 +3020,17 @@ class StrategyRunner:
         # DELEVERAGE is a notable risk event — log at WARNING so operators are
         # alerted even when they are not actively monitoring DEBUG logs.
         self._maybe_warn_deleverage(intent, strategy)
-        # Write structured trade record to transaction ledger (VIB-2402)
+        # Write structured trade record to transaction ledger (VIB-2402).
+        # VIB-3658 sequel (April 30 audit #3): pass state.price_oracle so the
+        # ledger writer can convert wei-gas-cost to USD via the chain's
+        # native-token price.  Without this, transaction_ledger.gas_usd is
+        # always empty for swap and LP intents.
         ledger_entry_id = await self._write_ledger_entry(
-            strategy, intent, result=state.last_execution_result, success=True
+            strategy,
+            intent,
+            result=state.last_execution_result,
+            success=True,
+            price_oracle=state.price_oracle,
         )
         # VIB-3467/3478: AccountingProcessor is the sole accounting write path (dual-write
         # period ended with removal of _try_write_* methods in VIB-3478).
@@ -3030,6 +3047,7 @@ class StrategyRunner:
                 intent=intent,
                 result=state.last_execution_result,
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
+                price_oracle=state.price_oracle,
             )
         except Exception:  # noqa: BLE001
             logger.warning("Sidecar import/call failed (non-blocking)", exc_info=True)
@@ -3128,9 +3146,18 @@ class StrategyRunner:
             last_execution_result,
         )
 
-        # Record slippage-breach trade in ledger (VIB-2402)
+        # Record slippage-breach trade in ledger (VIB-2402).
+        # VIB-3658 sequel (April 30 audit #3): pass state.price_oracle so the
+        # circuit-breaker row also gets gas_usd populated.  A breach is still
+        # an executed transaction on-chain — the gas drag is real and must
+        # show up in PnL totals.
         await self._write_ledger_entry(
-            strategy, intent, result=last_execution_result, success=False, error=slippage_error
+            strategy,
+            intent,
+            result=last_execution_result,
+            success=False,
+            error=slippage_error,
+            price_oracle=state.price_oracle,
         )
 
         # Persist state even when circuit breaker fails; on-chain state already changed.
@@ -3207,7 +3234,17 @@ class StrategyRunner:
 
         # Record failed trade in ledger (VIB-2402) -- on-chain state
         # changed, but the accounting outcome is a failure.
-        await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=False, error=recon_error)
+        # VIB-3658 sequel (April 30 audit #3): same as the success path —
+        # an enforcement breach is still a real on-chain TX, so its gas
+        # drag must surface in transaction_ledger.gas_usd.
+        await self._write_ledger_entry(
+            strategy,
+            intent,
+            result=last_execution_result,
+            success=False,
+            error=recon_error,
+            price_oracle=state.price_oracle,
+        )
 
         # Persist strategy state even on reconciliation failure: the
         # on-chain state has already moved, so any internal bookkeeping
@@ -3265,8 +3302,19 @@ class StrategyRunner:
         # Emit timeline event for failed execution
         timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
         self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
-        # Write failed trade to transaction ledger (VIB-2402)
-        await self._write_ledger_entry(strategy, intent, result=last_execution_result, success=False, error=error_msg)
+        # Write failed trade to transaction ledger (VIB-2402).
+        # VIB-3658 sequel (April 30 audit #3): pre-execution failures have no
+        # gas to convert (last_execution_result is None or carries no
+        # total_gas_cost_wei).  Where a retry exhausted gas was burned, the
+        # state.price_oracle is the right source so gas_usd lands populated.
+        await self._write_ledger_entry(
+            strategy,
+            intent,
+            result=last_execution_result,
+            success=False,
+            error=error_msg,
+            price_oracle=state.price_oracle,
+        )
 
         # Run revert diagnostics only for on-chain execution failures.
         # Skip when no execution was attempted (compilation failure, validation

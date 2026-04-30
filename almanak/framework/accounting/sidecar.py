@@ -98,6 +98,7 @@ class AccountingSidecarWriter:
         intent: Any,
         result: Any,
         chain: str,
+        price_oracle: dict[str, Any] | None = None,
     ) -> None:
         """Append one accounting line for a successful intent execution.
 
@@ -111,6 +112,14 @@ class AccountingSidecarWriter:
             The execution result object returned by the orchestrator.
         chain:
             Chain name (e.g. ``"arbitrum"``).
+        price_oracle:
+            Flat ``{symbol: usd_price}`` dict (typically
+            ``state.price_oracle``).  When supplied, ``gas_usd`` is
+            computed from ``total_gas_cost_wei × native_usd`` via
+            :func:`almanak.framework.accounting.gas_pricing.compute_gas_usd`.
+            Without it, ``gas_usd`` falls back to ``None`` — preserving the
+            pre-fix sidecar contract for callers that haven't been updated
+            (April 30 audit item #3).
         """
         try:
             line = self._build_line(
@@ -118,6 +127,7 @@ class AccountingSidecarWriter:
                 intent=intent,
                 result=result,
                 chain=chain,
+                price_oracle=price_oracle,
             )
             path = _sidecar_path(strategy_id)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,6 +151,7 @@ class AccountingSidecarWriter:
         intent: Any,
         result: Any,
         chain: str,
+        price_oracle: dict[str, Any] | None = None,
     ) -> dict[str, str | None]:
         """Extract all sidecar fields from *intent* and *result*."""
         # --- intent_type ---
@@ -164,10 +175,32 @@ class AccountingSidecarWriter:
                 tx_hash = _or_none(getattr(tx_results[0], "tx_hash", None))
 
         # --- gas_usd ---
+        # Prefer a pre-computed gas_cost_usd on the result (e.g. ResultEnricher's
+        # prediction-handler path).  Otherwise compute it from
+        # total_gas_cost_wei × native USD price via gas_pricing.compute_gas_usd —
+        # this closes the long-standing swap/LP gap where the sidecar
+        # ``gas_usd`` field was always null even though the runner had the
+        # gas figure and the price oracle in scope (April 30 audit item #3).
         gas_usd: str | None = None
         if result:
             gas_cost = getattr(result, "gas_cost_usd", None)
-            gas_usd = _or_none(gas_cost)
+            if gas_cost is not None:
+                gas_usd = _or_none(gas_cost)
+            else:
+                # Lazy import — sidecar is loaded by the runner on every cycle
+                # and we want zero overhead when the price_oracle is absent.
+                from almanak.framework.accounting.gas_pricing import compute_gas_usd
+
+                gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+                computed = compute_gas_usd(
+                    gas_cost_wei=gas_cost_wei,
+                    chain=chain,
+                    price_oracle=price_oracle,
+                )
+                # _or_none() returns None for falsy strings, which would drop a
+                # measured-zero "0".  Stringify Decimal directly to preserve "0"
+                # vs None semantics.
+                gas_usd = str(computed) if computed is not None else None
 
         # --- token_in / amount_in / token_out / amount_out ---
         token_in: str | None = None
