@@ -207,6 +207,30 @@ class MorphoUniV3LeveragedLPStrategy(IntentStrategy):
                 self._state = "borrowed"
             return
 
+        # Teardown unwind intents clear the corresponding cached position state.
+        # Without this, get_open_positions() keeps reporting "positions still open"
+        # after a successful teardown because LP_CLOSE/REPAY/WITHDRAW never reset
+        # the counters. VIB-3738.
+        intent_type = getattr(intent, "intent_type", None)
+        intent_type_val = (
+            intent_type.value if hasattr(intent_type, "value") else str(intent_type) if intent_type else ""
+        )
+        if intent_type_val == "LP_CLOSE":
+            logger.info(f"LP_CLOSE confirmed: clearing cached LP position #{self._lp_position_id}")
+            self._lp_position_id = None
+            return
+        if intent_type_val == "REPAY":
+            logger.info(f"REPAY confirmed: clearing cached borrow {self._borrowed_amount} {self.borrow_token}")
+            self._borrowed_amount = Decimal("0")
+            return
+        if intent_type_val == "WITHDRAW":
+            logger.info(
+                f"WITHDRAW confirmed: clearing cached collateral "
+                f"{self._collateral_supplied} {self.collateral_token}"
+            )
+            self._collateral_supplied = Decimal("0")
+            return
+
         if self._state == "supplying":
             self._collateral_supplied = self.collateral_amount
             self._state = "supplied"
@@ -270,12 +294,16 @@ class MorphoUniV3LeveragedLPStrategy(IntentStrategy):
     def get_open_positions(self):
         """Return all open positions for teardown.
 
-        # KNOWN_LIMITATION: Uses cached state for position detection (standard
-        # demo pattern). Production strategies should query on-chain state via
-        # market.balance() for authoritative position data. If the strategy
-        # restarts with stale state, teardown amounts may be inaccurate.
-        # This is acceptable for a demo strategy -- all demo strategies use
-        # this pattern. See loop review iter 89-91 for prior discussion.
+        Cached counters (`_lp_position_id`, `_collateral_supplied`,
+        `_borrowed_amount`) are cleared by `on_intent_executed` when the
+        corresponding teardown unwind intents (LP_CLOSE/REPAY/WITHDRAW) succeed,
+        so a second call after a clean teardown returns no positions.
+
+        Note: a strategy restart with stale persisted state would still report
+        cached positions until the next on-chain truth check; production
+        strategies should additionally probe Morpho `position(market_id, user)`
+        and the Uniswap V3 NFT manager `positions(tokenId).liquidity`. Tracked
+        in the on-chain accounting umbrella (VIB-3738 / report Bug L+G3).
         """
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 

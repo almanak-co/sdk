@@ -66,6 +66,14 @@ _ESTIMATE_GAS_TIMEOUT = 30
 # "timed out" strings (e.g. urllib ReadTimeout) that should NOT trigger the fallback.
 _ESTIMATE_GAS_TIMEOUT_MARKER = "eth_estimateGas timed out after"
 
+# Hard timeout for evm_snapshot / evm_revert RPC calls. Anvil normally returns
+# these in <100ms, but a stalled/disconnecting upstream socket can leave the
+# request hanging on the default web3 provider timeout (~150s) and stall the
+# entire simulation pipeline (VIB-3740, mirrors VIB-3295 fix on eth_estimateGas).
+# 10s is generous; failure here should fall through to the snapshot_unavailable
+# branch which still allows gas estimation to proceed.
+_EVM_SNAPSHOT_TIMEOUT = 10
+
 # Gas buffer multiplier for state-setup transaction execution.
 # eth_estimateGas returns the minimum gas needed at the current block state,
 # but actual execution via send_transaction mines a new block, which can
@@ -393,7 +401,10 @@ class LocalSimulator(Simulator):
                 )
             else:
                 try:
-                    result = await web3.provider.make_request(RPCEndpoint("evm_snapshot"), [])
+                    result = await asyncio.wait_for(
+                        web3.provider.make_request(RPCEndpoint("evm_snapshot"), []),
+                        timeout=_EVM_SNAPSHOT_TIMEOUT,
+                    )
                     snapshot_id = result.get("result")
                     if snapshot_id is not None:
                         logger.debug(f"Created EVM snapshot: {snapshot_id}")
@@ -403,6 +414,12 @@ class LocalSimulator(Simulator):
                             "evm_snapshot returned None - snapshot not supported. "
                             "Proceeding with gas estimation only (no state-mutating execution)."
                         )
+                except TimeoutError:
+                    snapshot_unavailable = True
+                    logger.warning(
+                        f"evm_snapshot timed out after {_EVM_SNAPSHOT_TIMEOUT}s. "
+                        "Proceeding with gas estimation only (no state-mutating execution)."
+                    )
                 except Exception as e:
                     snapshot_unavailable = True
                     logger.warning(
@@ -589,8 +606,13 @@ class LocalSimulator(Simulator):
             # Revert to snapshot to restore original state
             if snapshot_id is not None:
                 try:
-                    await web3.provider.make_request(RPCEndpoint("evm_revert"), [snapshot_id])
+                    await asyncio.wait_for(
+                        web3.provider.make_request(RPCEndpoint("evm_revert"), [snapshot_id]),
+                        timeout=_EVM_SNAPSHOT_TIMEOUT,
+                    )
                     logger.debug(f"Reverted to snapshot: {snapshot_id}")
+                except TimeoutError:
+                    logger.warning(f"evm_revert timed out after {_EVM_SNAPSHOT_TIMEOUT}s")
                 except Exception as e:
                     logger.warning(f"Failed to revert snapshot: {e}")
 

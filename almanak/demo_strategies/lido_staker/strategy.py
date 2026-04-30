@@ -72,6 +72,14 @@ from almanak.framework.utils.log_formatters import format_token_amount_human
 # Logger for debugging
 logger = logging.getLogger(__name__)
 
+# Dust threshold for teardown verification. stETH is a rebasing token: after a
+# full unwind swap, the wallet's reported stETH balance can briefly show 1-2 wei
+# (the rebase share-vs-amount conversion never lands exactly on zero). A bare
+# `> 0` check trips on this and reports the position as still open. 0.0001 stETH
+# is well below any real position (<$0.40 at typical prices) but well above any
+# rebase rounding artifact (which is sub-wei in human units). VIB-3739.
+_DUST_THRESHOLD = Decimal("0.0001")
+
 
 # =============================================================================
 # STRATEGY METADATA
@@ -379,7 +387,7 @@ class LidoStakerStrategy(IntentStrategy):
                 balance_amount = self._staked_amount
 
         positions: list[PositionInfo] = []
-        if balance_amount > 0:
+        if balance_amount > _DUST_THRESHOLD:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
@@ -416,12 +424,12 @@ class LidoStakerStrategy(IntentStrategy):
             snapshot = market or self.create_market_snapshot()
             balance = snapshot.balance(output_token)
             amount = balance.balance if hasattr(balance, "balance") else Decimal(str(balance))
-            has_balance = amount > 0
+            has_balance = amount > _DUST_THRESHOLD
         except Exception as exc:
             logger.warning(
                 f"Unable to query on-chain {output_token} balance for teardown intents: {exc!r}"
             )
-            has_balance = self._staked and self._staked_amount > 0
+            has_balance = self._staked and self._staked_amount > _DUST_THRESHOLD
 
         if not has_balance:
             logger.info("No staking position detected — no teardown intents needed")

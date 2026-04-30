@@ -240,21 +240,52 @@ class BalancerFlashArbStrategy(IntentStrategy):
         }
 
     # Teardown support
+
+    # Dust threshold: Enso swap quotes can leave 1-2 wei of base_token in the wallet
+    # after a "swap all" teardown. Without this floor, post-teardown verification
+    # incorrectly reports the wallet as still holding a position. VIB-3738.
+    _BASE_TOKEN_DUST_THRESHOLD = Decimal("0.000001")
+
+    def _query_base_token_balance(self, market=None) -> tuple[Decimal, Decimal]:
+        """Read on-chain wallet balance for base_token.
+
+        Returns (balance_amount, balance_usd). On query failure, falls back to
+        Decimal("0") so teardown verification reports no position rather than
+        spuriously detecting one from cached state.
+        """
+        try:
+            snapshot = market or self.create_market_snapshot()
+            balance = snapshot.balance(self.base_token)
+            amount = balance.balance if hasattr(balance, "balance") else Decimal(str(balance))
+            value_usd = getattr(balance, "balance_usd", None) or Decimal("0")
+            return Decimal(str(amount)), Decimal(str(value_usd))
+        except Exception as exc:
+            logger.warning(
+                f"Unable to query on-chain {self.base_token} balance for teardown: {exc!r}"
+            )
+            return Decimal("0"), Decimal("0")
+
     def get_open_positions(self) -> "TeardownPositionSummary":
+        """Detect open positions via on-chain wallet balance, not cached counters.
+
+        After a successful teardown SWAP, the wallet should hold approximately
+        zero base_token. The previous implementation read cached `_trades_executed`
+        and `_fell_back_to_swap` flags that were never reset, so verification
+        always reported the position as still open. VIB-3738.
+        """
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         positions = []
-        # Report a position if a swap was executed (either direct swap mode or EOA fallback)
-        _did_swap = self.force_action == "swap" or self._fell_back_to_swap
-        if self._trades_executed > 0 and _did_swap:
+        balance_amount, balance_usd = self._query_base_token_balance()
+        if balance_amount > self._BASE_TOKEN_DUST_THRESHOLD:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
                     position_id="balancer_flash_arb_token_0",
                     chain=self.chain,
                     protocol="enso",
-                    value_usd=Decimal("0"),
-                    details={"asset": self.base_token},
+                    value_usd=balance_usd,
+                    details={"asset": self.base_token, "balance": str(balance_amount)},
                 )
             )
 
@@ -267,9 +298,13 @@ class BalancerFlashArbStrategy(IntentStrategy):
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
         from almanak.framework.teardown import TeardownMode
 
-        # Only generate teardown intents if a swap was actually executed
-        _did_swap = self.force_action == "swap" or self._fell_back_to_swap
-        if self._trades_executed == 0 or not _did_swap:
+        # Skip the teardown swap if the wallet doesn't actually hold any base_token
+        # (e.g. the strategy never opened a position, or a previous teardown ran).
+        balance_amount, _ = self._query_base_token_balance(market)
+        if balance_amount <= self._BASE_TOKEN_DUST_THRESHOLD:
+            logger.info(
+                f"No {self.base_token} balance to unwind ({balance_amount}) — skipping teardown swap"
+            )
             return []
 
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal(str(self.max_slippage_pct)) / Decimal("100")
