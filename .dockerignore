@@ -54,5 +54,10 @@ trufflehog-results.json
 # Deploy (separate docker setup)
 deploy/
 
+# Strip lists are referenced by the deployed image Dockerfiles (gateway,
+# base-strategy, base-dashboard). They MUST be in the build context even
+# though the rest of deploy/ is excluded.
+!deploy/docker/strip-list-*.txt
+
 # Keep PYPI.md (needed by uv sync)
 !PYPI.md
