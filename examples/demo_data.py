@@ -408,7 +408,7 @@ class DataModuleDemo:
         print("Fetching historical candlestick data...")
 
         try:
-            from almanak.framework.data.ohlcv import BinanceOHLCVProvider
+            from almanak.gateway.data.ohlcv import BinanceOHLCVProvider
 
             provider = BinanceOHLCVProvider()
             try:

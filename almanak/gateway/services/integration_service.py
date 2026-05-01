@@ -729,7 +729,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             return gateway_pb2.GeckoTerminalOHLCVResponse()
 
         try:
-            from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+            from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 
             start_time_metric = time.monotonic()
 

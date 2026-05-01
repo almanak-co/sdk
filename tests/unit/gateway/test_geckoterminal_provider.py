@@ -22,7 +22,7 @@ import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import DataClassification, DataEnvelope
-from almanak.framework.data.ohlcv.geckoterminal_provider import (
+from almanak.gateway.data.ohlcv.geckoterminal_provider import (
     _CHAIN_TO_NETWORK,
     _TIMEFRAME_TO_GT,
     GeckoTerminalOHLCVProvider,
@@ -479,7 +479,18 @@ class TestMappings:
 
     def test_chain_to_network_coverage(self) -> None:
         """All expected chains are mapped."""
-        expected = {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc", "sonic", "solana"}
+        expected = {
+            "ethereum",
+            "arbitrum",
+            "base",
+            "optimism",
+            "polygon",
+            "avalanche",
+            "bsc",
+            "sonic",
+            "solana",
+            "mantle",
+        }
         assert expected == set(_CHAIN_TO_NETWORK.keys())
 
     def test_chain_network_values(self) -> None:

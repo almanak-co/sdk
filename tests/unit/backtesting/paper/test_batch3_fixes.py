@@ -39,12 +39,12 @@ class TestIndicatorFallback:
         trader.config = SimpleNamespace(chain="arbitrum")
 
         with patch(
-            "almanak.framework.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
             side_effect=RuntimeError("GeckoTerminal unavailable"),
         ):
             provider = trader._create_ohlcv_provider()
 
-        from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
+        from almanak.gateway.data.ohlcv.binance_provider import BinanceOHLCVProvider
 
         assert isinstance(provider, BinanceOHLCVProvider)
 

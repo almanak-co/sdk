@@ -12,7 +12,7 @@ Key Features:
     - Implements both OHLCVProvider and DataProvider protocols
 
 Example:
-    from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+    from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 
     provider = GeckoTerminalOHLCVProvider()
     candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)

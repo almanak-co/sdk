@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.data.ohlcv.binance_provider import (
+from almanak.gateway.data.ohlcv.binance_provider import (
     BINANCE_SYMBOL_MAP,
     BinanceOHLCVProvider,
 )

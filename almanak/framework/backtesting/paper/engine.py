@@ -3185,10 +3185,10 @@ class PaperTrader:
             An OHLCVProvider-compatible object with get_ohlcv() and supported_timeframes.
         """
         try:
-            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
-            from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
             from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
             from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
+            from almanak.gateway.data.ohlcv.binance_provider import BinanceOHLCVProvider
+            from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 
             chain = self.config.chain.lower() if isinstance(self.config.chain, str) else str(self.config.chain).lower()
 
@@ -3220,7 +3220,7 @@ class PaperTrader:
                 self._backtest_id,
                 str(e),
             )
-            from almanak.framework.data.ohlcv.binance_provider import BinanceOHLCVProvider
+            from almanak.gateway.data.ohlcv.binance_provider import BinanceOHLCVProvider
 
             return BinanceOHLCVProvider(cache_ttl=120)
 

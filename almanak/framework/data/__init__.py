@@ -139,10 +139,6 @@ if TYPE_CHECKING:
         Instrument,
         resolve_instrument,
     )
-    from .ohlcv import (
-        BINANCE_SYMBOL_MAP,
-        BinanceOHLCVProvider,
-    )
     from .pools import (
         AggregatedPrice,
         LiquidityDepth,
@@ -322,9 +318,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "DataMeta": (".models", "DataMeta"),
     "Instrument": (".models", "Instrument"),
     "resolve_instrument": (".models", "resolve_instrument"),
-    # .ohlcv
-    "BINANCE_SYMBOL_MAP": (".ohlcv", "BINANCE_SYMBOL_MAP"),
-    "BinanceOHLCVProvider": (".ohlcv", "BinanceOHLCVProvider"),
     # .pools
     "AggregatedPrice": (".pools", "AggregatedPrice"),
     "LiquidityDepth": (".pools", "LiquidityDepth"),

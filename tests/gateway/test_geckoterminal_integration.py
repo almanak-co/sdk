@@ -110,7 +110,7 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.framework.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
             return_value=mock_provider,
         ):
             response = await service.GeckoTerminalGetOHLCV(request, ctx)
@@ -135,7 +135,7 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.framework.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
             return_value=mock_provider,
         ):
             await service.GeckoTerminalGetOHLCV(request, ctx)
@@ -160,7 +160,7 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.framework.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
             return_value=mock_provider,
         ):
             await service.GeckoTerminalGetOHLCV(request, ctx)

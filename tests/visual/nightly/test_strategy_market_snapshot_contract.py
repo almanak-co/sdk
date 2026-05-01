@@ -49,9 +49,9 @@ from almanak.framework.data.indicators.sync_wrappers import (
 )
 from almanak.framework.data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider
 from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
-from almanak.framework.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
+from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.strategies.intent_strategy import IndicatorProvider, MarketSnapshot

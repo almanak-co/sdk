@@ -11,7 +11,7 @@ Key Features:
     - Health metrics tracking
 
 Example:
-    from almanak.framework.data.ohlcv import BinanceOHLCVProvider
+    from almanak.gateway.data.ohlcv import BinanceOHLCVProvider
 
     provider = BinanceOHLCVProvider()
     candles = await provider.get_ohlcv("WETH", timeframe="5m", limit=100)
@@ -30,7 +30,7 @@ from typing import Any
 
 import aiohttp
 
-from ..interfaces import (
+from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     OHLCVCandle,
     validate_timeframe,
