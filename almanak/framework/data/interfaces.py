@@ -85,11 +85,24 @@ class DataSourceTimeout(DataSourceError):
 
     This is distinct from DataSourceUnavailable as it may indicate
     a transient issue that could resolve with a retry.
+
+    Attributes:
+        source: Name of the data source.
+        timeout_seconds: How long we waited before timing out.
+        retry_after: Suggested seconds to wait before retrying. Populated when
+            the gateway surfaces a ``RetryInfo`` trailer; otherwise None and
+            caller policy decides the backoff.
     """
 
-    def __init__(self, source: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        source: str,
+        timeout_seconds: float,
+        retry_after: float | None = None,
+    ) -> None:
         self.source = source
         self.timeout_seconds = timeout_seconds
+        self.retry_after = retry_after
         super().__init__(f"Data source '{source}' timed out after {timeout_seconds}s")
 
 
@@ -120,6 +133,68 @@ class AllDataSourcesFailed(DataSourceError):
         self.errors = errors
         error_summary = "; ".join(f"{k}: {v}" for k, v in errors.items())
         super().__init__(f"All data sources failed: {error_summary}")
+
+
+def data_source_error_from_grpc(
+    rpc_error: Any,
+    *,
+    default_source: str = "gateway",
+) -> DataSourceError | None:
+    """Map a gRPC error to a typed ``DataSourceError`` using the VIB-3800 contract.
+
+    Looks for the ``grpc-status-details-bin`` trailer (see
+    :mod:`almanak.framework.grpc.error_details`), reads the gRPC status code +
+    optional ``RetryInfo`` payload, and returns the matching typed exception:
+
+    - ``RESOURCE_EXHAUSTED`` → :class:`DataSourceRateLimited`
+    - ``DEADLINE_EXCEEDED`` → :class:`DataSourceTimeout`
+    - ``UNAVAILABLE`` → :class:`DataSourceUnavailable`
+
+    Returns ``None`` for any other code (caller decides; usually re-raise as a
+    generic error). Returns ``None`` if no typed trailer is present so callers
+    can fall back to legacy string-matching during the rollout window.
+
+    Args:
+        rpc_error: A ``grpc.RpcError`` (or any object with ``trailing_metadata()``).
+        default_source: Source name to record on the typed exception when the
+            trailer doesn't carry an upstream identifier.
+    """
+    # Imported lazily so this module stays importable in environments that
+    # don't ship grpc (test harnesses, doc builders).
+    from almanak.framework.grpc.error_details import unpack_status_details
+
+    details = unpack_status_details(rpc_error)
+    if details is None:
+        return None
+
+    import grpc
+
+    source = details.upstream or default_source
+    message = details.message or str(rpc_error)
+    retry_delay = details.retry_delay_seconds
+
+    if details.code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+        # Rate-limited: prefer the upstream-suggested retry_delay; fall back to
+        # 0 (no delay advice) so callers know to apply their default backoff.
+        return DataSourceRateLimited(source=source, retry_after=retry_delay or 0.0)
+
+    if details.code == grpc.StatusCode.DEADLINE_EXCEEDED:
+        # The reconstructed timeout has no observed duration: we know the
+        # upstream timed out (DEADLINE_EXCEEDED) and we may know how long the
+        # gateway suggests we wait before retrying (retry_delay), but we do
+        # NOT know how long the upstream actually took before timing out.
+        # Pass 0.0 for timeout_seconds (unknown) and put the retry hint only
+        # on retry_after where it semantically belongs.
+        return DataSourceTimeout(
+            source=source,
+            timeout_seconds=0.0,
+            retry_after=retry_delay,
+        )
+
+    if details.code == grpc.StatusCode.UNAVAILABLE:
+        return DataSourceUnavailable(source=source, reason=message, retry_after=retry_delay)
+
+    return None
 
 
 class InsufficientDataError(DataSourceError):
@@ -977,6 +1052,7 @@ __all__ = [
     "VALID_TIMEFRAMES",
     # Utility functions
     "validate_timeframe",
+    "data_source_error_from_grpc",
     # Data classes
     "PriceResult",
     "BalanceResult",

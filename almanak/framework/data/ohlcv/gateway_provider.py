@@ -304,8 +304,16 @@ class GatewayOHLCVProvider:
         except DataSourceUnavailable:
             raise
         except Exception as e:
-            error_msg = f"Gateway OHLCV request failed: {e}"
+            # VIB-3800: surface typed errors from the gateway when available.
+            from almanak.framework.data.interfaces import data_source_error_from_grpc
+
+            typed = data_source_error_from_grpc(e, default_source="gateway_ohlcv")
             self._metrics.errors += 1
+            if typed is not None:
+                logger.error("Gateway OHLCV request failed: %s", e)
+                raise typed from e
+
+            error_msg = f"Gateway OHLCV request failed: {e}"
             logger.exception(error_msg)
             raise DataSourceUnavailable(source="gateway_ohlcv", reason=error_msg) from e
 
@@ -434,7 +442,13 @@ class GatewayGeckoTerminalOHLCVProvider:
         except DataSourceUnavailable:
             raise
         except Exception as e:
+            # VIB-3800: surface typed errors from the gateway when available.
+            from almanak.framework.data.interfaces import data_source_error_from_grpc
+
             self._metrics.errors += 1
+            typed = data_source_error_from_grpc(e, default_source="gateway_geckoterminal")
+            if typed is not None:
+                raise typed from e
             raise DataSourceUnavailable(
                 source="gateway_geckoterminal",
                 reason=str(e),

@@ -22,6 +22,7 @@ from almanak.gateway.integrations.thegraph import TheGraphIntegration
 from almanak.gateway.integrations.zerion import ZerionIntegration
 from almanak.gateway.metrics import record_integration_latency, record_integration_request
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services._grpc_errors import set_error_from_upstream
 from almanak.gateway.validation import (
     ValidationError,
     validate_address_for_chain,
@@ -215,8 +216,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             return gateway_pb2.BinanceKlinesResponse()
         except Exception as e:
             logger.exception("BinanceGetKlines failed for %s", request.symbol)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
+            set_error_from_upstream(context, e, upstream="binance")
             return gateway_pb2.BinanceKlinesResponse()
 
     async def BinanceGetOrderBook(
@@ -766,10 +766,9 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return gateway_pb2.GeckoTerminalOHLCVResponse()
-        except Exception:
+        except Exception as e:
             logger.exception("GeckoTerminalGetOHLCV failed for %s on %s", request.token, request.chain)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("GeckoTerminal OHLCV request failed")
+            set_error_from_upstream(context, e, upstream="geckoterminal")
             return gateway_pb2.GeckoTerminalOHLCVResponse()
 
     # =========================================================================

@@ -141,10 +141,11 @@ class TestGeckoTerminalGetOHLCV:
             await service.GeckoTerminalGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
-        # Must NOT leak raw error text
+        # Must NOT leak raw error text — VIB-3800 sanitization replaces the
+        # raw exception string with a fixed opaque message.
         details = ctx.set_details.call_args[0][0]
         assert "upstream API 500" not in details
-        assert "GeckoTerminal OHLCV request failed" in details
+        assert details == "Internal gateway error"
 
     @pytest.mark.asyncio
     async def test_value_error_returns_invalid_argument(self, service):

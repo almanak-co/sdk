@@ -109,6 +109,17 @@ class GatewayPriceOracle(PriceOracle):
             error_msg = str(e)
             request_ref = f"{token}/{quote}" if request_chain is None else f"{token}/{quote}@{request_chain}"
 
+            # VIB-3800: prefer the typed-error contract when the gateway packs
+            # ``RetryInfo`` / ``ErrorInfo`` into the trailer. Falls back to legacy
+            # string-matching when the trailer is absent (older gateways or
+            # non-mapped error paths) so we don't regress during rollout.
+            from almanak.framework.data.interfaces import data_source_error_from_grpc
+
+            typed = data_source_error_from_grpc(e, default_source="gateway")
+            if typed is not None:
+                logger.error(f"Gateway price request failed for {request_ref}: {error_msg}")
+                raise typed from e
+
             if "UNAVAILABLE" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
                 logger.error(f"Gateway price request failed for {request_ref}: {error_msg}")
                 raise DataSourceUnavailable(

@@ -16,6 +16,7 @@ import grpc
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services._grpc_errors import set_error_from_upstream
 from almanak.gateway.validation import (
     ValidationError,
     is_solana_chain,
@@ -691,8 +692,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 logger.warning(f"GetPrice failed for {token}/{quote}: {e}")
             else:
                 logger.error(f"GetPrice failed for {token}/{quote}: {e}")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
+            set_error_from_upstream(context, e, upstream="price_aggregator")
             return gateway_pb2.PriceResponse()
 
     async def GetBalance(

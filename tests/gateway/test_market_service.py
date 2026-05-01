@@ -555,8 +555,14 @@ class TestGetPriceManualOverrideFallback:
             await service.close()
 
     @pytest.mark.asyncio
-    async def test_fallback_falls_through_to_internal_when_no_override(self, mock_context):
-        """Aggregator fails AND override has no value → INTERNAL error path."""
+    async def test_fallback_falls_through_to_unavailable_when_no_override(self, mock_context):
+        """Aggregator fails AND override has no value → UNAVAILABLE error path.
+
+        VIB-3800: ``AllDataSourcesFailed`` is now mapped to
+        ``UNAVAILABLE`` (transient upstream outage) instead of ``INTERNAL``
+        (gateway bug). This is a deliberate reclassification — clients can
+        retry with backoff instead of treating the response as fatal.
+        """
         import grpc as grpc_mod
         from almanak.framework.data.interfaces import AllDataSourcesFailed, DataSourceUnavailable
 
@@ -580,16 +586,16 @@ class TestGetPriceManualOverrideFallback:
                 mock_context,
             )
 
-            # Empty response, INTERNAL code
             assert response.price == ""
-            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.INTERNAL)
+            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.UNAVAILABLE)
         finally:
             await service.close()
 
     @pytest.mark.asyncio
     async def test_fallback_not_used_when_override_disabled(self, mock_context):
         """With enable_manual_price_overrides=False (default), aggregator
-        failure goes straight to INTERNAL — override is never consulted."""
+        failure goes straight to the typed-error path (UNAVAILABLE for
+        AllDataSourcesFailed) — override is never consulted."""
         import grpc as grpc_mod
         from almanak.framework.data.interfaces import AllDataSourcesFailed
 
@@ -613,6 +619,6 @@ class TestGetPriceManualOverrideFallback:
             )
 
             assert response.price == ""
-            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.INTERNAL)
+            mock_context.set_code.assert_called_with(grpc_mod.StatusCode.UNAVAILABLE)
         finally:
             await service.close()

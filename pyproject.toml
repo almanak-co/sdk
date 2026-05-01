@@ -44,6 +44,7 @@ dependencies = [
     "grpcio-tools>=1.76.0",
     "grpcio-health-checking>=1.76.0",
     "grpcio-reflection>=1.76.0",
+    "googleapis-common-protos>=1.69.0", # google.rpc.{status_pb2, error_details_pb2} for VIB-3800 typed gRPC errors
     "pydantic-settings>=2.0.0", # For gateway configuration
     "prometheus-client>=0.25.0", # For gateway metrics
     # Backtesting dependencies
@@ -200,6 +201,7 @@ module = [
     "grpc_reflection.*",
     "google.protobuf.*",
     "google.cloud.*",
+    "google.rpc.*",
     "streamlit.*",
     "plotly.*",
     "optuna.*",
