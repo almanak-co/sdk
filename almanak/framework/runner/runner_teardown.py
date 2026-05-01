@@ -1183,6 +1183,23 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
         logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")
 
 
+# Per-chain bridged-stablecoin variants beyond the universal {USDC, USDT, DAI}
+# set. Adding a symbol here means the framework will treat it as a $1 fallback
+# *only* on the listed chains. Leaving it absent — as for ``bsc`` — keeps the
+# fallback dict from advertising tokens that don't exist on that chain, which
+# previously caused the swap-fee-tier heuristic and other downstream consumers
+# to probe the resolver for ``USDC.e`` on BSC and burn the 240s harness window
+# (VIB-3814 / BUG-30 residual).
+_CHAIN_BRIDGED_STABLECOINS: dict[str, tuple[str, ...]] = {
+    "arbitrum": ("USDC.e",),
+    "optimism": ("USDC.e",),
+    "polygon": ("USDC.e",),
+    "avalanche": ("USDC.e", "DAI.e", "USDT.e"),
+    "base": ("USDbC",),
+    "berachain": ("USDC.e",),
+}
+
+
 def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     """Build a minimal fallback price oracle when the market snapshot has no cached prices.
 
@@ -1190,25 +1207,37 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     on mainnet, which causes wildly wrong slippage calculations and silent
     compilation failures (None action bundles).
 
+    The stablecoin set is chain-aware: the universal {USDC, USDT, DAI} is
+    always seeded, with bridged variants (USDC.e, USDbC, …) added only on
+    chains that actually deploy them (per ``_CHAIN_BRIDGED_STABLECOINS`` —
+    grounded in ``almanak/framework/data/tokens/data/symbol_aliases.json``).
+    Chains absent from that table (BSC, Linea, Mantle, …) get no bridged-USDC
+    fallback because no such token is registered for them — the previous
+    behaviour leaked phantom symbols into the merged ``price_oracle`` and
+    downstream resolvers timed out probing them (VIB-3814).
+
     Returns a dict with at least stablecoin prices, or None if nothing can be
     determined.
     """
-    # Start with stablecoin fallbacks (always ~$1, safe to assume)
-    fallback: dict[str, Decimal] = {
-        "USDC": Decimal("1"),
-        "USDT": Decimal("1"),
-        "DAI": Decimal("1"),
-        "USDC.e": Decimal("1"),
-        "USDbC": Decimal("1"),
-    }
-
-    # Derive native + wrapped token symbols from existing registry maps
-    # so new chains are picked up automatically without code changes here.
     from almanak.framework.data.models import _NATIVE_TO_WRAPPED
     from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
     chain = getattr(market, "_chain", None) or getattr(market, "chain", None)
-    native = NATIVE_TOKEN_SYMBOLS.get(str(chain).lower(), "ETH") if chain else "ETH"
+    chain_key = str(chain).lower() if chain else ""
+
+    # Universal stablecoins — present on every chain we support.
+    fallback: dict[str, Decimal] = {
+        "USDC": Decimal("1"),
+        "USDT": Decimal("1"),
+        "DAI": Decimal("1"),
+    }
+    # Chain-specific bridged variants (added only where they actually exist).
+    for symbol in _CHAIN_BRIDGED_STABLECOINS.get(chain_key, ()):
+        fallback[symbol] = Decimal("1")
+
+    # Derive native + wrapped token symbols from existing registry maps
+    # so new chains are picked up automatically without code changes here.
+    native = NATIVE_TOKEN_SYMBOLS.get(chain_key, "ETH") if chain else "ETH"
     wrapped = _NATIVE_TO_WRAPPED.get(native, f"W{native}")
     tokens_to_fetch = (native, wrapped)
 

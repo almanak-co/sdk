@@ -773,5 +773,79 @@ def test_verify_closure_aggregates_multi_protocol_failures(
     assert fake_gateway.query_position_liquidity.call_count == 2
 
 
+# ---------------------------------------------------------------------------
+# VIB-3822 — gateway-client lookup must surface the orchestrator's _client
+# attribute, not just the compiler's _gateway_client. Without this, the
+# Optimism uniswap_lp_optimism --discover teardown verifier could not read
+# on-chain truth and fell through to the fail-closed branch in
+# ``_uniswap_v3_post_condition``.
+# ---------------------------------------------------------------------------
+
+
+def test_teardown_gateway_client_falls_back_to_orchestrator_underscore_client(
+    _restore_uniswap_v3_hook,
+):
+    """``GatewayExecutionOrchestrator`` stores its gateway client under
+    ``self._client``; the compiler under ``_gateway_client``. The teardown
+    verifier discovery flow (no ``get_open_positions`` → ``--discover``)
+    only has the orchestrator handle. ``_teardown_gateway_client`` must
+    surface that ``_client`` attribute or the V3 post-condition fails-closed
+    with "requires a gateway_client" — exactly the VIB-3822 symptom on
+    ``uniswap_lp_optimism``.
+    """
+    fake_gateway = _make_gateway(liquidity=0, tokens_owed=(0, 0))
+
+    mgr = TeardownManager()
+    mgr.compiler = None
+    mgr.orchestrator = SimpleNamespace(_client=fake_gateway)
+
+    resolved = mgr._teardown_gateway_client()
+    assert resolved is fake_gateway
+
+
+def test_verify_closure_uses_orchestrator_client_for_v3_post_condition(
+    _restore_uniswap_v3_hook,
+):
+    """End-to-end: the discovery-path teardown (compiler not yet set up,
+    only the orchestrator carries the gateway client) must reach the
+    Uniswap V3 post-condition with a real client and confirm closure
+    via on-chain truth — not return the fail-closed "requires a
+    gateway_client" error that VIB-3822 reproduced on Optimism.
+    """
+    fake_gateway = _make_gateway(liquidity=0, tokens_owed=(0, 0))
+
+    mgr = TeardownManager()
+    mgr.compiler = None
+    mgr.orchestrator = SimpleNamespace(_client=fake_gateway)
+
+    strategy = MagicMock()
+    strategy.wallet_address = WALLET
+    strategy.get_open_positions.return_value = TeardownPositionSummary(
+        strategy_id="optimism-lp", timestamp=datetime.now(UTC), positions=[]
+    )
+
+    pre_exec = TeardownPositionSummary(
+        strategy_id="optimism-lp",
+        timestamp=datetime.now(UTC),
+        positions=[
+            PositionInfo(
+                position_type=PositionType.LP,
+                position_id="1088512",
+                chain="optimism",
+                protocol="uniswap_v3",
+                value_usd=Decimal("4.0"),
+                details={"token_id": 1088512, "pool": "0xpool", "fee_tier": 500},
+            )
+        ],
+    )
+
+    result = asyncio.run(
+        mgr._verify_closure(strategy=strategy, pre_execution_positions=pre_exec)
+    )
+
+    assert result is True
+    fake_gateway.query_position_liquidity.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

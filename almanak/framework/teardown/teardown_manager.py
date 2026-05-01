@@ -1291,11 +1291,23 @@ class TeardownManager:
     # ------------------------------------------------------------------
 
     def _teardown_gateway_client(self) -> Any | None:
-        """Best-effort: surface a connected gateway client for post-conditions."""
+        """Best-effort: surface a connected gateway client for post-conditions.
+
+        VIB-3822: ``GatewayExecutionOrchestrator`` stores its gateway client
+        under ``self._client`` (see ``execution/gateway_orchestrator.py``); the
+        compiler uses ``_gateway_client`` / ``gateway_client``. Probe all three
+        so the V3 LP_CLOSE post-condition can read on-chain closure state when
+        the runner constructed an orchestrator (the ``--discover`` path used by
+        ``uniswap_lp_optimism`` and any strategy without ``get_open_positions``).
+        """
         for source in (self.compiler, self.orchestrator):
             if source is None:
                 continue
-            client = getattr(source, "_gateway_client", None) or getattr(source, "gateway_client", None)
+            client = (
+                getattr(source, "_gateway_client", None)
+                or getattr(source, "gateway_client", None)
+                or getattr(source, "_client", None)
+            )
             if client is not None:
                 if getattr(client, "is_connected", True):
                     return client
