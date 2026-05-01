@@ -521,6 +521,91 @@ class TestUniswapV3PostCondition:
 
 
 # ---------------------------------------------------------------------------
+# NPM-registry coverage (VIB-3807)
+#
+# A regression test that walks every (protocol, chain) pair the post-condition
+# registers for and asserts the on-chain NPM address resolves AND the hook
+# routes through the gateway path (i.e. does not fall through to the
+# fail-closed "no NPM registered" branch). If somebody accidentally drops a
+# ``position_manager`` field from one of the registries in
+# ``almanak.core.contracts``, this test fails with a clear pointer to the
+# missing chain — replacing the old "unknown-chain only" walk that caught
+# nothing for actual deployments.
+# ---------------------------------------------------------------------------
+
+
+def _v3_protocol_chain_pairs() -> list[tuple[str, str]]:
+    """All (protocol, chain) pairs the V3 post-condition registers for.
+
+    Read the protocol→registry mapping straight from
+    ``post_conditions._V3_PROTOCOL_TO_REGISTRY`` and the per-chain entries
+    from ``almanak.core.contracts``. Adding a new V3-fork to the
+    production mapping (e.g. PancakeSwap V3 once its NPM lands in
+    ``contracts.py``) automatically extends this parameterization — no
+    test edit required.
+    """
+    from almanak.core import contracts as _contracts
+    from almanak.framework.teardown.post_conditions import _V3_PROTOCOL_TO_REGISTRY
+
+    pairs: list[tuple[str, str]] = []
+    for protocol, registry_name in _V3_PROTOCOL_TO_REGISTRY.items():
+        registry = getattr(_contracts, registry_name, {})
+        for chain in registry:
+            pairs.append((protocol, chain))
+    return pairs
+
+
+class TestNPMRegistryCoverage:
+    @pytest.mark.parametrize(
+        ("protocol", "chain"),
+        _v3_protocol_chain_pairs(),
+    )
+    def test_npm_resolves_and_hook_routes_to_gateway_for_every_registered_chain(
+        self,
+        protocol: str,
+        chain: str,
+    ) -> None:
+        """Every registered (protocol, chain) pair must:
+
+        1. Have a non-empty ``position_manager`` in the contracts registry.
+        2. Cause the hook to call through to the gateway (proof that the
+           NPM lookup succeeded — the fail-closed path returns *without*
+           hitting the gateway).
+
+        Manually deleting one ``position_manager`` line from
+        ``almanak/core/contracts.py`` should turn this test red with a
+        clear "NonfungiblePositionManager" assertion.
+        """
+        from almanak.framework.teardown.post_conditions import _resolve_v3_position_manager
+
+        npm = _resolve_v3_position_manager(protocol, chain)
+        assert npm, (
+            f"No position_manager registered for {protocol!r} on {chain!r} — "
+            "the V3 teardown post-condition will fail-closed for every "
+            "position on this chain."
+        )
+        assert npm.startswith("0x") and len(npm) == 42
+
+        gateway = _make_gateway(liquidity=0, tokens_owed=(0, 0))
+        position = _make_position(chain=chain, protocol=protocol)
+        result = _uniswap_v3_post_condition(
+            position=position,
+            wallet_address=WALLET,
+            gateway_client=gateway,
+        )
+
+        # Closed (because liquidity=0 and tokensOwed=(0,0)) is the proof
+        # the hook reached the gateway path; fail-closed paths do not call
+        # the gateway and would surface a non-empty ``error`` instead.
+        assert result.closed is True, (
+            f"hook fell through to fail-closed for {protocol}/{chain}: {result.error}"
+        )
+        gateway.query_position_liquidity.assert_called_once()
+        called_npm = gateway.query_position_liquidity.call_args.kwargs["position_manager"]
+        assert called_npm.lower() == npm.lower()
+
+
+# ---------------------------------------------------------------------------
 # Integration via TeardownManager._verify_closure
 # ---------------------------------------------------------------------------
 

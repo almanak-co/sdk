@@ -144,6 +144,77 @@ class TestBuildSingleChainPriceOracle:
         called = {call.args[0] for call in market.price.call_args_list}
         assert "ETH" in called
 
+    def test_prefetches_native_gas_token_on_non_native_swap(self) -> None:
+        """VIB-3804: a polygon USDC->WETH swap never references MATIC, but the
+        chain's native gas token must still be in the oracle so
+        ``accounting.gas_pricing.compute_gas_usd`` can populate
+        ``transaction_ledger.gas_usd``. Without this pre-fetch, every
+        polygon/avalanche/bsc swap silently writes ``gas_usd=""``.
+        """
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("1"))
+        market = MagicMock()
+        market.chain = "polygon"
+        market.get_price_oracle_dict.side_effect = [
+            {"USDC": Decimal("1"), "WETH": Decimal("3000")},
+            {
+                "USDC": Decimal("1"),
+                "WETH": Decimal("3000"),
+                "MATIC": Decimal("0.5"),
+            },
+        ]
+        result = StrategyRunner._build_single_chain_price_oracle(market, intent)
+        assert result is not None
+        assert "MATIC" in result
+        called = {call.args[0] for call in market.price.call_args_list}
+        assert "MATIC" in called
+
+    def test_native_token_prefetch_skipped_when_chain_unknown(self) -> None:
+        """When neither the market nor the intent expose a chain, the native
+        pre-fetch is silently skipped — we don't want to fabricate an "ETH"
+        request on a market with no chain context.
+        """
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("1"))
+        market = MagicMock(spec=["get_price_oracle_dict", "price"])
+        # ``spec`` strips ``.chain`` so getattr falls through; intent.chain is None.
+        market.get_price_oracle_dict.return_value = {
+            "USDC": Decimal("1"),
+            "WETH": Decimal("3000"),
+        }
+        result = StrategyRunner._build_single_chain_price_oracle(market, intent)
+        assert result == {"USDC": Decimal("1"), "WETH": Decimal("3000")}
+        # No price() calls — both swap legs already in oracle and no native added.
+        market.price.assert_not_called()
+
+    def test_native_prefetch_skipped_on_empty_oracle_preserves_placeholder_mode(
+        self,
+    ) -> None:
+        """Codex audit P2 (VIB-3804 follow-up): an indicator-only strategy
+        that didn't fetch intent-leg prices in ``decide()`` must still see
+        an empty oracle so ``_init_single_chain_state`` keeps
+        ``allow_placeholder_prices=True``. Pre-fix to this guard, the
+        native-gas pre-fetch could populate MATIC into an otherwise-empty
+        oracle, flipping the signal and making the compiler raise on the
+        unresolved USDC/WETH legs.
+
+        Contract: when intent-token pre-fetches all fail (oracle stays
+        empty), the native pre-fetch is NOT attempted; ``gas_usd`` stays
+        empty in the indicator path (consistent with placeholder mode).
+        """
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("1"))
+        market = MagicMock()
+        market.chain = "polygon"
+        # Oracle stays empty after the intent-token pre-fetch loop —
+        # this simulates an indicator-only strategy with no upstream price feed.
+        market.get_price_oracle_dict.return_value = {}
+        result = StrategyRunner._build_single_chain_price_oracle(market, intent)
+        # Empty oracle is coerced to None so the compiler enables placeholder mode.
+        assert result is None
+        # Crucial: MATIC pre-fetch was NOT attempted. If it had been, the
+        # oracle would carry only MATIC and the placeholder-mode signal
+        # would silently flip (Codex audit P2).
+        called = {call.args[0] for call in market.price.call_args_list}
+        assert "MATIC" not in called
+
 
 # =============================================================================
 # _single_chain_pre_retry_confirmed

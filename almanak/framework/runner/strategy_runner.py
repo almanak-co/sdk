@@ -2562,12 +2562,16 @@ class StrategyRunner:
 
         price_oracle: dict | None = market.get_price_oracle_dict()
         # Pre-fetch prices for intent tokens that aren't already in the oracle.
-        # This covers two cases:
+        # This covers three cases:
         # 1. Oracle is empty (strategy didn't call market.price() in decide())
         # 2. Oracle has some tokens but FlashLoanIntent callbacks reference
         #    additional tokens (e.g., WETH) not fetched by decide().
+        # 3. The chain's native gas token isn't a leg of any intent (e.g. polygon
+        #    USDC->WETH never references MATIC). Without pre-fetching it,
+        #    accounting.gas_pricing.compute_gas_usd returns None and the ledger
+        #    writes gas_usd="" on every non-native-leg swap (VIB-3804).
         if hasattr(market, "price"):
-            intent_tokens = _extract_tokens_from_intent(intent)
+            intent_tokens: set[str] = set(_extract_tokens_from_intent(intent))
             missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
             if missing_tokens:
                 for token in missing_tokens:
@@ -2576,8 +2580,40 @@ class StrategyRunner:
                     except Exception:
                         pass  # Token price unavailable, compiler will use placeholder
                 price_oracle = market.get_price_oracle_dict()
-                if price_oracle:
-                    logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
+
+            # Native gas-token pre-fetch (case 3 above): ONLY runs when the
+            # oracle already carries at least one real intent-token price.
+            # Skipping it on an empty oracle preserves the indicator-strategy
+            # placeholder path — adding only MATIC there would flip the
+            # ``allow_placeholder_prices`` signal in ``_init_single_chain_state``
+            # and the compiler would raise on the unresolved swap leg
+            # (Codex audit P2 on the original VIB-3804 patch).
+            if price_oracle:
+                chain = getattr(market, "chain", None) or getattr(intent, "chain", None)
+                if chain:
+                    # Local import — strategy_runner uses function-scoped
+                    # imports for accounting modules to avoid early-binding
+                    # cycles (see ``from ..accounting...`` throughout this
+                    # file).
+                    from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+                    native_symbol = native_token_for_chain(chain)
+                    if native_symbol not in price_oracle:
+                        try:
+                            market.price(native_symbol)
+                        except Exception:
+                            # Cross-references the WARN at observability/ledger.py
+                            # gas_usd writer when the chain's native price is
+                            # missing (post-fix VIB-3804). DEBUG, not WARN —
+                            # one log per ledger row is enough.
+                            logger.debug(
+                                "gas_pricing: native pre-fetch failed for chain=%s symbol=%s; gas_usd may stay empty",
+                                chain,
+                                native_symbol,
+                            )
+                        price_oracle = market.get_price_oracle_dict()
+            if price_oracle:
+                logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
         if price_oracle is None:
             return None
         if not price_oracle:

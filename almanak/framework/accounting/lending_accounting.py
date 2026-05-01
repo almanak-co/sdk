@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
 
+from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
@@ -64,21 +65,10 @@ _COMPOUND_V3_BALANCE_OF_SELECTOR = "0x70a08231"
 # ─── Lending intent types ──────────────────────────────────────────────────────
 _LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DELEVERAGE"})
 
-# ─── Chain native gas token (for gas_usd conversion) ──────────────────────────
-_CHAIN_NATIVE_TOKEN: dict[str, str] = {
-    "ethereum": "ETH",
-    "arbitrum": "ETH",
-    "optimism": "ETH",
-    "base": "ETH",
-    "linea": "ETH",
-    "plasma": "ETH",
-    "polygon": "MATIC",
-    "avalanche": "AVAX",
-    "bsc": "BNB",
-    "sonic": "S",
-    "mantle": "MNT",
-    "xlayer": "OKB",
-}
+# Chain native gas token resolution lives in ``gas_pricing.native_token_for_chain`` —
+# a single framework source of truth shared with the EVM gas_usd writer
+# (VIB-3805). The previous local map diverged on plasma (ETH vs XPL) and
+# missed several chains in the gateway-side ``NATIVE_TOKEN_SYMBOLS``.
 
 
 @dataclass
@@ -912,7 +902,7 @@ def build_lending_accounting_event(
             gas_cost_native = Decimal(str(gas_cost_wei)) / Decimal(10**18)
         except Exception:
             pass
-    native_token = _CHAIN_NATIVE_TOKEN.get(chain.lower(), "ETH")
+    native_token = native_token_for_chain(chain)
     gas_usd = _amount_to_usd(gas_cost_native, price_oracle, native_token)
 
     # ── FIFO lot matching ─────────────────────────────────────────────────────

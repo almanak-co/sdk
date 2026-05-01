@@ -377,6 +377,29 @@ class TestChainNativeTokenCoverage:
         """Solana is non-EVM but still produces a gas figure in SOL."""
         assert _CHAIN_NATIVE_TOKEN.get("solana") == "SOL"
 
+    def test_plasma_resolves_to_xpl_through_lending_writer(self):
+        """VIB-3805 regression pin: prior to the consolidation,
+        ``lending_accounting`` carried its own map with plasma="ETH" while
+        the gas_pricing helper said plasma="XPL". After dropping the local
+        map, the lending writer must resolve plasma via
+        ``native_token_for_chain`` — which returns "XPL". A future commit
+        that reverts this consolidation (or typos plasma's symbol back to
+        "ETH") trips this test instead of silently mispricing plasma gas.
+        """
+        from almanak.framework.accounting import lending_accounting
+        from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+        assert native_token_for_chain("plasma") == "XPL"
+        # Hard-pin: lending writer MUST go through the framework SSOT, not
+        # a local map. The presence of any module-level _CHAIN_NATIVE_TOKEN
+        # in lending_accounting would mean somebody re-introduced the
+        # divergent map.
+        assert not hasattr(lending_accounting, "_CHAIN_NATIVE_TOKEN"), (
+            "lending_accounting reintroduced a local _CHAIN_NATIVE_TOKEN map — "
+            "this is the divergence VIB-3805 was filed to fix. The writer "
+            "must call native_token_for_chain() instead."
+        )
+
 
 # ---------------------------------------------------------------------------
 # build_ledger_entry — populates LedgerEntry.gas_usd via the helper
