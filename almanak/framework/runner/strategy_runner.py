@@ -970,7 +970,15 @@ class StrategyRunner:
             self._decide_in_progress = False  # Normal exceptions complete; reset guard
             logger.error(f"Strategy decision failed: {e}")
             if self._circuit_breaker is not None:
-                self._circuit_breaker.record_failure(f"decide() error: {e}")
+                # VIB-3803: classify the failure so a transient data outage gets
+                # the elevated data-class threshold (when exposure is open) and
+                # cannot crash-loop a strategy holding correct positions.
+                from .failure_kind import classify_failure
+
+                self._circuit_breaker.record_failure(
+                    f"decide() error: {e}",
+                    kind=classify_failure(e),
+                )
             return self._create_error_result(
                 strategy_id,
                 IterationStatus.STRATEGY_ERROR,
@@ -4840,6 +4848,18 @@ class StrategyRunner:
         result = await capture_portfolio_snapshot(self, strategy, iteration_number, force_snapshot=force)
         if result is not None:
             self._iteration_had_trade = False
+            # VIB-3803: cache last-known exposure for the breaker's data-class
+            # threshold logic. ``total_value_usd`` is strategy-scoped to
+            # positive positions only (VIB-3614), so > 0 == "has open exposure".
+            # Wrapped in try/except because this path must never break a
+            # successful snapshot — the breaker has a safe default for
+            # missing exposure data.
+            if self._circuit_breaker is not None:
+                try:
+                    has_exposure = (result.total_value_usd or Decimal("0")) > Decimal("0")
+                    self._circuit_breaker.record_exposure(has_exposure)
+                except Exception:  # noqa: BLE001
+                    logger.debug("Failed to record exposure on circuit breaker", exc_info=True)
         return result
 
     async def _update_portfolio_metrics(self, strategy_id, snapshot):

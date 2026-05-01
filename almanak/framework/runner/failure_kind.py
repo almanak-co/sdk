@@ -1,0 +1,167 @@
+"""Failure-kind classifier (VIB-3803).
+
+Classifies an exception into a stable :class:`FailureKind` so the circuit
+breaker can apply different tolerance thresholds for **data-class** vs
+**action-class** failures.
+
+Why this matters
+----------------
+The 29 Apr 2026 production incident tripped a strategy's circuit breaker
+after 3 consecutive transient ``GeckoTerminal`` OHLCV failures. The breaker
+treated all consecutive failures alike — so 3 transient *data* outages
+looked identical to 3 *execution-revert* failures. Risk reduction needs
+fresh data; killing the strategy at iteration 3 of a transient data outage
+when it has open positions is exactly the wrong response.
+
+Classification source-of-truth
+------------------------------
+Prefer the typed exception contract from VIB-3800
+(:class:`almanak.framework.data.interfaces.DataSourceRateLimited` /
+:class:`DataSourceTimeout` / :class:`DataSourceUnavailable`) — gateway
+services map upstream failures to these types via
+``set_error_from_upstream``, so a failure that came from gateway egress
+arrives at the runner already typed.
+
+Falls back to walking the ``__cause__`` chain so a generic ``Exception``
+wrapping a typed cause is still classified correctly. Returns
+:attr:`FailureKind.UNKNOWN` for anything we can't confidently classify —
+the breaker treats UNKNOWN as action-class (low tolerance) by default.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any
+
+
+class FailureKind(Enum):
+    """Stable classification of an iteration-level failure.
+
+    Used by the circuit breaker to decide whether to apply the standard
+    fail-fast threshold or the elevated data-class threshold (VIB-3803).
+    """
+
+    DATA_UNAVAILABLE = "data_unavailable"
+    DATA_RATE_LIMITED = "data_rate_limited"
+    DATA_TIMEOUT = "data_timeout"
+    EXECUTION_REVERTED = "execution_reverted"
+    STATE_CORRUPT = "state_corrupt"
+    UNKNOWN = "unknown"
+
+    @property
+    def is_data_class(self) -> bool:
+        """True iff this failure kind is a data-fetch failure.
+
+        Data-class failures get an elevated consecutive-failure threshold
+        when the strategy has open exposure, because risk-reduction action
+        requires fresh data — fail-fast on transient data outages crash-loops
+        a strategy that's holding correct positions.
+        """
+        return self in _DATA_KINDS
+
+
+_DATA_KINDS = frozenset(
+    {
+        FailureKind.DATA_UNAVAILABLE,
+        FailureKind.DATA_RATE_LIMITED,
+        FailureKind.DATA_TIMEOUT,
+    }
+)
+
+
+def classify_failure(exc: Any) -> FailureKind:
+    """Classify an exception into a :class:`FailureKind`.
+
+    Decision order:
+
+    1. Direct typed signal (VIB-3800 ``DataSource*`` exceptions).
+    2. Typed gRPC trailer — unwrap via ``data_source_error_from_grpc`` so a
+       raw ``grpc.RpcError`` returned from the gateway is still classified.
+    3. ``__cause__`` walk — handles the common pattern of a generic exception
+       wrapping a typed cause via ``raise X from typed_exc``.
+    4. :attr:`FailureKind.UNKNOWN` (caller policy applies — breaker treats
+       this as action-class).
+
+    The function is defensive against ``None`` and self-referential causes;
+    it never raises and it terminates on cycles.
+    """
+    if exc is None:
+        return FailureKind.UNKNOWN
+
+    # Late imports keep this module importable from anywhere in the runner
+    # without forcing the data-layer dependency tree onto modules that
+    # don't need it.
+    from almanak.framework.data.interfaces import (
+        AllDataSourcesFailed,
+        DataSourceRateLimited,
+        DataSourceTimeout,
+        DataSourceUnavailable,
+        data_source_error_from_grpc,
+    )
+
+    if isinstance(exc, DataSourceRateLimited):
+        return FailureKind.DATA_RATE_LIMITED
+    if isinstance(exc, DataSourceTimeout):
+        return FailureKind.DATA_TIMEOUT
+    if isinstance(exc, DataSourceUnavailable | AllDataSourcesFailed):
+        return FailureKind.DATA_UNAVAILABLE
+
+    # Try to unwrap a typed gRPC trailer. ``data_source_error_from_grpc``
+    # tolerates non-gRPC inputs (returns None silently).
+    try:
+        typed = data_source_error_from_grpc(exc)
+    except Exception:
+        typed = None
+    if typed is not None and typed is not exc:
+        return classify_failure(typed)
+
+    # Walk __cause__, capped to avoid a malformed chain spinning forever.
+    # Each cause is classified via the FULL pipeline (typed → gRPC trailer
+    # unwrap → direct check) — not just _classify_direct — so that a
+    # nested ``raise X from grpc.RpcError(typed)`` is still classified
+    # correctly. We dispatch to the per-step internals to avoid infinite
+    # recursion (a cause's cause is walked here, not via classify_failure).
+    seen: set[int] = {id(exc)}
+    cause = getattr(exc, "__cause__", None)
+    depth = 0
+    while cause is not None and id(cause) not in seen and depth < 8:
+        seen.add(id(cause))
+        kind = _classify_direct(cause)
+        if kind != FailureKind.UNKNOWN:
+            return kind
+        # Try the typed-gRPC-trailer unwrap on the cause too — this is the
+        # common production shape where ``raise RuntimeError("…") from
+        # rpc_error`` hides a typed `RetryInfo` payload one level down.
+        try:
+            cause_typed = data_source_error_from_grpc(cause)
+        except Exception:
+            cause_typed = None
+        if cause_typed is not None and id(cause_typed) not in seen:
+            kind = _classify_direct(cause_typed)
+            if kind != FailureKind.UNKNOWN:
+                return kind
+        cause = getattr(cause, "__cause__", None)
+        depth += 1
+
+    return FailureKind.UNKNOWN
+
+
+def _classify_direct(exc: Any) -> FailureKind:
+    """Classify without recursion or cause-walking — used inside the loop."""
+    from almanak.framework.data.interfaces import (
+        AllDataSourcesFailed,
+        DataSourceRateLimited,
+        DataSourceTimeout,
+        DataSourceUnavailable,
+    )
+
+    if isinstance(exc, DataSourceRateLimited):
+        return FailureKind.DATA_RATE_LIMITED
+    if isinstance(exc, DataSourceTimeout):
+        return FailureKind.DATA_TIMEOUT
+    if isinstance(exc, DataSourceUnavailable | AllDataSourcesFailed):
+        return FailureKind.DATA_UNAVAILABLE
+    return FailureKind.UNKNOWN
+
+
+__all__ = ["FailureKind", "classify_failure"]

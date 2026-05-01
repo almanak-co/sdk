@@ -51,7 +51,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from almanak.framework.runner.failure_kind import FailureKind
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +93,20 @@ class CircuitBreakerConfig:
     """Configuration for circuit breaker behavior.
 
     Attributes:
-        max_consecutive_failures: Number of consecutive failures before tripping.
-            Default 3 means after 3 failures in a row, execution is blocked.
+        max_consecutive_failures: Number of consecutive failures before tripping
+            for action-class failures (execution reverts, state corruption, etc).
+            Default 3.
+        data_class_max_consecutive_failures: Threshold for data-class failures
+            (data unavailable / timeout / rate-limited) when the strategy has
+            open exposure. Significantly higher than the action threshold
+            because risk-reduction needs fresh data — fail-fast on transient
+            data outages crash-loops a strategy that is correctly holding its
+            position. Default 30. VIB-3803.
+        exposure_freshness_seconds: Maximum age of the cached exposure
+            snapshot. If the cached exposure is older than this, the breaker
+            defaults to "exposure open" (safe default — high tolerance) rather
+            than fast-failing on a possibly-stale "no exposure" reading. Default
+            300s (5min). VIB-3803.
         max_cumulative_loss_usd: Maximum cumulative loss before tripping.
             Tracks total loss across all executions. Default $5,000.
         cooldown_seconds: Seconds to wait after tripping before allowing retry.
@@ -105,6 +120,8 @@ class CircuitBreakerConfig:
     """
 
     max_consecutive_failures: int = 3
+    data_class_max_consecutive_failures: int = 30
+    exposure_freshness_seconds: int = 300
     max_cumulative_loss_usd: Decimal = field(default_factory=lambda: Decimal("5000"))
     cooldown_seconds: int = 3600  # 1 hour
     half_open_success_threshold: int = 2
@@ -115,6 +132,8 @@ class CircuitBreakerConfig:
         """Serialize to dictionary."""
         return {
             "max_consecutive_failures": self.max_consecutive_failures,
+            "data_class_max_consecutive_failures": self.data_class_max_consecutive_failures,
+            "exposure_freshness_seconds": self.exposure_freshness_seconds,
             "max_cumulative_loss_usd": str(self.max_cumulative_loss_usd),
             "cooldown_seconds": self.cooldown_seconds,
             "half_open_success_threshold": self.half_open_success_threshold,
@@ -238,10 +257,22 @@ class CircuitBreaker:
         self._state = CircuitBreakerState.CLOSED
         self._lock = threading.RLock()
 
-        # Failure tracking
+        # Failure tracking — VIB-3803 splits the legacy single counter into
+        # action-class and data-class so each can have its own threshold.
+        # ``_consecutive_failures`` is kept as the sum for telemetry and for
+        # backwards compat with callers that read it directly.
         self._consecutive_failures = 0
+        self._consecutive_action_failures = 0
+        self._consecutive_data_failures = 0
         self._failure_history: list[FailureRecord] = []
         self._last_failure_time: datetime | None = None
+
+        # Cached last-known exposure (VIB-3803). Kept here so the breaker
+        # never has to call get_open_positions() during a data outage —
+        # that would create a circular dependency between the very thing
+        # that's failing (data) and the thing protecting against it.
+        self._last_known_exposure_open: bool | None = None
+        self._last_exposure_at: datetime | None = None
 
         # Trip tracking
         self._trip_time: datetime | None = None
@@ -342,11 +373,14 @@ class CircuitBreaker:
     def record_success(self) -> None:
         """Record a successful execution.
 
-        Resets consecutive failure counter. In HALF_OPEN state, may
-        transition back to CLOSED if success threshold is met.
+        Resets all consecutive failure counters (legacy total, action-class,
+        data-class). In HALF_OPEN state, may transition back to CLOSED if the
+        success threshold is met.
         """
         with self._lock:
             self._consecutive_failures = 0
+            self._consecutive_action_failures = 0
+            self._consecutive_data_failures = 0
 
             if self._state == CircuitBreakerState.HALF_OPEN:
                 self._half_open_successes += 1
@@ -366,32 +400,57 @@ class CircuitBreaker:
         self,
         error_message: str,
         loss_usd: Decimal = Decimal("0"),
+        *,
+        kind: "FailureKind | None" = None,
     ) -> None:
         """Record a failed execution.
 
-        Increments failure counter and may trip the circuit breaker
-        if thresholds are exceeded.
+        Increments the matching failure counter and may trip the circuit
+        breaker if thresholds are exceeded.
 
         Args:
-            error_message: Description of the failure
-            loss_usd: USD value of any loss incurred (for cumulative tracking)
+            error_message: Description of the failure.
+            loss_usd: USD value of any loss incurred (for cumulative tracking).
+            kind: Optional :class:`FailureKind` classification (VIB-3803).
+                Data-class kinds use the elevated
+                ``data_class_max_consecutive_failures`` threshold when the
+                strategy has cached open exposure (or the cached exposure is
+                stale / unknown — safe default). Action-class kinds (and the
+                ``UNKNOWN`` default for un-classified callers) use
+                ``max_consecutive_failures`` as before.
         """
+        # Resolve the kind lazily so callers that don't import FailureKind
+        # don't need to. None ↔ UNKNOWN.
+        from almanak.framework.runner.failure_kind import FailureKind as _FailureKind
+
+        resolved_kind = kind if kind is not None else _FailureKind.UNKNOWN
+
         with self._lock:
             now = datetime.now(UTC)
 
-            # Record failure
+            # Record failure on the legacy total + kinded counter.
             self._consecutive_failures += 1
+            if resolved_kind.is_data_class:
+                self._consecutive_data_failures += 1
+            else:
+                self._consecutive_action_failures += 1
+
             self._last_failure_time = now
             self._failure_history.append(FailureRecord(timestamp=now, error_message=error_message, loss_usd=loss_usd))
 
             # Prune old failures outside the tracking window
             self._prune_old_failures()
 
+            data_threshold = self._effective_data_threshold()
+            action_threshold = self.config.max_consecutive_failures
             logger.warning(
-                "CircuitBreaker %s: failure %d/%d - %s",
+                "CircuitBreaker %s: failure kind=%s action=%d/%d data=%d/%d - %s",
                 self.strategy_id,
-                self._consecutive_failures,
-                self.config.max_consecutive_failures,
+                resolved_kind.value,
+                self._consecutive_action_failures,
+                action_threshold,
+                self._consecutive_data_failures,
+                data_threshold,
                 error_message,
             )
 
@@ -401,8 +460,14 @@ class CircuitBreaker:
                 self._trip(TripReason.CONSECUTIVE_FAILURES)
                 return
 
-            # Check consecutive failure threshold
-            if self._consecutive_failures >= self.config.max_consecutive_failures:
+            # Action-class threshold (existing behavior)
+            if self._consecutive_action_failures >= action_threshold:
+                self._trip(TripReason.CONSECUTIVE_FAILURES)
+                return
+
+            # Data-class threshold (VIB-3803): elevated when exposure is open
+            # (or stale / unknown — safe default).
+            if self._consecutive_data_failures >= data_threshold:
                 self._trip(TripReason.CONSECUTIVE_FAILURES)
                 return
 
@@ -411,6 +476,54 @@ class CircuitBreaker:
             if cumulative >= self.config.max_cumulative_loss_usd:
                 self._trip(TripReason.CUMULATIVE_LOSS)
                 return
+
+    def record_exposure(self, has_open_positions: bool) -> None:
+        """Cache the strategy's last-known exposure (VIB-3803).
+
+        Called by the runner after each successful portfolio snapshot so the
+        breaker can apply the elevated data-class threshold *only* when the
+        strategy has positions on-chain (where data outages must not crash
+        the iteration loop and abandon position management).
+
+        The cache lives on the breaker, never on a live "fetch positions"
+        callback, because we MUST NOT call ``get_open_positions()`` during
+        a data outage — that's a circular dep on the very subsystem that's
+        failing.
+
+        Stale or never-recorded exposure intentionally defaults to "open"
+        in :meth:`_effective_data_threshold` (high tolerance) — that's the
+        safe behaviour: don't fast-fail when unsure whether a strategy has
+        funds at risk.
+
+        Args:
+            has_open_positions: True if the strategy currently has any open
+                position with on-chain value > 0.
+        """
+        with self._lock:
+            self._last_known_exposure_open = bool(has_open_positions)
+            self._last_exposure_at = datetime.now(UTC)
+
+    def _effective_data_threshold(self) -> int:
+        """Return the threshold to use for the data-class counter.
+
+        Returns ``data_class_max_consecutive_failures`` when:
+        - cached exposure is open, OR
+        - cached exposure is stale (older than ``exposure_freshness_seconds``), OR
+        - exposure has never been recorded.
+
+        Returns the standard ``max_consecutive_failures`` only when we have
+        a fresh, confident "no exposure" reading — at that point fast-failing
+        on a transient data outage is fine because no on-chain risk depends
+        on data freshness.
+        """
+        if self._last_known_exposure_open is None or self._last_exposure_at is None:
+            return self.config.data_class_max_consecutive_failures
+        age_seconds = (datetime.now(UTC) - self._last_exposure_at).total_seconds()
+        if age_seconds > self.config.exposure_freshness_seconds:
+            return self.config.data_class_max_consecutive_failures
+        if self._last_known_exposure_open:
+            return self.config.data_class_max_consecutive_failures
+        return self.config.max_consecutive_failures
 
     def pause(self, reason: str, operator: str) -> None:
         """Manually pause the circuit breaker.
@@ -485,6 +598,10 @@ class CircuitBreaker:
 
             self._state = CircuitBreakerState.CLOSED
             self._consecutive_failures = 0
+            self._consecutive_action_failures = 0
+            self._consecutive_data_failures = 0
+            self._last_known_exposure_open = None
+            self._last_exposure_at = None
             self._failure_history = []
             self._last_failure_time = None
             self._trip_time = None
@@ -507,6 +624,11 @@ class CircuitBreaker:
                 "strategy_id": self.strategy_id,
                 "state": self._state.value,
                 "consecutive_failures": self._consecutive_failures,
+                "consecutive_action_failures": self._consecutive_action_failures,
+                "consecutive_data_failures": self._consecutive_data_failures,
+                "effective_data_threshold": self._effective_data_threshold(),
+                "last_known_exposure_open": self._last_known_exposure_open,
+                "last_exposure_at": (self._last_exposure_at.isoformat() if self._last_exposure_at else None),
                 "cumulative_loss_usd": str(self._get_cumulative_loss()),
                 "failure_history_count": len(self._failure_history),
                 "last_failure_time": (self._last_failure_time.isoformat() if self._last_failure_time else None),
@@ -554,6 +676,12 @@ class CircuitBreaker:
         """Close the circuit breaker (return to normal operation)."""
         self._state = CircuitBreakerState.CLOSED
         self._consecutive_failures = 0
+        # VIB-3803: also reset the per-kind split counters. Without this,
+        # pause() + resume() leaves the breaker CLOSED with stale split
+        # counts so the *next* failure trips at threshold-1 instead of
+        # the configured threshold.
+        self._consecutive_action_failures = 0
+        self._consecutive_data_failures = 0
         self._trip_time = None
         self._trip_reason = None
         self._half_open_successes = 0
