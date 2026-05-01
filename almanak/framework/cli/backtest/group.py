@@ -1,16 +1,75 @@
 """Backtest CLI group definition.
 
-This module defines the top-level `backtest` click group that all subcommands
-register onto. It is imported by all submodule files.
+Defines the top-level ``backtest`` click group plus a lazy
+``MultiCommand`` subclass that only imports a subcommand's submodule when
+click resolves that subcommand. Importing this module is therefore cheap:
+no ``framework.backtesting`` deps (optuna, sqlalchemy, plotly, matplotlib,
+…) load until the user actually invokes ``almanak strat backtest <cmd>``.
+
+Subcommands continue to register themselves via ``@backtest.command(...)``
+or ``@backtest.group(...)`` decorators in their own files; the lazy group
+just defers the import that runs those decorators.
 """
 
+import importlib
 from pathlib import Path
+from typing import ClassVar
 
 import click
 from dotenv import load_dotenv
 
 
-@click.group("backtest")
+class LazyBacktestGroup(click.Group):
+    """Click group that loads its subcommand modules on first lookup.
+
+    The ``framework.cli.backtest`` package is imported eagerly by
+    ``almanak/cli/cli.py`` (``from almanak.framework.cli import backtest as
+    framework_backtest_group``) so ``almanak strat run`` inside the deployed
+    strategy container loads it on every startup. Each subcommand module
+    pulls in the backtesting engine (optuna, sqlalchemy, plotly, …), which
+    is irrelevant to a running strategy. By deferring the submodule import
+    to ``get_command`` / ``list_commands`` time, the strategy container
+    pays zero backtesting cost.
+    """
+
+    # Map a click subcommand name to the relative submodule that defines
+    # it. Multiple commands can map to the same submodule — importing the
+    # submodule once registers all its decorated commands. Keep this in
+    # sync with the @backtest.command / @backtest.group decorator names
+    # across the package; the test in
+    # tests/framework/cli/test_imports_lean.py guards against unwanted
+    # eager imports.
+    _SUBCOMMAND_MODULES: ClassVar[dict[str, str]] = {
+        "pnl": "pnl",
+        "sweep": "sweep",
+        "optimize": "sweep",
+        "paper": "paper",
+        "dashboard": "paper",
+        "block": "block",
+        "walk-forward": "advanced",
+        "monte-carlo": "advanced",
+        "scenario": "advanced",
+    }
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        # ``--help`` (and shell completion) want the full subcommand list,
+        # so force-load every submodule before delegating to the base
+        # implementation.
+        for submodule in set(self._SUBCOMMAND_MODULES.values()):
+            self._ensure_loaded(submodule)
+        return super().list_commands(ctx)
+
+    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
+        if name in self._SUBCOMMAND_MODULES and name not in self.commands:
+            self._ensure_loaded(self._SUBCOMMAND_MODULES[name])
+        return super().get_command(ctx, name)
+
+    @staticmethod
+    def _ensure_loaded(submodule: str) -> None:
+        importlib.import_module(f"almanak.framework.cli.backtest.{submodule}")
+
+
+@click.group("backtest", cls=LazyBacktestGroup)
 def backtest() -> None:
     """
     Run backtests for Almanak strategies.
