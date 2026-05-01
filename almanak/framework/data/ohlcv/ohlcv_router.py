@@ -48,7 +48,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
+from almanak.framework.data.interfaces import (
+    DataSourceRateLimited,
+    DataSourceTimeout,
+    DataSourceUnavailable,
+    OHLCVCandle,
+)
 from almanak.framework.data.models import (
     CEX_SYMBOL_MAP,
     OHLCV_PROXY_MAP,
@@ -63,18 +68,26 @@ from almanak.framework.data.routing.config import DataProvider
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Retry policy (VIB-3447)
+# Retry policy (VIB-3447 + VIB-3802)
 # ---------------------------------------------------------------------------
 
 # Max additional attempts beyond the first for the primary DEX provider.
 # Total attempts = 1 + _MAX_PRIMARY_RETRIES.
 _MAX_PRIMARY_RETRIES = 2
 _RETRY_BASE_DELAY = 0.25  # seconds
-_RETRY_MAX_DELAY = 2.0  # seconds cap
+_RETRY_MAX_DELAY = 2.0  # seconds cap (default full-jitter backoff)
 
-# Substrings (lowercased) in exception messages that indicate a transient
-# failure worth retrying.  gRPC INTERNAL is included because, in practice,
-# it is emitted by the gateway for upstream Gecko API blips, not for bugs.
+# Cap on upstream-advised retry delay (RetryInfo). Adversarial or misconfigured
+# upstreams can return very long delays; we honor the advice but cap so a
+# single retry can never stretch beyond the framework's iteration budget.
+# Values longer than this are breaker territory, not retry territory — that's
+# what VIB-3803's exposure-aware breaker is for.
+_UPSTREAM_RETRY_MAX_DELAY = 5.0  # seconds
+
+# Legacy substring heuristic. VIB-3802 prefers typed exceptions
+# (DataSourceRateLimited / DataSourceTimeout / DataSourceUnavailable populated
+# from RetryInfo), but we keep this as a fallback for paths that haven't been
+# migrated to the typed-error contract yet.
 _TRANSIENT_ERROR_HINTS: frozenset[str] = frozenset(
     [
         "statuscode.internal",
@@ -95,18 +108,72 @@ _TRANSIENT_ERROR_HINTS: frozenset[str] = frozenset(
 )
 
 
-def _is_transient_exc(exc: Exception) -> bool:
-    """Return True if *exc* looks like a recoverable, transient failure.
+def _is_retryable_exc(exc: Exception) -> bool:
+    """Return True if *exc* should trigger a retry.
 
-    For DataSourceUnavailable we check *reason* directly to avoid false
-    positives from the class's own boilerplate ("Data source '...' unavailable:
-    ..."), which would make every DataSourceUnavailable look transient.
+    Decision order:
+
+    1. **Typed VIB-3800 signals** — :class:`DataSourceRateLimited` and
+       :class:`DataSourceTimeout` always retry. :class:`DataSourceUnavailable`
+       retries iff the upstream populated ``retry_after`` (i.e. ``RetryInfo``
+       was present on the trailer); the gateway only sets that when the failure
+       is transient.
+    2. **Legacy substring heuristic** — for non-typed exceptions and untagged
+       :class:`DataSourceUnavailable` instances, fall back to matching against
+       ``_TRANSIENT_ERROR_HINTS``. This preserves the existing behavior where
+       a DSU like "Pool not found" or "unsupported chain" (raised from
+       client-side validation, not from an upstream error) is NOT retried.
+
+    The legacy path will narrow as more upstream services migrate to the typed
+    contract.
     """
+    if isinstance(exc, DataSourceRateLimited | DataSourceTimeout):
+        return True
+
     if isinstance(exc, DataSourceUnavailable):
+        if exc.retry_after is not None:
+            return True
         s = exc.reason.lower()
     else:
         s = str(exc).lower()
     return any(hint in s for hint in _TRANSIENT_ERROR_HINTS)
+
+
+# Back-compat alias — external callers still import the legacy name.
+_is_transient_exc = _is_retryable_exc
+
+
+def _extract_upstream_retry_delay(exc: Exception | None) -> float | None:
+    """Read the upstream-advised retry delay (seconds) from a typed exception.
+
+    Returns None when the exception doesn't carry ``retry_after`` (legacy
+    path) or the value is missing / unusable, so the caller falls back to
+    full-jitter backoff.
+    """
+    if exc is None:
+        return None
+    retry_after = getattr(exc, "retry_after", None)
+    if isinstance(retry_after, int | float) and retry_after >= 0:
+        return float(retry_after)
+    return None
+
+
+def _retry_delay_for(exc: Exception | None, attempt: int) -> float:
+    """Compute the delay before the next retry.
+
+    Honors :class:`google.rpc.RetryInfo` (surfaced as ``exc.retry_after``)
+    when the upstream provided one, capped at ``_UPSTREAM_RETRY_MAX_DELAY``
+    so a single retry can't stretch the iteration budget. Falls back to
+    full-jitter exponential backoff when no advice is available.
+
+    Args:
+        exc: The exception from the most recent failed attempt.
+        attempt: The attempt index we are about to start (1-based).
+    """
+    upstream_delay = _extract_upstream_retry_delay(exc)
+    if upstream_delay is not None:
+        return min(upstream_delay, _UPSTREAM_RETRY_MAX_DELAY)
+    return _backoff_delay(attempt)
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -419,16 +486,25 @@ class OHLCVRouter:
             # because their failures are almost always deterministic (no symbol).
             max_attempts = (1 + _MAX_PRIMARY_RETRIES) if provider_name in _RETRYABLE_PROVIDERS else 1
 
+            # Tracks the exception from the most recent failed attempt against
+            # this provider, so the next iteration's backoff can honor any
+            # upstream-advised RetryInfo (VIB-3802).
+            last_provider_exc: Exception | None = None
+
             for attempt in range(max_attempts):
                 if attempt > 0:
-                    delay = _backoff_delay(attempt)
+                    advised = _extract_upstream_retry_delay(last_provider_exc)
+                    delay = min(advised, _UPSTREAM_RETRY_MAX_DELAY) if advised is not None else _backoff_delay(attempt)
+                    log_kind = "ohlcv_retry_upstream_advised" if advised is not None else "ohlcv_retry"
                     logger.info(
-                        "ohlcv_retry provider=%s instrument=%s attempt=%d/%d delay_s=%.2f",
+                        "%s provider=%s instrument=%s attempt=%d/%d delay_s=%.2f advised_s=%s",
+                        log_kind,
                         provider_name,
                         instrument.pair,
                         attempt + 1,
                         max_attempts,
                         delay,
+                        f"{advised:.2f}" if advised is not None else "none",
                     )
                     time.sleep(delay)
 
@@ -511,6 +587,7 @@ class OHLCVRouter:
 
                 except Exception as exc:
                     last_error = exc
+                    last_provider_exc = exc
                     if provider_name in _RETRYABLE_PROVIDERS and (
                         primary_provider_name is None or primary_provider_name == provider_name
                     ):
@@ -520,7 +597,7 @@ class OHLCVRouter:
                     elapsed = int((time.monotonic() - start) * 1000)
 
                     # Retry on transient errors if we have attempts left
-                    if attempt < max_attempts - 1 and _is_transient_exc(exc):
+                    if attempt < max_attempts - 1 and _is_retryable_exc(exc):
                         logger.warning(
                             "ohlcv_retry_scheduled provider=%s instrument=%s attempt=%d/%d error=%s elapsed_ms=%d",
                             provider_name,
