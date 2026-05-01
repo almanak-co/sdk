@@ -37,7 +37,9 @@ import asyncio
 import importlib.util
 import json
 import logging
+import os
 import sys
+import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -51,10 +53,132 @@ from ..teardown import (
     PositionType,
     TeardownAssetPolicy,
     TeardownMode,
+    TeardownPhase,
     TeardownRequest,
     TeardownStatus,
     get_teardown_state_manager,
 )
+
+# =============================================================================
+# Strategy-folder resolution (VIB-3835)
+# =============================================================================
+#
+# Every teardown subcommand that reads/writes ``teardown_requests`` needs to
+# know which strategy folder owns the SQLite DB. The local-DB rule is folder-
+# scoped (1 strategy = 1 folder = 1 DB = 1 gateway, plan §B / VIB-3761) so the
+# CLI must resolve the folder explicitly — silently falling through to the
+# per-user utility DB caused the May 1 mainnet teardown failure.
+#
+# Resolution order (mirrors `strat run` / VIB-3835):
+#   1. Explicit ``-d / --working-dir`` flag.
+#   2. ``ALMANAK_STRATEGY_FOLDER`` env var (set by `strat run` in its own process,
+#      so a teardown run from inside that process inherits the right folder).
+#   3. ``./`` (cwd) if it contains config.json (or strategy.py).
+#   4. HARD FAIL — no fallback to utility DB.
+#
+# The resolver exports ``ALMANAK_STRATEGY_FOLDER`` so any downstream code that
+# reads ``local_paths.local_strategy_db_path()`` sees the same folder.
+
+_STRATEGY_FOLDER_HINT = (
+    "Pass --working-dir / -d <path>, or run from a strategy folder.\n"
+    "  A strategy folder must contain config.json (and strategy.py)."
+)
+
+
+def _looks_like_strategy_folder(path: Path) -> bool:
+    """Return True if ``path`` contains a config.json (or strategy.py).
+
+    config.json is the primary signal — every Almanak strategy folder has one.
+    strategy.py is accepted as a fallback because some incubating strategies
+    rely on the decorator-driven config and ship without a config.json.
+    """
+    if not path.is_dir():
+        return False
+    if (path / "config.json").exists():
+        return True
+    if (path / "config.yaml").exists() or (path / "config.yml").exists():
+        return True
+    return (path / "strategy.py").exists()
+
+
+def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
+    """Resolve the strategy folder and export it in the env for downstream code.
+
+    Raises ``click.ClickException`` with the canonical remediation hint when
+    no folder can be resolved. Always exits non-zero on failure so operator
+    scripts can detect a misconfigured invocation rather than silently writing
+    to the wrong DB.
+    """
+    # Step 1: explicit -d flag wins.
+    if working_dir is not None:
+        candidate = Path(working_dir).expanduser().resolve()
+        if not candidate.is_dir():
+            raise click.ClickException(f"--working-dir does not exist or is not a directory: {candidate}")
+        if not _looks_like_strategy_folder(candidate):
+            raise click.ClickException(
+                f"--working-dir does not look like a strategy folder: {candidate}\n  {_STRATEGY_FOLDER_HINT}"
+            )
+        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(candidate)
+        # Reset any singleton state managers cached from a prior path so the
+        # exported folder takes effect for this invocation.
+        _reset_teardown_state_singleton()
+        return candidate
+
+    # Step 2: respect a folder already exported by a parent process (e.g. a
+    # `strat run` that shells out to `teardown` for some scripted flow).
+    env_folder = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    if env_folder and env_folder.strip():
+        candidate = Path(env_folder.strip()).expanduser().resolve()
+        if candidate.is_dir() and _looks_like_strategy_folder(candidate):
+            # Mirror Steps 1 and 3: reset the singleton so a parent process
+            # that imported `get_teardown_state_manager` before exporting the
+            # env var doesn't cache the wrong DB path.
+            _reset_teardown_state_singleton()
+            return candidate
+        # Fall through — env var is stale or points at a non-strategy dir.
+
+    # Step 3: try cwd.
+    cwd = Path.cwd().resolve()
+    if _looks_like_strategy_folder(cwd):
+        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(cwd)
+        _reset_teardown_state_singleton()
+        return cwd
+
+    # Step 4: hard-fail.
+    raise click.ClickException(f"no strategy folder resolved.\n  {_STRATEGY_FOLDER_HINT}")
+
+
+def _reset_teardown_state_singleton() -> None:
+    """Clear the cached ``TeardownStateManager`` so the next call re-resolves.
+
+    The singleton in ``get_teardown_state_manager`` caches the DB path on first
+    call; if a CLI invocation sets ``ALMANAK_STRATEGY_FOLDER`` after the cache
+    was populated (e.g. via a prior import), subsequent calls would otherwise
+    hit the wrong DB.
+    """
+    from ..teardown import state_manager as state_manager_module
+
+    state_manager_module._default_manager = None
+
+
+def _get_teardown_state_manager_or_die():
+    """``get_teardown_state_manager()`` wrapped to surface ``LocalPathError``
+    as a CLI-friendly ``click.ClickException`` instead of a raw traceback.
+
+    The strict resolver (``local_strategy_db_path``) raises ``LocalPathError``
+    when no strategy folder is resolvable — which happens in hosted mode or
+    when an operator runs a CLI subcommand without ``-d``/cwd context. The
+    error message already contains the canonical remediation hint; turning
+    it into a ``ClickException`` ensures Click formats it as a single red
+    error line and exits non-zero, matching every other CLI failure mode.
+    """
+    from ..local_paths import LocalPathError
+
+    try:
+        return get_teardown_state_manager()
+    except LocalPathError as exc:
+        raise click.ClickException(str(exc)) from exc
+
 
 # =============================================================================
 # Helper Functions
@@ -423,8 +547,6 @@ def execute_teardown(
         # Skip confirmation
         almanak strat teardown execute -d almanak/demo_strategies/uniswap_lp --force
     """
-    import os
-
     from eth_account import Account
 
     click.echo("=" * 60)
@@ -432,6 +554,17 @@ def execute_teardown(
     click.echo("=" * 60)
 
     working_path = Path(working_dir).resolve()
+
+    # Export ALMANAK_STRATEGY_FOLDER so the strategy-scoped DB resolver
+    # (local_strategy_db_path, VIB-3835) sees the same folder the operator
+    # passed via -d. Mirrors `strat run` and matches the request/status/list/
+    # cancel subcommands' resolver. We export unconditionally here because
+    # execute_teardown's -d defaults to cwd, and a cwd-scoped invocation that
+    # forgot to set the env var would otherwise have downstream adapters
+    # raise LocalPathError.
+    if working_path.is_dir():
+        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(working_path)
+        _reset_teardown_state_singleton()
 
     # Load environment from .env if present
     from dotenv import load_dotenv
@@ -823,9 +956,17 @@ def execute_teardown(
         )
 
         # Create teardown manager with state persistence (VIB-2924)
+        from almanak.framework.local_paths import LocalPathError
         from almanak.framework.teardown.state_manager import TeardownStateAdapter
 
-        teardown_state_adapter = TeardownStateAdapter()
+        # VIB-3835: TeardownStateAdapter() resolves through the strict
+        # strategy-scoped path resolver. Surface LocalPathError as a clean CLI
+        # error (canonical remediation hint already in the message) rather
+        # than letting it bubble out as a raw traceback.
+        try:
+            teardown_state_adapter = TeardownStateAdapter()
+        except LocalPathError as exc:
+            raise click.ClickException(str(exc)) from exc
         teardown_manager = TeardownManager(
             orchestrator=orchestrator,  # type: ignore[arg-type]  # duck-typed orchestrator
             compiler=compiler,
@@ -886,6 +1027,17 @@ def execute_teardown(
 
 @teardown.command()
 @click.option(
+    "--working-dir",
+    "-d",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Strategy folder owning the local DB. Resolves like `strat run -d`: "
+        "explicit flag → ALMANAK_STRATEGY_FOLDER → cwd if it has config.json. "
+        "Hard-fails when nothing resolves (no utility-DB fallback)."
+    ),
+)
+@click.option(
     "--strategy",
     "-s",
     required=True,
@@ -923,13 +1075,32 @@ def execute_teardown(
     is_flag=True,
     help="Skip confirmation prompt",
 )
+@click.option(
+    "--wait",
+    is_flag=True,
+    default=False,
+    help=(
+        "Block until the runner reaches a terminal state (completed/failed/"
+        "cancelled). Without --wait the command returns as soon as the request "
+        "is written, which is fire-and-forget and does NOT confirm pickup."
+    ),
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=300,
+    help="Seconds to wait for terminal state when --wait is set (default: 300).",
+)
 def request(
+    working_dir: str | None,
     strategy: str,
     mode: str,
     asset_policy: str,
     target_token: str,
     reason: str | None,
     force: bool,
+    wait: bool,
+    timeout: int,
 ):
     """Request a teardown for a strategy.
 
@@ -938,15 +1109,23 @@ def request(
     with the specified parameters.
 
     Examples:
-        # Graceful teardown with default settings
-        almanak strat teardown request --strategy uniswap_lp --mode graceful
+        # Graceful teardown with default settings (folder-scoped)
+        almanak strat teardown request -d strategies/my_strat -s uniswap_lp --mode graceful
 
         # Emergency teardown keeping native tokens
-        almanak strat teardown request --strategy aave_leverage --mode emergency --asset-policy keep
+        almanak strat teardown request -d strategies/my_strat -s aave_lev --mode emergency --asset-policy keep
+
+        # Block until the runner finishes (recommended for interactive use)
+        almanak strat teardown request -d strategies/my_strat -s uniswap_lp --wait --timeout 300
 
         # Teardown with reason
-        almanak strat teardown request --strategy gmx_perp --mode graceful --reason "Rebalancing"
+        almanak strat teardown request -d strategies/my_strat -s gmx_perp --reason "Rebalancing"
     """
+    _resolve_and_export_strategy_folder(working_dir)
+
+    if timeout <= 0:
+        raise click.ClickException("--timeout must be a positive number of seconds")
+
     # Map asset policy
     policy_map = {
         "target": TeardownAssetPolicy.TARGET_TOKEN,
@@ -977,7 +1156,7 @@ def request(
             return
 
     # Create the request
-    manager = get_teardown_state_manager()
+    manager = _get_teardown_state_manager_or_die()
 
     # Check for existing active request
     existing = manager.get_active_request(strategy)
@@ -1006,11 +1185,161 @@ def request(
 
     click.echo()
     click.echo(click.style("Teardown request created!", fg="green"))
-    click.echo("The strategy will pick up this request on the next iteration.")
-    click.echo(f"Use 'almanak strat teardown status --strategy {strategy}' to monitor progress.")
+
+    if not wait:
+        click.echo("The strategy will pick up this request on the next iteration.")
+        click.echo(f"Use 'almanak strat teardown status -d <folder> -s {strategy}' to monitor progress.")
+        return
+
+    # --wait: poll until terminal state or timeout.
+    exit_code = _wait_for_terminal_state(manager, strategy, timeout)
+    if exit_code != 0:
+        sys.exit(exit_code)
+
+
+def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> int:
+    """Poll ``teardown_requests`` until terminal status or timeout.
+
+    Surfaces state transitions progressively (acknowledged, started, phase
+    changes, position counts) so the operator sees what the runner is doing
+    in real time. Returns a CLI exit code:
+
+      * 0 — COMPLETED
+      * 1 — FAILED, CANCELLED, or timeout
+
+    Implementation note: Polls every 2s (cheap SQLite read) and dedupes
+    transitions on a small per-state cache so the output stays compact.
+    A 2s poll is fast enough that an interactive operator sees the runner
+    pick up the request within the first iteration tick.
+    """
+    poll_interval = 2.0
+    deadline = time.monotonic() + timeout
+
+    seen_acknowledged = False
+    seen_started = False
+    last_phase: TeardownPhase | None = None
+    last_progress: tuple[int, int, int] | None = None
+
+    click.echo()
+    click.echo(click.style(f"Waiting (timeout={timeout}s)...", fg="cyan"))
+    click.echo("  pending — request created, waiting for runner to pick up")
+
+    while True:
+        request_row = manager.get_request(strategy_id)
+        if request_row is None:
+            # Production code never deletes terminal rows — `mark_completed` /
+            # `mark_failed` / `mark_cancelled` preserve them. So a missing row
+            # mid-wait means one of: (a) external process pruned the table,
+            # (b) the resolver is reading a different DB than the runner,
+            # (c) the row was never created. None of these are safe to report
+            # as "COMPLETED — exit 0"; that masks exactly the silent-failure
+            # class VIB-3835 closes. Surface as a non-zero error instead.
+            click.echo()
+            click.secho(
+                f"Error: teardown_requests row for {strategy_id} disappeared while waiting.",
+                fg="red",
+                bold=True,
+            )
+            click.echo(
+                "  This usually means the CLI and the runner are reading different DBs "
+                "(check ALMANAK_STRATEGY_FOLDER / -d), or the row was deleted out-of-band."
+            )
+            return 1
+
+        # Acknowledged transition.
+        if not seen_acknowledged and request_row.acknowledged_at is not None:
+            seen_acknowledged = True
+            click.echo(
+                f"  acknowledged — runner picked up the request at {format_datetime(request_row.acknowledged_at)}"
+            )
+
+        # Started transition.
+        if not seen_started and request_row.started_at is not None:
+            seen_started = True
+            click.echo(
+                "  started — runner began closing positions at "
+                f"{format_datetime(request_row.started_at)} "
+                f"({request_row.positions_total} position(s) total)"
+            )
+
+        # Phase / progress lines, only on change.
+        if request_row.current_phase is not None and request_row.current_phase != last_phase:
+            last_phase = request_row.current_phase
+            click.echo(f"  phase — {last_phase.value}")
+
+        progress = (
+            request_row.positions_closed,
+            request_row.positions_failed,
+            request_row.positions_total,
+        )
+        if progress != last_progress and progress[2] > 0:
+            last_progress = progress
+            click.echo(f"  progress — closed={progress[0]}, failed={progress[1]}, total={progress[2]}")
+
+        # Terminal states.
+        status = request_row.status
+        if status == TeardownStatus.COMPLETED:
+            click.echo()
+            click.echo(click.style(f"Teardown completed for {strategy_id}.", fg="green"))
+            click.echo(
+                f"  positions_closed={request_row.positions_closed}, "
+                f"positions_failed={request_row.positions_failed}, "
+                f"total={request_row.positions_total}"
+            )
+            return 0
+        if status == TeardownStatus.FAILED:
+            click.echo()
+            click.secho(f"Teardown FAILED for {strategy_id}.", fg="red", bold=True)
+            click.echo(
+                f"  positions_closed={request_row.positions_closed}, "
+                f"positions_failed={request_row.positions_failed}, "
+                f"total={request_row.positions_total}"
+            )
+            return 1
+        if status == TeardownStatus.CANCELLED:
+            click.echo()
+            click.secho(f"Teardown CANCELLED for {strategy_id}.", fg="yellow", bold=True)
+            return 1
+
+        # Timeout. Distinguish "runner never picked up" from "runner is
+        # working but didn't finish" — the operator needs different
+        # remediations for each.
+        if time.monotonic() >= deadline:
+            click.echo()
+            if seen_acknowledged or seen_started:
+                click.secho(
+                    f"Error: teardown did not reach a terminal state within {timeout}s.",
+                    fg="red",
+                    bold=True,
+                )
+                click.echo(
+                    f"  The runner is still working. Check progress: 'almanak strat teardown status -d <folder> -s {strategy_id}'."
+                )
+            else:
+                click.secho(
+                    f"Error: timeout waiting for runner acknowledgement ({timeout}s).",
+                    fg="red",
+                    bold=True,
+                )
+                click.echo(
+                    f"  Is the runner running? Check 'almanak strat teardown status -d <folder> -s {strategy_id}'."
+                )
+            return 1
+
+        time.sleep(poll_interval)
 
 
 @teardown.command()
+@click.option(
+    "--working-dir",
+    "-d",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Strategy folder owning the local DB. Resolves like `strat run -d`. "
+        "Hard-fails when no strategy folder resolves."
+    ),
+)
 @click.option(
     "--strategy",
     "-s",
@@ -1024,16 +1353,17 @@ def request(
     is_flag=True,
     help="Output as JSON",
 )
-def status(strategy: str, as_json: bool):
+def status(working_dir: str | None, strategy: str, as_json: bool):
     """Check teardown status for a strategy.
 
     Shows the current state of any teardown request for the specified strategy.
 
     Examples:
-        almanak strat teardown status --strategy uniswap_lp
-        almanak strat teardown status --strategy aave_leverage --json
+        almanak strat teardown status -d strategies/my_strat -s uniswap_lp
+        almanak strat teardown status -d strategies/my_strat -s aave_lev --json
     """
-    manager = get_teardown_state_manager()
+    _resolve_and_export_strategy_folder(working_dir)
+    manager = _get_teardown_state_manager_or_die()
     request = manager.get_request(strategy)
 
     if not request:
@@ -1079,6 +1409,16 @@ def status(strategy: str, as_json: bool):
 
 @teardown.command()
 @click.option(
+    "--working-dir",
+    "-d",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Strategy folder owning the local DB. Resolves like `strat run -d`. "
+        "Hard-fails when no strategy folder resolves."
+    ),
+)
+@click.option(
     "--strategy",
     "-s",
     required=True,
@@ -1090,17 +1430,18 @@ def status(strategy: str, as_json: bool):
     is_flag=True,
     help="Skip confirmation prompt",
 )
-def cancel(strategy: str, force: bool):
+def cancel(working_dir: str | None, strategy: str, force: bool):
     """Cancel a pending or in-progress teardown.
 
     For graceful mode: Cancellable anytime before completion.
     For emergency mode: Only cancellable during the 10-second window.
 
     Examples:
-        almanak strat teardown cancel --strategy uniswap_lp
-        almanak strat teardown cancel --strategy aave_leverage --force
+        almanak strat teardown cancel -d strategies/my_strat -s uniswap_lp
+        almanak strat teardown cancel -d strategies/my_strat -s aave_lev --force
     """
-    manager = get_teardown_state_manager()
+    _resolve_and_export_strategy_folder(working_dir)
+    manager = _get_teardown_state_manager_or_die()
     request = manager.get_active_request(strategy)
 
     if not request:
@@ -1140,6 +1481,16 @@ def cancel(strategy: str, force: bool):
 
 @teardown.command(name="list")
 @click.option(
+    "--working-dir",
+    "-d",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Strategy folder owning the local DB. Resolves like `strat run -d`. "
+        "Hard-fails when no strategy folder resolves."
+    ),
+)
+@click.option(
     "--all",
     "-a",
     "show_all",
@@ -1153,18 +1504,19 @@ def cancel(strategy: str, force: bool):
     is_flag=True,
     help="Output as JSON",
 )
-def list_teardowns(show_all: bool, as_json: bool):
-    """List teardown requests.
+def list_teardowns(working_dir: str | None, show_all: bool, as_json: bool):
+    """List teardown requests in the strategy-folder DB.
 
     By default, shows only active teardowns. Use --all to include
     completed and cancelled requests.
 
     Examples:
-        almanak strat teardown list
-        almanak strat teardown list --all
-        almanak strat teardown list --json
+        almanak strat teardown list -d strategies/my_strat
+        almanak strat teardown list -d strategies/my_strat --all
+        almanak strat teardown list -d strategies/my_strat --json
     """
-    manager = get_teardown_state_manager()
+    _resolve_and_export_strategy_folder(working_dir)
+    manager = _get_teardown_state_manager_or_die()
 
     if show_all:
         requests = manager.get_all_requests()

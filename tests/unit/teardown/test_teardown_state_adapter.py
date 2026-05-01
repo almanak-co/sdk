@@ -86,18 +86,18 @@ class TestPathResolution:
 
         assert resolved == explicit
 
-    def test_falls_through_to_per_user_default_when_env_unset(
+    def test_hard_fails_when_no_strategy_folder_resolves(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """With no explicit path, no ALMANAK_STATE_DB, no XDG, fall back to a
-        stable per-user path so runner+API converge regardless of cwd.
-
-        VIB-3761: the canonical resolver returns
-        ``~/.local/share/almanak/utility/almanak_state.db``. The
-        previous ``~/.almanak/almanak_state.db`` shape was specific to
-        the old teardown adapter; the unified contract uses XDG-style
-        ``~/.local/share`` so it sits next to other per-user data.
+        """VIB-3835: the teardown DB resolver no longer falls through to the
+        per-user utility default. Strategy-scoped operations must resolve to
+        a real strategy folder; silently writing to ``~/.local/share/almanak/
+        utility/almanak_state.db`` was the May 1 mainnet teardown failure
+        mode (the runner polls the strategy-folder DB, the CLI was writing
+        to the utility DB, the request was never seen).
         """
+        from almanak.framework.local_paths import LocalPathError
+
         monkeypatch.delenv("AGENT_ID", raising=False)
         monkeypatch.delenv("ALMANAK_STATE_DB", raising=False)
         monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
@@ -105,9 +105,8 @@ class TestPathResolution:
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        resolved = TeardownStateManager._resolve_db_path(None)
-
-        assert resolved == tmp_path / ".local" / "share" / "almanak" / "utility" / "almanak_state.db"
+        with pytest.raises(LocalPathError, match="no strategy folder resolved"):
+            TeardownStateManager._resolve_db_path(None)
 
 
 # -----------------------------------------------------------------------------

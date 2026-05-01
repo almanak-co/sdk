@@ -26,6 +26,7 @@ from almanak.framework.local_paths import (
     acquire_local_db_lock,
     local_db_path,
     local_log_path,
+    local_strategy_db_path,
     release_local_db_lock,
     warn_if_legacy_cwd_db_exists,
 )
@@ -282,3 +283,55 @@ def test_t_3761_12_no_cwd_relative_db_default_remains() -> None:
         "Use almanak.framework.local_paths.local_db_path() instead.\n"
         "Offenders:\n  - " + "\n  - ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# VIB-3835: local_strategy_db_path — strict, no utility-DB fallback
+# ---------------------------------------------------------------------------
+def test_strategy_db_path_uses_strategy_folder(clean_env, tmp_path) -> None:
+    """VIB-3835: ALMANAK_STRATEGY_FOLDER selects the strategy-folder DB."""
+    folder = tmp_path / "strategy"
+    folder.mkdir()
+    clean_env.setenv("ALMANAK_STRATEGY_FOLDER", str(folder))
+    assert local_strategy_db_path() == folder.resolve() / LOCAL_DB_FILENAME
+
+
+def test_strategy_db_path_honors_explicit_state_db(clean_env, tmp_path) -> None:
+    """VIB-3835: ALMANAK_STATE_DB beats every other branch (test escape hatch)."""
+    explicit = tmp_path / "explicit.db"
+    clean_env.setenv("ALMANAK_STATE_DB", str(explicit))
+    clean_env.setenv("ALMANAK_STRATEGY_FOLDER", str(tmp_path / "strategy"))
+    assert local_strategy_db_path() == explicit.resolve()
+
+
+def test_strategy_db_path_raises_when_no_folder(clean_env) -> None:
+    """VIB-3835: strict resolver hard-fails instead of falling back to utility DB.
+
+    The May 1 mainnet teardown surfaced the silent-fallback failure mode:
+    ``teardown request`` ran from a second shell with no ``ALMANAK_STRATEGY_FOLDER``,
+    fell through to ``~/.local/share/almanak/utility/almanak_state.db``, and the
+    runner (polling the strategy-folder DB) never saw the request. The strict
+    resolver eliminates that branch.
+    """
+    with pytest.raises(LocalPathError, match=r"no strategy folder resolved"):
+        local_strategy_db_path()
+
+
+def test_strategy_db_path_ignores_gateway_db_path_env(clean_env, tmp_path) -> None:
+    """VIB-3835: ALMANAK_GATEWAY_DB_PATH is a gateway-only override; strategy
+    operations must not honour it.
+
+    The utility-DB path (whether default or via ``ALMANAK_GATEWAY_DB_PATH``) is
+    explicitly out of scope for strategy-scoped writers. Folding it back in
+    would re-open the silent-DB-mismatch class.
+    """
+    clean_env.setenv("ALMANAK_GATEWAY_DB_PATH", str(tmp_path / "gateway-only.db"))
+    with pytest.raises(LocalPathError, match=r"no strategy folder resolved"):
+        local_strategy_db_path()
+
+
+def test_strategy_db_path_hosted_mode_refuses(clean_env) -> None:
+    """VIB-3835: like local_db_path, the strict variant refuses in hosted mode."""
+    clean_env.setenv("AGENT_ID", "agent-test")
+    with pytest.raises(LocalPathError, match=r"hosted mode"):
+        local_strategy_db_path()

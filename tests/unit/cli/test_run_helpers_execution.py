@@ -423,6 +423,22 @@ class TestHandleStandaloneDashboard:
 class TestRunOnce:
     """Phase 15 helper — single-iteration execution + exit code."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_teardown_state_db(self, monkeypatch, tmp_path) -> None:
+        """Pin ``ALMANAK_STATE_DB`` so ``_run_once`` with ``teardown_after=True``
+        can build a real ``TeardownStateManager`` (VIB-3835 strict resolver
+        otherwise hard-fails when no strategy folder is set). The DB sits
+        in a per-test tmp file; ``create_request`` writes one row and that's it.
+        """
+        monkeypatch.delenv("AGENT_ID", raising=False)
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
+        # Reset the singleton in case a prior test already cached a manager
+        # for a different path.
+        from almanak.framework.teardown import state_manager as state_manager_module
+
+        state_manager_module._default_manager = None
+
     def test_happy_path_returns_exit_0(self) -> None:
         runner = _make_fake_runner(iteration_result=_make_success_result())
         strategy = _make_fake_strategy()

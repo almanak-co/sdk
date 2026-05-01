@@ -67,9 +67,17 @@ def _deployed(monkeypatch):
 
 
 @pytest.fixture()
-def _local(monkeypatch):
-    """Simulate local development (no AGENT_ID env var)."""
+def _local(monkeypatch, tmp_path):
+    """Simulate local development (no AGENT_ID env var).
+
+    Also pin ``ALMANAK_STATE_DB`` to a per-test tmp file so the strict,
+    strategy-scoped DB resolver (VIB-3835) doesn't hard-fail when the
+    teardown manager / adapter resolves its DB path. The runner code under
+    test only constructs the manager — it never reads the file — so a
+    placeholder path is sufficient.
+    """
     monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
 
 
 # ---------------------------------------------------------------------------

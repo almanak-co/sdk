@@ -27,6 +27,18 @@ from almanak.framework.runner.strategy_runner import (
 from almanak.framework.teardown.models import TeardownMode
 
 
+@pytest.fixture(autouse=True)
+def _isolated_teardown_state_db(monkeypatch, tmp_path):
+    """Pin ``ALMANAK_STATE_DB`` to a per-test tmp file so the strict,
+    strategy-scoped DB resolver (VIB-3835) doesn't hard-fail when the
+    runner builds the TeardownStateAdapter. Tests mock the manager so the
+    file is never read.
+    """
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+    monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "test_state.db"))
+
+
 def _runner() -> StrategyRunner:
     return StrategyRunner(
         price_oracle=MagicMock(),

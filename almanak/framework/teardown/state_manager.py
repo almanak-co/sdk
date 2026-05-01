@@ -123,28 +123,34 @@ class TeardownStateManager:
     def _resolve_db_path(db_path: str | Path | None) -> Path:
         """Resolve database path, converging runner and API on the same file.
 
-        Precedence (VIB-3761 — single source of truth):
+        Precedence (VIB-3761/VIB-3835 — single source of truth, strategy-scoped):
         1. Explicit ``db_path`` argument.
-        2. ``almanak.framework.local_paths.local_db_path()`` — the canonical
-           helper. Honours ``ALMANAK_STATE_DB``, ``ALMANAK_STRATEGY_FOLDER``,
-           ``ALMANAK_GATEWAY_DB_PATH``, falls back to the per-user utility
-           directory.
+        2. ``almanak.framework.local_paths.local_strategy_db_path()`` — the
+           strategy-scoped helper. Honours ``ALMANAK_STATE_DB`` and
+           ``ALMANAK_STRATEGY_FOLDER``; refuses the utility-DB fallback.
 
         **Never CWD-relative.** Runner is documented to be launched from a
         strategy directory, while API/CLI processes are often started from
         the repo root — a CWD-relative default silently opens different
         SQLite files per process, which breaks the approval channel entirely
         (April 29 silent-failure root cause).
+
+        **No utility-DB fallback** (VIB-3835). Teardown is a strategy-scoped
+        operation; falling through to the per-user utility DB silently writes
+        the request to a file the runner never reads, which was the May 1
+        mainnet teardown failure mode. Callers that get ``LocalPathError``
+        here must surface it as a CLI error with the remediation hint.
         """
         if db_path is not None:
             return Path(db_path)
 
-        # VIB-3761: delegate to the canonical resolver. Hosted mode raises
-        # LocalPathError; the teardown manager is local-only so we treat
-        # that as a programmer error by letting it propagate.
-        from almanak.framework.local_paths import local_db_path
+        # VIB-3761/VIB-3835: delegate to the strict, strategy-scoped resolver.
+        # Hosted mode and "no strategy folder" both raise LocalPathError; the
+        # teardown manager is local-only and strategy-scoped, so we let the
+        # error propagate to the caller.
+        from almanak.framework.local_paths import local_strategy_db_path
 
-        return local_db_path()
+        return local_strategy_db_path()
 
     def _init_db(self) -> None:
         """Initialize the database schema."""

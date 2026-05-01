@@ -57,10 +57,22 @@ def _utility_data_dir() -> Path:
 
 
 def _strategy_folder() -> Path | None:
+    """Resolve ``ALMANAK_STRATEGY_FOLDER`` to an existing directory, or ``None``.
+
+    Returning ``None`` for a missing / non-directory path lets the strict
+    resolver hard-fail with the canonical "no strategy folder resolved"
+    remediation. Without this check, a stale env var like
+    ``/tmp/typo`` would silently create a fresh folder DB at that path —
+    re-opening the May 1 silent-failure class the strict resolver exists
+    to close.
+    """
     raw = os.environ.get("ALMANAK_STRATEGY_FOLDER")
     if not raw or not raw.strip():
         return None
-    return Path(raw.strip()).expanduser().resolve()
+    path = Path(raw.strip()).expanduser().resolve()
+    if not path.is_dir():
+        return None
+    return path
 
 
 def _ensure_local() -> None:
@@ -78,11 +90,17 @@ def _ensure_local() -> None:
         )
 
 
-def _resolve_db_path() -> Path:
+def _resolve_db_path(*, strict: bool = False) -> Path:
     """Internal: pure resolution with no filesystem side effects.
 
     Kept separate from :func:`local_db_path` so tests can pin the
     resolution rules without parent-dir creation interfering.
+
+    When ``strict`` is True, refuse to fall back to the utility-data
+    directory (or to ``ALMANAK_GATEWAY_DB_PATH``). VIB-3835: strategy-
+    scoped operations (teardown CLI, runner accounting writes) MUST
+    resolve to a real strategy folder — silently falling through to
+    a per-user utility DB caused the May 1 mainnet teardown failure.
     """
     explicit = os.environ.get("ALMANAK_STATE_DB")
     if explicit and explicit.strip():
@@ -91,6 +109,13 @@ def _resolve_db_path() -> Path:
     folder = _strategy_folder()
     if folder is not None:
         return folder / LOCAL_DB_FILENAME
+
+    if strict:
+        raise LocalPathError(
+            "no strategy folder resolved.\n"
+            "  Pass --working-dir / -d <path>, or run from a strategy folder.\n"
+            "  A strategy folder must contain config.json (and strategy.py)."
+        )
 
     explicit_gw = os.environ.get("ALMANAK_GATEWAY_DB_PATH")
     if explicit_gw and explicit_gw.strip():
@@ -114,6 +139,27 @@ def local_db_path() -> Path:
     except OSError:
         # Best-effort: if the user's filesystem is read-only, surface the
         # failure at connect time rather than here.
+        pass
+    return path
+
+
+def local_strategy_db_path() -> Path:
+    """Resolve the SQLite DB path for a *strategy-scoped* operation.
+
+    Same as :func:`local_db_path` but refuses the utility-DB fallback
+    (VIB-3835). Use this from any code path whose semantics are tied to
+    a specific strategy: teardown CLI subcommands, accounting writers,
+    runner state — anywhere a silent fall-through to the per-user
+    utility DB would write to the wrong place.
+
+    Raises :class:`LocalPathError` when no strategy folder can be
+    resolved (no ``ALMANAK_STATE_DB``, no ``ALMANAK_STRATEGY_FOLDER``).
+    """
+    _ensure_local()
+    path = _resolve_db_path(strict=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
         pass
     return path
 
