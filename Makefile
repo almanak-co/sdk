@@ -293,28 +293,30 @@ test-gateway:
 test-backtest-service:
 	uv run pytest tests/unit/services/backtest/ -v --import-mode=importlib
 
-# Demo strategy tests through gateway (run on Anvil forks)
-# These tests verify strategies work correctly through the gateway architecture
-# Uses public RPCs by default; set ALCHEMY_API_KEY for better rate limits
+# Demo strategy smoke test (run on Anvil forks via the product CLI path).
+# Drives `almanak strat run --network anvil --fresh --once` for every
+# discoverable demo. Each demo's funding comes from its own config.json
+# anvil_funding (no global dict) — see docs/internal/DemoFixing.md.
+# Uses public RPCs by default; set ALCHEMY_API_KEY for better rate limits.
 test-demo-strategies:
-	uv run --env-file .env python scripts/test_demo_strategies_gateway.py --all
+	uv run --env-file .env python scripts/run_demo.py --all
 
-# Quick demo strategy gateway test (one per chain)
+# Quick demo strategy smoke test (one per registered connector chain).
 test-demo-quick:
-	uv run --env-file .env python scripts/test_demo_strategies_gateway.py
+	uv run --env-file .env python scripts/run_demo.py --quick
 
-# Test a single strategy through gateway
+# Test a single demo through the product CLI path.
 # Usage: make test-demo-single STRATEGY=uniswap_rsi CHAIN=arbitrum
 test-demo-single:
 	@if [ -z "$(STRATEGY)" ]; then \
 		echo "Error: STRATEGY is not set. Usage: make test-demo-single STRATEGY=uniswap_rsi"; \
 		exit 1; \
 	fi
-	uv run --env-file .env python scripts/test_demo_strategies_gateway.py --strategy $(STRATEGY) $(if $(CHAIN),--chain $(CHAIN),)
+	uv run --env-file .env python scripts/run_demo.py --strategy $(STRATEGY) $(if $(CHAIN),--chain $(CHAIN),)
 
-# List available gateway-compatible demo strategies
+# List discoverable demo strategies (DemoSpec catalog).
 list-demo-strategies:
-	uv run python scripts/test_demo_strategies_gateway.py --list
+	uv run python scripts/run_demo.py --list
 
 # Check Pendle market expiry dates in demo and incubating strategy configs.
 # Fails if any demo strategy references a market expiring within 30 days.
