@@ -7013,7 +7013,52 @@ class IntentCompiler:
                 )
 
             # Lazy import to avoid circular import
-            from ..connectors.vaults import build_vault_adapter
+            from ..connectors.vaults import (
+                build_vault_adapter,
+                is_vault_chain_supported,
+                supported_vault_chains,
+            )
+
+            # VIB-3827: fail-fast chain support check. Without this, the
+            # adapter constructor raises a generic ``ValueError("Invalid
+            # chain: …")`` which the state machine cannot classify as
+            # permanent — the runner then retries forever on a deterministic
+            # mis-configuration. Surfaces the "not supported" keyword that
+            # ``_categorize_error`` maps to ``COMPILATION_PERMANENT``.
+            #
+            # Two distinct rejection cases are handled separately so neither
+            # falls through to a misclassified error:
+            #   1. Unknown protocol (``model_construct`` bypassed the pydantic
+            #      validator, e.g. when an intent is restored from serialized
+            #      state). ``supported_vault_chains`` would raise ``KeyError``
+            #      and the broad ``except`` below would strip the message to
+            #      the bare protocol name, missing ``permanent_keywords``.
+            #   2. Known protocol, unsupported chain (the headline VIB-3827
+            #      case — Sonic on metamorpho today).
+            if not is_vault_chain_supported(intent.protocol, self.chain):
+                try:
+                    supported = supported_vault_chains(intent.protocol)
+                except KeyError:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"Vault protocol '{intent.protocol}' is not supported "
+                            "(no vault adapter registered). Register the adapter "
+                            "or correct the intent's protocol field before retrying."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+                supported_str = ", ".join(sorted(supported)) if supported else "(none declared)"
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Vault protocol '{intent.protocol}' is not supported on chain "
+                        f"'{self.chain}'. Supported chains: {supported_str}. "
+                        "File a vault registry / native connector ticket for the missing "
+                        "chain before retrying."
+                    ),
+                    intent_id=intent.intent_id,
+                )
 
             adapter = build_vault_adapter(
                 intent.protocol,
@@ -7119,7 +7164,43 @@ class IntentCompiler:
                 )
 
             # Lazy import to avoid circular import
-            from ..connectors.vaults import build_vault_adapter
+            from ..connectors.vaults import (
+                build_vault_adapter,
+                is_vault_chain_supported,
+                supported_vault_chains,
+            )
+
+            # VIB-3827: fail-fast chain support check (mirrors deposit lane).
+            # Keeps redeem failures classifiable as ``COMPILATION_PERMANENT``
+            # so the runner does not retry indefinitely when the wallet has
+            # an open position on a chain the vault adapter does not (yet)
+            # support — a real scenario for stale state during chain rollouts.
+            # Unknown-protocol case is split out so ``supported_vault_chains``
+            # never raises ``KeyError`` into the broad ``except`` below.
+            if not is_vault_chain_supported(intent.protocol, self.chain):
+                try:
+                    supported = supported_vault_chains(intent.protocol)
+                except KeyError:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"Vault protocol '{intent.protocol}' is not supported "
+                            "(no vault adapter registered). Register the adapter "
+                            "or correct the intent's protocol field before retrying."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+                supported_str = ", ".join(sorted(supported)) if supported else "(none declared)"
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Vault protocol '{intent.protocol}' is not supported on chain "
+                        f"'{self.chain}'. Supported chains: {supported_str}. "
+                        "File a vault registry / native connector ticket for the missing "
+                        "chain before retrying."
+                    ),
+                    intent_id=intent.intent_id,
+                )
 
             adapter = build_vault_adapter(
                 intent.protocol,

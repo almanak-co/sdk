@@ -148,6 +148,17 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
     raise click.ClickException(f"no strategy folder resolved.\n  {_STRATEGY_FOLDER_HINT}")
 
 
+def _build_no_op_teardown_message(strategy_id: str) -> str:
+    """Canonical no-op teardown log line (VIB-3705).
+
+    Single source of truth so the two CLI call sites (the empty-positions
+    branch around line 814 and the empty-intents branch around line 1027)
+    produce byte-identical output. QA harnesses grep this line to
+    distinguish "no work was required" from a real teardown completion.
+    """
+    return f"Teardown: no open positions for strategy {strategy_id}; nothing to close. Exiting 0."
+
+
 def _reset_teardown_state_singleton() -> None:
     """Clear the cached ``TeardownStateManager`` so the next call re-resolves.
 
@@ -812,7 +823,20 @@ def execute_teardown(
                 raise click.ClickException(f"Failed to get positions: {e}") from e
 
         if not positions.positions:
-            click.echo("\nNo open positions found. Nothing to teardown.")
+            # VIB-3705: emit the canonical no-op success message that QA
+            # harnesses (and CI) can grep for to distinguish "no work was
+            # required" from "real teardown failure". Returning here yields
+            # exit 0 via Click's normal command-return semantics — swap-only
+            # / HOLD-state strategies (uniswap_v4_swap_*, fluid_swap_*,
+            # edge_yield_*_fluiddex, edge_yield_base_univ4) hit this branch
+            # whenever the wallet's balance for the strategy's quote/target
+            # token is 0, and treating that as exit 1 produced 5+ false
+            # failures in the April 28-29 QA batch.
+            strategy_id_for_log = getattr(strategy, "strategy_id", strategy_class.__name__)
+            no_op_msg = _build_no_op_teardown_message(strategy_id_for_log)
+            click.echo()
+            click.secho(no_op_msg, fg="green")
+            logger.info(no_op_msg)
             if not discover:
                 click.echo(
                     "Tip: if positions were opened by a previous gateway instance, "
@@ -1002,7 +1026,20 @@ def execute_teardown(
 
         # Display results
         click.echo("\n" + "=" * 60)
-        if result.success:
+        # VIB-3705: TeardownManager returns _empty_result(success=True,
+        # intents_total=0) when ``generate_teardown_intents()`` returned an
+        # empty list (Branch 2 of the "nothing to do" taxonomy). The post-
+        # execution summary loses signal in that case — "0/0 intents,
+        # $0 starting value" reads like a degenerate result rather than
+        # the explicit no-op success it actually is. Surface the canonical
+        # no-op log so QA harnesses can distinguish it from an executed
+        # teardown.
+        strategy_id_for_log = getattr(strategy, "strategy_id", strategy_class.__name__)
+        if result.success and result.intents_total == 0:
+            no_op_msg = _build_no_op_teardown_message(strategy_id_for_log)
+            click.secho(no_op_msg, fg="green")
+            logger.info(no_op_msg)
+        elif result.success:
             click.echo(click.style("[SUCCESS] Teardown completed successfully!", fg="green"))
         else:
             click.echo(click.style(f"[FAILED] Teardown failed: {result.error}", fg="red"))
