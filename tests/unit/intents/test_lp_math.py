@@ -13,6 +13,8 @@ from almanak.framework.intents.lp_math import (
     _amount1_for_liquidity,
     _liquidity_for_amount0,
     _liquidity_for_amount1,
+    liquidity_for_amounts_at_sqrt_price,
+    range_midpoint_sqrt_price_x96,
     recompute_lp_amounts,
     tick_to_sqrt_ratio_x96,
 )
@@ -281,3 +283,144 @@ class TestRecomputeLPAmounts:
         assert a1 > 0
         assert a0 <= 1000 * 10**6
         assert a1 <= 10**18
+
+
+# =============================================================================
+# VIB-3823: getLiquidityForAmounts pre-flight helpers
+# =============================================================================
+
+
+class TestRangeMidpointSqrtPriceX96:
+    """Geometric midpoint helper for the no-slot0 fallback."""
+
+    def test_midpoint_inside_range(self):
+        sqrt_a = tick_to_sqrt_ratio_x96(-1000)
+        sqrt_b = tick_to_sqrt_ratio_x96(1000)
+        mid = range_midpoint_sqrt_price_x96(-1000, 1000)
+        assert sqrt_a < mid < sqrt_b
+
+    def test_midpoint_symmetric_around_tick0(self):
+        # Symmetric range around tick 0 should put midpoint near 2**96
+        mid = range_midpoint_sqrt_price_x96(-1000, 1000)
+        # Tolerate isqrt floor rounding
+        assert abs(mid - 2**96) <= 1
+
+    def test_midpoint_handles_swapped_inputs(self):
+        forward = range_midpoint_sqrt_price_x96(-500, 500)
+        reversed_ = range_midpoint_sqrt_price_x96(500, -500)
+        assert forward == reversed_
+
+    def test_midpoint_degenerate_returns_zero(self):
+        # Same lower/upper -> degenerate -> 0 (caller short-circuits)
+        assert range_midpoint_sqrt_price_x96(100, 100) == 0
+
+
+class TestLiquidityForAmountsAtSqrtPrice:
+    """Pre-flight liquidity helper used by the LP_OPEN compile-time check."""
+
+    def test_in_range_both_legs_positive(self):
+        sqrt_p = tick_to_sqrt_ratio_x96(0)
+        liq = liquidity_for_amounts_at_sqrt_price(
+            sqrt_p, -1000, 1000, 10**18, 10**18
+        )
+        assert liq > 0
+
+    def test_below_range_with_only_token0(self):
+        # Pool is below the position range — needs only token0 to mint
+        sqrt_p = tick_to_sqrt_ratio_x96(-2000)
+        liq = liquidity_for_amounts_at_sqrt_price(
+            sqrt_p, -1000, 1000, 10**18, 0
+        )
+        assert liq > 0
+
+    def test_below_range_no_token0_returns_zero(self):
+        # Pool below range and only token1 supplied — cannot mint
+        sqrt_p = tick_to_sqrt_ratio_x96(-2000)
+        assert (
+            liquidity_for_amounts_at_sqrt_price(sqrt_p, -1000, 1000, 0, 10**18)
+            == 0
+        )
+
+    def test_above_range_no_token1_returns_zero(self):
+        # Pool above range and only token0 supplied — cannot mint
+        sqrt_p = tick_to_sqrt_ratio_x96(2000)
+        assert (
+            liquidity_for_amounts_at_sqrt_price(sqrt_p, -1000, 1000, 10**18, 0)
+            == 0
+        )
+
+    def test_in_range_zero_amount0_returns_zero(self):
+        # In-range needs both legs; missing one rounds liquidity to 0
+        sqrt_p = tick_to_sqrt_ratio_x96(0)
+        assert (
+            liquidity_for_amounts_at_sqrt_price(sqrt_p, -1000, 1000, 0, 10**18)
+            == 0
+        )
+
+    def test_in_range_zero_amount1_returns_zero(self):
+        sqrt_p = tick_to_sqrt_ratio_x96(0)
+        assert (
+            liquidity_for_amounts_at_sqrt_price(sqrt_p, -1000, 1000, 10**18, 0)
+            == 0
+        )
+
+    def test_degenerate_range_returns_zero(self):
+        sqrt_p = tick_to_sqrt_ratio_x96(0)
+        assert (
+            liquidity_for_amounts_at_sqrt_price(sqrt_p, 100, 100, 10**18, 10**18)
+            == 0
+        )
+
+    def test_out_of_bounds_sqrt_returns_zero(self):
+        # sqrtPriceX96 below MIN_SQRT_RATIO classifies as a sentinel; returns 0
+        assert liquidity_for_amounts_at_sqrt_price(0, -1000, 1000, 10**18, 10**18) == 0
+
+    def test_steth_weth_tight_range_one_wei_returns_zero(self):
+        # Near-1:1 peg with very tight range and token-1 missing.
+        # This is the canonical VIB-3823 stETH/WETH M0 reproduction.
+        sqrt_p = tick_to_sqrt_ratio_x96(0)
+        # 1 wei of token0 alone in a tight in-range slot rounds liquidity to 0
+        assert liquidity_for_amounts_at_sqrt_price(sqrt_p, -10, 10, 1, 0) == 0
+
+    def test_steth_weth_tight_range_paired_one_wei_positive(self):
+        # When both legs supply at least 1 wei, the in-range branch
+        # uses min(L0, L1); for tick spacing 10 that still rounds to a
+        # small but POSITIVE liquidity (verified against Solidity in
+        # the reference implementation).
+        sqrt_p = tick_to_sqrt_ratio_x96(0)
+        assert liquidity_for_amounts_at_sqrt_price(sqrt_p, -10, 10, 1, 1) > 0
+
+
+class TestLpOpenZeroLiquidityError:
+    """Typed error for VIB-3823 strategy-side catch."""
+
+    def test_error_message_prefix_stable(self):
+        from almanak.framework.intents import LpOpenZeroLiquidityError
+
+        err = LpOpenZeroLiquidityError(
+            amount0_desired=1,
+            amount1_desired=0,
+            tick_lower=-10,
+            tick_upper=10,
+            reason="test",
+        )
+        # The string-match contract: strategies use this prefix to catch
+        # the error from CompilationResult.error.
+        assert str(err).startswith(LpOpenZeroLiquidityError.ERROR_PREFIX)
+
+    def test_attributes_round_trip(self):
+        from almanak.framework.intents import LpOpenZeroLiquidityError
+
+        err = LpOpenZeroLiquidityError(
+            amount0_desired=42,
+            amount1_desired=0,
+            tick_lower=-60,
+            tick_upper=60,
+            reason="why",
+        )
+        assert err.amount0_desired == 42
+        assert err.amount1_desired == 0
+        assert err.tick_lower == -60
+        assert err.tick_upper == 60
+        assert err.reason == "why"
+        assert isinstance(err, ValueError)

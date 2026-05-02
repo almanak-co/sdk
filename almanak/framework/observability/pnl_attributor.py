@@ -57,6 +57,32 @@ Perp v2 formula::
 **v3 (VIB-3519)** — ``attribute_perp()`` persists ``funding_fee_usd`` raw
 value in attribution dict to survive ``recompute_attribution()`` cycles.
 
+LP rebalance gas attribution (VIB-3493)
+---------------------------------------
+
+Per-lifecycle ``attribute_lp()`` answers "what did *this LP position*
+cost?" Multi-rebalance strategies — open → close → open → close cycles
+under the same logical strategy — make per-lifecycle gas misleading on
+its own: each individual lifecycle has only one OPEN tx and one CLOSE
+tx, so the gas spend looks artificially cheap, while the strategy-
+total gas is much higher (every rebalance is a CLOSE+OPEN pair, both
+of which carry their own gas).
+
+The framework's chosen model is **continuous strategy-level LP**:
+every LP-typed PositionEvent's ``gas_usd`` accumulates against the
+strategy, regardless of which lifecycle currently owns it. The
+``almanak strat pnl`` LP section reports strategy-total LP gas via
+``attribute_lp_strategy()`` so multi-rebalance behaviour is visible
+in one place (rebalance count, open/close counts, total gas).
+Per-lifecycle ``attribute_lp()`` remains correct for "what did this
+single position cost" reporting.
+
+The alternative model — explicit ``LP_REBALANCE`` lifecycle events —
+is reserved (``LPEventType.LP_REBALANCE`` exists in
+``almanak.framework.accounting.models``) but not currently emitted by
+any connector. Choosing the continuous-strategy-level model lets us
+report accurately without a connector-side schema migration first.
+
 Missing-data semantics (critical)
 ---------------------------------
 
@@ -500,6 +526,124 @@ def attribute_lp(open_event: dict, close_event: dict) -> dict:
         "net_pnl_usd": str(net_pnl),
         "amount0_recovered": str(amount0_recovered),
         "amount1_recovered": str(amount1_recovered),
+    }
+
+
+def attribute_lp_strategy(position_events: list[dict]) -> dict:
+    """Strategy-level LP attribution across all rebalances (VIB-3493).
+
+    Per-lifecycle ``attribute_lp`` is the right primitive for "what did
+    *this position* cost". For a multi-rebalance strategy that opens
+    and closes the same logical LP position dozens of times, the per-
+    lifecycle view paints each individual position as artificially
+    cheap — half of the strategy's gas is "between lifecycles" (the
+    rebalance pair: CLOSE_old + OPEN_new). Mid-lifecycle CLOSE gas
+    pairs with the closing LP, but the OPEN gas of the immediately-
+    following position lands on the new lifecycle, so neither
+    lifecycle individually owns "the rebalance".
+
+    The Almanak chosen model is **continuous strategy-level LP**:
+    every LP-typed PositionEvent's ``gas_usd`` accumulates against
+    the strategy. ``almanak strat pnl``'s ``Gas costs`` line already
+    aggregates strategy-level gas at the ledger layer; this helper is
+    the LP-only decomposition so the LP section can show "rebalance
+    cycles seen" alongside "total LP gas spent across them".
+
+    The alternative model (explicit ``LP_REBALANCE`` lifecycle events)
+    is left available — ``LPEventType.LP_REBALANCE`` is reserved in
+    ``almanak.framework.accounting.models`` — but no production caller
+    emits it today.  Choosing this model now lets ``strat pnl`` report
+    accurately without a connector-side schema migration.
+
+    Args:
+        position_events: Mixed list of LP/perp/lending PositionEvent
+            dicts (e.g. from ``store.get_position_events``). Non-LP
+            events are ignored. ``event_type`` is normalised case-
+            insensitively so legacy callers passing enum-derived strings
+            still work.
+
+    Returns:
+        Strategy-level LP totals — all amounts as Decimal-encoded strings:
+
+        - ``total_gas_usd``: sum of ``gas_usd`` across all LP events
+          (OPEN, CLOSE, COLLECT_FEES, SNAPSHOT, …). Continuous-model
+          gas — captures rebalance gas regardless of which lifecycle
+          owns the tx event.
+        - ``open_gas_usd`` / ``close_gas_usd``: sub-totals for the
+          two lifecycle-defining event types.
+        - ``open_count`` / ``close_count``: number of LP OPEN/CLOSE
+          events across the strategy.
+        - ``close_open_pairs``: number of adjacent CLOSE→OPEN
+          transitions in the supplied event stream. **This is a
+          heuristic, not a true rebalance count** — multi-pool /
+          multi-protocol strategies that close one position and open
+          an unrelated position next iteration will inflate this
+          number. Treated as "rebalance" only when paired with stable
+          ``unique_position_ids`` over the same window. An explicit
+          ``LP_REBALANCE`` event lane would supersede it.
+        - ``unique_position_ids``: count of distinct ``position_id``
+          values touched.
+    """
+    OPEN = "OPEN"
+    CLOSE = "CLOSE"
+    LP_TYPE = "LP"
+
+    total = Decimal("0")
+    open_gas = Decimal("0")
+    close_gas = Decimal("0")
+    open_count = 0
+    close_count = 0
+    position_ids: set[str] = set()
+
+    # Track CLOSE→OPEN adjacency. Walk events oldest-first; the order
+    # the caller supplied is not guaranteed (SQLite reads return
+    # newest-first by default). Sort key uses ``timestamp`` then
+    # ``str(id)`` so that mixed runtime types (UUID strings in production,
+    # integer ids in some tests) sort deterministically without raising
+    # ``TypeError`` from a heterogeneous comparison.
+    sortable: list[dict] = sorted(
+        (e for e in position_events if (e.get("position_type") or "").upper() == LP_TYPE),
+        key=lambda e: (e.get("timestamp") or "", str(e.get("id") or "")),
+    )
+
+    last_lifecycle_event: str | None = None
+    close_open_pairs = 0
+
+    for evt in sortable:
+        evt_type = (evt.get("event_type") or "").upper()
+        gas_val = _dec(evt.get("gas_usd"))
+        total += gas_val
+
+        if evt_type == OPEN:
+            open_count += 1
+            open_gas += gas_val
+            pid = evt.get("position_id") or ""
+            if pid:
+                position_ids.add(str(pid))
+            if last_lifecycle_event == CLOSE:
+                close_open_pairs += 1
+            last_lifecycle_event = OPEN
+        elif evt_type == CLOSE:
+            close_count += 1
+            close_gas += gas_val
+            pid = evt.get("position_id") or ""
+            if pid:
+                position_ids.add(str(pid))
+            last_lifecycle_event = CLOSE
+        # Non-lifecycle LP events (COLLECT_FEES, SNAPSHOT, …) still
+        # contribute to total_gas but don't shift the rebalance state
+        # machine.
+
+    return {
+        "version": CURRENT_VERSION,
+        "model": "continuous_strategy_level",
+        "total_gas_usd": str(total),
+        "open_gas_usd": str(open_gas),
+        "close_gas_usd": str(close_gas),
+        "open_count": open_count,
+        "close_count": close_count,
+        "close_open_pairs": close_open_pairs,
+        "unique_position_ids": len(position_ids),
     }
 
 

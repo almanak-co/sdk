@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -388,6 +388,101 @@ def test_compute_pnl_non_lifecycle_events_preserve_prior_state() -> None:
     assert result.open_positions == 0
     assert result.wins == 1
     assert result.win_rate == Decimal("100")
+
+
+# ---------------------------------------------------------------------------
+# VIB-3493 — strategy-level LP rebalance attribution wired into strat_pnl
+# ---------------------------------------------------------------------------
+
+
+def _make_lp_event_with_gas(
+    *,
+    position_id: str,
+    event_type: PositionEventType,
+    gas_usd: str,
+    timestamp: datetime | None = None,
+) -> PositionEvent:
+    """Factory for LP events that carry a gas value (PnL-strategy tests)."""
+    event = PositionEvent(
+        deployment_id=DEPLOYMENT_ID,
+        position_id=position_id,
+        position_type=PositionType.LP.value,
+        event_type=event_type.value,
+        protocol="uniswap_v3",
+        chain="arbitrum",
+        gas_usd=gas_usd,
+        attribution_json="{}",
+        attribution_version=0,
+    )
+    if timestamp is not None:
+        event.timestamp = timestamp
+    return event
+
+
+def test_compute_pnl_lp_strategy_attribution_populated_for_multi_rebalance() -> None:
+    """Multi-rebalance LP strategy: lp_*_gas_usd + lp_close_open_pairs surfaced."""
+    metrics = _make_metrics(initial="1000", total="1000", gas="0")
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    events = [
+        _make_lp_event_with_gas(
+            position_id="A",
+            event_type=PositionEventType.OPEN,
+            gas_usd="5",
+            timestamp=base,
+        ),
+        _make_lp_event_with_gas(
+            position_id="A",
+            event_type=PositionEventType.CLOSE,
+            gas_usd="3",
+            timestamp=base + timedelta(minutes=1),
+        ),
+        _make_lp_event_with_gas(
+            position_id="B",
+            event_type=PositionEventType.OPEN,
+            gas_usd="5",
+            timestamp=base + timedelta(minutes=1, seconds=1),
+        ),
+        _make_lp_event_with_gas(
+            position_id="B",
+            event_type=PositionEventType.CLOSE,
+            gas_usd="3",
+            timestamp=base + timedelta(minutes=2),
+        ),
+    ]
+
+    result = compute_pnl_breakdown(
+        deployment_id=DEPLOYMENT_ID,
+        metrics=metrics,
+        ledger_entries=[],
+        position_events=[e.to_dict() for e in events],
+        snapshot=None,
+    )
+
+    # 2 OPENs + 2 CLOSEs, with one CLOSE→OPEN rebalance pair (A close → B open)
+    assert result.lp_open_count == 2
+    assert result.lp_close_count == 2
+    assert result.lp_close_open_pairs == 1
+    assert result.lp_total_gas_usd == Decimal("16")  # 5 + 3 + 5 + 3
+    assert result.lp_open_gas_usd == Decimal("10")
+    assert result.lp_close_gas_usd == Decimal("6")
+
+
+def test_compute_pnl_lp_strategy_attribution_absent_for_non_lp_strategy() -> None:
+    """Non-LP strategies (no LP events) keep lp_* fields at None / 0."""
+    result = compute_pnl_breakdown(
+        deployment_id=DEPLOYMENT_ID,
+        metrics=_make_metrics(initial="1000", total="1000", gas="0"),
+        ledger_entries=[],
+        position_events=[],
+        snapshot=None,
+    )
+
+    assert result.lp_total_gas_usd is None
+    assert result.lp_open_gas_usd is None
+    assert result.lp_close_gas_usd is None
+    assert result.lp_open_count == 0
+    assert result.lp_close_count == 0
+    assert result.lp_close_open_pairs == 0
 
 
 def test_amount_in_usd_resolves_address_tokens_via_token_resolver(monkeypatch) -> None:

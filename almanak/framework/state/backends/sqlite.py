@@ -1373,6 +1373,16 @@ class SQLiteStore:
 
         Returns:
             True if save succeeded.
+
+        Durability (VIB-3181):
+            The exists-check + INSERT/UPDATE pair runs inside a single
+            ``BEGIN IMMEDIATE`` ... ``COMMIT`` transaction under
+            ``_db_lock``. Without this, a concurrent writer racing
+            between the SELECT and the INSERT could insert a row with
+            the same ``order_id``, producing either a UNIQUE constraint
+            violation or duplicate writes against the same logical
+            order. The transaction also makes the write atomic with
+            respect to readers and crash-durable on ``synchronous=FULL``.
         """
         if not self._initialized:
             await self.initialize()
@@ -1382,74 +1392,86 @@ class SQLiteStore:
         now = datetime.now(UTC).isoformat()
 
         def _sync_save() -> bool:
-            # Check if order already exists
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT id FROM clob_orders WHERE order_id = ?",
-                (order.order_id,),
-            )
-            existing = cursor.fetchone()
+            conn = self._conn
+            assert conn is not None
 
-            if existing:
-                # Update existing order
-                self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    UPDATE clob_orders
-                    SET market_id = ?, token_id = ?, side = ?, status = ?,
-                        price = ?, size = ?, filled_size = ?, average_fill_price = ?,
-                        fills = ?, order_type = ?, intent_id = ?, error = ?,
-                        metadata = ?, updated_at = ?
-                    WHERE order_id = ?
-                    """,
-                    (
-                        order.market_id,
-                        order.token_id,
-                        order.side,
-                        order.status.value,
-                        str(order.price),
-                        str(order.size),
-                        str(order.filled_size),
-                        str(order.average_fill_price) if order.average_fill_price else None,
-                        fills_json,
-                        order.order_type,
-                        order.intent_id,
-                        order.error,
-                        metadata_json,
-                        now,
-                        order.order_id,
-                    ),
-                )
-            else:
-                # Insert new order
-                self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    INSERT INTO clob_orders
-                    (order_id, market_id, token_id, side, status, price, size,
-                     filled_size, average_fill_price, fills, order_type, intent_id,
-                     error, metadata, submitted_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        order.order_id,
-                        order.market_id,
-                        order.token_id,
-                        order.side,
-                        order.status.value,
-                        str(order.price),
-                        str(order.size),
-                        str(order.filled_size),
-                        str(order.average_fill_price) if order.average_fill_price else None,
-                        fills_json,
-                        order.order_type,
-                        order.intent_id,
-                        order.error,
-                        metadata_json,
-                        order.submitted_at.isoformat(),
-                        now,
-                    ),
-                )
+            with self._db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor = conn.execute(
+                        "SELECT id FROM clob_orders WHERE order_id = ?",
+                        (order.order_id,),
+                    )
+                    existing = cursor.fetchone()
 
-            self._conn.commit()  # type: ignore[union-attr]
-            return True
+                    if existing:
+                        conn.execute(
+                            """
+                            UPDATE clob_orders
+                            SET market_id = ?, token_id = ?, side = ?, status = ?,
+                                price = ?, size = ?, filled_size = ?, average_fill_price = ?,
+                                fills = ?, order_type = ?, intent_id = ?, error = ?,
+                                metadata = ?, updated_at = ?
+                            WHERE order_id = ?
+                            """,
+                            (
+                                order.market_id,
+                                order.token_id,
+                                order.side,
+                                order.status.value,
+                                str(order.price),
+                                str(order.size),
+                                str(order.filled_size),
+                                str(order.average_fill_price) if order.average_fill_price else None,
+                                fills_json,
+                                order.order_type,
+                                order.intent_id,
+                                order.error,
+                                metadata_json,
+                                now,
+                                order.order_id,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            INSERT INTO clob_orders
+                            (order_id, market_id, token_id, side, status, price, size,
+                             filled_size, average_fill_price, fills, order_type, intent_id,
+                             error, metadata, submitted_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                order.order_id,
+                                order.market_id,
+                                order.token_id,
+                                order.side,
+                                order.status.value,
+                                str(order.price),
+                                str(order.size),
+                                str(order.filled_size),
+                                str(order.average_fill_price) if order.average_fill_price else None,
+                                fills_json,
+                                order.order_type,
+                                order.intent_id,
+                                order.error,
+                                metadata_json,
+                                order.submitted_at.isoformat(),
+                                now,
+                            ),
+                        )
+
+                    conn.execute("COMMIT")
+                    return True
+                except Exception:
+                    # Wrap ROLLBACK so a failure here (e.g. BEGIN IMMEDIATE
+                    # itself failed and there is no active transaction)
+                    # cannot mask the original exception (gemini-code-assist).
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
@@ -1728,6 +1750,14 @@ class SQLiteStore:
         Returns:
             ID of the inserted row.
 
+        Durability (VIB-3181):
+            Wrapped in an explicit ``BEGIN IMMEDIATE`` ... ``COMMIT``
+            transaction under ``_db_lock`` so the write is serialized
+            with concurrent writers (CAS state, snapshot+metrics,
+            clob orders) and torn writes never become visible to a
+            later reader. With ``synchronous = FULL`` the commit is
+            fsync'd before returning.
+
         Note:
             Uses INSERT OR REPLACE to handle unique constraint on (strategy_id, timestamp).
         """
@@ -1736,49 +1766,91 @@ class SQLiteStore:
             await self.initialize()
 
         def _sync_save() -> int:
+            conn = self._conn
+            assert conn is not None
             now = datetime.now(UTC).isoformat()
 
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                INSERT OR REPLACE INTO portfolio_snapshots (
-                    strategy_id, timestamp, iteration_number, total_value_usd,
-                    available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
-                    value_confidence, positions_json,
-                    token_prices_json, wallet_balances_json,
-                    chain, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    snapshot.strategy_id,
-                    snapshot.timestamp.isoformat(),
-                    snapshot.iteration_number,
-                    str(snapshot.total_value_usd),
-                    str(snapshot.available_cash_usd),
-                    str(snapshot.deployed_capital_usd),
-                    str(snapshot.wallet_total_value_usd),
-                    snapshot.value_confidence.value,
-                    json.dumps(snapshot.to_positions_payload()),
-                    json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
-                    json.dumps(
-                        [
-                            {
-                                "symbol": b.symbol,
-                                "balance": str(b.balance),
-                                "value_usd": str(b.value_usd),
-                                "address": b.address,
-                                "price_usd": str(b.price_usd) if b.price_usd is not None else None,
-                            }
-                            for b in snapshot.wallet_balances
-                        ]
+            with self._db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    # Use INSERT...ON CONFLICT DO UPDATE rather than
+                    # INSERT OR REPLACE: the latter deletes the old row
+                    # and reinserts, which silently resets phase-4
+                    # identity columns (deployment_id, cycle_id,
+                    # execution_mode) — written by save_snapshot_and_metrics
+                    # — to their TEXT '' defaults. The DO UPDATE clause
+                    # only overwrites the columns this method actually
+                    # provides, preserving phase-4 metadata on conflict
+                    # (CodeRabbit review).
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO portfolio_snapshots (
+                            strategy_id, timestamp, iteration_number, total_value_usd,
+                            available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                            value_confidence, positions_json,
+                            token_prices_json, wallet_balances_json,
+                            chain, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(strategy_id, timestamp) DO UPDATE SET
+                            iteration_number = excluded.iteration_number,
+                            total_value_usd = excluded.total_value_usd,
+                            available_cash_usd = excluded.available_cash_usd,
+                            deployed_capital_usd = excluded.deployed_capital_usd,
+                            wallet_total_value_usd = excluded.wallet_total_value_usd,
+                            value_confidence = excluded.value_confidence,
+                            positions_json = excluded.positions_json,
+                            token_prices_json = excluded.token_prices_json,
+                            wallet_balances_json = excluded.wallet_balances_json,
+                            chain = excluded.chain,
+                            created_at = excluded.created_at
+                        RETURNING id
+                        """,
+                        (
+                            snapshot.strategy_id,
+                            snapshot.timestamp.isoformat(),
+                            snapshot.iteration_number,
+                            str(snapshot.total_value_usd),
+                            str(snapshot.available_cash_usd),
+                            str(snapshot.deployed_capital_usd),
+                            str(snapshot.wallet_total_value_usd),
+                            snapshot.value_confidence.value,
+                            json.dumps(snapshot.to_positions_payload()),
+                            json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
+                            json.dumps(
+                                [
+                                    {
+                                        "symbol": b.symbol,
+                                        "balance": str(b.balance),
+                                        "value_usd": str(b.value_usd),
+                                        "address": b.address,
+                                        "price_usd": str(b.price_usd) if b.price_usd is not None else None,
+                                    }
+                                    for b in snapshot.wallet_balances
+                                ]
+                            )
+                            if snapshot.wallet_balances
+                            else "[]",
+                            snapshot.chain,
+                            now,
+                        ),
                     )
-                    if snapshot.wallet_balances
-                    else "[]",
-                    snapshot.chain,
-                    now,
-                ),
-            )
-            self._conn.commit()  # type: ignore[union-attr]
-            return cursor.lastrowid or 0
+                    # `RETURNING id` makes the row id unambiguous on both
+                    # the INSERT and the ON CONFLICT DO UPDATE path
+                    # (cursor.lastrowid is not updated when a conflict
+                    # took the UPDATE branch).
+                    returned = cursor.fetchone()
+                    row_id = returned[0] if returned else (cursor.lastrowid or 0)
+                    conn.execute("COMMIT")
+                    return row_id
+                except Exception:
+                    # Wrap ROLLBACK so a failure here (e.g. BEGIN IMMEDIATE
+                    # itself failed and there is no active transaction)
+                    # cannot mask the original exception (gemini-code-assist).
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)

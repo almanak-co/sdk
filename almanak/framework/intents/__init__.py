@@ -126,6 +126,7 @@ from .vocabulary import (
     InvalidSequenceError,
     LPCloseIntent,
     LPOpenIntent,
+    LpOpenZeroLiquidityError,
     PerpCloseIntent,
     PerpOpenIntent,
     # Prediction market intents
@@ -157,6 +158,7 @@ __all__ = [
     "InvalidSequenceError",
     "InvalidAmountError",
     "InvalidCollateralForMarketError",
+    "LpOpenZeroLiquidityError",
     "InvalidProtocolParameterError",
     "ProtocolRequiredError",
     "ChainedAmount",

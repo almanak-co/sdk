@@ -94,6 +94,57 @@ class ProtocolRequiredError(ValueError):
         )
 
 
+class LpOpenZeroLiquidityError(ValueError):
+    """Raised when an LP_OPEN intent would mint zero liquidity.
+
+    Uniswap V3's ``UniswapV3Pool.mint()`` requires the computed liquidity to be
+    strictly greater than zero (``M0`` revert string when violated). For
+    near-1:1 pegged pairs (stETH/WETH, frxETH/WETH, etc.) on tight tick
+    ranges, the ``getLiquidityForAmounts`` math can floor-divide to zero
+    even when both ``amount0_desired`` and ``amount1_desired`` are positive.
+
+    This pre-flight is the framework-level fix mirroring the
+    VIB-3744 / VIB-3749 "fail before on-chain" pattern: surface a typed
+    error at compile time so strategies can react cleanly (widen the
+    range, hold for the next iteration, choose a different fee tier)
+    instead of burning gas on the on-chain ``M0`` revert.
+
+    Attributes:
+        amount0_desired: Token0 amount in wei that was supplied.
+        amount1_desired: Token1 amount in wei that was supplied.
+        tick_lower: Lower tick of the requested LP range (spacing-aligned).
+        tick_upper: Upper tick of the requested LP range (spacing-aligned).
+        reason: Human-facing diagnostic string (range-too-narrow vs.
+            amounts-too-small).
+
+    Strategies can match on the stable error-message prefix
+    (``"LP_OPEN would mint zero liquidity"``) returned in
+    ``CompilationResult.error`` to emit a clean ``Intent.hold(...)``.
+    """
+
+    ERROR_PREFIX = "LP_OPEN would mint zero liquidity"
+
+    def __init__(
+        self,
+        *,
+        amount0_desired: int,
+        amount1_desired: int,
+        tick_lower: int,
+        tick_upper: int,
+        reason: str,
+    ) -> None:
+        self.amount0_desired = amount0_desired
+        self.amount1_desired = amount1_desired
+        self.tick_lower = tick_lower
+        self.tick_upper = tick_upper
+        self.reason = reason
+        super().__init__(
+            f"{self.ERROR_PREFIX} at the requested tick range "
+            f"[{tick_lower}, {tick_upper}] with amounts "
+            f"({amount0_desired}, {amount1_desired}). {reason}"
+        )
+
+
 class InvalidCollateralForMarketError(ValueError):
     """Raised when a perp intent specifies a collateral that is invalid for the market.
 

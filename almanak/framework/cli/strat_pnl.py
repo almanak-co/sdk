@@ -271,6 +271,18 @@ class PnLBreakdown:
     trade_count: int = 0
     open_positions: int = 0
 
+    # VIB-3493: LP rebalance attribution under the continuous strategy-level
+    # model. When the strategy has no LP events these stay None / 0; otherwise
+    # they surface the strategy-total LP gas (rebalance gas included) plus a
+    # rebalance-cycle count so multi-rebalance strategies don't look
+    # artificially cheap when only per-lifecycle attribution is shown.
+    lp_total_gas_usd: Decimal | None = None
+    lp_open_gas_usd: Decimal | None = None
+    lp_close_gas_usd: Decimal | None = None
+    lp_open_count: int = 0
+    lp_close_count: int = 0
+    lp_close_open_pairs: int = 0
+
     # Diagnostics
     warnings: list[str] = field(default_factory=list)
 
@@ -298,6 +310,12 @@ class PnLBreakdown:
             "avg_trade_size_usd": _maybe(self.avg_trade_size_usd),
             "trade_count": self.trade_count,
             "open_positions": self.open_positions,
+            "lp_total_gas_usd": _maybe(self.lp_total_gas_usd),
+            "lp_open_gas_usd": _maybe(self.lp_open_gas_usd),
+            "lp_close_gas_usd": _maybe(self.lp_close_gas_usd),
+            "lp_open_count": self.lp_open_count,
+            "lp_close_count": self.lp_close_count,
+            "lp_close_open_pairs": self.lp_close_open_pairs,
             "warnings": list(self.warnings),
         }
 
@@ -423,6 +441,21 @@ def compute_pnl_breakdown(
     breakdown.closed_positions = closed_count
     breakdown.open_positions = open_count
 
+    # VIB-3493: surface strategy-level LP gas (continuous-model attribution).
+    # Per-lifecycle ``attribute_lp`` only shows one OPEN+CLOSE pair per
+    # position; multi-rebalance strategies need the strategy-level total
+    # so the gas spent on every rebalance cycle is visible in one place.
+    from ..observability.pnl_attributor import attribute_lp_strategy
+
+    lp_summary = attribute_lp_strategy(position_events)
+    if lp_summary["open_count"] > 0 or lp_summary["close_count"] > 0:
+        breakdown.lp_total_gas_usd = _dec(lp_summary["total_gas_usd"])
+        breakdown.lp_open_gas_usd = _dec(lp_summary["open_gas_usd"])
+        breakdown.lp_close_gas_usd = _dec(lp_summary["close_gas_usd"])
+        breakdown.lp_open_count = lp_summary["open_count"]
+        breakdown.lp_close_count = lp_summary["close_count"]
+        breakdown.lp_close_open_pairs = lp_summary["close_open_pairs"]
+
     wins = sum(1 for p in positions_by_id.values() if p["closed"] and p["pnl"] is not None and p["pnl"] > 0)
     # Only compute win rate if at least one closed position has attribution;
     # otherwise the number is meaningless.
@@ -512,6 +545,26 @@ def render_text(breakdown: PnLBreakdown) -> str:
         f"Trade count:      {breakdown.trade_count} total "
         f"({breakdown.closed_positions} closed, {breakdown.open_positions} open)"
     )
+
+    # VIB-3493: LP rebalance attribution. Only render when the strategy
+    # actually has LP events; non-LP strategies stay clean.
+    if breakdown.lp_open_count > 0 or breakdown.lp_close_count > 0:
+        lines.append("")
+        lines.append("LP rebalance attribution (continuous strategy-level)")
+        lines.append("-----------------------------------------------------")
+        lines.append(
+            f"LP gas total:     {_fmt_money(-breakdown.lp_total_gas_usd) if breakdown.lp_total_gas_usd is not None else _MISSING}"
+        )
+        lines.append(
+            f"  open gas:       {_fmt_money(-breakdown.lp_open_gas_usd) if breakdown.lp_open_gas_usd is not None else _MISSING}"
+        )
+        lines.append(
+            f"  close gas:      {_fmt_money(-breakdown.lp_close_gas_usd) if breakdown.lp_close_gas_usd is not None else _MISSING}"
+        )
+        lines.append(
+            f"LP cycles:        {breakdown.lp_open_count} OPENs / {breakdown.lp_close_count} CLOSEs / "
+            f"{breakdown.lp_close_open_pairs} close→open pairs"
+        )
 
     if breakdown.warnings:
         lines.append("")

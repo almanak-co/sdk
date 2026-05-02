@@ -55,6 +55,7 @@ from .intent_errors import (  # noqa: E402, F401
     InvalidCollateralForMarketError,
     InvalidProtocolParameterError,
     InvalidSequenceError,
+    LpOpenZeroLiquidityError,
     ProtocolRequiredError,
 )
 

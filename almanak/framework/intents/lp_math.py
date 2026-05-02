@@ -168,6 +168,89 @@ def recompute_lp_amounts(
 # ---------------------------------------------------------------------------
 
 
+def liquidity_for_amounts_at_sqrt_price(
+    sqrt_price_x96: int,
+    tick_lower: int,
+    tick_upper: int,
+    amount0: int,
+    amount1: int,
+) -> int:
+    """Compute the liquidity Uniswap V3 ``mint()`` will use for the given amounts.
+
+    Mirrors Solidity's ``LiquidityAmounts.getLiquidityForAmounts``: classifies
+    the pool's current ``sqrtPriceX96`` against the position range and returns
+    the maximum liquidity the position can hold without exceeding either
+    ``amount0`` or ``amount1``. Returns ``0`` when the math floors to zero.
+
+    Used by the LP_OPEN compile-time pre-flight (VIB-3823) to short-circuit
+    before submitting a mint() that would revert with ``M0`` ("liquidity
+    must be greater than zero"). Tight ranges on near-1:1 pairs and very
+    small amounts both round to zero liquidity even when the input
+    amounts are non-zero.
+
+    Args:
+        sqrt_price_x96: The reference ``sqrtPriceX96`` to classify the
+            position against. When the live pool slot0 is unavailable,
+            callers should pass the geometric range midpoint
+            (``isqrt(sqrt_a * sqrt_b)``) so the in-range branch exercises
+            the most permissive math.
+        tick_lower: Lower tick of the LP range (spacing-aligned).
+        tick_upper: Upper tick of the LP range (spacing-aligned).
+        amount0: ``amount0_desired`` in wei.
+        amount1: ``amount1_desired`` in wei.
+
+    Returns:
+        Maximum liquidity attainable from the supplied amounts, or 0 when
+        the result floors to zero / inputs are degenerate.
+    """
+    tick_lo = min(tick_lower, tick_upper)
+    tick_hi = max(tick_lower, tick_upper)
+    if tick_lo < MIN_TICK or tick_hi > MAX_TICK or tick_lo == tick_hi:
+        return 0
+
+    sqrt_a = tick_to_sqrt_ratio_x96(tick_lo)
+    sqrt_b = tick_to_sqrt_ratio_x96(tick_hi)
+    if sqrt_a >= sqrt_b:
+        return 0
+    if sqrt_price_x96 < MIN_SQRT_RATIO or sqrt_price_x96 > MAX_SQRT_RATIO:
+        return 0
+
+    try:
+        if sqrt_price_x96 <= sqrt_a:
+            # Below range — liquidity comes entirely from token0
+            return _liquidity_for_amount0(sqrt_a, sqrt_b, amount0)
+        if sqrt_price_x96 >= sqrt_b:
+            # Above range — liquidity comes entirely from token1
+            return _liquidity_for_amount1(sqrt_a, sqrt_b, amount1)
+        # In range — both legs participate; minimum bounds the position
+        sqrt_p = sqrt_price_x96
+        l0 = _liquidity_for_amount0(sqrt_p, sqrt_b, amount0)
+        l1 = _liquidity_for_amount1(sqrt_a, sqrt_p, amount1)
+        return min(l0, l1)
+    except ZeroDivisionError:
+        return 0
+
+
+def range_midpoint_sqrt_price_x96(tick_lower: int, tick_upper: int) -> int:
+    """Geometric midpoint sqrtPriceX96 for a position range.
+
+    When the live pool slot0 is unavailable, this is the assumption the
+    LP_OPEN pre-flight uses for "would-this-mint-zero?" classification.
+    Geometric midpoint matches the convention used by Uniswap V3 quote
+    helpers and stays in-range for any non-degenerate ``[tick_lower,
+    tick_upper]`` pair, so the in-range branch of
+    :func:`liquidity_for_amounts_at_sqrt_price` is exercised (the most
+    permissive — both legs contribute).
+    """
+    from math import isqrt
+
+    sqrt_a = tick_to_sqrt_ratio_x96(min(tick_lower, tick_upper))
+    sqrt_b = tick_to_sqrt_ratio_x96(max(tick_lower, tick_upper))
+    if sqrt_a == 0 or sqrt_b == 0 or sqrt_a == sqrt_b:
+        return 0
+    return isqrt(sqrt_a * sqrt_b)
+
+
 def _liquidity_for_amount0(sqrt_a: int, sqrt_b: int, amount0: int) -> int:
     """Compute liquidity achievable from amount0 in range [sqrt_a, sqrt_b].
 

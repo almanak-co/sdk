@@ -359,3 +359,367 @@ class TestConcurrentWritersAreSerialized:
         results = await asyncio.gather(writer(1), writer(2))
         # Exactly one must succeed.
         assert sum(results) == 1
+
+
+# =============================================================================
+# VIB-3181: portfolio_snapshots and clob_orders atomic-write extension
+# =============================================================================
+
+
+def _make_snapshot(strategy_id: str, iteration: int, total_usd: str = "1000"):
+    """Build a minimal PortfolioSnapshot for atomic-write tests."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from almanak.framework.portfolio.models import (
+        PortfolioSnapshot,
+        TokenBalance,
+        ValueConfidence,
+    )
+
+    return PortfolioSnapshot(
+        timestamp=datetime.now(UTC),
+        strategy_id=strategy_id,
+        total_value_usd=Decimal(total_usd),
+        available_cash_usd=Decimal("500"),
+        value_confidence=ValueConfidence.HIGH,
+        deployed_capital_usd=Decimal("500"),
+        wallet_total_value_usd=Decimal(total_usd),
+        wallet_balances=[
+            TokenBalance(
+                symbol="USDC",
+                balance=Decimal("500"),
+                value_usd=Decimal("500"),
+                address="0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                price_usd=Decimal("1"),
+            ),
+        ],
+        token_prices={"avalanche:0xusdc": {"price_usd": "1.0", "symbol": "USDC", "decimals": 6}},
+        chain="avalanche",
+        iteration_number=iteration,
+    )
+
+
+def _make_clob_order(order_id: str, status_value: str = "live", filled: str = "0"):
+    """Build a minimal ClobOrderState for atomic-write tests."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from almanak.framework.execution.clob_handler import ClobOrderState, ClobOrderStatus
+
+    return ClobOrderState(
+        order_id=order_id,
+        market_id="market-x",
+        token_id="token-yes",
+        side="BUY",
+        status=ClobOrderStatus(status_value),
+        price=Decimal("0.55"),
+        size=Decimal("100"),
+        filled_size=Decimal(filled),
+        order_type="GTC",
+        intent_id="intent-1",
+        submitted_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
+class TestPortfolioSnapshotAtomicWrites:
+    """save_portfolio_snapshot wraps the write in BEGIN IMMEDIATE / COMMIT.
+
+    The legacy implementation called raw ``_conn.execute`` + ``_conn.commit``
+    outside ``_db_lock``, which left the write unserialized against
+    concurrent ``save()`` / ``save_snapshot_and_metrics()`` callers and
+    skipped the explicit transaction boundary other state writers rely on.
+    """
+
+    async def test_happy_path_round_trip(self, store, temp_db_path):
+        """A successful save lands a self-consistent row on disk."""
+        snap = _make_snapshot("snap-happy", iteration=1, total_usd="2500.50")
+        row_id = await store.save_portfolio_snapshot(snap)
+        assert row_id > 0
+
+        conn = sqlite3.connect(temp_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT total_value_usd, iteration_number, wallet_balances_json "
+                "FROM portfolio_snapshots WHERE strategy_id = ?",
+                ("snap-happy",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row["total_value_usd"] == "2500.50"
+        assert row["iteration_number"] == 1
+        # wallet_balances_json must be a parseable JSON list
+        parsed = json.loads(row["wallet_balances_json"])
+        assert isinstance(parsed, list) and len(parsed) == 1
+
+    async def test_crash_before_commit_preserves_prior_row(self, store, temp_db_path):
+        """A separate connection that ROLLBACKs leaves no torn row."""
+        baseline = _make_snapshot("snap-crash", iteration=1, total_usd="100")
+        await store.save_portfolio_snapshot(baseline)
+
+        conn = sqlite3.connect(temp_db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO portfolio_snapshots ("
+                "strategy_id, timestamp, iteration_number, total_value_usd, "
+                "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
+                "value_confidence, positions_json, token_prices_json, "
+                "wallet_balances_json, chain, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "snap-crash",
+                    "2030-01-01T00:00:00+00:00",
+                    99,
+                    "9999",
+                    "0",
+                    "0",
+                    "9999",
+                    "HIGH",
+                    "[]",
+                    "{}",
+                    "[]",
+                    "avalanche",
+                    "2030-01-01T00:00:00+00:00",
+                ),
+            )
+            # Simulate crash before COMMIT.
+            conn.execute("ROLLBACK")
+        finally:
+            conn.close()
+
+        # Reopen and confirm the torn write never landed: row count for
+        # iteration 99 (the would-be torn row) is 0; baseline iteration
+        # is intact.
+        await store.close()
+        recovered = SQLiteStore(SQLiteConfig(db_path=temp_db_path, wal_mode=True))
+        await recovered.initialize()
+        try:
+            conn = sqlite3.connect(temp_db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT iteration_number, total_value_usd FROM portfolio_snapshots "
+                    "WHERE strategy_id = ? ORDER BY iteration_number",
+                    ("snap-crash",),
+                ).fetchall()
+            finally:
+                conn.close()
+            assert [r["iteration_number"] for r in rows] == [1]
+            assert rows[0]["total_value_usd"] == "100"
+        finally:
+            await recovered.close()
+
+    async def test_phase4_identity_fields_preserved_on_conflict(self, store, temp_db_path):
+        """save_portfolio_snapshot must NOT clobber phase-4 identity fields.
+
+        save_snapshot_and_metrics writes (deployment_id, cycle_id,
+        execution_mode) for the same (strategy_id, timestamp). A
+        subsequent save_portfolio_snapshot for the same key must
+        preserve those fields rather than reset them to '' default
+        (legacy INSERT OR REPLACE behavior — VIB-3181 follow-up,
+        CodeRabbit review on PR #2006).
+        """
+        # Seed a row carrying phase-4 metadata directly via SQL so the
+        # test does not depend on save_snapshot_and_metrics internals.
+        from datetime import UTC, datetime
+
+        ts = datetime.now(UTC)
+        ts_iso = ts.isoformat()
+        conn = sqlite3.connect(temp_db_path)
+        try:
+            conn.execute(
+                "INSERT INTO portfolio_snapshots ("
+                "strategy_id, deployment_id, cycle_id, execution_mode, "
+                "timestamp, iteration_number, total_value_usd, "
+                "available_cash_usd, deployed_capital_usd, wallet_total_value_usd, "
+                "value_confidence, positions_json, token_prices_json, "
+                "wallet_balances_json, chain, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "snap-phase4",
+                    "deploy-abc",  # deployment_id (must be preserved)
+                    "cycle-42",  # cycle_id (must be preserved)
+                    "live",  # execution_mode (must be preserved)
+                    ts_iso,
+                    1,
+                    "1000",
+                    "500",
+                    "500",
+                    "1000",
+                    "HIGH",
+                    "[]",
+                    "{}",
+                    "[]",
+                    "avalanche",
+                    ts_iso,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Now write via save_portfolio_snapshot with the SAME
+        # (strategy_id, timestamp) — UPSERT path triggered.
+        snap = _make_snapshot("snap-phase4", iteration=2, total_usd="2000")
+        snap.timestamp = ts
+        row_id = await store.save_portfolio_snapshot(snap)
+        assert row_id > 0
+
+        # Read back and assert phase-4 fields survived.
+        conn = sqlite3.connect(temp_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT deployment_id, cycle_id, execution_mode, "
+                "iteration_number, total_value_usd "
+                "FROM portfolio_snapshots WHERE strategy_id = ?",
+                ("snap-phase4",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        # New snapshot fields applied:
+        assert row["iteration_number"] == 2
+        assert row["total_value_usd"] == "2000"
+        # Phase-4 identity preserved (the regression guard):
+        assert row["deployment_id"] == "deploy-abc"
+        assert row["cycle_id"] == "cycle-42"
+        assert row["execution_mode"] == "live"
+
+    async def test_concurrent_writers_serialized(self, store, temp_db_path):
+        """Concurrent saves with distinct timestamps both land cleanly.
+
+        Without ``BEGIN IMMEDIATE`` under ``_db_lock`` two concurrent
+        writers could race on the underlying connection; with the
+        atomic-write pattern, each transaction commits in turn.
+        """
+        snaps = [_make_snapshot("snap-conc", iteration=i, total_usd=f"{1000 + i}") for i in range(8)]
+        # Force distinct timestamps so INSERT OR REPLACE doesn't collapse rows.
+        for i, s in enumerate(snaps):
+            s.timestamp = s.timestamp.replace(microsecond=i)
+
+        results = await asyncio.gather(*[store.save_portfolio_snapshot(s) for s in snaps])
+        assert all(r > 0 for r in results)
+        assert len(set(results)) == len(snaps)  # all distinct row IDs
+
+        conn = sqlite3.connect(temp_db_path)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM portfolio_snapshots WHERE strategy_id = ?",
+                ("snap-conc",),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == len(snaps)
+
+
+class TestClobOrderAtomicWrites:
+    """save_clob_order wraps the SELECT-then-INSERT/UPDATE in one transaction.
+
+    The legacy implementation issued a SELECT to choose between INSERT
+    and UPDATE, then ran the second statement and committed on a raw
+    autocommit connection.  Two writers racing on the same ``order_id``
+    could both observe "missing" and both attempt INSERT, producing a
+    UNIQUE constraint failure or a duplicate write window.  Wrapping in
+    ``BEGIN IMMEDIATE`` under ``_db_lock`` collapses that race: writer
+    A finishes before writer B starts its SELECT.
+    """
+
+    async def test_insert_then_update_round_trip(self, store, temp_db_path):
+        """First save inserts; second save with same order_id updates."""
+        from decimal import Decimal
+
+        order = _make_clob_order("order-1", status_value="live")
+        ok = await store.save_clob_order(order)
+        assert ok is True
+
+        # Update path: same order_id, new status + filled_size
+        order.status = type(order.status)("matched")
+        order.filled_size = Decimal("100")
+        order.average_fill_price = Decimal("0.55")
+        ok2 = await store.save_clob_order(order)
+        assert ok2 is True
+
+        conn = sqlite3.connect(temp_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT status, filled_size FROM clob_orders WHERE order_id = ?",
+                ("order-1",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1  # No duplicate inserts
+        assert rows[0]["status"] == "matched"
+        assert rows[0]["filled_size"] == "100"
+
+    async def test_concurrent_inserts_no_duplicate(self, store, temp_db_path):
+        """Two concurrent saves of the same NEW order_id must not duplicate.
+
+        With the SELECT-then-INSERT race in the legacy code, both writers
+        could see "missing" and both INSERT, producing either a UNIQUE
+        violation (if a constraint exists) or two rows with the same
+        ``order_id``.  Under BEGIN IMMEDIATE the second writer waits for
+        the first to commit and then takes the UPDATE branch.
+        """
+        order_a = _make_clob_order("order-race", status_value="live", filled="10")
+        order_b = _make_clob_order("order-race", status_value="live", filled="20")
+
+        results = await asyncio.gather(
+            store.save_clob_order(order_a),
+            store.save_clob_order(order_b),
+            return_exceptions=True,
+        )
+        # Both calls must succeed (no UNIQUE violation, no exception).
+        for r in results:
+            assert r is True, f"unexpected result {r!r}"
+
+        conn = sqlite3.connect(temp_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT order_id, filled_size FROM clob_orders WHERE order_id = ?",
+                ("order-race",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1, f"expected single row after race; got {len(rows)}"
+        # Whichever writer committed last wins; we only assert no duplicate
+        # rows landed.
+        assert rows[0]["filled_size"] in ("10", "20")
+
+    async def test_crash_before_commit_preserves_prior_row(self, store, temp_db_path):
+        """A separate-connection ROLLBACK never advances the row."""
+        from decimal import Decimal
+
+        baseline = _make_clob_order("order-crash", status_value="live", filled="0")
+        await store.save_clob_order(baseline)
+
+        # Open a second sqlite3 connection, BEGIN IMMEDIATE, write a torn
+        # update, then ROLLBACK.  Recovery must show the original "live" /
+        # filled=0 row.
+        conn = sqlite3.connect(temp_db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE clob_orders SET status = ?, filled_size = ?, updated_at = ? WHERE order_id = ?",
+                ("matched", "9999", "2030-01-01T00:00:00+00:00", "order-crash"),
+            )
+            conn.execute("ROLLBACK")
+        finally:
+            conn.close()
+
+        await store.close()
+        recovered = SQLiteStore(SQLiteConfig(db_path=temp_db_path, wal_mode=True))
+        await recovered.initialize()
+        try:
+            loaded = await recovered.get_clob_order("order-crash")
+            assert loaded is not None
+            assert loaded.status.value == "live"
+            assert loaded.filled_size == Decimal("0")
+        finally:
+            await recovered.close()

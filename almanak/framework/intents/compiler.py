@@ -224,6 +224,13 @@ _CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
 # =============================================================================
 
 
+# Sentinel for the LP_OPEN slot0 dedup path (VIB-3823 follow-up).
+# ``None`` is a valid post-fetch value meaning "fetch attempted, missed";
+# this sentinel preserves the legacy "argument not supplied — please fetch"
+# semantic so the helper does not double-fetch on transient slot0 failures.
+_SLOT0_NOT_FETCHED: Any = object()
+
+
 class IntentCompiler:
     """Compiles Intents into executable ActionBundles.
 
@@ -2768,6 +2775,11 @@ class IntentCompiler:
                 f"ticks=[{tick_lower}, {tick_upper}], spacing={tick_spacing}"
             )
 
+            # Step 4a: One-shot slot0 fetch shared by 4b (recompute) and 4c (pre-flight).
+            # Both checks need the live sqrt-price; doing it twice burns an
+            # extra RPC for no reason.
+            slot0 = self._fetch_lp_pool_slot0(pool_check)
+
             # Step 4b: Align amounts to pool's current price when slot0 is available,
             # preventing "Price slippage check" reverts when oracle price diverges.
             recomputed_or_fail = self._maybe_recompute_lp_amounts_from_slot0(
@@ -2777,10 +2789,29 @@ class IntentCompiler:
                 amount0_desired=amount0_desired,
                 amount1_desired=amount1_desired,
                 intent_id=intent.intent_id,
+                slot0=slot0,
             )
             if isinstance(recomputed_or_fail, CompilationResult):
                 return recomputed_or_fail
             amount0_desired, amount1_desired = recomputed_or_fail
+
+            # Step 4c: VIB-3823 — getLiquidityForAmounts pre-flight.
+            # Fails fast when the chosen tick range + amounts would mint zero
+            # liquidity on-chain (M0 revert). Fires for the no-slot0 fallback
+            # path (where step 4b returned the inputs unchanged) AND as a
+            # belt-and-braces check after the slot0 recompute. Mirrors the
+            # VIB-3744 / VIB-3749 "fail before on-chain" pattern.
+            preflight = self._preflight_lp_liquidity(
+                pool_check=pool_check,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                amount0_desired=amount0_desired,
+                amount1_desired=amount1_desired,
+                intent_id=intent.intent_id,
+                slot0=slot0,
+            )
+            if preflight is not None:
+                return preflight
 
             # Step 5: LP slippage-based minimums
             amount0_min, amount1_min = self._compute_lp_slippage_mins(
@@ -2969,40 +3000,32 @@ class IntentCompiler:
             )
         return tick_lower, tick_upper, tick_spacing
 
-    def _maybe_recompute_lp_amounts_from_slot0(
+    def _fetch_lp_pool_slot0(
         self,
-        *,
         pool_check: "PoolValidationResult",
-        tick_lower: int,
-        tick_upper: int,
-        amount0_desired: int,
-        amount1_desired: int,
-        intent_id: str,
-    ) -> tuple[int, int] | CompilationResult:
-        """Align desired amounts to the pool's current price using ``slot0``.
+    ) -> tuple[int, int] | None:
+        """Single slot0 fetch shared by the recompute + zero-liquidity pre-flight.
 
-        Returns the (possibly recomputed) ``(amount0, amount1)`` pair, or a
-        FAILED result if recomputation yields ``(0, 0)`` from non-zero input.
-        When the pool address or RPC is unavailable, returns the inputs unchanged.
-
-        Prevents "Price slippage check" reverts when the oracle-derived ratio
-        diverges from the pool's live ratio.
+        Returns ``(sqrt_price_x96, current_tick)`` or ``None`` when the
+        pool address / transport is unavailable or the call fails. Both
+        ``_maybe_recompute_lp_amounts_from_slot0`` (Step 4b) and
+        ``_preflight_lp_liquidity`` (Step 4c, VIB-3823) consume this so
+        we don't burn two RPC round-trips per LP_OPEN compile.
         """
         if not pool_check.pool_address:
-            return amount0_desired, amount1_desired
+            return None
 
-        rpc_url_for_slot0 = self._get_chain_rpc_url()
+        rpc_url = self._get_chain_rpc_url()
         gateway_connected = self._gateway_client is not None and self._gateway_client.is_connected
-        if not (rpc_url_for_slot0 or gateway_connected):
-            return amount0_desired, amount1_desired
+        if not (rpc_url or gateway_connected):
+            return None
 
-        from .lp_math import recompute_lp_amounts
         from .pool_validation import fetch_v3_pool_sqrt_price_x96
 
         try:
             slot0_result = fetch_v3_pool_sqrt_price_x96(
                 pool_check.pool_address,
-                rpc_url_for_slot0,
+                rpc_url,
                 chain=self.chain,
                 gateway_client=self._gateway_client,
             )
@@ -3013,13 +3036,58 @@ class IntentCompiler:
                 pool_check.pool_address,
                 exc,
             )
-            slot0_result = None
+            return None
 
         if slot0_result is None:
-            return amount0_desired, amount1_desired
+            return None
         sqrt_price_x96, current_tick = slot0_result
-        if sqrt_price_x96 is None or sqrt_price_x96 <= 0:
+        # Guard against partial returns: downstream math (recompute, preflight)
+        # consumes both fields and would type-error on a None tick. The
+        # gateway/Web3 plumbing should always return both, but a defensive
+        # None-check keeps the return shape strictly matching the type hint
+        # (gemini-code-assist).
+        if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
+            return None
+        return sqrt_price_x96, current_tick
+
+    def _maybe_recompute_lp_amounts_from_slot0(
+        self,
+        *,
+        pool_check: "PoolValidationResult",
+        tick_lower: int,
+        tick_upper: int,
+        amount0_desired: int,
+        amount1_desired: int,
+        intent_id: str,
+        slot0: tuple[int, int] | None | Any = _SLOT0_NOT_FETCHED,
+    ) -> tuple[int, int] | CompilationResult:
+        """Align desired amounts to the pool's current price using ``slot0``.
+
+        Returns the (possibly recomputed) ``(amount0, amount1)`` pair, or a
+        FAILED result if recomputation yields ``(0, 0)`` from non-zero input.
+        When the pool address or RPC is unavailable, returns the inputs unchanged.
+
+        Prevents "Price slippage check" reverts when the oracle-derived ratio
+        diverges from the pool's live ratio.
+
+        Args:
+            slot0: Pre-fetched ``(sqrt_price_x96, current_tick)`` from the
+                caller's one-shot ``_fetch_lp_pool_slot0`` — pass it through
+                explicitly. ``None`` means "caller fetched and missed";
+                the default sentinel ``_SLOT0_NOT_FETCHED`` preserves the
+                legacy contract for tests / callers that have not migrated
+                yet, in which case the helper fetches slot0 itself. The
+                sentinel matters: ``None`` must NOT trigger a re-fetch on
+                an already-failed slot0 lookup (Codex P3 dedup).
+        """
+        from .lp_math import recompute_lp_amounts
+
+        if slot0 is _SLOT0_NOT_FETCHED:
+            slot0 = self._fetch_lp_pool_slot0(pool_check)
+        if slot0 is None:
             return amount0_desired, amount1_desired
+
+        sqrt_price_x96, current_tick = slot0
 
         a0_corrected, a1_corrected = recompute_lp_amounts(
             sqrt_price_x96,
@@ -3030,12 +3098,21 @@ class IntentCompiler:
             current_tick=current_tick,
         )
         if a0_corrected == 0 and a1_corrected == 0 and (amount0_desired > 0 or amount1_desired > 0):
+            from .intent_errors import LpOpenZeroLiquidityError
+
+            err = LpOpenZeroLiquidityError(
+                amount0_desired=amount0_desired,
+                amount1_desired=amount1_desired,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                reason=(
+                    "Live pool sqrt-price + supplied amounts produced zero "
+                    "liquidity. Widen the tick range or increase amounts."
+                ),
+            )
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error=(
-                    "LP_OPEN cannot mint liquidity at the pool's current price for the "
-                    "supplied range/amounts. Adjust the tick range or token amounts."
-                ),
+                error=str(err),
                 intent_id=intent_id,
             )
         if a0_corrected > 0 or a1_corrected > 0:
@@ -3045,6 +3122,105 @@ class IntentCompiler:
             )
             return a0_corrected, a1_corrected
         return amount0_desired, amount1_desired
+
+    def _preflight_lp_liquidity(
+        self,
+        *,
+        pool_check: "PoolValidationResult",
+        tick_lower: int,
+        tick_upper: int,
+        amount0_desired: int,
+        amount1_desired: int,
+        intent_id: str,
+        slot0: tuple[int, int] | None = None,
+    ) -> CompilationResult | None:
+        """VIB-3823 LP_OPEN pre-flight: simulate getLiquidityForAmounts.
+
+        Returns a FAILED ``CompilationResult`` carrying an
+        ``LpOpenZeroLiquidityError``-style error message when the
+        chosen tick range + amounts would mint zero liquidity on-chain
+        (the ``M0`` revert in ``UniswapV3Pool.mint()``). Returns
+        ``None`` when liquidity is positive, letting compile continue.
+
+        Uses the supplied live pool ``sqrtPriceX96`` when present;
+        otherwise falls back to the geometric range midpoint. The
+        midpoint is the most permissive in-range classification (both
+        legs participate) so a zero result there is conclusive — no
+        choice of in-range sqrt-price would mint liquidity for these
+        amounts.
+
+        Skips when both inputs are zero — that's a different error
+        surface caught upstream by ``_resolve_lp_pool_and_amounts``.
+
+        Args:
+            slot0: Optional pre-fetched ``(sqrt_price_x96, current_tick)``
+                — usually shared with ``_maybe_recompute_lp_amounts_from_slot0``
+                so a single LP_OPEN compile makes one slot0 RPC at most.
+        """
+        if amount0_desired == 0 and amount1_desired == 0:
+            return None
+
+        from .intent_errors import LpOpenZeroLiquidityError
+        from .lp_math import (
+            liquidity_for_amounts_at_sqrt_price,
+            range_midpoint_sqrt_price_x96,
+        )
+
+        sqrt_price_x96: int | None = None
+        used_live = False
+        if slot0 is not None:
+            candidate, _current_tick = slot0
+            if candidate and candidate > 0:
+                sqrt_price_x96 = candidate
+                used_live = True
+
+        if sqrt_price_x96 is None:
+            # Without live sqrt-price, single-sided mints (one amount = 0) can
+            # still be valid on-chain when the live price sits outside the
+            # range — UniswapV3 mints positive liquidity for that case. The
+            # geometric midpoint always classifies as in-range, where the
+            # in-range branch needs both legs and returns 0. Skipping the
+            # check here trades a possible M0 revert for not falsely blocking
+            # a legitimate single-sided LP_OPEN. Two-sided mints still get
+            # the conservative midpoint check.
+            if amount0_desired == 0 or amount1_desired == 0:
+                return None
+            sqrt_price_x96 = range_midpoint_sqrt_price_x96(tick_lower, tick_upper)
+            if sqrt_price_x96 == 0:
+                # Degenerate range — caught earlier by _compute_lp_ticks; no-op
+                return None
+
+        liquidity = liquidity_for_amounts_at_sqrt_price(
+            sqrt_price_x96,
+            tick_lower,
+            tick_upper,
+            amount0_desired,
+            amount1_desired,
+        )
+
+        if liquidity <= 0:
+            reason_suffix = (
+                "(checked against live pool sqrtPriceX96)"
+                if used_live
+                else "(checked against range geometric midpoint; no live sqrt-price available)"
+            )
+            err = LpOpenZeroLiquidityError(
+                amount0_desired=amount0_desired,
+                amount1_desired=amount1_desired,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                reason=(
+                    f"getLiquidityForAmounts returned 0 {reason_suffix}. "
+                    f"Either widen the tick range, choose a wider fee tier, or "
+                    f"increase the deposit amounts."
+                ),
+            )
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=str(err),
+                intent_id=intent_id,
+            )
+        return None
 
     def _compute_lp_slippage_mins(
         self,

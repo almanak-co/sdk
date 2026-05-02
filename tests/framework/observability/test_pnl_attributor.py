@@ -21,6 +21,7 @@ import pytest
 from almanak.framework.observability.pnl_attributor import (
     CURRENT_VERSION,
     attribute_lp,
+    attribute_lp_strategy,
     attribute_perp,
     build_entry_state,
     compute_attribution,
@@ -877,3 +878,138 @@ class TestProtocolFeesRoundTrip:
         )
         assert len(events) == 1
         assert events[0]["protocol_fees_usd"] == "1.25"
+
+
+# ---------------------------------------------------------------------------
+# VIB-3493 — strategy-level LP attribution (continuous-strategy-level model)
+# ---------------------------------------------------------------------------
+
+
+def _lp_event(
+    *,
+    event_id: int,
+    timestamp: str,
+    event_type: str,
+    gas_usd: str,
+    position_id: str = "1",
+    position_type: str = "LP",
+) -> dict:
+    """Compact factory for strategy-level LP attribution tests."""
+    return {
+        "id": event_id,
+        "timestamp": timestamp,
+        "event_type": event_type,
+        "position_type": position_type,
+        "position_id": position_id,
+        "gas_usd": gas_usd,
+    }
+
+
+class TestAttributeLPStrategy:
+    """``attribute_lp_strategy`` aggregates LP gas across every rebalance.
+
+    Per-lifecycle ``attribute_lp`` answers "what did THIS position cost".
+    The strategy-level helper is the missing piece that makes
+    multi-rebalance strategies stop looking artificially cheap.
+    """
+
+    def test_empty_input_returns_zero_totals(self):
+        result = attribute_lp_strategy([])
+        assert result["model"] == "continuous_strategy_level"
+        assert result["total_gas_usd"] == "0"
+        assert result["open_count"] == 0
+        assert result["close_count"] == 0
+        assert result["close_open_pairs"] == 0
+        assert result["unique_position_ids"] == 0
+
+    def test_non_lp_events_filtered_out(self):
+        events = [
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5", position_type="PERP"),
+            _lp_event(event_id=2, timestamp="2026-05-01T00:00:01", event_type="CLOSE", gas_usd="3", position_type="LENDING"),
+        ]
+        result = attribute_lp_strategy(events)
+        assert result["total_gas_usd"] == "0"
+        assert result["open_count"] == 0
+        assert result["close_count"] == 0
+
+    def test_single_lifecycle_attributes_open_and_close(self):
+        events = [
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5"),
+            _lp_event(event_id=2, timestamp="2026-05-01T00:01:00", event_type="CLOSE", gas_usd="3"),
+        ]
+        result = attribute_lp_strategy(events)
+        assert result["total_gas_usd"] == "8"
+        assert result["open_gas_usd"] == "5"
+        assert result["close_gas_usd"] == "3"
+        assert result["open_count"] == 1
+        assert result["close_count"] == 1
+        assert result["close_open_pairs"] == 0
+        assert result["unique_position_ids"] == 1
+
+    def test_two_rebalances_counts_two_pairs_and_full_gas(self):
+        """Strategy: OPEN_A, CLOSE_A, OPEN_B, CLOSE_B, OPEN_C — counts 2 rebalances."""
+        events = [
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5", position_id="A"),
+            _lp_event(event_id=2, timestamp="2026-05-01T00:01:00", event_type="CLOSE", gas_usd="3", position_id="A"),
+            _lp_event(event_id=3, timestamp="2026-05-01T00:01:01", event_type="OPEN", gas_usd="5", position_id="B"),
+            _lp_event(event_id=4, timestamp="2026-05-01T00:02:00", event_type="CLOSE", gas_usd="3", position_id="B"),
+            _lp_event(event_id=5, timestamp="2026-05-01T00:02:01", event_type="OPEN", gas_usd="5", position_id="C"),
+        ]
+        result = attribute_lp_strategy(events)
+        # CLOSE_A → OPEN_B is one rebalance; CLOSE_B → OPEN_C is another. Two cycles.
+        assert result["close_open_pairs"] == 2
+        # 3 opens + 2 closes = 5 events @ (5,3,5,3,5) = 21
+        assert result["total_gas_usd"] == "21"
+        assert result["open_gas_usd"] == "15"
+        assert result["close_gas_usd"] == "6"
+        assert result["open_count"] == 3
+        assert result["close_count"] == 2
+        assert result["unique_position_ids"] == 3
+
+    def test_non_lifecycle_events_count_in_total_but_dont_shift_rebalance_state(self):
+        """COLLECT_FEES / SNAPSHOT contribute gas but don't break/start rebalance pairs."""
+        events = [
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5"),
+            # Mid-position fee collection: gas counted but doesn't affect lifecycle pairing
+            _lp_event(event_id=2, timestamp="2026-05-01T00:00:30", event_type="COLLECT_FEES", gas_usd="2"),
+            _lp_event(event_id=3, timestamp="2026-05-01T00:01:00", event_type="CLOSE", gas_usd="3"),
+            _lp_event(event_id=4, timestamp="2026-05-01T00:01:01", event_type="OPEN", gas_usd="5"),
+        ]
+        result = attribute_lp_strategy(events)
+        assert result["total_gas_usd"] == "15"  # 5 + 2 + 3 + 5
+        assert result["close_open_pairs"] == 1  # CLOSE -> OPEN counts despite COLLECT_FEES in the middle of an earlier cycle
+        assert result["open_count"] == 2
+        assert result["close_count"] == 1
+
+    def test_unsorted_input_sorted_internally(self):
+        """The helper sorts by (timestamp, id) so ordering is deterministic."""
+        events = [
+            _lp_event(event_id=4, timestamp="2026-05-01T00:02:00", event_type="CLOSE", gas_usd="3", position_id="B"),
+            _lp_event(event_id=2, timestamp="2026-05-01T00:01:00", event_type="CLOSE", gas_usd="3", position_id="A"),
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5", position_id="A"),
+            _lp_event(event_id=3, timestamp="2026-05-01T00:01:01", event_type="OPEN", gas_usd="5", position_id="B"),
+        ]
+        result = attribute_lp_strategy(events)
+        assert result["close_open_pairs"] == 1  # CLOSE_A -> OPEN_B
+
+    def test_missing_gas_usd_treated_as_zero(self):
+        """Legacy rows with empty/null gas_usd don't crash and don't inflate totals."""
+        events = [
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd=""),
+            _lp_event(event_id=2, timestamp="2026-05-01T00:01:00", event_type="CLOSE", gas_usd="3"),
+        ]
+        result = attribute_lp_strategy(events)
+        assert result["total_gas_usd"] == "3"
+        assert result["open_gas_usd"] == "0"
+        assert result["close_gas_usd"] == "3"
+
+    def test_event_type_case_insensitive(self):
+        """Some legacy rows used lowercase event types — normalise."""
+        events = [
+            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="open", gas_usd="5"),
+            _lp_event(event_id=2, timestamp="2026-05-01T00:01:00", event_type="close", gas_usd="3"),
+        ]
+        result = attribute_lp_strategy(events)
+        assert result["open_count"] == 1
+        assert result["close_count"] == 1
+        assert result["total_gas_usd"] == "8"
