@@ -152,6 +152,27 @@ class TestFlashLoanEOAGuard:
         assert "EOA" in result.error
         assert "receiver contract" in result.error
 
+    def test_flash_loan_eoa_error_classified_as_compilation_permanent(self):
+        """VIB-3826: EOA failure must be COMPILATION_PERMANENT (no pointless retries).
+
+        Before VIB-3826 the error string did not include any of state_machine.py's
+        permanent_keywords ("not supported", "unsupported", ...) so the framework
+        retried compilation up to ``max_retries`` times even though wallet bytecode
+        cannot change between attempts.
+        """
+        from almanak.framework.intents.state_machine import IntentStateMachine
+
+        compiler = self._make_compiler()
+        intent = self._make_intent()
+
+        with patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"):
+            with patch("httpx.post", return_value=self._mock_rpc_response("0x")):
+                result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        sm = IntentStateMachine(intent=intent, compiler=compiler)
+        assert sm._categorize_error(result.error) == "COMPILATION_PERMANENT"
+
     def test_flash_loan_proceeds_for_contract_wallet(self):
         """Flash loan compilation should proceed when wallet is a contract."""
         compiler = self._make_compiler()

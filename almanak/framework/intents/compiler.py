@@ -22,6 +22,7 @@ Example:
 
 import logging
 import os
+import re
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -199,6 +200,17 @@ from .compiler_models import (  # noqa: F401
 # as native. Mantle (MNT), Monad (MON), Berachain (BERA), Sonic (S) and
 # zerog (A0GI) are included for future coverage but their entries in the
 # token registry already carry ``is_native=True`` so this is belt-and-braces.
+# Inlined to avoid pulling the resolver's web3-touching import chain into the
+# compiler's hot path (unit tests monkeypatch ``web3``). Mirrors
+# ``almanak.framework.data.tokens.resolver.SOLANA_ADDRESS_PATTERN``.
+_SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+
+def _is_solana_mint(token: str) -> bool:
+    """True when ``token`` matches a Solana base58 mint (32-44 chars)."""
+    return bool(_SOLANA_ADDRESS_RE.match(token))
+
+
 _CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
     "ethereum": frozenset({"ETH"}),
     "arbitrum": frozenset({"ETH"}),
@@ -216,6 +228,7 @@ _CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
     "monad": frozenset({"MON"}),
     "xlayer": frozenset({"OKB"}),
     "zerog": frozenset({"A0GI"}),
+    "solana": frozenset({"SOL"}),
 }
 
 
@@ -7492,7 +7505,15 @@ class IntentCompiler:
             # arbitrary address that happens to share a native ticker
             # (e.g. a wrapper contract symbolised "POL"), forcing it down
             # the no-allowance native path and breaking real ERC20 swaps.
-            input_is_address = isinstance(token, str) and token.startswith("0x")
+            #
+            # Chain-aware address detection (CodeRabbit P2 on PR #2005):
+            # EVM uses 0x-prefixed hex; Solana uses base58 mints (no 0x).
+            # Without the Solana branch the cross-check could flip
+            # is_native=True for a raw SPL mint that resolves to symbol
+            # "SOL", bypassing the SPL-token path.
+            input_is_address = isinstance(token, str) and (
+                token.startswith("0x") or (target_chain.lower() == "solana" and _is_solana_mint(token))
+            )
             if not is_native and not input_is_address:
                 # Defense-in-depth: if the registry address for a chain's gas
                 # token doesn't match the native sentinel (e.g. POL on

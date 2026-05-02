@@ -1029,6 +1029,12 @@ class IntentStateMachine:
             "invalid_order",
             "invalid_tick",
             "order_below_minimum",
+            # VIB-3823: LpOpenZeroLiquidityError.ERROR_PREFIX (intent_errors.py)
+            # surfaces this exact phrase from both the slot0-driven recompute
+            # gate and the post-recompute pre-flight (compiler.py step 4c).
+            # Retrying with the same range/amounts always reproduces the M0
+            # revert, so classify as terminal to skip the retry storm.
+            "mint zero liquidity",
         )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"

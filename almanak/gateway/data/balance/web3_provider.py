@@ -151,6 +151,7 @@ NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "monad": "MON",
     "xlayer": "OKB",
     "zerog": "A0GI",
+    "solana": "SOL",
 }
 
 

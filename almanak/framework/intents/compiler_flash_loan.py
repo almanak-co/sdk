@@ -62,11 +62,14 @@ def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
-                    "Flash loans require a receiver contract that implements the provider callback "
-                    "(e.g., Balancer's receiveFlashLoan or Aave's executeOperation). "
-                    f"Wallet {compiler.wallet_address} is an EOA (no bytecode). "
-                    "Flash-loan providers call back into the recipient during the same transaction, "
-                    "which EOAs cannot handle. Deploy a compatible flash-loan receiver contract."
+                    # VIB-3826: phrasing includes "not supported" so the state machine
+                    # classifies this as COMPILATION_PERMANENT (state_machine.py:1007)
+                    # and skips pointless retries. EOA-ness will not change between
+                    # attempts; retrying always produces the same revert.
+                    "Flash loans not supported for EOA wallets — flash-loan providers call back "
+                    "into the recipient during the same transaction (Balancer's receiveFlashLoan, "
+                    f"Aave's executeOperation), which EOAs cannot handle. Wallet {compiler.wallet_address} "
+                    "is an EOA (no bytecode); deploy a compatible flash-loan receiver contract."
                 ),
                 intent_id=intent.intent_id,
             )
