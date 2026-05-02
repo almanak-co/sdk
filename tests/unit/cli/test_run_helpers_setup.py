@@ -626,6 +626,23 @@ class TestPrintStartupBanner:
         assert "RESUME" in output
         assert "WARNING: Loading state" not in output
 
+    def test_hosted_mode_shows_gateway_managed_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hosted mode (AGENT_ID set) keeps state in Postgres via the gateway —
+        the runner CLI does no SQLite resume detection so is_resume is always
+        False. Without a hosted-aware branch the banner would always print
+        the misleading "FRESH START (no existing state)" even when the agent
+        is actually resuming from prior Postgres state across pod restarts.
+        Regression guard for the gemini-code-assist review on PR #2004."""
+        monkeypatch.setenv("AGENT_ID", "test-agent-id")
+        output = _capture_banner(is_resume=False)
+        assert "HOSTED" in output
+        assert "Postgres" in output
+        # Local-mode markers must not leak through in hosted output.
+        assert "FRESH START" not in output
+        assert "RESUME" not in output
+
     def test_multi_chain_prints_chains_and_protocols(self) -> None:
         output = _capture_banner(
             multi_chain=True,

@@ -482,7 +482,19 @@ def _print_startup_banner(
     click.echo(f"Strategy: {strategy_name}")
     click.echo(f"Deployment ID: {strategy_id}")
     click.echo(f"Run ID: {run_id}")
-    if is_resume:
+    # Resume detection in hosted mode lives in the gateway against Postgres,
+    # not in the runner CLI — the runner has no SQLite to inspect. Avoid
+    # the misleading "FRESH START" banner that would otherwise print on
+    # every hosted iteration regardless of actual Postgres state.
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        click.secho(
+            "Mode: HOSTED (state managed by gateway via Postgres)",
+            fg="cyan",
+            bold=True,
+        )
+    elif is_resume:
         click.secho("Mode: RESUME (existing state found)", fg="yellow", bold=True)
         if existing_state_info:
             click.echo(f"  State version: {existing_state_info['version']}, keys: {existing_state_info['keys']}")
@@ -705,8 +717,15 @@ def _resolve_identity(
     # Backfill: migrate data from bare strategy name to deployment_id (VIB-2767).
     # Uses the centralized SQLiteStore.backfill_deployment_id helper so that ALL
     # tables (including timeline_events) are migrated consistently with _db_lock.
+    #
+    # Hosted mode keeps state in Postgres and the gateway has always written
+    # under the resolved agent_id — there is no bare-name → deployment_id
+    # SQLite migration to run, and local_db_path would raise LocalPathError
+    # by design (see local_paths._ensure_local).
+    from almanak.framework.deployment import is_local
+
     migrated = False
-    if deployment_id != config_display_name:
+    if deployment_id != config_display_name and is_local():
         # VIB-3761: canonical local-DB resolver.
         from almanak.framework.local_paths import local_db_path
 
@@ -737,7 +756,15 @@ def _resolve_identity(
     # VIB-2573: On Anvil, clear ALL strategy state (not just current strategy)
     # to prevent TokenNotFoundError from stale state referencing wrong-chain tokens.
     # On mainnet, only clear the current strategy's state (preserve other strategies).
+    #
+    # --fresh is a SQLite-only operation. Hosted mode has no local DB to clear;
+    # the platform recreates the agent if a clean state is required.
     strategy_id = strategy_config["strategy_id"]
+    if fresh and not is_local():
+        raise click.ClickException(
+            "--fresh is not supported in hosted mode (AGENT_ID set). "
+            "Hosted state lives in Postgres; recreate the agent to start clean."
+        )
     if fresh:
         from almanak.framework.local_paths import local_db_path
 

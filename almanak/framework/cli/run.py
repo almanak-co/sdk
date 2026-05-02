@@ -1426,14 +1426,22 @@ def run(
 
     # Detect RESUME vs FRESH START (phase 9 helper).
     # VIB-3761: canonical local-DB resolver.
+    #
+    # Hosted mode (AGENT_ID set) keeps state in Postgres via the gateway state
+    # manager — there is no local SQLite file to inspect. Calling local_db_path
+    # in hosted mode raises LocalPathError by design (see local_paths._ensure_local).
+    # Resume semantics for hosted strategies are handled by the gateway against
+    # Postgres, not by the runner CLI.
+    from almanak.framework.deployment import is_local
     from almanak.framework.local_paths import local_db_path as _local_db_path
 
-    state_db_path = _local_db_path()
-    resume_info = _detect_state_resume(state_db_path, strategy_id)
-    is_resume = resume_info.is_resume
-    existing_state_info: dict[str, Any] | None = (
-        {"version": resume_info.version, "keys": resume_info.state_keys} if is_resume else None
-    )
+    is_resume = False
+    existing_state_info: dict[str, Any] | None = None
+    if is_local():
+        state_db_path = _local_db_path()
+        resume_info = _detect_state_resume(state_db_path, strategy_id)
+        is_resume = resume_info.is_resume
+        existing_state_info = {"version": resume_info.version, "keys": resume_info.state_keys} if is_resume else None
 
     # Display startup information (phase 10 helper)
     _print_startup_banner(

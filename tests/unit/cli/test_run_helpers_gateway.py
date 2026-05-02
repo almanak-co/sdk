@@ -1301,6 +1301,69 @@ class TestResolveIdentity:
         )
         assert info.migrated is False
 
+    def test_hosted_mode_skips_sqlite_backfill(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Hosted mode (AGENT_ID set) keeps state in Postgres — the
+        bare-name → deployment_id SQLite backfill must not even attempt to
+        resolve a local DB path. Calling local_db_path in hosted mode raises
+        LocalPathError by design (see local_paths._ensure_local), so any
+        unguarded call here would crash the entire deploy at startup.
+        Regression guard for VIB-3879 (rc8 stage deploy crash)."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AGENT_ID", "test-agent-id")
+        # deployment_id intentionally differs from display_name so we hit the
+        # backfill branch — without the is_local() guard this would raise.
+        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
+
+        from almanak.framework.state.backends import sqlite as sqlite_backend
+
+        class _Tripwire:
+            def __init__(self, config: Any) -> None:
+                raise AssertionError(
+                    "hosted mode must not construct SQLiteStore for backfill"
+                )
+
+        monkeypatch.setattr(sqlite_backend, "SQLiteStore", _Tripwire)
+
+        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
+        info = run_helpers._resolve_identity(
+            strategy_config=strategy_config,
+            fresh=False,
+            multi_chain=False,
+            strategy_chains=[],
+            config_display_name="strat-1",
+            cli_id_override=None,
+            gateway_network="mainnet",
+        )
+        # Identity still resolves; backfill skipped; nothing crashed.
+        assert info.deployment_id == "strat-1:hash"
+        assert info.migrated is False
+
+    def test_hosted_mode_rejects_fresh_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """--fresh is a SQLite-only operation. In hosted mode there is no
+        local DB to clear; the platform recreates the agent if a clean state
+        is required. Surface this as a clear ClickException rather than
+        letting local_db_path raise LocalPathError mid-flight."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AGENT_ID", "test-agent-id")
+        _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
+
+        strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
+        with pytest.raises(click.ClickException) as exc_info:
+            run_helpers._resolve_identity(
+                strategy_config=strategy_config,
+                fresh=True,
+                multi_chain=False,
+                strategy_chains=[],
+                config_display_name="strat-1",
+                cli_id_override=None,
+                gateway_network="mainnet",
+            )
+        assert "--fresh is not supported in hosted mode" in exc_info.value.message
+
 
 # ---------------------------------------------------------------------------
 # Sanity: the typed IdentityInfo dataclass is frozen + ordered like documented.
