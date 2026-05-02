@@ -100,6 +100,114 @@ def _normalize_quick_chains(raw: Any) -> list[str]:
     return []
 
 
+def _normalize_anvil_funding(raw: Any) -> dict[str, int | float | str]:
+    """Normalize a quick-config ``anvil_funding`` value into a safe dict (VIB-3876).
+
+    User-authored config files may set ``anvil_funding`` to a malformed value
+    — a list (``anvil_funding: [WETH, USDC]``), a string, an int — all of
+    which would propagate to ``ManagedGateway._anvil_funding`` and then crash
+    inside ``_fund_anvil_wallets()`` on ``.items()``. Validate the shape
+    here (a dict of ``{token_symbol: amount}``) and emit a warning + safe
+    fallback for anything else, rather than letting the gateway boot fail
+    with an opaque ``AttributeError`` mid-startup.
+
+    Token amounts may be ints, floats, or strings (the gateway accepts strings
+    for high-precision Decimal values like wstETH); other value types
+    (booleans, dicts, lists) are dropped with a warning.
+
+    Args:
+        raw: The raw value read from the config's ``anvil_funding`` field.
+
+    Returns:
+        A ``{token_symbol: amount}`` dict suitable for ``ManagedGateway``,
+        or an empty dict if ``raw`` is malformed.
+    """
+    if not isinstance(raw, dict):
+        if raw not in (None, {}):
+            logger.warning(
+                "Ignoring malformed anvil_funding (%s); expected dict[str, int | float | str], got %r",
+                type(raw).__name__,
+                raw,
+            )
+        return {}
+    cleaned: dict[str, int | float | str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            logger.warning(
+                "Ignoring anvil_funding entry with non-string key %r (value=%r)",
+                key,
+                value,
+            )
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | float | str):
+            # bool is a subclass of int — reject it explicitly so True/False
+            # don't silently get treated as 1/0 fund amounts.
+            logger.warning(
+                "Ignoring anvil_funding[%s] — expected int | float | str, got %s (value=%r)",
+                key,
+                type(value).__name__,
+                value,
+            )
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+# Chains that run on solana-test-validator, not Anvil. Filtered out of
+# ``anvil_chains`` so ``ManagedGateway`` doesn't try to start a RollingForkManager
+# for them; tracked separately via ``solana_anvil_needed`` so the caller can wire
+# up ``SolanaForkManager`` (run_helpers.py:1837-1884 / cli/teardown.py VIB-3878).
+NON_ANVIL_CHAINS: frozenset[str] = frozenset({"solana"})
+
+
+def _resolve_anvil_chain_dispatch(
+    network: str,
+    primary_chain: str | None,
+    config_dict: dict[str, Any],
+) -> tuple[list[str], bool]:
+    """Decide which forks the teardown CLI must start (VIB-3878).
+
+    Returns ``(anvil_chains, solana_anvil_needed)``:
+
+    - ``anvil_chains`` — EVM chains to pass to ``ManagedGateway(anvil_chains=...)``.
+      Empty when ``network != "anvil"`` or when the strategy is Solana-only.
+    - ``solana_anvil_needed`` — ``True`` when ``--network anvil`` and the
+      strategy declares a Solana chain (single ``chain`` field or in ``chains``
+      list). Caller is responsible for spinning up a ``SolanaForkManager``.
+
+    The two flags are independent; multi-chain strategies (e.g. EVM + Solana)
+    set both. Mirrors ``run_helpers.py:907-910`` so ``strat run`` and
+    ``strat teardown`` agree on which forks to start.
+    """
+    if network != "anvil":
+        return [], False
+
+    chains_val = config_dict.get("chains")
+    if isinstance(chains_val, str | list):
+        all_chains = _normalize_quick_chains(chains_val)
+    else:
+        if chains_val is not None:
+            # Malformed config (int, dict, None-equivalent): warn and fall
+            # back to ``primary_chain`` rather than silently starting nothing.
+            # CodeRabbit P2 — turning a recoverable typo into a "start nothing"
+            # path is exactly the silent-failure VIB-3819 was fixing for.
+            logger.warning(
+                "Ignoring malformed config['chains'] (%s); falling back to primary chain. value=%r",
+                type(chains_val).__name__,
+                chains_val,
+            )
+        all_chains = [primary_chain] if primary_chain else []
+
+    # Normalize once: strip whitespace + lowercase. Otherwise a config like
+    # ``chains: [" solana "]`` would slip past the NON_ANVIL_CHAINS filter and
+    # the solana_anvil_needed check, sending "solana" to ``ManagedGateway`` as
+    # an Anvil fork target (which would fail). CodeRabbit P_minor.
+    normalized_chains = [str(c).strip().lower() for c in all_chains]
+    anvil_chains = [c for c in normalized_chains if c not in NON_ANVIL_CHAINS]
+    solana_anvil_needed = "solana" in normalized_chains
+    return anvil_chains, solana_anvil_needed
+
+
 def _configure_logging_and_validate(
     *,
     verbose: bool,
@@ -889,7 +997,7 @@ def _setup_gateway(
                 anvil_chains = _normalize_quick_chains(chains_val)
             elif chain_val:
                 anvil_chains = [chain_val]
-            anvil_funding = quick_config.get("anvil_funding", {})
+            anvil_funding = _normalize_anvil_funding(quick_config.get("anvil_funding", {}))
 
         # Fall back to decorator metadata if config.json has no chain
         if not anvil_chains and early_strategy_class:
@@ -1031,43 +1139,12 @@ def _setup_gateway(
         external_anvil_ports=external_anvil_ports,
         keep_anvil=keep_anvil,
     )
-    # Anvil forks need extra startup time (forking from mainnet RPC).
-    # Archive-RPC chains (Avalanche, Ethereum, Polygon) are slower to fork:
-    # cold-cache Anvil startup against an archive node can take 60-90s, and
-    # the default 30s is too short. A 30s timeout causes the managed gateway to
-    # abort before the Anvil fork finishes, leaving a daemon gRPC thread running
-    # that races with the main process's shutdown sequence — producing the
-    # "absl::InitializeLog() called multiple times" error.
-    #
-    # Derive the outer timeout from the per-fork budgets so multi-archive-chain
-    # configs (e.g. [ethereum, polygon]) also get enough time. ManagedGateway
-    # starts forks sequentially, so the total Anvil budget is:
-    #   sum(per_fork_timeout) + gateway_server_warmup_headroom
-    # Keep _ARCHIVE_CHAINS_SLOW_FORK in sync with
-    # ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS in gateway/managed.py.
-    # Canonicalize chain names via resolve_chain_name so aliases such as
-    # "avax" -> "avalanche" and "eth" -> "ethereum" are classified correctly.
-    _ARCHIVE_CHAINS_SLOW_FORK = frozenset({"polygon", "ethereum", "avalanche"})
-    _GATEWAY_WARMUP_HEADROOM = 30.0  # server start + prewarm after all forks ready
-    if anvil_chains:
-        try:
-            from almanak.core.constants import resolve_chain_name as _resolve_chain
+    # Per-chain Anvil startup-timeout policy lives in _anvil_timeout.py
+    # (VIB-3877) so the run + teardown CLI paths can never drift. See that
+    # module for the cold-cache-fork-vs-gRPC-race rationale this guards.
+    from ._anvil_timeout import compute_anvil_startup_timeout
 
-            def _canonical(c: str) -> str:
-                try:
-                    return _resolve_chain(c)
-                except ValueError:
-                    return c.strip().lower()
-
-        except ImportError:
-
-            def _canonical(c: str) -> str:
-                return c.strip().lower()
-
-        anvil_fork_budget = sum(90.0 if _canonical(c) in _ARCHIVE_CHAINS_SLOW_FORK else 30.0 for c in anvil_chains)
-        startup_timeout = anvil_fork_budget + _GATEWAY_WARMUP_HEADROOM
-    else:
-        startup_timeout = 10.0
+    startup_timeout = compute_anvil_startup_timeout(anvil_chains)
     try:
         managed_gateway.start(timeout=startup_timeout)
     except RuntimeError as e:

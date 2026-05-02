@@ -60,6 +60,11 @@ class _FakeGatewayClient:
 class _FakeManagedGateway:
     last: "_FakeManagedGateway | None" = None
     start_should_fail = False
+    # Match the real ManagedGateway class attribute (managed.py:196) — the
+    # _anvil_timeout helper sources the slow-chain set from this attribute,
+    # so the fake must expose it for the existing timeout-budget tests
+    # below (TestArchiveChainStartupTimeout) to keep working.
+    ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche"})
 
     def __init__(
         self,

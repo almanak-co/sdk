@@ -69,14 +69,21 @@ _TEST_WALLET = "0x1234567890123456789012345678901234567890"
 
 
 class TestSwapExactInput:
+    # USDC (6 dec) → WETH (18 dec) — VIB-3875 requires price_ratio for cross-decimal quotes.
+    # 1 USDC ≈ 0.0003 ETH, so price_ratio (token_out per token_in) is Decimal("0.0003").
+    _USDC_TO_WETH_PRICE_RATIO = Decimal("0.0003")
+    _USDC_ADDR = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    _WETH_ADDR = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+
     def test_basic_swap(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         result = adapter.swap_exact_input(
-            token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-            token_out="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
             amount_in=Decimal("1000"),
             slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
         )
         assert result.success is True
         assert len(result.transactions) == 3  # approve Permit2 + Permit2 approve router + swap
@@ -87,9 +94,11 @@ class TestSwapExactInput:
         adapter = UniswapV4Adapter(chain="arbitrum", token_resolver=_make_resolver())
         with pytest.raises(ValueError, match="wallet_address must be set"):
             adapter.swap_exact_input(
-                token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-                token_out="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+                token_in=self._USDC_ADDR,
+                token_out=self._WETH_ADDR,
                 amount_in=Decimal("1000"),
+                # price_ratio supplied so the wallet_address check is what fires (not VIB-3875).
+                price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
             )
 
     def test_native_eth_no_approve(self):
@@ -97,8 +106,10 @@ class TestSwapExactInput:
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         result = adapter.swap_exact_input(
             token_in="0x0000000000000000000000000000000000000000",
-            token_out="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            token_out=self._USDC_ADDR,
             amount_in=Decimal("1"),
+            # ETH (18 dec) → USDC (6 dec): price_ratio = USDC per ETH ≈ 3000.
+            price_ratio=Decimal("3000"),
         )
         assert result.success is True
         # No approve needed for native ETH - just swap
@@ -108,10 +119,11 @@ class TestSwapExactInput:
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         result = adapter.swap_exact_input(
-            token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-            token_out="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
             amount_in=Decimal("1000"),
             slippage_bps=100,  # 1%
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
         )
         assert result.success is True
         # amount_out_minimum should be ~99% of quote output
@@ -176,6 +188,11 @@ class TestTokenResolution:
 
 
 class TestCompileSwapIntent:
+    # USDC (6 dec) → WETH (18 dec) needs both token prices in the oracle so the
+    # adapter can derive ``computed_price_ratio`` and bridge the decimal gap
+    # (VIB-3875). Without both, the SDK now raises COMPILATION_PERMANENT.
+    _PRICE_ORACLE = {"USDC": Decimal("1.0"), "WETH": Decimal("3000")}
+
     def test_compile_with_amount(self):
         config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
         adapter = UniswapV4Adapter(config=config)
@@ -189,7 +206,7 @@ class TestCompileSwapIntent:
         intent.max_slippage = Decimal("0.005")
         intent.intent_id = "test-intent-1"
 
-        bundle = adapter.compile_swap_intent(intent)
+        bundle = adapter.compile_swap_intent(intent, self._PRICE_ORACLE)
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) > 0
         assert bundle.metadata["protocol_version"] == "v4"
@@ -210,8 +227,7 @@ class TestCompileSwapIntent:
         intent.max_slippage = Decimal("0.005")
         intent.intent_id = "test-intent-2"
 
-        price_oracle = {"USDC": Decimal("1.0")}
-        bundle = adapter.compile_swap_intent(intent, price_oracle)
+        bundle = adapter.compile_swap_intent(intent, self._PRICE_ORACLE)
         assert bundle.intent_type == "SWAP"
         assert len(bundle.transactions) > 0
 

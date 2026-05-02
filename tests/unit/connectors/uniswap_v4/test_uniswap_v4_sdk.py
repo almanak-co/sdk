@@ -221,6 +221,56 @@ class TestGetQuoteLocal:
         expected = int(Decimal(amount_in) * Decimal("0.997"))
         assert abs(quote.amount_out - expected) < 2  # Allow rounding
 
+    def test_same_decimal_fallback_when_price_ratio_missing(self):
+        """VIB-3875: same-decimal pairs without price_ratio still produce a quote."""
+        sdk = UniswapV4SDK(chain="arbitrum")
+        quote = sdk.get_quote_local(
+            token_in="0xaaaa",
+            token_out="0xbbbb",
+            amount_in=10**18,
+            fee_tier=3000,
+            token_in_decimals=18,
+            token_out_decimals=18,
+            price_ratio=None,
+        )
+        assert quote.amount_out > 0
+
+    def test_decimal_mismatch_without_price_ratio_raises_permanent(self):
+        """VIB-3875: decimal mismatch + price_ratio=None must raise rather than
+        silently emit a 10**12x-too-high amount_out_minimum that reverts on-chain
+        with V4TooLittleReceived. Error must contain a ``permanent_keywords``
+        token (see ``state_machine._categorize_error``) so the strategy classifies
+        it COMPILATION_PERMANENT and does not retry the impossible swap.
+        """
+        import pytest
+
+        sdk = UniswapV4SDK(chain="arbitrum")
+        with pytest.raises(ValueError, match=r"not supported"):
+            sdk.get_quote_local(
+                token_in="0xaaaa",
+                token_out="0xbbbb",
+                amount_in=10**18,  # 1.0 in 18-dec
+                fee_tier=3000,
+                token_in_decimals=18,
+                token_out_decimals=6,  # USDC
+                price_ratio=None,
+            )
+
+    def test_decimal_mismatch_with_price_ratio_succeeds(self):
+        """VIB-3875 control: decimal mismatch IS allowed when price_ratio bridges it."""
+        sdk = UniswapV4SDK(chain="arbitrum")
+        quote = sdk.get_quote_local(
+            token_in="0xaaaa",
+            token_out="0xbbbb",
+            amount_in=10**18,  # 1.0 of 18-dec token
+            fee_tier=500,
+            token_in_decimals=18,
+            token_out_decimals=6,  # USDC
+            price_ratio=Decimal("3000"),  # 1 in = 3000 out
+        )
+        # Expect ~3000 USDC * (1 - 0.05%) = ~2998.5 USDC in 6-dec units
+        assert 2_990_000_000 <= quote.amount_out <= 3_000_000_000
+
 
 # =============================================================================
 # Transaction building tests

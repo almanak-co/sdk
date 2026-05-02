@@ -313,6 +313,26 @@ def test_solana_chain_filtered_from_anvil_chains(
         lambda _host, port: port,
     )
 
+    # VIB-3878 wired SolanaForkManager into the teardown CLI for solana strategies
+    # on --network anvil. Mock it so the test does not require a real
+    # solana-test-validator binary in CI (which doesn't ship one).
+    async def _async_true(*_args, **_kwargs):
+        return True
+
+    async def _async_none(*_args, **_kwargs):
+        return None
+
+    fake_solana_fork_mgr = MagicMock()
+    fake_solana_fork_mgr.start = MagicMock(side_effect=_async_true)
+    fake_solana_fork_mgr.stop = MagicMock(side_effect=_async_none)
+    fake_solana_fork_mgr.fund_wallet = MagicMock(side_effect=_async_true)
+    fake_solana_fork_mgr.fund_tokens = MagicMock(side_effect=_async_true)
+    fake_solana_fork_mgr.get_rpc_url = MagicMock(return_value="http://127.0.0.1:8899")
+    monkeypatch.setattr(
+        "almanak.framework.anvil.solana_fork_manager.SolanaForkManager",
+        MagicMock(return_value=fake_solana_fork_mgr),
+    )
+
     result = cli_runner.invoke(
         teardown_cli_module.teardown,
         [
@@ -333,6 +353,161 @@ def test_solana_chain_filtered_from_anvil_chains(
     _, kwargs = managed_gateway_ctor.call_args
     assert kwargs.get("anvil_chains") == [], (
         f"Solana must be filtered from anvil_chains, got anvil_chains={kwargs.get('anvil_chains')!r}"
+    )
+    # VIB-3878: fork manager should have been started and the wallet funded.
+    fake_solana_fork_mgr.start.assert_called_once()
+    fake_solana_fork_mgr.fund_wallet.assert_called_once()
+
+
+def test_solana_fork_startup_failure_aborts_with_clear_message(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """VIB-3878: a Solana fork that fails to start must abort the CLI with a
+    diagnostic mentioning the install command — never silently fall through to
+    teardown logic against a dead validator (CodeRabbit P_major lifecycle ask)."""
+    _, config_file = _write_solana_strategy_files(tmp_path)
+
+    monkeypatch.setattr(
+        teardown_cli_module,
+        "load_strategy_from_file",
+        lambda _path: (_SwapOnlyStrategy, None),
+    )
+    monkeypatch.setattr(
+        "almanak.framework.gateway_client.GatewayClient",
+        _FakeGatewayClient,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.TokenResolver.set_gateway_channel",
+        lambda _self, _channel: None,
+    )
+
+    fake_managed_gateway_instance = MagicMock()
+    fake_managed_gateway_instance.start = MagicMock(return_value=None)
+    fake_managed_gateway_instance.stop = MagicMock(return_value=None)
+    monkeypatch.setattr(
+        "almanak.gateway.managed.ManagedGateway",
+        MagicMock(return_value=fake_managed_gateway_instance),
+    )
+    monkeypatch.setattr(
+        "almanak.gateway.managed.find_available_gateway_port",
+        lambda _host, port: port,
+    )
+
+    async def _async_false(*_args, **_kwargs):
+        return False
+
+    async def _async_none(*_args, **_kwargs):
+        return None
+
+    fake_solana_fork_mgr = MagicMock()
+    fake_solana_fork_mgr.start = MagicMock(side_effect=_async_false)  # startup FAILS
+    fake_solana_fork_mgr.stop = MagicMock(side_effect=_async_none)
+    monkeypatch.setattr(
+        "almanak.framework.anvil.solana_fork_manager.SolanaForkManager",
+        MagicMock(return_value=fake_solana_fork_mgr),
+    )
+
+    result = cli_runner.invoke(
+        teardown_cli_module.teardown,
+        ["execute", "-d", str(tmp_path), "-c", config_file, "--network", "anvil", "--mode", "graceful", "--force"],
+    )
+
+    assert result.exit_code != 0, "CLI must abort when solana-test-validator fails to start"
+    assert "Failed to start solana-test-validator" in result.output
+    # ManagedGateway must be torn down to avoid leaking the gRPC daemon when the
+    # Solana side fails after the EVM gateway already started.
+    fake_managed_gateway_instance.stop.assert_called()
+
+
+def test_solana_fork_stop_idempotent_no_double_call(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """VIB-3878: success-path finally cleanup must mark ``solana_stopped=True``
+    so the atexit safety-net doesn't re-stop after the loop closed (CodeRabbit
+    P_major lifecycle ask). Counts ``stop()`` invocations to pin the contract.
+
+    Captures the registered atexit callback and invokes it manually after the
+    CLI returns — atexit handlers don't fire inside ``CliRunner.invoke`` (the
+    pytest process keeps running), so without this capture the test would only
+    prove the ``finally``-path single stop, not that the atexit safety-net
+    short-circuits via ``solana_stopped``.
+    """
+    _, config_file = _write_solana_strategy_files(tmp_path)
+
+    registered_atexit_callbacks: list = []
+
+    def _capture_atexit(fn, *args, **kwargs):
+        registered_atexit_callbacks.append(fn)
+
+    # ``atexit`` is imported lazily inside the teardown function (line 637),
+    # so we can't patch ``teardown_cli_module.atexit.register`` (the attribute
+    # doesn't exist at module level). Patch ``atexit.register`` itself; the
+    # other tests in this file don't rely on real atexit firing.
+    import atexit as _atexit_mod
+
+    monkeypatch.setattr(_atexit_mod, "register", _capture_atexit)
+
+    monkeypatch.setattr(
+        teardown_cli_module,
+        "load_strategy_from_file",
+        lambda _path: (_SwapOnlyStrategy, None),
+    )
+    monkeypatch.setattr(
+        "almanak.framework.gateway_client.GatewayClient",
+        _FakeGatewayClient,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.TokenResolver.set_gateway_channel",
+        lambda _self, _channel: None,
+    )
+    monkeypatch.setattr(
+        "almanak.gateway.managed.ManagedGateway",
+        MagicMock(return_value=MagicMock(start=MagicMock(return_value=None), stop=MagicMock(return_value=None))),
+    )
+    monkeypatch.setattr(
+        "almanak.gateway.managed.find_available_gateway_port",
+        lambda _host, port: port,
+    )
+
+    async def _async_true(*_args, **_kwargs):
+        return True
+
+    async def _async_none(*_args, **_kwargs):
+        return None
+
+    fake_solana_fork_mgr = MagicMock()
+    fake_solana_fork_mgr.start = MagicMock(side_effect=_async_true)
+    fake_solana_fork_mgr.stop = MagicMock(side_effect=_async_none)
+    fake_solana_fork_mgr.fund_wallet = MagicMock(side_effect=_async_true)
+    fake_solana_fork_mgr.fund_tokens = MagicMock(side_effect=_async_true)
+    fake_solana_fork_mgr.get_rpc_url = MagicMock(return_value="http://127.0.0.1:8899")
+    monkeypatch.setattr(
+        "almanak.framework.anvil.solana_fork_manager.SolanaForkManager",
+        MagicMock(return_value=fake_solana_fork_mgr),
+    )
+
+    result = cli_runner.invoke(
+        teardown_cli_module.teardown,
+        ["execute", "-d", str(tmp_path), "-c", config_file, "--network", "anvil", "--mode", "graceful", "--force"],
+    )
+
+    assert result.exit_code == 0, result.output
+    # Sanity: the teardown CLI registers an atexit safety-net for the Solana
+    # validator. Without this, the captured-callback list would be empty and
+    # the test below would silently degrade to "did nothing".
+    assert registered_atexit_callbacks, "Expected teardown to register a Solana atexit cleanup"
+    # The success-path finally cleanup already ran ``stop()`` once. Now invoke
+    # the atexit callback by hand (CliRunner doesn't fire atexit) — the
+    # ``solana_stopped`` flag set by the finally must short-circuit it so
+    # ``stop()`` stays at exactly 1 call.
+    for fn in registered_atexit_callbacks:
+        fn()
+    assert fake_solana_fork_mgr.stop.call_count == 1, (
+        f"Expected exactly 1 stop() call (idempotent atexit), got {fake_solana_fork_mgr.stop.call_count}"
     )
 
 

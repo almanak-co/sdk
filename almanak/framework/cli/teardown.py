@@ -731,6 +731,11 @@ def execute_teardown(
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
 
     managed_gateway: ManagedGateway | None = None
+    # solana_anvil_needed is initialised here (not inside the managed-gateway
+    # branch where it gets its real value) so the `--no-gateway` path can still
+    # reference it below without UnboundLocalError. solana_fork_mgr is similarly
+    # initialised before the gateway-wiring block at line ~821.
+    solana_anvil_needed = False
 
     # Resolve wallet address up-front (VIB-3819): the managed-gateway path
     # below needs it to pre-fund the Anvil fork during boot. Both gateway
@@ -819,37 +824,27 @@ def execute_teardown(
         # run_helpers.py:882-897 derivation order so behavior between
         # `strat run` and `strat teardown` stays identical (Codex review,
         # multi-chain teardown gap).
-        anvil_chains: list[str] = []
-        if resolved_network == "anvil":
-            from .run_helpers import _normalize_quick_chains
+        from .run_helpers import _normalize_anvil_funding, _resolve_anvil_chain_dispatch
 
-            chains_val = config_dict.get("chains")
-            if chains_val is not None:
-                anvil_chains = _normalize_quick_chains(chains_val)
-            elif chain:
-                anvil_chains = [chain]
+        anvil_chains, solana_anvil_needed = _resolve_anvil_chain_dispatch(resolved_network, chain, config_dict)
+        anvil_funding = (
+            _normalize_anvil_funding(config_dict.get("anvil_funding", {}))
+            if (anvil_chains or solana_anvil_needed)
+            else {}
+        )
 
-            # Solana uses solana-test-validator (not Anvil); filter it out so
-            # ManagedGateway doesn't try to start a RollingForkManager for it.
-            # Mirrors run_helpers.py:907-910. Teardown of a Solana-only
-            # strategy on --network anvil falls through with anvil_chains=[]
-            # — a future ticket can wire the same SolanaForkManager flow
-            # `strat run` uses (claude pr-auditor follow-up).
-            NON_EVM_CHAINS = {"solana"}
-            anvil_chains = [c for c in anvil_chains if c.lower() not in NON_EVM_CHAINS]
-
-        anvil_funding = config_dict.get("anvil_funding", {}) if anvil_chains else {}
-
+        chain_summary_parts: list[str] = []
         if anvil_chains:
-            click.echo(
-                f"Starting managed gateway on {effective_host}:{gateway_port} "
-                f"(network={resolved_network}, anvil chains: {', '.join(anvil_chains)})..."
-            )
-        else:
-            click.echo(
-                f"Starting managed gateway on {effective_host}:{gateway_port} "
-                f"(network={resolved_network}, chain={chain})..."
-            )
+            chain_summary_parts.append(f"anvil chains: {', '.join(anvil_chains)}")
+        if solana_anvil_needed:
+            chain_summary_parts.append("solana fork: yes")
+        if not chain_summary_parts and chain:
+            chain_summary_parts.append(f"chain={chain}")
+        chain_summary = ", ".join(chain_summary_parts) if chain_summary_parts else f"chain={chain}"
+        click.echo(
+            f"Starting managed gateway on {effective_host}:{gateway_port} "
+            f"(network={resolved_network}, {chain_summary})..."
+        )
         managed_gateway = ManagedGateway(
             gateway_settings,
             anvil_chains=anvil_chains,
@@ -857,27 +852,11 @@ def execute_teardown(
             anvil_funding=anvil_funding,
         )
 
-        # Match run_helpers.py timeout policy: archive-RPC chains (Avalanche,
-        # Ethereum, Polygon) take 60-90s to fork from a cold cache; the legacy
-        # 10s default raced the fork and returned a half-started gateway.
-        # Source the slow-chain set from ManagedGateway directly (gemini-code-
-        # assist review) so this code can never drift if the gateway adds a
-        # new archive-RPC chain — there is one source of truth, not three.
-        _GATEWAY_WARMUP_HEADROOM = 30.0
-        if anvil_chains:
-            from almanak.core.constants import resolve_chain_name as _resolve_chain
+        # Per-chain Anvil startup-timeout policy lives in _anvil_timeout.py
+        # (VIB-3877) so the run + teardown CLI paths can never drift.
+        from ._anvil_timeout import compute_anvil_startup_timeout
 
-            def _canonical(c: str) -> str:
-                try:
-                    return _resolve_chain(c)
-                except ValueError:
-                    return c.strip().lower()
-
-            slow_chains = ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS
-            anvil_fork_budget = sum(90.0 if _canonical(c) in slow_chains else 30.0 for c in anvil_chains)
-            startup_timeout = anvil_fork_budget + _GATEWAY_WARMUP_HEADROOM
-        else:
-            startup_timeout = 10.0
+        startup_timeout = compute_anvil_startup_timeout(anvil_chains)
 
         try:
             managed_gateway.start(timeout=startup_timeout)
@@ -904,6 +883,99 @@ def execute_teardown(
             raise click.ClickException(
                 "Managed gateway started but health check failed. Check gateway logs above for details."
             )
+
+    # VIB-3878: when teardown runs against --network anvil for a Solana strategy,
+    # start a local solana-test-validator the same way `strat run` does
+    # (run_helpers.py:1837-1884). Without this, the Solana balance probe hits a
+    # dead RPC, get_open_positions() swallows the error, and the no-op exit
+    # branch silently leaves Solana positions stranded — same VIB-3819 failure
+    # mode the EVM gateway-fork wiring already plugged.
+    solana_fork_mgr = None
+    solana_stopped = False  # idempotency flag shared by atexit + finally cleanup
+    if not no_gateway and solana_anvil_needed:
+        import asyncio as _aio
+        from decimal import Decimal as _Decimal
+
+        from ..anvil.solana_fork_manager import SolanaForkManager
+        from ._solana_setup import get_orca_pool_accounts
+
+        solana_rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+        extra_clone: list[str] = []
+        for _key in ("pool_address", "pool_a_address", "pool_b_address"):
+            _addr = config_dict.get(_key)
+            if _addr and isinstance(_addr, str):
+                extra_clone.append(_addr)
+        _orca_accounts = get_orca_pool_accounts(config_dict)
+        if _orca_accounts:
+            click.echo(f"  Pre-cloning {len(_orca_accounts)} Orca pool accounts (vaults + tick arrays)")
+            extra_clone.extend(_orca_accounts)
+        if extra_clone:
+            click.echo(f"  Cloning {len(extra_clone)} account(s) from mainnet")
+
+        solana_fork_mgr = SolanaForkManager(
+            rpc_url=solana_rpc_url,
+            validator_port=int(os.environ.get("SOLANA_VALIDATOR_PORT", "8899")),
+            clone_accounts=extra_clone,
+        )
+        click.echo("  Starting local solana-test-validator...")
+
+        # Use asyncio.run() (not get_event_loop().run_until_complete()) so we
+        # don't accidentally pin a stale loop reference. The finally + atexit
+        # cleanup also use asyncio.run(), which fails on Python 3.12+ when a
+        # loop is already running but works correctly outside any loop — the
+        # exact post-asyncio.run() state the cleanup code runs in.
+        try:
+            started = _aio.run(solana_fork_mgr.start())
+        except Exception as exc:
+            if managed_gateway is not None:
+                managed_gateway.stop()
+            raise click.ClickException(f"solana-test-validator failed to start: {exc}") from exc
+        if not started:
+            if managed_gateway is not None:
+                managed_gateway.stop()
+            raise click.ClickException(
+                "Failed to start solana-test-validator. "
+                "Ensure Solana CLI tools are installed: "
+                'sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"'
+            )
+        click.echo(f"  solana-test-validator running at {solana_fork_mgr.get_rpc_url()}")
+
+        if wallet_address:
+            # ``fund_wallet`` and ``fund_tokens`` return bool. Capture the
+            # results — a silent funding failure (airdrop quota, validator
+            # hiccup) would otherwise surface as a confusing "insufficient
+            # balance" mid-teardown. CodeRabbit P_major.
+            sol_funded = _aio.run(solana_fork_mgr.fund_wallet(wallet_address, _Decimal("100")))
+            tokens_funded = _aio.run(
+                solana_fork_mgr.fund_tokens(
+                    wallet_address,
+                    {"USDC": _Decimal("10000"), "USDT": _Decimal("10000")},
+                )
+            )
+            if sol_funded and tokens_funded:
+                click.echo("  Wallet funded with 100 SOL + 10K USDC + 10K USDT")
+            else:
+                click.secho(
+                    f"  Warning: Solana wallet funding incomplete (SOL={sol_funded}, "
+                    f"tokens={tokens_funded}). Teardown may fail with insufficient balance.",
+                    fg="yellow",
+                )
+
+        # atexit safety-net for Ctrl-C / sys.exit() paths that skip the finally
+        # block. Idempotent via ``solana_stopped`` so the success-path finally
+        # cleanup doesn't get followed by a second stop() at interpreter
+        # shutdown (which would re-enter the now-closed loop on Py 3.12+).
+        def _stop_solana_fork() -> None:
+            nonlocal solana_stopped
+            if solana_stopped or solana_fork_mgr is None:
+                return
+            solana_stopped = True
+            try:
+                _aio.run(solana_fork_mgr.stop())
+            except Exception:
+                pass
+
+        atexit.register(_stop_solana_fork)
 
     # Wire gateway channel into TokenResolver for on-chain token discovery
     from ..data.tokens import get_token_resolver
@@ -1310,6 +1382,15 @@ def execute_teardown(
     finally:
         resolver.set_gateway_channel(None)
         gateway_client.disconnect()
+        if solana_fork_mgr is not None and not solana_stopped:
+            solana_stopped = True
+            try:
+                import asyncio as _aio_cleanup
+
+                _aio_cleanup.run(solana_fork_mgr.stop())
+                click.echo("  Stopped solana-test-validator")
+            except Exception as e:
+                logger.debug("Failed to stop solana-test-validator: %s", e)
         if managed_gateway is not None:
             managed_gateway.stop()
 

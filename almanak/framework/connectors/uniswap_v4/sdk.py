@@ -575,6 +575,21 @@ class UniswapV4SDK:
             decimal_adjusted_amount = Decimal(amount_in) / Decimal(10**token_in_decimals)
             output_amount = decimal_adjusted_amount * price_ratio * (1 - fee_fraction)
             amount_out = int(output_amount * Decimal(10**token_out_decimals))
+        elif token_in_decimals != token_out_decimals:
+            # VIB-3875: Without an oracle price_ratio, we cannot bridge token-decimal
+            # differences. Falling back to the same-decimal estimate would emit an
+            # ``amount_out_minimum`` scaled to ``token_in_decimals`` (e.g. 18) for an
+            # output token with fewer decimals (e.g. USDC=6), producing a minOut
+            # ~10**12x too high and reverting on-chain with V4TooLittleReceived.
+            # Raise a permanent error so the strategy halts/holds rather than burning
+            # gas on a guaranteed-revert swap. Message must contain a ``permanent_keywords``
+            # token (see state_machine._categorize_error) so it classifies as
+            # COMPILATION_PERMANENT and is treated as non-retryable.
+            raise ValueError(
+                f"UniV4 offline quote not supported when price_ratio is unavailable "
+                f"and token decimals differ (in={token_in_decimals}, out={token_out_decimals}). "
+                f"Provide an oracle price_ratio or hold until both token prices resolve."
+            )
         else:
             # Same-decimal estimate (e.g., stablecoin pairs)
             amount_out = int(Decimal(amount_in) * (1 - fee_fraction))
