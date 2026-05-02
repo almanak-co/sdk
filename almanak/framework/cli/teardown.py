@@ -646,6 +646,19 @@ def execute_teardown(
 
     managed_gateway: ManagedGateway | None = None
 
+    # Resolve wallet address up-front (VIB-3819): the managed-gateway path
+    # below needs it to pre-fund the Anvil fork during boot. Both gateway
+    # paths (--no-gateway and managed) and the strategy-instantiation block
+    # below (~line 800) consume it.
+    wallet_address = config_dict.get("wallet_address")
+    if not wallet_address:
+        private_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+        if private_key:
+            wallet_address = Account.from_key(private_key).address
+    # Note: missing wallet_address is non-fatal here — managed gateway can
+    # still boot (only Anvil pre-funding is skipped). Hard-fail happens at
+    # strategy instantiation.
+
     if no_gateway:
         # --no-gateway: connect to an existing gateway, fail if unavailable
         click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
@@ -703,12 +716,85 @@ def execute_teardown(
             auth_token=session_auth_token,
         )
 
-        click.echo(
-            f"Starting managed gateway on {effective_host}:{gateway_port} (network={resolved_network}, chain={chain})..."
+        # VIB-3819: when running against --network anvil, the gateway must boot
+        # an Anvil fork for the strategy's chain (and pre-fund the wallet) — the
+        # `strat run` path does this via run_helpers; teardown was missing it,
+        # causing the balance provider to hit a dead RPC port (8548) and the
+        # strategy's get_open_positions() to swallow the error and report "no
+        # positions". VIB-3705's no-op branch then exits 0 while WETH (or any
+        # held position) is silently stranded on-chain. Mirror the run-helpers
+        # pattern: pass anvil_chains, wallet_address, anvil_funding so the fork
+        # actually starts and is pre-funded for the close swap.
+        #
+        # Multi-chain teardown: prefer config["chains"] (a list, possibly with
+        # multiple entries) over the scalar `chain`, so a strategy holding
+        # positions on more than one chain has every fork started. Falls back
+        # to [chain] for the common single-chain case. Mirrors the
+        # run_helpers.py:882-897 derivation order so behavior between
+        # `strat run` and `strat teardown` stays identical (Codex review,
+        # multi-chain teardown gap).
+        anvil_chains: list[str] = []
+        if resolved_network == "anvil":
+            from .run_helpers import _normalize_quick_chains
+
+            chains_val = config_dict.get("chains")
+            if chains_val is not None:
+                anvil_chains = _normalize_quick_chains(chains_val)
+            elif chain:
+                anvil_chains = [chain]
+
+            # Solana uses solana-test-validator (not Anvil); filter it out so
+            # ManagedGateway doesn't try to start a RollingForkManager for it.
+            # Mirrors run_helpers.py:907-910. Teardown of a Solana-only
+            # strategy on --network anvil falls through with anvil_chains=[]
+            # — a future ticket can wire the same SolanaForkManager flow
+            # `strat run` uses (claude pr-auditor follow-up).
+            NON_EVM_CHAINS = {"solana"}
+            anvil_chains = [c for c in anvil_chains if c.lower() not in NON_EVM_CHAINS]
+
+        anvil_funding = config_dict.get("anvil_funding", {}) if anvil_chains else {}
+
+        if anvil_chains:
+            click.echo(
+                f"Starting managed gateway on {effective_host}:{gateway_port} "
+                f"(network={resolved_network}, anvil chains: {', '.join(anvil_chains)})..."
+            )
+        else:
+            click.echo(
+                f"Starting managed gateway on {effective_host}:{gateway_port} "
+                f"(network={resolved_network}, chain={chain})..."
+            )
+        managed_gateway = ManagedGateway(
+            gateway_settings,
+            anvil_chains=anvil_chains,
+            wallet_address=wallet_address,
+            anvil_funding=anvil_funding,
         )
-        managed_gateway = ManagedGateway(gateway_settings)
+
+        # Match run_helpers.py timeout policy: archive-RPC chains (Avalanche,
+        # Ethereum, Polygon) take 60-90s to fork from a cold cache; the legacy
+        # 10s default raced the fork and returned a half-started gateway.
+        # Source the slow-chain set from ManagedGateway directly (gemini-code-
+        # assist review) so this code can never drift if the gateway adds a
+        # new archive-RPC chain — there is one source of truth, not three.
+        _GATEWAY_WARMUP_HEADROOM = 30.0
+        if anvil_chains:
+            from almanak.core.constants import resolve_chain_name as _resolve_chain
+
+            def _canonical(c: str) -> str:
+                try:
+                    return _resolve_chain(c)
+                except ValueError:
+                    return c.strip().lower()
+
+            slow_chains = ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS
+            anvil_fork_budget = sum(90.0 if _canonical(c) in slow_chains else 30.0 for c in anvil_chains)
+            startup_timeout = anvil_fork_budget + _GATEWAY_WARMUP_HEADROOM
+        else:
+            startup_timeout = 10.0
+
         try:
-            managed_gateway.start(timeout=10.0)
+            managed_gateway.start(timeout=startup_timeout)
         except RuntimeError as e:
             logger.error("Managed gateway startup failed", exc_info=True)
             click.echo()
@@ -741,15 +827,13 @@ def execute_teardown(
     try:
         resolver.set_gateway_channel(gateway_client.channel)
 
-        # Resolve wallet address from config first, then private key.
-        wallet_address = config_dict.get("wallet_address")
+        # Wallet address was resolved before gateway start (VIB-3819 fix) so
+        # the Anvil fork could pre-fund it. Hard-fail here if still missing —
+        # strategy instantiation needs it.
         if not wallet_address:
-            private_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
-            if not private_key:
-                raise click.ClickException(
-                    "Could not determine wallet address. Set config.wallet_address or ALMANAK_PRIVATE_KEY."
-                )
-            wallet_address = Account.from_key(private_key).address
+            raise click.ClickException(
+                "Could not determine wallet address. Set config.wallet_address or ALMANAK_PRIVATE_KEY."
+            )
 
         # Create config object -- deferred import to avoid heavy run.py import cascade (VIB-522)
         from almanak.framework.cli.run import DictConfigWrapper
