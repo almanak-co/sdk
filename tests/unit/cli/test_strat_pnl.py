@@ -800,6 +800,108 @@ def test_strat_pnl_missing_db_exits_with_error(tmp_path: Path) -> None:
     assert "not found" in result.output
 
 
+def test_strat_pnl_warns_only_on_true_position_limit_truncation(
+    seeded_db: Path,
+) -> None:
+    """The truncation warning must fire iff older events were actually dropped.
+
+    The CLI uses a probe-row pattern (``position_limit + 1`` in the loader
+    call) so that the equality boundary (``len(events) == limit``) is the
+    "exact fit, no truncation" case, not a false-positive trigger.
+
+    seeded_db has 2 LP position events. We exercise three boundaries:
+
+    - ``--position-limit 1`` (N > limit): warning fires, partial data flag.
+    - ``--position-limit 2`` (N == limit, exact fit): no warning.
+    - ``--position-limit 1000`` (N < limit): no warning.
+    """
+    runner = CliRunner()
+
+    # 1. True truncation — warning must fire and surface in both text + JSON.
+    truncated = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--position-limit", "1"],
+    )
+    assert truncated.exit_code == 0, truncated.output
+    assert "--position-limit" in truncated.output
+    assert "Position-derived" in truncated.output
+
+    truncated_json = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--position-limit", "1", "--json"],
+    )
+    assert truncated_json.exit_code == 0, truncated_json.output
+    payload = json.loads(truncated_json.output)
+    assert any(
+        "--position-limit" in w and "Position-derived" in w
+        for w in payload["warnings"]
+    )
+
+    # 2. Exact fit — N == limit, no rows dropped, no warning.
+    exact_fit = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--position-limit", "2"],
+    )
+    assert exact_fit.exit_code == 0, exact_fit.output
+    assert "--position-limit" not in exact_fit.output
+
+    # 3. Limit well above N — no warning.
+    no_trunc = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--position-limit", "1000"],
+    )
+    assert no_trunc.exit_code == 0, no_trunc.output
+    assert "--position-limit" not in no_trunc.output
+
+
+def test_strat_pnl_warns_only_on_true_ledger_limit_truncation(
+    seeded_db: Path,
+) -> None:
+    """Symmetric coverage for ``--ledger-limit``: same probe-row pattern, same
+    boundary semantics.
+
+    seeded_db has 2 swap ledger entries (USDC→WETH + WETH→USDC). Boundaries:
+
+    - ``--ledger-limit 1`` (N > limit): warning fires, partial data flag.
+    - ``--ledger-limit 2`` (N == limit, exact fit): no warning.
+    - ``--ledger-limit 1000`` (N < limit): no warning.
+    """
+    runner = CliRunner()
+
+    truncated = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--ledger-limit", "1"],
+    )
+    assert truncated.exit_code == 0, truncated.output
+    assert "--ledger-limit" in truncated.output
+    assert "Ledger-derived" in truncated.output
+
+    truncated_json = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--ledger-limit", "1", "--json"],
+    )
+    assert truncated_json.exit_code == 0, truncated_json.output
+    payload = json.loads(truncated_json.output)
+    assert any(
+        "--ledger-limit" in w and "Ledger-derived" in w
+        for w in payload["warnings"]
+    )
+
+    exact_fit = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--ledger-limit", "2"],
+    )
+    assert exact_fit.exit_code == 0, exact_fit.output
+    assert "--ledger-limit" not in exact_fit.output
+
+    no_trunc = runner.invoke(
+        strat_pnl,
+        ["-s", DEPLOYMENT_ID, "--db", str(seeded_db), "--ledger-limit", "1000"],
+    )
+    assert no_trunc.exit_code == 0, no_trunc.output
+    assert "--ledger-limit" not in no_trunc.output
+
+
 def test_pnl_breakdown_to_json_dict_preserves_null_placeholders() -> None:
     """Decimal fields must serialize as strings; None must remain null."""
     bd = PnLBreakdown(

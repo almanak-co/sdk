@@ -650,17 +650,31 @@ def strat_pnl(
         sys.exit(1)
 
     try:
+        # Probe with one extra row (`limit + 1`) on every truncatable axis so
+        # we can distinguish "exactly N rows, no truncation" from "more than
+        # N, older rows dropped". Without the probe row the only signal is
+        # `len == limit`, which has a false-positive on the equality boundary.
         acct_data = asyncio.run(
             load_accounting_data(
                 resolved_db,
                 strategy_id,
-                ledger_limit=ledger_limit,
-                position_limit=position_limit,
+                ledger_limit=ledger_limit + 1,
+                position_limit=position_limit + 1,
             )
         )
     except Exception as exc:
         click.secho(f"Failed to read state DB: {exc}", fg="red", err=True)
         sys.exit(1)
+
+    # Honour the user's caps downstream: trim each truncated list to the
+    # requested window so reports / counts agree with what the flags asked
+    # for. The truncation flags drive a single warning emitted later.
+    position_events_truncated = len(acct_data.position_events) > position_limit
+    if position_events_truncated:
+        acct_data.position_events = acct_data.position_events[:position_limit]
+    ledger_entries_truncated = len(acct_data.ledger_entries) > ledger_limit
+    if ledger_entries_truncated:
+        acct_data.ledger_entries = acct_data.ledger_entries[:ledger_limit]
 
     metrics = acct_data.metrics
     ledger_entries = acct_data.ledger_entries
@@ -691,6 +705,28 @@ def strat_pnl(
         position_events=position_events,
         snapshot=snapshot,
     )
+
+    # Surface truncation on either axis. The probe-row pattern above means
+    # these fire only when older rows were actually dropped — no false-
+    # positive at the equality boundary. Wording is class-agnostic so the
+    # message stays accurate for LP, perp, lending, and Pendle strategies
+    # (all consume `position_events` for lifecycle stats; `ledger_entries`
+    # back gas + slippage aggregation regardless of strategy class).
+    if position_events_truncated:
+        breakdown.warnings.append(
+            f"Truncated to --position-limit ({position_limit}) position "
+            f"events; the strategy has emitted more. Position-derived "
+            f"stats (lifecycle counts, win rate, strategy-level LP gas, "
+            f"perp lifecycle PnL) are partial — re-run with a higher "
+            f"--position-limit to see the full window."
+        )
+    if ledger_entries_truncated:
+        breakdown.warnings.append(
+            f"Truncated to --ledger-limit ({ledger_limit}) ledger entries; "
+            f"the strategy has emitted more. Ledger-derived stats (gas "
+            f"total, slippage, trade count, avg trade size) are partial "
+            f"— re-run with a higher --ledger-limit to see the full window."
+        )
 
     # Strategy-class-specific sections
     lp_section = build_lp_report(acct_data)
