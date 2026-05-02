@@ -18,10 +18,17 @@ dist/
 local_storage/
 # Local artifacts
 venv/
-almanak_state.db
-almanak_state.db-shm
-almanak_state.db-wal
+# Strategy-scoped SQLite stores (VIB-3761 folder-scoping). Match in any
+# subdirectory so committed reference DBs cannot regress (VIB-3864). Sample
+# DB dumps for accountant-test reports stay LOCAL — never committed.
+**/almanak_state.db
+**/almanak_state.db-shm
+**/almanak_state.db-wal
+**/almanak_state.db.gw.lock
+**/almanak_state.db.*
 almanak_copy_ledger.db
+# Accountant Test reference DB backups (kept locally; never committed).
+docs/internal/AccountantTest-baseline/db-backups/
 .almanak/sdk.json
 scripts/contracts.db
 almanak/.dashboard_events.json

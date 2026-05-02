@@ -137,6 +137,14 @@ def _lookup_price(price_oracle: dict[str, Any] | None, symbol: str) -> Decimal |
     precedence used by ``lending_accounting._amount_to_usd`` so we stay
     consistent across the codebase.  ``None`` is returned for any failure
     (missing oracle, missing key, unparseable value).
+
+    Accepts both shapes the runner emits today:
+      * Flat ``{symbol: price}`` (legacy `MarketSnapshot.get_price_oracle_dict()`).
+      * Nested ``{symbol: {"price_usd": ..., "oracle_source": ..., ...}}`` —
+        the AttemptNo17 G12 shape produced by
+        ``_portfolio_snapshot_to_price_oracle`` for the teardown lane.
+    Without the nested branch, teardown ledger rows lost ``gas_usd`` because
+    `compute_gas_usd` couldn't parse the oracle's nested ``price_usd`` field.
     """
     if not price_oracle:
         return None
@@ -147,6 +155,10 @@ def _lookup_price(price_oracle: dict[str, Any] | None, symbol: str) -> Decimal |
         candidate = price_oracle.get(symbol.lower())
     if candidate is None:
         return None
+    if isinstance(candidate, dict):
+        candidate = candidate.get("price_usd")
+        if candidate is None:
+            return None
     try:
         price = Decimal(str(candidate))
     except (InvalidOperation, ValueError, TypeError):

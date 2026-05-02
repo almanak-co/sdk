@@ -102,6 +102,62 @@ class TestExtractIntentTokens:
         tokens = StrategyRunner._extract_intent_tokens(intent)
         assert tokens == ["USDC"]
 
+    def test_lp_open_intent_parses_pool_with_fee_tier(self):
+        """``LPOpenIntent`` shaped like ``pool="WETH/USDC/500"`` — the third
+        segment is the fee tier, not a token. The parser must keep the first
+        two and drop the rest. Without this, mainnet balance snapshots and
+        price oracles for LP intents were empty (Mainnet 2026-05-01)."""
+        intent = MagicMock()
+        intent.pool = "WETH/USDC/500"
+        # Force the LP-pool branch by removing every earlier-priority attr.
+        del intent.from_token
+        del intent.to_token
+        del intent.token0
+        del intent.token1
+        del intent.token
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["WETH", "USDC"]
+
+    def test_lp_open_intent_parses_two_segment_pool(self):
+        """TraderJoe V2 style — ``"TOKEN0/TOKEN1"`` with bin_step in
+        ``protocol_params`` rather than the pool string."""
+        intent = MagicMock()
+        intent.pool = "AVAX/USDC"
+        del intent.from_token
+        del intent.to_token
+        del intent.token0
+        del intent.token1
+        del intent.token
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["AVAX", "USDC"]
+
+    def test_malformed_pool_string_returns_empty(self):
+        """Single-segment / empty / leading-slash pool strings must NOT be
+        treated as tokens — fail closed rather than fabricating one."""
+        for bad_pool in ("", "TOKENONLY", "/USDC", "  ", "/"):
+            intent = MagicMock()
+            intent.pool = bad_pool
+            del intent.from_token
+            del intent.to_token
+            del intent.token0
+            del intent.token1
+            del intent.token
+            tokens = StrategyRunner._extract_intent_tokens(intent)
+            assert tokens == [], f"unexpected tokens for pool={bad_pool!r}: {tokens}"
+
+    def test_pool_string_strips_whitespace_segments(self):
+        """``"WETH / USDC / 500"`` (operator-typed, whitespace creep) must
+        round-trip cleanly to canonical symbols."""
+        intent = MagicMock()
+        intent.pool = "WETH / USDC / 500"
+        del intent.from_token
+        del intent.to_token
+        del intent.token0
+        del intent.token1
+        del intent.token
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["WETH", "USDC"]
+
 
 # =============================================================================
 # Tests: _reconcile_post_execution_balances

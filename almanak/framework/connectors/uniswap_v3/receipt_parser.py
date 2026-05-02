@@ -1538,6 +1538,14 @@ class UniswapV3ReceiptParser:
         if not position_manager:
             position_manager = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
 
+        mint_topic = EVENT_TOPICS["Mint"].lower()
+        # Receipts come back from the RPC in logIndex order, so iterating in
+        # list order is also chronological order. Track the most recent
+        # eligible Pool Mint we've seen so the next matching IncreaseLiquidity
+        # claims ITS ticks (not some unrelated pool's ticks from a multi-
+        # position bundle).
+        last_npm_mint: dict[str, Any] | None = None
+
         for log in logs:
             if hasattr(log, "get"):
                 topics = log.get("topics", [])
@@ -1552,11 +1560,7 @@ class UniswapV3ReceiptParser:
                 address = "0x" + address.hex()
             address = str(address).lower()
 
-            if address != position_manager:
-                continue
-
-            # IncreaseLiquidity needs at least topic0 + tokenId
-            if len(topics) < 2:
+            if not topics:
                 continue
 
             first_topic = topics[0]
@@ -1565,6 +1569,22 @@ class UniswapV3ReceiptParser:
             first_topic = str(first_topic).lower()
             if not first_topic.startswith("0x"):
                 first_topic = "0x" + first_topic
+
+            # Pool Mint events emitted by NPM-mediated mints carry
+            # ``owner = NPM`` in topics[1]. Track the most recent such Mint
+            # so the next matching IncreaseLiquidity gets ITS ticks (not
+            # some unrelated pool's ticks from a multi-position bundle).
+            if first_topic == mint_topic and len(topics) >= 4:
+                if self._mint_owner_matches_npm(topics, position_manager):
+                    last_npm_mint = log
+                continue
+
+            if address != position_manager:
+                continue
+
+            # IncreaseLiquidity needs at least topic0 + tokenId
+            if len(topics) < 2:
+                continue
 
             if first_topic != increase_topic:
                 continue
@@ -1596,11 +1616,16 @@ class UniswapV3ReceiptParser:
             amount0 = HexDecoder.decode_uint256(normalized, 32)
             amount1 = HexDecoder.decode_uint256(normalized, 64)
 
+            tick_lower, tick_upper = self._ticks_from_mint(last_npm_mint)
+
             logger.info(
-                f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} amount0={amount0} amount1={amount1}"
+                f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} "
+                f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}]"
             )
             return LPOpenData(
                 position_id=token_id,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
                 liquidity=liquidity,
                 amount0=amount0,
                 amount1=amount1,
@@ -1608,20 +1633,80 @@ class UniswapV3ReceiptParser:
 
         return None
 
+    @staticmethod
+    def _mint_owner_matches_npm(topics: list[Any], npm_address: str) -> bool:
+        """Return True iff the Mint event's ``owner`` indexed topic == NPM."""
+        if len(topics) < 2:
+            return False
+        owner_topic = topics[1]
+        if isinstance(owner_topic, bytes):
+            owner_topic = "0x" + owner_topic.hex()
+        owner_topic = str(owner_topic).lower()
+        # Indexed addresses are right-aligned in a 32-byte topic. Compare the
+        # low 40 hex chars (20 bytes) to the NPM address.
+        try:
+            owner_addr = "0x" + owner_topic.removeprefix("0x").rjust(64, "0")[-40:]
+        except Exception:
+            return False
+        return owner_addr == npm_address.lower()
+
+    @staticmethod
+    def _ticks_from_mint(mint_log: dict[str, Any] | None) -> tuple[int | None, int | None]:
+        """Decode (tickLower, tickUpper) from a Pool Mint log, or (None, None).
+
+        Mint(address sender, address indexed owner, int24 indexed tickLower,
+             int24 indexed tickUpper, uint128 amount, uint256 amount0,
+             uint256 amount1) — ticks are at topics[2] and topics[3].
+        """
+        if mint_log is None:
+            return (None, None)
+        topics = mint_log.get("topics", []) if hasattr(mint_log, "get") else getattr(mint_log, "topics", [])
+        if len(topics) < 4:
+            return (None, None)
+
+        def _decode(topic: Any) -> int | None:
+            if isinstance(topic, bytes):
+                topic = "0x" + topic.hex()
+            try:
+                return HexDecoder.decode_int24(str(topic), 0)
+            except Exception:
+                return None
+
+        return (_decode(topics[2]), _decode(topics[3]))
+
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from transaction receipt.
 
-        Looks for Collect events from Uniswap V3 pools which indicate
-        fees and principal being collected when closing/reducing a position.
+        Decodes the Uniswap V3 LP close pattern: ``decreaseLiquidity`` emits
+        ``Burn`` (which carries the principal amounts), and ``collect``
+        emits ``Collect`` (which carries principal PLUS earned fees). The
+        accrued fees are the difference between the two.
 
-        Collect event: Collect(address indexed owner, int24 indexed tickLower,
-                               int24 indexed tickUpper, uint128 amount0, uint128 amount1)
+        Burn event: Burn(address indexed owner, int24 indexed tickLower,
+                         int24 indexed tickUpper, uint128 amount,
+                         uint256 amount0, uint256 amount1)
+        - data layout: amount (uint128, left-padded to 32B)
+                       ‖ amount0 (uint256) ‖ amount1 (uint256)
+
+        Collect event: Collect(address indexed owner, address recipient,
+                               int24 indexed tickLower, int24 indexed tickUpper,
+                               uint128 amount0, uint128 amount1)
+        - ``owner``, ``tickLower``, ``tickUpper`` are indexed (3 topics + topic0).
+          ``recipient`` is **non-indexed** — it occupies the first 32-byte data
+          slot, so amount0/amount1 start at offsets 32 and 64, not 0 and 32.
+        - data layout: recipient (address, left-padded to 32B)
+                       ‖ amount0 (uint128, left-padded to 32B)
+                       ‖ amount1 (uint128, left-padded to 32B)
+
+        For a fee-only ``collect()`` (no decreaseLiquidity in the same TX —
+        e.g. an in-range fee harvest), there is no Burn event. We treat the
+        full Collect amounts as fees, with principal = 0.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
 
         Returns:
-            LPCloseData dataclass if Collect event found, None otherwise
+            LPCloseData if Burn or Collect event found, None otherwise.
         """
         from almanak.framework.execution.extracted_data import LPCloseData
 
@@ -1633,16 +1718,19 @@ class UniswapV3ReceiptParser:
             collect_topic = EVENT_TOPICS["Collect"].lower()
             burn_topic = EVENT_TOPICS["Burn"].lower()
 
-            total_amount0 = 0
-            total_amount1 = 0
-            liquidity_removed = None
+            collect_amount0 = 0
+            collect_amount1 = 0
+            burn_amount0 = 0
+            burn_amount1 = 0
+            burn_liquidity_total = 0
+            saw_burn = False
+            saw_collect = False
 
             for log in logs:
                 topics = log.get("topics", [])
                 if not topics:
                     continue
 
-                # Check event type
                 first_topic = topics[0]
                 if isinstance(first_topic, bytes):
                     first_topic = "0x" + first_topic.hex()
@@ -1651,28 +1739,43 @@ class UniswapV3ReceiptParser:
                 data = HexDecoder.normalize_hex(log.get("data", ""))
 
                 if first_topic == collect_topic and len(topics) >= 4:
-                    # Collect event - amounts collected
-                    # data: amount0 (uint128), amount1 (uint128)
-                    amount0 = HexDecoder.decode_uint128(data, 0)
-                    amount1 = HexDecoder.decode_uint128(data, 32)
-                    total_amount0 += amount0
-                    total_amount1 += amount1
+                    # data: recipient (32B padded address)
+                    #     ‖ amount0 (uint128, 32B padded)
+                    #     ‖ amount1 (uint128, 32B padded)
+                    # `recipient` is non-indexed in the Pool Collect event, so
+                    # amount0/amount1 sit at offsets 32 and 64 — not 0 and 32.
+                    collect_amount0 += HexDecoder.decode_uint128(data, 32)
+                    collect_amount1 += HexDecoder.decode_uint128(data, 64)
+                    saw_collect = True
 
                 elif first_topic == burn_topic and len(topics) >= 4:
-                    # Burn event - liquidity being removed
-                    # data: amount (uint128), amount0 (uint256), amount1 (uint256)
-                    liquidity_removed = HexDecoder.decode_uint128(data, 0)
+                    # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
+                    # Accumulate across multiple Burn logs in the same receipt
+                    # (multicall LP_CLOSE) — the previous overwrite-only path
+                    # silently kept just the last Burn's liquidity.
+                    burn_liquidity_total += HexDecoder.decode_uint128(data, 0)
+                    burn_amount0 += HexDecoder.decode_uint256(data, 32)
+                    burn_amount1 += HexDecoder.decode_uint256(data, 64)
+                    saw_burn = True
 
-            if total_amount0 > 0 or total_amount1 > 0:
-                return LPCloseData(
-                    amount0_collected=total_amount0,
-                    amount1_collected=total_amount1,
-                    fees0=0,  # Uniswap V3 doesn't separate fees in events
-                    fees1=0,
-                    liquidity_removed=liquidity_removed,
-                )
+            if not (saw_collect or saw_burn):
+                return None
 
-            return None
+            liquidity_removed = burn_liquidity_total if saw_burn else None
+
+            # principal = burn amounts (zero on fee-only collect — that's correct)
+            # fees = collect - burn (clamped at zero in case of pre-existing
+            # tokensOwed dust we can't separate cleanly)
+            fees0 = max(collect_amount0 - burn_amount0, 0) if saw_collect else 0
+            fees1 = max(collect_amount1 - burn_amount1, 0) if saw_collect else 0
+
+            return LPCloseData(
+                amount0_collected=collect_amount0 if saw_collect else burn_amount0,
+                amount1_collected=collect_amount1 if saw_collect else burn_amount1,
+                fees0=fees0,
+                fees1=fees1,
+                liquidity_removed=liquidity_removed,
+            )
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")

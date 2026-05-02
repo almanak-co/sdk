@@ -48,6 +48,7 @@ from almanak.framework.accounting.models import (
     PendleEventType,
 )
 from almanak.framework.accounting.writer import AccountingWriter
+from almanak.framework.state.exceptions import AccountingPersistenceError
 from almanak.framework.connectors.pendle.receipt_parser import EVENT_TOPICS, PendleReceiptParser
 from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
@@ -392,7 +393,11 @@ class TestAccountingModels:
             confidence=AccountingConfidence.UNAVAILABLE,
         )
 
-        with pytest.raises(RuntimeError, match="save_accounting_event"):
+        # AttemptNo17: writer raises ``AccountingPersistenceError`` (a typed
+        # ``Exception`` subclass introduced by VIB-3863) instead of the legacy
+        # bare ``RuntimeError``. The message still includes
+        # ``save_accounting_event`` so operators can grep for it.
+        with pytest.raises(AccountingPersistenceError, match="save_accounting_event"):
             await writer.write(event)
 
     def test_fifo_basis_no_lots_returns_unmatched(self):  # noqa: layers

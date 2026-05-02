@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2907,14 +2908,27 @@ def _run_test_lifecycle(
                     click.echo(f"\n→ force_action={action!r}")
                 logs_before = log_buffer.next_id
                 try:
+                    iteration_start_monotonic = time.monotonic()
                     result = await runner.run_iteration(strategy_instance)
-                    # Capture portfolio snapshot per iteration (mirrors _run_once).
-                    # Snapshot failures must propagate; matches _run_once semantics.
-                    if runner.config.enable_state_persistence:
-                        await runner._capture_portfolio_snapshot(
-                            strategy=strategy_instance,
-                            iteration_number=runner._total_iterations,
-                        )
+                    # Capture portfolio snapshot per iteration through the
+                    # canonical helper so the live-mode ``ACCOUNTING_FAILED``
+                    # escalation contract (VIB-3762) is honoured. Direct
+                    # calls to ``_capture_portfolio_snapshot`` here were the
+                    # April 29 silent-failure shape: a live ledger-write
+                    # exception in the snapshot path was swallowed by the
+                    # surrounding ``except Exception`` and the loop carried
+                    # on with a half-persisted iteration.
+                    from almanak.framework.runner._run_loop_helpers import (
+                        capture_snapshot_with_accounting,
+                    )
+
+                    result = await capture_snapshot_with_accounting(
+                        runner=runner,
+                        strategy=strategy_instance,
+                        strategy_id=getattr(strategy_instance, "strategy_id", "") or "",
+                        result=result,
+                        iteration_start_monotonic=iteration_start_monotonic,
+                    )
                     runner._emit_iteration_summary(result, chain=getattr(strategy_instance, "chain", None))
                 except Exception as exc:
                     # Record the raise as a synthetic failed step and break — but DO NOT
@@ -2973,7 +2987,24 @@ def _run_test_lifecycle(
                             requested_by="cli",
                         )
                     )
+                    td_iteration_start = time.monotonic()
                     td_result = await runner.run_iteration(strategy_instance)
+                    # Same accounting-snapshot wrapper as the force-action
+                    # iteration above — without this, a live teardown's
+                    # ledger-write failure during the post-iteration snapshot
+                    # would be swallowed (the canonical April 29 silent-
+                    # failure shape).
+                    from almanak.framework.runner._run_loop_helpers import (
+                        capture_snapshot_with_accounting,
+                    )
+
+                    td_result = await capture_snapshot_with_accounting(
+                        runner=runner,
+                        strategy=strategy_instance,
+                        strategy_id=strategy_id,
+                        result=td_result,
+                        iteration_start_monotonic=td_iteration_start,
+                    )
                     runner._emit_iteration_summary(td_result, chain=getattr(strategy_instance, "chain", None))
                 except Exception as exc:
                     # Materialize a failed teardown step instead of letting the

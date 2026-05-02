@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..state.exceptions import AccountingPersistenceError
@@ -333,6 +333,63 @@ async def capture_snapshot_with_accounting(
     return result
 
 
+def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
+    """Convert a PortfolioSnapshot.token_prices dict into the price_oracle
+    shape consumed by ``build_ledger_entry``.
+
+    PortfolioSnapshot stores prices keyed by ``chain:address`` with values
+    ``{"price_usd": str, "symbol": str, "decimals": int|None}``. The ledger
+    writer expects either a flat ``{symbol: usd}`` dict or the shaped
+    ``{symbol: {price_usd, oracle_source, fetched_at, confidence}}`` form
+    (Accounting-AttemptNo17 §1.2 G12).
+
+    This converter emits the shaped form, stamps ``oracle_source="portfolio_valuer"``
+    so auditors can grep "exposure by oracle" against teardown rows, and
+    threads the snapshot timestamp through as ``fetched_at``. Confidence is
+    inherited from the snapshot's ValueConfidence.
+
+    Returns ``None`` when the snapshot is missing or has no token prices —
+    callers fall back to the ``price_oracle=None`` path on
+    ``_write_ledger_entry``, which leaves ``price_inputs_json=""`` (the
+    pre-fix behaviour). That's preferable to fabricating a price.
+    """
+    if snapshot is None:
+        return None
+    token_prices = getattr(snapshot, "token_prices", None) or {}
+    if not token_prices:
+        return None
+
+    # ValueConfidence -> Accountant Test confidence taxonomy
+    confidence_attr = getattr(snapshot, "value_confidence", None)
+    confidence_str = getattr(confidence_attr, "value", None) or getattr(confidence_attr, "name", None) or "ESTIMATED"
+    confidence_str = str(confidence_str).upper()
+    # Map "HIGH" through; collapse anything else to ESTIMATED so the
+    # downstream confidence vocabulary stays bounded.
+    if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
+        confidence_str = "ESTIMATED"
+
+    timestamp = getattr(snapshot, "timestamp", None)
+    fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+
+    oracle: dict[str, dict[str, Any]] = {}
+    for _key, val in token_prices.items():
+        if not isinstance(val, dict):
+            continue
+        symbol = val.get("symbol") or ""
+        price_usd = val.get("price_usd")
+        if not symbol or price_usd is None:
+            continue
+        # Last-write-wins on duplicate symbol across chains: teardown is
+        # single-chain so this collision is rare, but stamp determinism.
+        oracle[str(symbol)] = {
+            "price_usd": str(price_usd),
+            "oracle_source": "portfolio_valuer",
+            "fetched_at": fetched_at,
+            "confidence": confidence_str,
+        }
+    return oracle or None
+
+
 @dataclass(frozen=True)
 class TeardownSnapshotOutcome:
     """Outcome of a single pre- or post-teardown snapshot bracket.
@@ -479,6 +536,20 @@ async def capture_teardown_snapshot_with_accounting(
                 force_snapshot=True,
             )
             snapshot_captured = snapshot is not None
+            # G12 wiring: stash the per-cycle price oracle for the teardown
+            # commit pipeline. ``commit_teardown_intent`` reads
+            # ``runner._teardown_price_oracle`` and threads it into
+            # ``_write_ledger_entry`` so every teardown row carries
+            # ``price_inputs_json``. Set on the pre-bracket; cleared in the
+            # post-bracket below so an iteration after teardown never sees
+            # stale teardown prices.
+            if pre_teardown:
+                runner._teardown_price_oracle = _portfolio_snapshot_to_price_oracle(snapshot)
+            elif not getattr(runner, "_teardown_price_oracle", None):
+                # Fallback: pre-snapshot failed but post produced prices.
+                # Better to record post-teardown prices than to leave the
+                # row's price_inputs_json empty.
+                runner._teardown_price_oracle = _portfolio_snapshot_to_price_oracle(snapshot)
         except AccountingPersistenceError as acc_err:
             accounting_degraded = True
             degraded_reason = (
@@ -516,6 +587,14 @@ async def capture_teardown_snapshot_with_accounting(
         else:
             set_cycle_id(saved_ctx_cycle_id)
         runner._last_cycle_id = saved_last_cycle_id
+        # G12 teardown stash lifecycle (Accounting-AttemptNo17 §A4): the
+        # post-bracket clears the stash so the next iteration's lane
+        # never reads teardown prices that may be stale by then. If the
+        # post-bracket itself failed, the stash still lived through every
+        # commit_teardown_intent call (where it matters), so clearing
+        # here is safe regardless of accounting_degraded.
+        if not pre_teardown:
+            runner._teardown_price_oracle = None
 
     return TeardownSnapshotOutcome(
         snapshot_captured=snapshot_captured,

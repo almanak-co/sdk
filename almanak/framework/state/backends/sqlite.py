@@ -2574,11 +2574,31 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
 
     async def save_accounting_event(self, event: Any) -> bool:
-        """Persist a typed accounting event (LendingAccountingEvent, PendleAccountingEvent, etc.)."""
+        """Persist a typed accounting event (LendingAccountingEvent, PendleAccountingEvent, etc.).
+
+        G13 stamp + L1/L4 alias projection (Accounting-AttemptNo17 §A4) —
+        scoped to the SQLite/local persistence path: every accounting write
+        that lands in the local SDK SQLite backend is augmented here, so the
+        local stamp + alias-projection is per-backend rather than per-caller.
+        The hosted (gateway) path performs the same augmentation in
+        ``GatewayStateManager.save_accounting_event`` before the gRPC hop —
+        the projection is therefore *single-point per backend*, not single-
+        point across the whole writer surface (the SQLite backend cannot
+        observe writes that go straight through the gateway, and vice versa).
+        """
         if not self._initialized:
             await self.initialize()
 
         identity = event.identity
+        # Augment payload with version stamps + lending aliases at the
+        # last possible moment, regardless of who called us. Mode-aware
+        # error contract (VIB-3863): live raises AccountingPersistenceError
+        # on a malformed payload so the runner halts; paper/dry-run logs
+        # ERROR and pass-throughs so the loop keeps moving.
+        from ...accounting.writer import augment_accounting_payload
+
+        is_live = getattr(identity, "execution_mode", "") == "live"
+        payload_json = augment_accounting_payload(event.to_payload_json(), is_live=is_live)
 
         def _sync_save() -> bool:
             with self._db_lock:
@@ -2605,7 +2625,7 @@ class SQLiteStore:
                         identity.ledger_entry_id,
                         identity.tx_hash,
                         str(event.confidence),
-                        event.to_payload_json(),
+                        payload_json,
                         event.schema_version,
                     ),
                 )

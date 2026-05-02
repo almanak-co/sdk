@@ -214,8 +214,21 @@ async def commit_teardown_intent(
             _record("enrich", exc)
 
         # ----- Step 2: ledger entry --------------------------------------
+        # G12 wiring (Accounting-AttemptNo17 §A4): the teardown lane has no
+        # ``state.price_oracle`` because there's no per-iteration state, so
+        # the pre-teardown bracket stashes the priced PortfolioSnapshot's
+        # token_prices on ``runner._teardown_price_oracle`` after re-shaping
+        # to the build_ledger_entry contract. Without this, every teardown
+        # row landed with empty ``price_inputs_json`` and ``gas_usd``.
+        teardown_price_oracle = getattr(runner, "_teardown_price_oracle", None)
         try:
-            ledger_entry_id = await runner._write_ledger_entry(strategy, intent, result=enriched_result, success=True)
+            ledger_entry_id = await runner._write_ledger_entry(
+                strategy,
+                intent,
+                result=enriched_result,
+                success=True,
+                price_oracle=teardown_price_oracle,
+            )
         except Exception as exc:  # noqa: BLE001 — never propagate
             logger.error(
                 "commit_teardown_intent: ledger write failed for %s/%s tx=%s: %s",
@@ -246,11 +259,17 @@ async def commit_teardown_intent(
             from ..accounting.sidecar import AccountingSidecarWriter
 
             chain = getattr(strategy, "chain", "") or getattr(runner.config, "chain", "")
+            # Pass the SAME teardown-stash oracle the ledger write used
+            # (Accounting-AttemptNo17 §A4) so the local-dashboard sidecar
+            # row carries the same priced asset set as the canonical SQLite
+            # row. Without this, the teardown sidecar JSONL line was missing
+            # the price_oracle entirely.
             AccountingSidecarWriter().append(
                 strategy_id=strategy_id,
                 intent=intent,
                 result=enriched_result,
                 chain=chain,
+                price_oracle=teardown_price_oracle,
             )
         except Exception as exc:  # noqa: BLE001 — never propagate
             logger.error(

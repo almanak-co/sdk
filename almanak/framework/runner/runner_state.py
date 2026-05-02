@@ -757,16 +757,36 @@ async def reconcile_post_execution_balances(
 
 
 def extract_intent_tokens(intent: AnyIntent) -> list[str]:
-    """Extract token symbols involved in an intent."""
+    """Extract token symbols involved in an intent.
+
+    Mainnet 2026-05-01: ``LPOpenIntent`` carries the pool symbols inside
+    the ``pool`` string (e.g. ``"WETH/USDC/500"``) — there are no separate
+    ``token0`` / ``token1`` attrs on the intent. Without parsing the pool
+    string, every LP intent reported zero tokens, leaving
+    ``state.pre_snapshot=None`` and ``state.price_oracle`` un-augmented.
+    """
     tokens: list[str] = []
     # SwapIntent
     if hasattr(intent, "from_token") and hasattr(intent, "to_token"):
         tokens.extend([intent.from_token, intent.to_token])
-    # LP intents
-    elif hasattr(intent, "token0") and hasattr(intent, "token1"):
+        return tokens
+    # LP intents with explicit token0/token1 (legacy or test-only)
+    if hasattr(intent, "token0") and hasattr(intent, "token1"):
         tokens.extend([intent.token0, intent.token1])
+        return tokens
+    # LPOpenIntent / LPCloseIntent: parse the pool string. Pool format is
+    # typically "TOKEN0/TOKEN1[/FEE_TIER]" (Uniswap V3, Aerodrome,
+    # PancakeSwap, ...) or "TOKEN0/TOKEN1" (TraderJoe V2 with bin_step in
+    # protocol_params). Anything past the second segment is fee/curve
+    # metadata, not a token.
+    pool = getattr(intent, "pool", "") or ""
+    if "/" in pool:
+        parts = [p.strip() for p in pool.split("/") if p.strip()]
+        if len(parts) >= 2:
+            tokens.extend(parts[:2])
+            return tokens
     # Supply/Borrow intents
-    elif hasattr(intent, "token"):
+    if hasattr(intent, "token"):
         tokens.append(intent.token)
     return tokens
 

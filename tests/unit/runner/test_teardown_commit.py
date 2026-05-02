@@ -129,7 +129,7 @@ def patch_enricher_and_sidecar(monkeypatch: pytest.MonkeyPatch):
     sidecar_calls: list[dict] = []
 
     class _SpySidecar:
-        def append(self, *, strategy_id, intent, result, chain):
+        def append(self, *, strategy_id, intent, result, chain, price_oracle=None):
             sidecar_calls.append(
                 {
                     "strategy_id": strategy_id,
@@ -138,6 +138,7 @@ def patch_enricher_and_sidecar(monkeypatch: pytest.MonkeyPatch):
                     ),
                     "chain": chain,
                     "result_enriched": getattr(result, "enriched", False),
+                    "price_oracle_passed": price_oracle is not None,
                 }
             )
 
@@ -382,7 +383,7 @@ async def test_cycle_id_set_during_helper_and_restored(
     # Capture cycle_id seen by ledger/outbox writers.
     seen_cycle_ids: list[str | None] = []
 
-    async def _capture_ledger(strategy, intent, *, result, success, error=""):
+    async def _capture_ledger(strategy, intent, *, result, success, error="", price_oracle=None):
         seen_cycle_ids.append(get_cycle_id())
         return "ledger-1"
 
@@ -453,7 +454,7 @@ async def test_enrich_failure_does_not_block_ledger_outbox_sidecar(
     sidecar_seen: list[bool] = []
 
     class _SpySidecar:
-        def append(self, *, strategy_id, intent, result, chain):
+        def append(self, *, strategy_id, intent, result, chain, price_oracle=None):
             sidecar_seen.append(True)
 
     monkeypatch.setattr(

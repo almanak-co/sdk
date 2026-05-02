@@ -512,7 +512,20 @@ class GatewayStateManager:
         identity = event.identity
         is_live = getattr(identity, "execution_mode", "") == "live"
         try:
-            payload_bytes = event.to_payload_json().encode("utf-8")
+            # Augment payload before gRPC send so the version stamps + lending
+            # aliases survive every downstream path (G13, L1/L4 — see
+            # accounting.writer.augment_accounting_payload). Without this,
+            # mainnet runs produced rows missing matching_policy_version
+            # despite the SQLite chokepoint augmenter — the gateway routing
+            # has multiple consumers, not all of which re-serialize through
+            # SQLiteStore.save_accounting_event.
+            #
+            # Mode-aware error contract (VIB-3863): live raises
+            # AccountingPersistenceError on a malformed payload so the runner
+            # halts; paper/dry-run logs ERROR and pass-throughs.
+            from ..accounting.writer import augment_accounting_payload
+
+            payload_bytes = augment_accounting_payload(event.to_payload_json(), is_live=is_live).encode("utf-8")
             request = gateway_pb2.SaveAccountingEventRequest(
                 id=identity.id,
                 deployment_id=identity.deployment_id,

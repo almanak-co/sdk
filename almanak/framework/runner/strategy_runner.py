@@ -161,6 +161,56 @@ def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
     return ExecutionMode.LIVE
 
 
+def _build_pre_state_for_ledger(pre_snapshot: Any) -> dict[str, Any] | None:
+    """Build a ``pre_state`` dict for the ledger writer from a balance snapshot.
+
+    Accounting-AttemptNo17 §A4 (VIB-3480 columns finally populated): the
+    runner is the single capture point. Without this, ``pre_state_json`` was
+    NULL on every ledger row.
+
+    Returns ``None`` when ``pre_snapshot`` is missing — leaves the column at
+    its default empty string. Honest absence over fabricated data.
+    """
+    if pre_snapshot is None:
+        return None
+    balances = getattr(pre_snapshot, "balances", None) or {}
+    if not balances:
+        return None
+    timestamp = getattr(pre_snapshot, "timestamp", None)
+    captured_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+    return {
+        "wallet_balances": {k: str(v) for k, v in balances.items()},
+        "captured_at": captured_at,
+        "source": "balance_provider",
+    }
+
+
+def _build_post_state_for_ledger(recon: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build a ``post_state`` dict for the ledger writer from a reconciliation report.
+
+    The reconciliation step in ``_single_chain_handle_success`` already
+    queried post-execution balances and put them on ``recon["post_balances"]``.
+    Reusing those avoids a redundant RPC round-trip and guarantees the
+    ledger row's ``post_state_json`` matches the reconciliation balances
+    byte-for-byte (zero drift between the recon report and the ledger).
+
+    Returns ``None`` when reconciliation didn't produce post_balances —
+    typical paths: pre-execution failure, no intent tokens, or every
+    balance query failed.
+    """
+    if not recon:
+        return None
+    post_balances = recon.get("post_balances")
+    if not post_balances:
+        return None
+    return {
+        "wallet_balances": dict(post_balances),
+        "captured_at": recon.get("post_timestamp", "") or "",
+        "source": "balance_provider",
+        "incident": bool(recon.get("incident", False)),
+    }
+
+
 # =============================================================================
 # Per-iteration mutable state (Phase 3b refactor)
 # =============================================================================
@@ -393,6 +443,15 @@ class StrategyRunner:
         self._snapshot_interval_seconds = 300  # Capture time-series snapshot every 5 min
         self._portfolio_valuer = PortfolioValuer()
         self._iteration_had_trade = False  # Set by _write_ledger_entry on success
+
+        # G12 teardown-lane price oracle stash (Accounting-AttemptNo17 §A4).
+        # Set by ``capture_teardown_snapshot_with_accounting`` (pre-bracket)
+        # and read by ``commit_teardown_intent`` so every teardown ledger row
+        # carries ``price_inputs_json`` and ``gas_usd``. Cleared in the
+        # post-bracket finally so a subsequent iteration after teardown never
+        # sees stale teardown prices. ``None`` = no stash; the writer falls
+        # back to the unpriced path (price_inputs_json="").
+        self._teardown_price_oracle: dict | None = None
 
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
@@ -1842,6 +1901,8 @@ class StrategyRunner:
         success: bool,
         error: str = "",
         price_oracle: dict | None = None,
+        pre_state: dict | None = None,
+        post_state: dict | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -1874,6 +1935,8 @@ class StrategyRunner:
                 success=success,
                 error=error,
                 price_oracle=price_oracle,
+                pre_state=pre_state,
+                post_state=post_state,
             )
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
@@ -2557,6 +2620,91 @@ class StrategyRunner:
         state.pre_snapshot = await self._snapshot_balances_for_intent(intent)
 
     @staticmethod
+    def _refresh_price_oracle_for_ledger(market: Any | None, intent: AnyIntent) -> dict | None:
+        """Best-effort price-oracle refresh at ledger-write time.
+
+        ``state.price_oracle`` is captured at intent-init time. For an
+        indicator strategy whose ``decide()`` only calls ``market.price()``
+        for a subset of tokens, the runner pre-fetch may run BEFORE the
+        gateway has finished warming the rest. The ledger write that
+        comes after execution still sees the empty pre-execution oracle.
+
+        This helper re-queries ``market.get_price_oracle_dict()`` at the
+        write site — by then the gateway has answered every leg and any
+        post-warming has landed in the local cache. It mirrors
+        :meth:`_build_single_chain_price_oracle` so the post-execution
+        ledger path tops off the same set of tokens as the pre-execution
+        compile path: intent legs PLUS the chain's native gas token. Without
+        the native top-off, gas_usd stays empty for any intent that doesn't
+        already reference the gas token (e.g. a Polygon USDC→WETH swap that
+        never names MATIC). Failure is silent (returns None); the writer
+        falls back to the unpriced path rather than raising.
+        """
+        if market is None or not hasattr(market, "get_price_oracle_dict"):
+            return None
+        try:
+            tokens = _extract_tokens_from_intent(intent)
+            if hasattr(market, "price"):
+                for token in tokens:
+                    try:
+                        market.price(token)
+                    except Exception:
+                        continue
+            oracle = market.get_price_oracle_dict() or {}
+
+            # Mirror the native-gas pre-fetch in ``_build_single_chain_price_oracle``
+            # so the refresh helper covers the same case the build path
+            # added in VIB-3804. Same guard: only attempt this when the
+            # oracle already carries at least one priced token, so we don't
+            # convert an empty oracle into a "native-only" oracle which
+            # would flip the placeholder-price signal downstream.
+            if oracle and hasattr(market, "price"):
+                chain = getattr(market, "chain", None) or getattr(intent, "chain", None)
+                if chain:
+                    from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+                    native_symbol = native_token_for_chain(chain)
+                    if native_symbol and native_symbol not in oracle:
+                        try:
+                            market.price(native_symbol)
+                        except Exception:
+                            logger.debug(
+                                "gas_pricing: native pre-fetch failed (refresh path) for chain=%s symbol=%s",
+                                chain,
+                                native_symbol,
+                            )
+                        oracle = market.get_price_oracle_dict() or oracle
+
+            return oracle or None
+        except Exception:  # noqa: BLE001 — never raise on a best-effort refresh
+            return None
+
+    def _merge_oracle_for_ledger(self, state: Any, intent: AnyIntent) -> dict | None:
+        """Refresh the market oracle and merge with the cached one.
+
+        Threading consistency: every ledger-write call site (success,
+        slippage, reconciliation-failure, generic-failure) must pass an
+        oracle that is at least as complete as the cached
+        ``state.price_oracle``. The previous "use cache OR refresh" pattern
+        left a reachable hole — init captured intent legs but not the
+        native gas token, so a SWAP whose cache was non-empty but didn't
+        carry the gas-token price wrote ``gas_usd=""`` on the ledger row
+        even though the market cache was warm by the time of the write.
+
+        The merge is additive: cached values win on key collision so we
+        don't trample a HIGH-confidence price with a STALE refresh, but
+        any key the cache lacked gets filled from the refresh.
+        """
+        cached = getattr(state, "price_oracle", None) or {}
+        refreshed = self._refresh_price_oracle_for_ledger(getattr(state, "market", None), intent) or {}
+        if not cached and not refreshed:
+            return None
+        # ``refreshed`` first, ``cached`` overrides — preserves cached
+        # provenance / confidence on overlap, fills gaps from refresh.
+        merged: dict = {**refreshed, **cached}
+        return merged or None
+
+    @staticmethod
     def _build_single_chain_price_oracle(market: Any | None, intent: AnyIntent) -> dict | None:
         """Extract and normalize the price oracle dict from a market snapshot.
 
@@ -3069,12 +3217,30 @@ class StrategyRunner:
         # ledger writer can convert wei-gas-cost to USD via the chain's
         # native-token price.  Without this, transaction_ledger.gas_usd is
         # always empty for swap and LP intents.
+        # Accounting-AttemptNo17 §A4 (VIB-3480): pass pre/post wallet
+        # balance observations so transaction_ledger.pre_state_json /
+        # post_state_json land populated. The reconciliation step above
+        # already computed both — we just thread them through.
+        pre_state = _build_pre_state_for_ledger(state.pre_snapshot)
+        post_state = _build_post_state_for_ledger(recon)
+        # Mainnet 2026-05-01 finding: state.price_oracle was empty for the
+        # very first SWAP iteration of an indicator strategy because market
+        # warming hadn't completed by execution time. Refresh-and-merge the
+        # market's current oracle dict at write time on EVERY ledger write
+        # — the partial-oracle case (init captured some legs but missed the
+        # native gas token) is reachable even when ``state.price_oracle`` is
+        # truthy, and a non-empty cached dict is not evidence that the
+        # ledger row will pay for gas. Cached values win on key collision so
+        # this is purely additive (refreshed values fill gaps).
+        ledger_price_oracle = self._merge_oracle_for_ledger(state, intent)
         ledger_entry_id = await self._write_ledger_entry(
             strategy,
             intent,
             result=state.last_execution_result,
             success=True,
-            price_oracle=state.price_oracle,
+            price_oracle=ledger_price_oracle,
+            pre_state=pre_state,
+            post_state=post_state,
         )
         # VIB-3467/3478: AccountingProcessor is the sole accounting write path (dual-write
         # period ended with removal of _try_write_* methods in VIB-3478).
@@ -3091,7 +3257,12 @@ class StrategyRunner:
                 intent=intent,
                 result=state.last_execution_result,
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
-                price_oracle=state.price_oracle,
+                # Use the SAME refreshed oracle as the ledger row above —
+                # otherwise the sidecar (consumed by the local dashboard)
+                # falls back to the empty-on-first-iteration price oracle
+                # while the ledger row itself is correct, leading to
+                # inconsistent dashboards/CSVs vs. the canonical SQLite row.
+                price_oracle=ledger_price_oracle,
             )
         except Exception:  # noqa: BLE001
             logger.warning("Sidecar import/call failed (non-blocking)", exc_info=True)
@@ -3195,13 +3366,22 @@ class StrategyRunner:
         # circuit-breaker row also gets gas_usd populated.  A breach is still
         # an executed transaction on-chain — the gas drag is real and must
         # show up in PnL totals.
+        # Accounting-AttemptNo17 §A4: pass pre_state too. Post-state is
+        # NOT captured on this path (we entered slippage-breach before the
+        # reconciliation step), so post_state_json stays empty.
         await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
             success=False,
             error=slippage_error,
-            price_oracle=state.price_oracle,
+            # VIB-3804 hardening: refresh+merge so the slippage-breach row
+            # gets the full oracle (including the chain's native gas token)
+            # even when ``state.price_oracle`` was captured before market
+            # warming. Without this, a slippage breach still landed gas on-
+            # chain but the ledger row wrote ``gas_usd=""``.
+            price_oracle=self._merge_oracle_for_ledger(state, intent),
+            pre_state=_build_pre_state_for_ledger(state.pre_snapshot),
         )
 
         # Persist state even when circuit breaker fails; on-chain state already changed.
@@ -3281,13 +3461,21 @@ class StrategyRunner:
         # VIB-3658 sequel (April 30 audit #3): same as the success path —
         # an enforcement breach is still a real on-chain TX, so its gas
         # drag must surface in transaction_ledger.gas_usd.
+        # Accounting-AttemptNo17 §A4: pass pre/post state too. The
+        # reconciliation report already has post_balances by definition
+        # (we got here BECAUSE recon produced an incident).
         await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
             success=False,
             error=recon_error,
-            price_oracle=state.price_oracle,
+            # VIB-3804 hardening (mirrors the slippage / success branches):
+            # refresh+merge so the reconciliation-failure row also carries
+            # the full oracle and a populated ``gas_usd``.
+            price_oracle=self._merge_oracle_for_ledger(state, intent),
+            pre_state=_build_pre_state_for_ledger(state.pre_snapshot),
+            post_state=_build_post_state_for_ledger(recon),
         )
 
         # Persist strategy state even on reconciliation failure: the
@@ -3351,13 +3539,20 @@ class StrategyRunner:
         # gas to convert (last_execution_result is None or carries no
         # total_gas_cost_wei).  Where a retry exhausted gas was burned, the
         # state.price_oracle is the right source so gas_usd lands populated.
+        # Accounting-AttemptNo17 §A4: pass pre_state. No post-state since
+        # this path means execution itself failed (or was never attempted).
         await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
             success=False,
             error=error_msg,
-            price_oracle=state.price_oracle,
+            # VIB-3804 hardening: even on the post-retry FAILED path, gas
+            # may have been burned by the attempt(s). Refresh+merge so the
+            # ledger row carries the full oracle and ``gas_usd`` is non-
+            # empty when there's gas to convert.
+            price_oracle=self._merge_oracle_for_ledger(state, intent),
+            pre_state=_build_pre_state_for_ledger(state.pre_snapshot),
         )
 
         # Run revert diagnostics only for on-chain execution failures.

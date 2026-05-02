@@ -5,10 +5,18 @@ Usage in strategy_runner.py (after ledger save):
     await writer.write(lending_event)
 
 The writer is the only code that touches the accounting_events table.
+
+Augmentation chokepoints (single source of truth):
+    Both backends — :func:`SQLiteStore.save_accounting_event` and
+    :func:`GatewayStateManager.save_accounting_event` — call
+    :func:`augment_accounting_payload` immediately before serialising the
+    payload. The writer delegates and never mutates the event instance.
+    This module deliberately does *not* monkey-patch ``event.to_payload_json``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -19,8 +27,17 @@ from almanak.framework.accounting.models import (
     PendleAccountingEvent,
     PredictionAccountingEvent,
 )
+from almanak.framework.accounting.payload_schemas import (
+    FORMULA_VERSION,
+    MATCHING_POLICY_VERSION,
+    SCHEMA_VERSION,
+)
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
+from almanak.framework.state.exceptions import (
+    AccountingPersistenceError,
+    AccountingWriteKind,
+)
 
 if TYPE_CHECKING:
     pass
@@ -37,33 +54,164 @@ AccountingEvent = (
 )
 
 
+def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
+    """Augment an accounting-event payload with the G13/L1/L4 contract.
+
+    Single-point augmentation called by both state backends
+    (:meth:`SQLiteStore.save_accounting_event` and
+    :meth:`GatewayStateManager.save_accounting_event`) so every accounting
+    row ends up with:
+
+    * ``schema_version`` / ``formula_version`` / ``matching_policy_version``
+      (G13: lot-matching policy declared + versioned).
+    * ``principal_repaid_usd`` / ``interest_paid_usd`` projection from
+      ``principal_delta_usd`` / ``interest_delta_usd`` for REPAY (L4).
+    * ``interest_accrued_usd`` projection from ``interest_delta_usd`` for
+      WITHDRAW (L1).
+
+    Failure contract — VIB-3863:
+
+    * **Live mode** (``is_live=True``): malformed JSON or non-dict payloads
+      raise :class:`AccountingPersistenceError`. A ``to_payload_json()``
+      that emits a non-dict or unparsable string is a bug in the event
+      class — silently dropping the version stamps and lending aliases
+      would let unaudited rows reach the production books.
+    * **Non-live mode** (``is_live=False``): the same conditions log ERROR
+      and return the original payload unchanged so paper / dry-run / backtest
+      runs do not halt on schema bugs.
+    """
+    versions = {
+        "schema_version": SCHEMA_VERSION,
+        "formula_version": FORMULA_VERSION,
+        "matching_policy_version": MATCHING_POLICY_VERSION,
+    }
+
+    try:
+        d = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        msg = (
+            f"augment_accounting_payload: payload_json is not valid JSON "
+            f"(type={type(payload_json).__name__}, len={len(payload_json) if isinstance(payload_json, str) else 'n/a'}): {exc}"
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.ACCOUNTING,
+                message=msg,
+                cause=exc,
+            ) from exc
+        logger.error("%s — non-live mode, returning original payload unchanged", msg)
+        return payload_json
+
+    if not isinstance(d, dict):
+        msg = f"augment_accounting_payload: payload_json must decode to dict, got {type(d).__name__}"
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.ACCOUNTING,
+                message=msg,
+            )
+        logger.error("%s — non-live mode, returning original payload unchanged", msg)
+        return payload_json
+
+    d.update(versions)
+    _project_lending_aliases(d)
+    return json.dumps(d)
+
+
+def _project_lending_aliases(d: dict[str, Any]) -> None:
+    """Project lending payload fields onto Accounting-AttemptNo17 spec names
+    so L1 / L4 cells can read them.
+
+    The :class:`LendingAccountingEvent` was authored with
+    ``principal_delta_usd`` / ``interest_delta_usd``. The Accountant Test
+    §1.2 L4 spec names are ``principal_repaid_usd`` / ``interest_paid_usd``
+    (REPAY) and ``interest_accrued_usd`` (WITHDRAW). Rather than rename a
+    stable payload schema (which would break every downstream consumer),
+    the writer projects the existing fields to the spec names — both shapes
+    coexist in the row, and post-hoc auditors can grep either.
+
+    The projection is intent-type aware:
+
+    * REPAY / DELEVERAGE → ``principal_repaid_usd`` ← ``principal_delta_usd``,
+      ``interest_paid_usd`` ← ``interest_delta_usd``
+    * WITHDRAW → ``interest_accrued_usd`` ← ``interest_delta_usd``
+      (supply-side interest accrued before unlock)
+    * Other event types pass through unchanged.
+
+    Existing aliases on the payload (if any) win — the projection only
+    fills missing keys so a future event that natively writes the spec
+    names is not stomped.
+    """
+    et = d.get("event_type")
+    if not isinstance(et, str):
+        return
+
+    principal_delta = d.get("principal_delta_usd")
+    interest_delta = d.get("interest_delta_usd")
+
+    if et in ("REPAY", "DELEVERAGE"):
+        if "principal_repaid_usd" not in d and principal_delta is not None:
+            d["principal_repaid_usd"] = principal_delta
+        if "interest_paid_usd" not in d and interest_delta is not None:
+            d["interest_paid_usd"] = interest_delta
+    elif et == "WITHDRAW":
+        if "interest_accrued_usd" not in d and interest_delta is not None:
+            d["interest_accrued_usd"] = interest_delta
+
+
 class AccountingWriter:
+    """Single delegating writer for typed accounting events.
+
+    The writer's only jobs are mode-aware error semantics and routing to
+    the underlying store. Payload augmentation (G13 version stamps + L1/L4
+    lending aliases) is the store's responsibility — see
+    :func:`augment_accounting_payload`. This division keeps a single
+    augmentation chokepoint per backend and avoids any lifetime mutation
+    of the in-memory event instance.
+    """
+
     def __init__(self, store: Any) -> None:
         self._store = store
 
     async def write(self, event: AccountingEvent) -> bool:
         """Persist a typed accounting event to the accounting_events store.
 
-        Fail-closed in LIVE mode: a missing or broken store raises rather than
-        silently dropping the accounting record. In non-live modes, errors are
-        logged and False is returned so the loop continues.
+        Fail-closed in LIVE mode: a missing or broken store raises so the
+        runner halts with ACCOUNTING_FAILED rather than silently dropping
+        the record. In non-live modes, errors are logged and ``False`` is
+        returned so the loop continues.
         """
         is_live = event.identity.execution_mode == "live"
         if not hasattr(self._store, "save_accounting_event"):
             msg = (
-                f"Store {type(self._store).__name__} does not support save_accounting_event; "
-                "accounting event would be silently dropped"
+                f"Store {type(self._store).__name__} does not support "
+                f"save_accounting_event; accounting event would be silently dropped"
             )
             if is_live:
-                raise RuntimeError(msg)
+                raise AccountingPersistenceError(
+                    AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(event.identity, "strategy_id", ""),
+                    message=msg,
+                )
             logger.warning(msg)
             return False
         try:
             return await self._store.save_accounting_event(event)
-        except Exception:
-            logger.error("AccountingWriter.write failed", exc_info=True)
+        except AccountingPersistenceError:
+            # Already typed — propagate untouched in live mode, swallow with
+            # ERROR log in non-live (the backend's mode-aware augment raised
+            # a typed error; we honour its semantics rather than re-wrap).
             if is_live:
                 raise
+            logger.error("AccountingWriter.write failed (non-live)", exc_info=True)
+            return False
+        except Exception as exc:
+            logger.error("AccountingWriter.write failed", exc_info=True)
+            if is_live:
+                raise AccountingPersistenceError(
+                    AccountingWriteKind.ACCOUNTING,
+                    strategy_id=getattr(event.identity, "strategy_id", ""),
+                    cause=exc,
+                ) from exc
             return False
 
     def make_unavailable_lending_event(

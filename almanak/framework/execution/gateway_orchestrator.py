@@ -70,6 +70,63 @@ class GatewayExecutionResult:
         """First transaction hash (compatibility with TransactionExecutionResult)."""
         return self.tx_hashes[0] if self.tx_hashes else None
 
+    @property
+    def total_gas_cost_wei(self) -> int:
+        """Total gas cost in wei across every receipt in the bundle.
+
+        Σ(gas_used × effective_gas_price) over ``self.receipts``.
+
+        Why a property rather than a field: the gateway proto carries
+        ``total_gas_used`` but never bundled the gas-price side, so this is
+        a derived shape that didn't exist on the wire. Until VIB-3658-sequel
+        landed, ``transaction_ledger.gas_usd`` was always empty for every
+        gateway-backed strategy run because ``_extract_tx_and_gas`` reads
+        ``getattr(result, "total_gas_cost_wei", None)`` and got ``None``.
+        Computing it here is the single line that flips G2 from RED to GREEN
+        for every gateway-routed intent.
+
+        Returns ``0`` (not ``None``) so the existing ``compute_gas_usd``
+        path that early-returns on ``gas_cost_wei in (None, 0)`` keeps
+        working — a missing receipt is not a unit-conversion bug, it's
+        absence of evidence.
+        """
+        if not self.receipts:
+            return 0
+
+        def _to_int(value: Any) -> int:
+            """Coerce gas-field values to int, accepting hex-encoded RPC strings.
+
+            Some RPCs (and some gateway proto serializations) emit gas fields
+            as ``"0x..."`` hex strings rather than decimal integers. The
+            previous ``int(value)`` path silently dropped those receipts —
+            ``int("0x5208")`` raises ``ValueError``, the ``except`` continues,
+            and the bundle's gas cost was understated.
+            """
+            if value is None or value == "":
+                return 0
+            if isinstance(value, bool):
+                # ``bool`` is a subclass of ``int`` — be explicit so True/False
+                # don't sneak into a numeric sum as 1 / 0.
+                return int(value)
+            if isinstance(value, int):
+                return value
+            try:
+                text = str(value).strip()
+                if text.startswith(("0x", "0X")):
+                    return int(text, 16)
+                return int(text)
+            except (TypeError, ValueError):
+                return 0
+
+        total = 0
+        for r in self.receipts:
+            if not isinstance(r, dict):
+                continue
+            gas_used = _to_int(r.get("gas_used", 0))
+            egp = _to_int(r.get("effective_gas_price", 0))
+            total += gas_used * egp
+        return total
+
     # === Enriched Data (populated by ResultEnricher) ===
     # These fields mirror ExecutionResult for strategy author UX consistency
     position_id: int | str | None = None

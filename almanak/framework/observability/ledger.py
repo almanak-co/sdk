@@ -424,6 +424,8 @@ def build_ledger_entry(
     success: bool = True,
     error: str = "",
     price_oracle: dict[str, Any] | None = None,
+    pre_state: dict[str, Any] | None = None,
+    post_state: dict[str, Any] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
 
@@ -440,6 +442,19 @@ def build_ledger_entry(
     the April 30 audit identified the gap).  A WARN is logged when the
     oracle is supplied but cannot resolve the native-token price — once
     per ledger write, never per helper invocation.
+
+    ``pre_state`` / ``post_state`` (Accounting-AttemptNo17 §3 D3): typed
+    snapshots of protocol state captured by the runner BEFORE submission and
+    AFTER confirmation. When supplied, they're serialized to JSON and stored
+    on ``LedgerEntry.pre_state_json`` / ``post_state_json`` (VIB-3480 columns
+    that have been universally NULL since the columns were added). The runner
+    is the only correct capture point — see Accounting-AttemptNo17 §3 D3 and
+    docs/internal/connector-pre-post-audit.md.
+
+    ``price_oracle`` is also serialized to ``price_inputs_json`` so every
+    ledger row carries the oracle snapshot used at execution time. Auditors
+    grep ``price_inputs_json`` to filter "exposure by oracle" — the
+    ``oracle_source`` field on each priced asset is required (G12).
     """
     intent_type = _extract_intent_type(intent)
     (
@@ -490,6 +505,48 @@ def build_ledger_entry(
     extracted_data_json = _build_extracted_data_json(result)
     protocol = getattr(intent, "protocol", "") or ""
 
+    # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──
+    # Until this PR, pre_state_json / post_state_json / price_inputs_json
+    # were declared on the dataclass + DDL but no writer ever filled them.
+    # That's the canonical leaf-fix anti-pattern §0 names. The runner is the
+    # single capture point — see docs/internal/connector-pre-post-audit.md.
+
+    def _safe_json(d: dict[str, Any] | None) -> str:
+        # ``None`` = no state was captured (callers default to passing
+        # ``None`` when pre/post capture didn't run). ``{}`` = the runner
+        # captured an explicitly empty snapshot — e.g. "wallet had nothing
+        # of interest after the close" — and we want that recorded as the
+        # JSON object ``{}``, not collapsed to ``""`` which is
+        # indistinguishable from the unmeasured case downstream.
+        if d is None:
+            return ""
+        try:
+            # Decimals + datetimes need a default — match serialize_extracted_data.
+            return json.dumps(d, default=str)
+        except (TypeError, ValueError):
+            return ""
+
+    price_inputs_json = ""
+    if price_oracle:
+        # Shape per AttemptNo17 §1.2 G12: {symbol: {price_usd, oracle_source,
+        # fetched_at, confidence}}. The runner may pass the new shape directly
+        # OR the legacy flat {symbol: price} shape. Normalize to the new shape.
+        normalised: dict[str, Any] = {}
+        for sym, val in price_oracle.items():
+            if isinstance(val, dict) and "price_usd" in val:
+                normalised[sym] = val
+            else:
+                normalised[sym] = {
+                    "price_usd": str(val) if val is not None else None,
+                    "oracle_source": "unknown",
+                    "fetched_at": "",
+                    "confidence": "ESTIMATED",
+                }
+        price_inputs_json = _safe_json(normalised)
+
+    pre_state_json = _safe_json(pre_state)
+    post_state_json = _safe_json(post_state)
+
     return LedgerEntry(
         cycle_id=cycle_id,
         strategy_id=strategy_id,
@@ -508,6 +565,9 @@ def build_ledger_entry(
         success=success,
         error=final_error,
         extracted_data_json=extracted_data_json,
+        price_inputs_json=price_inputs_json,
+        pre_state_json=pre_state_json,
+        post_state_json=post_state_json,
     )
 
 

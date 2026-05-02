@@ -174,3 +174,51 @@ class TestGatewayExecutionResultToOutcome:
         assert outcome.success is False
         assert outcome.error == "Timeout"
         assert outcome.tx_ids == []
+
+    def test_total_gas_cost_wei_sums_receipts(self):
+        # VIB-3843 / Accounting-AttemptNo17: gas_usd was always empty on
+        # gateway-routed runs because total_gas_cost_wei wasn't computed.
+        from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+
+        result = GatewayExecutionResult(
+            success=True,
+            tx_hashes=["0xaaa", "0xbbb"],
+            total_gas_used=300000,
+            receipts=[
+                {"gas_used": 100000, "effective_gas_price": 1_000_000_000},  # 1 gwei
+                {"gas_used": 200000, "effective_gas_price": 2_000_000_000},  # 2 gwei
+            ],
+            execution_id="exec-1",
+        )
+        # 100k * 1 gwei + 200k * 2 gwei = 1e14 + 4e14 = 5e14 wei
+        assert result.total_gas_cost_wei == 500_000_000_000_000
+
+    def test_total_gas_cost_wei_empty_receipts(self):
+        from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+
+        result = GatewayExecutionResult(
+            success=False,
+            tx_hashes=[],
+            total_gas_used=0,
+            receipts=[],
+            execution_id="",
+        )
+        assert result.total_gas_cost_wei == 0
+
+    def test_total_gas_cost_wei_handles_missing_or_bogus_fields(self):
+        # Robustness: missing keys, None values, non-numeric strings.
+        from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+
+        result = GatewayExecutionResult(
+            success=True,
+            tx_hashes=["0xaaa"],
+            total_gas_used=100000,
+            receipts=[
+                {},  # no gas data at all
+                {"gas_used": None, "effective_gas_price": None},
+                {"gas_used": "bogus", "effective_gas_price": 1_000_000_000},
+                {"gas_used": 50000, "effective_gas_price": 1_000_000_000},  # the real one
+            ],
+            execution_id="exec-2",
+        )
+        assert result.total_gas_cost_wei == 50_000_000_000_000

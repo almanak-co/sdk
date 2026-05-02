@@ -294,3 +294,211 @@ def test_extract_lp_open_data_result_crash_is_error(
     out = parser.extract_lp_open_data_result({"logs": [{"topics": []}]})
     assert isinstance(out, ExtractError)
     assert "induced lp_open_data crash" in out.error
+
+
+# ---------------------------------------------------------------------------
+# Tick range extraction (LP1 acceptance: tick_lower / tick_upper on every
+# LP_OPEN row so range exposure can be reconstructed downstream)
+# ---------------------------------------------------------------------------
+
+
+def _npm_owner_topic(npm_address: str = ARBITRUM_NPM) -> str:
+    """Encode the NPM address as a 32-byte indexed topic (right-aligned)."""
+    return "0x" + npm_address.removeprefix("0x").rjust(64, "0")
+
+
+def _make_pool_mint_log(
+    *,
+    tick_lower: int,
+    tick_upper: int,
+    pool_address: str = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    owner: str = ARBITRUM_NPM,
+    log_index: int = 5,
+) -> dict[str, Any]:
+    """Build an ABI-faithful Uniswap V3 Pool ``Mint`` log.
+
+    Pool Mint signature::
+
+        Mint(
+            address sender,
+            address indexed owner,
+            int24 indexed tickLower,
+            int24 indexed tickUpper,
+            uint128 amount,
+            uint256 amount0,
+            uint256 amount1,
+        )
+
+    For NPM-mediated LP_OPENs (the only path the parser claims to support),
+    ``owner`` is the NonfungiblePositionManager — the parser uses that to
+    pair Mints with their corresponding IncreaseLiquidity in multi-position
+    receipts.
+
+    int24 in topics is sign-extended to 32 bytes — we encode the tick as
+    its two's-complement int256 representation so HexDecoder.decode_int24
+    recovers the signed value.
+    """
+
+    def _encode_int24_topic(value: int) -> str:
+        # Two's-complement to 256 bits, formatted as 64-char hex
+        return f"0x{value & ((1 << 256) - 1):064x}"
+
+    owner_topic = "0x" + owner.removeprefix("0x").rjust(64, "0")
+    return {
+        "address": pool_address,
+        "topics": [
+            EVENT_TOPICS["Mint"],
+            owner_topic,  # owner = NPM (indexed)
+            _encode_int24_topic(tick_lower),
+            _encode_int24_topic(tick_upper),
+        ],
+        "data": "0x" + "0" * 192,  # amount + amount0 + amount1, irrelevant here
+        "logIndex": log_index,
+    }
+
+
+def test_extract_lp_open_data_populates_ticks_from_pool_mint(
+    parser: UniswapV3ReceiptParser,
+) -> None:
+    """A real LP_OPEN bundles BOTH the pool's ``Mint`` (carries ticks) AND
+    the NPM's ``IncreaseLiquidity`` (carries tokenId / liquidity / amounts).
+    The parser must surface ticks via ``LPOpenData.tick_lower`` /
+    ``tick_upper`` so downstream position_events rows carry range exposure
+    (Accountant Test cell LP1)."""
+    receipt = {
+        "logs": [
+            _make_pool_mint_log(tick_lower=-199960, tick_upper=-197950),
+            _make_increase_liquidity_log(
+                token_id=TOKEN_ID,
+                liquidity=LIQUIDITY,
+                amount0=AMOUNT0,
+                amount1=AMOUNT1,
+            ),
+        ],
+        "status": 1,
+    }
+    out = parser.extract_lp_open_data(receipt)
+    assert isinstance(out, LPOpenData)
+    assert out.tick_lower == -199960
+    assert out.tick_upper == -197950
+
+
+def test_extract_lp_open_data_negative_ticks_round_trip(
+    parser: UniswapV3ReceiptParser,
+) -> None:
+    """int24 sign extension: a tick like -887272 (Uniswap V3 absolute min)
+    must come back negative, not a huge positive uint256."""
+    receipt = {
+        "logs": [
+            _make_pool_mint_log(tick_lower=-887272, tick_upper=887272),
+            _make_increase_liquidity_log(
+                token_id=TOKEN_ID,
+                liquidity=LIQUIDITY,
+                amount0=AMOUNT0,
+                amount1=AMOUNT1,
+            ),
+        ],
+        "status": 1,
+    }
+    out = parser.extract_lp_open_data(receipt)
+    assert out is not None
+    assert out.tick_lower == -887272
+    assert out.tick_upper == 887272
+
+
+def test_extract_lp_open_data_pairs_ticks_with_immediate_prior_mint(
+    parser: UniswapV3ReceiptParser,
+) -> None:
+    """Multi-position bundle: two Mints from two different pools followed by
+    one IncreaseLiquidity. The parser must pair the IncreaseLiquidity with
+    the **most recent** prior NPM-owned Mint, not the first one in the list.
+
+    Without this pairing, an LP_OPEN inside a multicall that closes one
+    position and opens another reports ticks from the unrelated old position
+    — exactly the failure mode behind the accounting attempt's outsized-
+    liquidity values caught during PR #1997 review."""
+    receipt = {
+        "logs": [
+            # Earlier Mint (different pool): ticks belong to a position the
+            # caller is closing/refreshing. Must NOT be attributed.
+            _make_pool_mint_log(
+                tick_lower=-100_000,
+                tick_upper=-90_000,
+                pool_address="0x1111111111111111111111111111111111111111",
+                log_index=2,
+            ),
+            # Later Mint (the position being opened by THIS LP_OPEN): ticks
+            # belong here. Must be attributed.
+            _make_pool_mint_log(
+                tick_lower=-199960,
+                tick_upper=-197950,
+                log_index=4,
+            ),
+            _make_increase_liquidity_log(
+                token_id=TOKEN_ID,
+                liquidity=LIQUIDITY,
+                amount0=AMOUNT0,
+                amount1=AMOUNT1,
+                log_index=5,
+            ),
+        ],
+        "status": 1,
+    }
+    out = parser.extract_lp_open_data(receipt)
+    assert isinstance(out, LPOpenData)
+    assert out.tick_lower == -199960
+    assert out.tick_upper == -197950
+
+
+def test_extract_lp_open_data_ignores_pool_mint_with_non_npm_owner(
+    parser: UniswapV3ReceiptParser,
+) -> None:
+    """A Pool Mint whose ``owner`` is NOT the NPM (e.g. a custom router or
+    a different protocol's mint that happens to share the topic0) must not
+    contribute ticks — otherwise an unrelated mint can corrupt range data
+    on the LP_OPEN we're actually parsing."""
+    receipt = {
+        "logs": [
+            _make_pool_mint_log(
+                tick_lower=-12345,
+                tick_upper=12345,
+                owner="0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+            ),
+            _make_increase_liquidity_log(
+                token_id=TOKEN_ID,
+                liquidity=LIQUIDITY,
+                amount0=AMOUNT0,
+                amount1=AMOUNT1,
+            ),
+        ],
+        "status": 1,
+    }
+    out = parser.extract_lp_open_data(receipt)
+    assert out is not None
+    assert out.tick_lower is None
+    assert out.tick_upper is None
+
+
+def test_extract_lp_open_data_no_pool_mint_keeps_ticks_none(
+    parser: UniswapV3ReceiptParser,
+) -> None:
+    """If the receipt has IncreaseLiquidity but no Mint (e.g. an
+    increase-on-existing-position TX, which doesn't re-emit Mint), the
+    parser must still return LPOpenData with ticks=None — not crash, not
+    invent ticks."""
+    receipt = {
+        "logs": [
+            _make_increase_liquidity_log(
+                token_id=TOKEN_ID,
+                liquidity=LIQUIDITY,
+                amount0=AMOUNT0,
+                amount1=AMOUNT1,
+            ),
+        ],
+        "status": 1,
+    }
+    out = parser.extract_lp_open_data(receipt)
+    assert out is not None
+    assert out.position_id == TOKEN_ID
+    assert out.tick_lower is None
+    assert out.tick_upper is None
