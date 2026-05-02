@@ -323,8 +323,35 @@ def lifecycle_handle_stop(runner: Any, strategy_id: str, strategy: Any) -> None:
     """Handle STOP command: bridge into teardown or hard-stop.
 
     Shared by both the normal STOP path and the STOP-while-paused path.
+
+    Local mode: writes a teardown request to the SQLite approval channel
+    so the next iteration's ``_check_teardown_requested()`` picks it up,
+    runs teardown intents, then shuts the runner down.
+
+    Hosted mode (``AGENT_ID`` set): the SQLite approval channel doesn't
+    exist (gateway/Postgres owns the teardown channel; the runner-side
+    gateway lookup is the planned path under VIB-3777). We can't write a
+    cross-process request, so STOP becomes a direct shutdown signal:
+    write ``STOPPING`` lifecycle state, set ``_shutdown_requested`` so the
+    run loop exits cleanly on its next sleep wake-up. Position unwind in
+    hosted mode is a separate channel — operators issue teardown via the
+    dashboard's hosted teardown endpoint, not via STOP. STOP semantics
+    here are "stop the runner loop", not "unwind positions".
     """
+    from almanak.framework.deployment import is_hosted
+
     runner._lifecycle_write_state(strategy_id, "STOPPING")
+
+    if is_hosted():
+        logger.info(
+            "Hosted-mode STOP for %s: requesting clean runner shutdown. "
+            "Position unwind (if any) is a separate hosted teardown channel "
+            "(VIB-3777) — STOP does not implicitly unwind positions in hosted mode.",
+            strategy_id,
+        )
+        runner._shutdown_requested = True
+        return
+
     from almanak.framework.teardown import TeardownMode, TeardownRequest, get_teardown_state_manager
 
     try:
