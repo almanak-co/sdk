@@ -564,18 +564,21 @@ def execute_teardown(
     click.echo("ALMANAK STRATEGY TEARDOWN")
     click.echo("=" * 60)
 
-    working_path = Path(working_dir).resolve()
+    # Fail fast on incompatible option combinations before any filesystem or
+    # resolver work. This is a pure option validator — it must fire before
+    # the strategy-folder resolver so `--no-gateway --network anvil <bad-d>`
+    # surfaces the option conflict, not the folder error.
+    if no_gateway and network is not None:
+        raise click.ClickException(
+            "--network only applies when the managed gateway is auto-started. Remove --network or remove --no-gateway."
+        )
 
-    # Export ALMANAK_STRATEGY_FOLDER so the strategy-scoped DB resolver
-    # (local_strategy_db_path, VIB-3835) sees the same folder the operator
-    # passed via -d. Mirrors `strat run` and matches the request/status/list/
-    # cancel subcommands' resolver. We export unconditionally here because
-    # execute_teardown's -d defaults to cwd, and a cwd-scoped invocation that
-    # forgot to set the env var would otherwise have downstream adapters
-    # raise LocalPathError.
-    if working_path.is_dir():
-        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(working_path)
-        _reset_teardown_state_singleton()
+    # VIB-3838: route -d through the same resolver as request/status/list/
+    # cancel. Validates is_dir + _looks_like_strategy_folder, exports
+    # ALMANAK_STRATEGY_FOLDER, resets the cached singleton. Hard-fails with
+    # the canonical "does not look like a strategy folder" message instead
+    # of falling through to a noisier failure later in strategy loading.
+    working_path = _resolve_and_export_strategy_folder(working_dir)
 
     # Load environment from .env if present
     from dotenv import load_dotenv
@@ -589,12 +592,6 @@ def execute_teardown(
 
     # Install secret redaction after env is loaded so all secrets are registered.
     install_redaction()
-
-    # Fail fast on incompatible option combinations before touching the filesystem.
-    if no_gateway and network is not None:
-        raise click.ClickException(
-            "--network only applies when the managed gateway is auto-started. Remove --network or remove --no-gateway."
-        )
 
     # Find strategy.py
     strategy_file = working_path / "strategy.py"
@@ -1336,14 +1333,50 @@ def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> in
     poll_interval = 2.0
     deadline = time.monotonic() + timeout
 
+    click.echo()
+    click.echo(click.style(f"Waiting (timeout={timeout}s)...", fg="cyan"))
+    click.echo("  pending — request created, waiting for runner to pick up")
+
+    try:
+        return _poll_for_terminal_state(manager, strategy_id, timeout, poll_interval, deadline)
+    except KeyboardInterrupt:
+        # VIB-3837: the runner is the only writer of the teardown_requests
+        # row, so interrupting the CLI's wait does NOT cancel or partially
+        # commit the teardown — it just stops the local poll. Tell the
+        # operator how to pick the wait back up and exit 130 (128+SIGINT).
+        # The resume hint must include ``-d <folder>`` because the in-process
+        # ``ALMANAK_STRATEGY_FOLDER`` export dies with this CLI process; a
+        # follow-up command from another cwd would otherwise hard-fail at the
+        # resolver. Read the folder we exported earlier (always populated by
+        # ``_resolve_and_export_strategy_folder``).
+        strategy_folder = os.environ.get("ALMANAK_STRATEGY_FOLDER", "<folder>")
+        click.echo()
+        click.echo(
+            click.style(
+                "Interrupted. The runner will continue executing the teardown — "
+                f"check 'almanak strat teardown status -d {strategy_folder} -s {strategy_id}'.",
+                fg="yellow",
+            )
+        )
+        return 130
+
+
+def _poll_for_terminal_state(
+    manager: Any,
+    strategy_id: str,
+    timeout: int,
+    poll_interval: float,
+    deadline: float,
+) -> int:
+    """Polling loop body for ``_wait_for_terminal_state``.
+
+    Extracted so the wrapper can catch ``KeyboardInterrupt`` once around the
+    whole loop instead of around every ``time.sleep`` (VIB-3837).
+    """
     seen_acknowledged = False
     seen_started = False
     last_phase: TeardownPhase | None = None
     last_progress: tuple[int, int, int] | None = None
-
-    click.echo()
-    click.echo(click.style(f"Waiting (timeout={timeout}s)...", fg="cyan"))
-    click.echo("  pending — request created, waiting for runner to pick up")
 
     while True:
         request_row = manager.get_request(strategy_id)

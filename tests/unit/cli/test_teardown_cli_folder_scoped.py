@@ -427,3 +427,88 @@ def test_t_3835_12_wait_off_is_fire_and_forget(
     # Should NOT have any of the --wait progress strings.
     assert "acknowledged" not in result.output
     assert "completed" not in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# VIB-3837: --wait Ctrl-C handler returns 130 with operator-friendly message
+# ---------------------------------------------------------------------------
+def test_t_3837_1_wait_returns_130_on_keyboard_interrupt(
+    clean_env, strategy_folder: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C during --wait exits 130 with a yellow info line, not a traceback."""
+    from almanak.framework.cli import teardown as teardown_module
+
+    strategy_id = "InterruptStrat:1"
+
+    # Pre-create a pending row so the wait loop has something to read on the
+    # first poll. Then make the SECOND poll raise KeyboardInterrupt to
+    # simulate the operator hitting Ctrl-C while the runner is still working.
+    db_file = strategy_folder / "almanak_state.db"
+    pre_mgr = TeardownStateManager(db_path=str(db_file))
+    pre_mgr.create_request(
+        TeardownRequest(
+            strategy_id=strategy_id,
+            mode=TeardownMode.SOFT,
+            asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
+            requested_by="test",
+        )
+    )
+
+    real_sleep = time.sleep
+
+    def interrupting_sleep(_seconds: float) -> None:
+        # Skip the first sleep (let the loop tick once) so the test exercises
+        # the SIGINT handler from inside the loop rather than at entry.
+        if not getattr(interrupting_sleep, "_fired", False):
+            interrupting_sleep._fired = True  # type: ignore[attr-defined]
+            real_sleep(0)
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(teardown_module.time, "sleep", interrupting_sleep)
+
+    cli_runner = CliRunner()
+    result = cli_runner.invoke(
+        teardown_cli,
+        [
+            "request",
+            "-d",
+            str(strategy_folder),
+            "-s",
+            strategy_id,
+            "--force",
+            "--wait",
+            "--timeout",
+            "30",
+        ],
+    )
+
+    assert result.exit_code == 130, result.output
+    assert "Interrupted" in result.output
+    assert "runner will continue" in result.output
+    assert "almanak strat teardown status" in result.output
+    # CodeRabbit P1: resume hint must carry both -d <folder> AND -s <id> so
+    # the operator can pick up status from a different cwd after the
+    # ALMANAK_STRATEGY_FOLDER process-export dies with this CLI process.
+    assert f"-d {strategy_folder}" in result.output
+    assert f"-s {strategy_id}" in result.output
+    # No traceback bled through.
+    assert "Traceback" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# VIB-3838: execute -d routes through the canonical resolver
+# ---------------------------------------------------------------------------
+def test_t_3838_1_execute_rejects_non_strategy_folder(
+    clean_env, tmp_path: Path
+) -> None:
+    """`teardown execute -d <real-but-non-strategy-dir>` hard-fails with the
+    canonical "does not look like a strategy folder" message — not a noisier
+    failure later in strategy loading.
+    """
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    cli_runner = CliRunner()
+    result = cli_runner.invoke(teardown_cli, ["execute", "-d", str(junk), "--preview"])
+    assert result.exit_code != 0, result.output
+    assert "does not look like a strategy folder" in result.output
