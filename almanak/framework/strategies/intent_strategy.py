@@ -3499,9 +3499,23 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Called at the start of each iteration by the runner.
         Returns the request if one exists and is active.
 
+        Hosted mode: the SQLite-backed approval channel doesn't exist —
+        the gateway/Postgres owns the teardown channel and a separate
+        runner-side gateway lookup is the planned path (VIB-3777).
+        Short-circuit to None so we don't construct ``TeardownStateManager``
+        (which would raise ``LocalPathError`` from its shared
+        ``_resolve_db_path`` and emit a per-iteration WARNING). Until
+        VIB-3777 lands, hosted runners only honour strategy-self-signalled
+        teardowns via auto-protect overrides.
+
         Returns:
             TeardownRequest if one exists and is active, None otherwise
         """
+        from almanak.framework.deployment import is_hosted
+
+        if is_hosted():
+            return None
+
         try:
             from almanak.framework.teardown import get_teardown_state_manager
 
@@ -3526,9 +3540,20 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Called when the strategy picks up a teardown request
         and starts processing it.
 
+        Hosted mode no-op (mirrors ``_check_teardown_request``): the local
+        approval channel is unavailable; ack happens against the gateway
+        once VIB-3777 wires the gateway-backed teardown lookup. Returning
+        ``False`` here is consistent with "no local request to acknowledge",
+        which is the truth in hosted mode.
+
         Returns:
             True if request was acknowledged, False otherwise
         """
+        from almanak.framework.deployment import is_hosted
+
+        if is_hosted():
+            return False
+
         try:
             from almanak.framework.teardown import get_teardown_state_manager
 
