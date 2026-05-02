@@ -43,7 +43,12 @@ import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
+    from ..gateway_client import GatewayClient
+    from ..runner import StrategyRunner
 
 import click
 
@@ -189,6 +194,90 @@ def _get_teardown_state_manager_or_die():
         return get_teardown_state_manager()
     except LocalPathError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+# =============================================================================
+# CLI accounting wiring (VIB-3839)
+# =============================================================================
+#
+# The CLI ``teardown execute`` lane needs to drive the same per-intent commit
+# pipeline (enrich → ledger → outbox+fire → sidecar) and pre/post snapshot
+# brackets the runner-loop lane already drives via VIB-3773. Without this
+# wiring, every closing tx (LP_CLOSE, REPAY, swap-back, …) lands on-chain
+# but the SDK records zero rows in transaction_ledger / position_events /
+# portfolio_snapshots / portfolio_metrics / accounting_events — the operator
+# sees "Teardown completed" with an empty audit trail.
+#
+# ``runner_helpers`` is ``functools.partial(fn, runner)`` for two callables;
+# both need a real :class:`StrategyRunner` to read attributes like
+# ``_write_ledger_entry``, ``_portfolio_valuer``, ``_last_cycle_id``, etc.
+# So the CLI lane builds a minimal runner from the gateway-backed pieces it
+# already has (price_oracle, balance_provider, execution_orchestrator,
+# state_manager) and passes it through ``build_runner_helpers``.
+
+
+async def _build_cli_teardown_runner(
+    *,
+    gateway_client: "GatewayClient",
+    price_oracle: dict[str, Decimal] | None,
+    orchestrator: "GatewayExecutionOrchestrator",
+    chain: str,
+    wallet_address: str,
+) -> "StrategyRunner":
+    """Construct a minimal :class:`StrategyRunner` for the CLI teardown lane.
+
+    The returned runner is *not* attached to an iteration loop — it exists
+    purely so :func:`build_runner_helpers` can bind ``commit_teardown_intent``
+    and ``capture_teardown_snapshot_with_accounting`` against it. The runner's
+    state_manager + accounting_processor write to the same gateway-backed
+    backend the runner-loop lane uses, so the same five accounting tables
+    light up for CLI-driven teardowns.
+
+    ``price_oracle`` is the symbol→Decimal price map produced by
+    ``MarketSnapshot.get_price_oracle_dict()``. Per the existing CLI
+    behaviour, a None price oracle keeps compilation working with
+    placeholder prices; the same falls through here.
+    """
+    from ..data.balance.gateway_provider import GatewayBalanceProvider
+    from ..runner import RunnerConfig, StrategyRunner
+    from ..state.gateway_state_manager import GatewayStateManager
+
+    state_manager = GatewayStateManager(gateway_client)
+    await state_manager.initialize()
+
+    balance_provider = GatewayBalanceProvider(
+        client=gateway_client,
+        wallet_address=wallet_address,
+        chain=chain,
+    )
+
+    runner_config = RunnerConfig(
+        # Interval is irrelevant — there is no iteration loop. Pick the
+        # default to avoid surfacing a magic value.
+        default_interval_seconds=30,
+        dry_run=False,
+        enable_state_persistence=True,
+        # CLI teardown writes to the deferred-write log on accounting failure
+        # (VIB-3773 inverted contract — never block the next risk-reducing
+        # intent). No alerts are routed through the runner from this lane.
+        enable_alerting=False,
+    )
+
+    # ``GatewayExecutionOrchestrator`` and ``GatewayStateManager`` are
+    # duck-compatible with ``ExecutionOrchestrator`` and ``StateManager``
+    # respectively (the runner only calls a narrow set of methods that
+    # both share). The StrategyRunner ctor's nominal types don't reflect
+    # this duck-typing, so we annotate the call rather than widen the
+    # ctor — the runner-loop's CLI fallback (cli/run_helpers.py) does
+    # the same.
+    runner = StrategyRunner(
+        price_oracle=price_oracle,  # type: ignore[arg-type]
+        balance_provider=balance_provider,
+        execution_orchestrator=orchestrator,  # type: ignore[arg-type]
+        state_manager=state_manager,  # type: ignore[arg-type]
+        config=runner_config,
+    )
+    return runner
 
 
 # =============================================================================
@@ -1061,7 +1150,10 @@ def execute_teardown(
         )
 
         # Create teardown manager with state persistence (VIB-2924)
+        import uuid as _uuid
+
         from almanak.framework.local_paths import LocalPathError
+        from almanak.framework.teardown.runner_helpers import build_runner_helpers
         from almanak.framework.teardown.state_manager import TeardownStateAdapter
 
         # VIB-3835: TeardownStateAdapter() resolves through the strict
@@ -1072,11 +1164,15 @@ def execute_teardown(
             teardown_state_adapter = TeardownStateAdapter()
         except LocalPathError as exc:
             raise click.ClickException(str(exc)) from exc
-        teardown_manager = TeardownManager(
-            orchestrator=orchestrator,  # type: ignore[arg-type]  # duck-typed orchestrator
-            compiler=compiler,
-            state_manager=teardown_state_adapter,
-        )
+
+        # VIB-3839: pre-generate the teardown_id so the cycle-id we stamp on
+        # the bracket snapshots matches the cycle-id ``_execute_intents``
+        # derives for per-intent commits. Without this alignment, the five
+        # accounting tables would be split across two cycle ids — the audit
+        # query ``WHERE cycle_id = X`` would find the per-intent rows but
+        # miss the snapshot/metrics rows (or vice versa).
+        cli_teardown_id = f"td_{_uuid.uuid4().hex[:12]}"
+        teardown_cycle_id = f"teardown-{cli_teardown_id}"
 
         # Execute with progress callback. When --discover is active the
         # strategy has no knowledge of the on-chain-discovered positions, so
@@ -1086,17 +1182,92 @@ def execute_teardown(
             async def on_progress(pct: int, msg: str):
                 click.echo(f"  [{pct}%] {msg}")
 
+            # VIB-3839: build the minimal StrategyRunner inside the async
+            # context (state_manager.initialize() is async). The runner
+            # exists only to host the runner_helpers callables — it is
+            # never started as an iteration loop.
+            runner = await _build_cli_teardown_runner(
+                gateway_client=gateway_client,
+                price_oracle=price_oracle,
+                orchestrator=orchestrator,
+                chain=chain,
+                wallet_address=wallet_address,
+            )
+
+            teardown_manager = TeardownManager(
+                orchestrator=orchestrator,  # type: ignore[arg-type]  # duck-typed orchestrator
+                compiler=compiler,
+                state_manager=teardown_state_adapter,
+                runner_helpers=build_runner_helpers(runner),
+            )
+
             kwargs = {
                 "strategy": strategy,
                 "mode": mode,
                 "on_progress": on_progress,
                 "market": market,
+                "teardown_id": cli_teardown_id,
             }
             if discover:
                 kwargs["precomputed_positions"] = positions
                 kwargs["precomputed_intents"] = intents
 
-            result = await teardown_manager.execute(**kwargs)
+            # VIB-3839: cycle-id swap on BOTH surfaces (P1-4 — runner_state.py
+            # reads ``runner._last_cycle_id`` first, then falls back to the
+            # contextvar). Mirrors ``execute_teardown_via_manager`` Phase 6.5.
+            from ..observability.context import (
+                clear_cycle_id,
+                get_cycle_id,
+                set_cycle_id,
+            )
+
+            saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+            saved_ctx_cycle_id = get_cycle_id()
+            runner._last_cycle_id = teardown_cycle_id
+            set_cycle_id(teardown_cycle_id)
+
+            # Hoist the local once so the type narrows for the rest of the
+            # block — Mypy can't follow the ``has_snapshot`` property across
+            # the boundary, but it can narrow ``capture_snapshot`` itself.
+            capture_snapshot = teardown_manager.runner_helpers.capture_snapshot
+            try:
+                # VIB-3839 pre-bracket: degraded-but-continue (failures land
+                # in the deferred-write log but never abort the teardown).
+                if capture_snapshot is not None:
+                    pre_outcome = await capture_snapshot(
+                        strategy,
+                        teardown_cycle_id=teardown_cycle_id,
+                        pre_teardown=True,
+                    )
+                    if pre_outcome.accounting_degraded:
+                        logger.error(
+                            "CLI pre-teardown snapshot accounting degraded for %s — %s",
+                            strategy.strategy_id,
+                            pre_outcome.degraded_reason or "unknown",
+                        )
+
+                result = await teardown_manager.execute(**kwargs)
+
+                # VIB-3839 post-bracket: same degraded-but-continue contract.
+                if capture_snapshot is not None:
+                    post_outcome = await capture_snapshot(
+                        strategy,
+                        teardown_cycle_id=teardown_cycle_id,
+                        pre_teardown=False,
+                    )
+                    if post_outcome.accounting_degraded:
+                        logger.error(
+                            "CLI post-teardown snapshot accounting degraded for %s — %s",
+                            strategy.strategy_id,
+                            post_outcome.degraded_reason or "unknown",
+                        )
+            finally:
+                runner._last_cycle_id = saved_last_cycle_id
+                if saved_ctx_cycle_id is None:
+                    clear_cycle_id()
+                else:
+                    set_cycle_id(saved_ctx_cycle_id)
+
             return result
 
         try:

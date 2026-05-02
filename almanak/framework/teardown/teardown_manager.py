@@ -337,6 +337,7 @@ class TeardownManager:
         market: Any = None,
         precomputed_positions: Any = None,
         precomputed_intents: list[Any] | None = None,
+        teardown_id: str | None = None,
     ) -> TeardownResult:
         """Execute teardown with full safety guarantees.
 
@@ -366,13 +367,22 @@ class TeardownManager:
                 discovered positions that the strategy doesn't know about.
                 Both ``precomputed_positions`` and ``precomputed_intents``
                 should be supplied together for consistency.
+            teardown_id: VIB-3839 — optional caller-supplied teardown id. When
+                provided, ``_execute_intents`` derives ``teardown_cycle_id =
+                f"teardown-{teardown_id}"`` from this value, so a caller that
+                wants to bracket the teardown with its own snapshot writes
+                (CLI execute lane) can pre-generate the id, drive the pre-
+                bracket with the same cycle id, then call ``execute()`` and
+                trust per-intent commits to use the same cycle id. Default
+                ``None`` keeps the legacy behaviour (uuid generated here).
 
         Returns:
             TeardownResult with complete execution details
         """
         internal_mode = TeardownMode.SOFT if mode == "graceful" else TeardownMode.HARD
         started_at = datetime.now(UTC)
-        teardown_id = f"td_{uuid.uuid4().hex[:12]}"
+        if teardown_id is None:
+            teardown_id = f"td_{uuid.uuid4().hex[:12]}"
 
         try:
             # Step 1: Pause strategy
