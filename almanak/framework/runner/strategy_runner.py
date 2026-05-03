@@ -3955,7 +3955,7 @@ class StrategyRunner:
         # ``LocalPathError``.
         #
         # KNOWN GAP — hosted-mode operator-mode lookup not yet wired
-        # (VIB-3777, follow-up to this PR): a hosted-mode runner has
+        # (VIB-3810, follow-up to PR #1977): a hosted-mode runner has
         # no in-process path to read the operator's chosen teardown
         # mode, so we default to ``SOFT`` (graceful). When the
         # ``should_teardown()`` strategy hook fires in hosted mode,
@@ -3977,7 +3977,7 @@ class StrategyRunner:
                 raise
             logger.warning(
                 "_check_teardown_requested[%s]: hosted mode — local teardown "
-                "state manager unavailable. Defaulting to SOFT mode (VIB-3777 "
+                "state manager unavailable. Defaulting to SOFT mode (VIB-3810 "
                 "tracks adding the gateway-backed lookup so HARD requests "
                 "made via the dashboard API reach hosted runners).",
                 strategy_id,
