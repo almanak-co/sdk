@@ -490,6 +490,74 @@ CREATE TABLE IF NOT EXISTS accounting_outbox (
 CREATE INDEX IF NOT EXISTS idx_outbox_drain
 ON accounting_outbox (deployment_id, status, created_at ASC)
 WHERE status != 'processed';
+
+-- Per-iteration position-state snapshots (AttemptNo17 §3 D4 / Track C / VIB-3891).
+-- Continuously-accrued fields the event-driven Layer-1/3/5 writers cannot
+-- emit on their own — HF trajectory (L2), in-range fraction (LP2),
+-- supply/borrow APR (L5), funding accrual (P2), liquidation buffer (L3/P4).
+-- One row per open position per portfolio_snapshots row; gap-free time
+-- series gives the cell evaluators a curve, not just an integral.
+--
+-- Hosted Postgres has the equivalent table behind VIB-3871 (Infra). This
+-- DDL is the local SQLite half — the materializer in
+-- almanak.framework.accounting.position_state already short-circuits in
+-- hosted mode (returns None) until the metrics-database PR ships.
+CREATE TABLE IF NOT EXISTS position_state_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id INTEGER NOT NULL,             -- FK → portfolio_snapshots.id
+    strategy_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL DEFAULT '',
+    cycle_id TEXT NOT NULL DEFAULT '',
+    captured_at TEXT NOT NULL,                -- ISO-8601 UTC
+    position_id TEXT NOT NULL,
+    position_type TEXT NOT NULL,              -- LP | LENDING | PERP
+
+    -- LP fields ------------------------------------------------------
+    current_tick INTEGER,
+    in_range INTEGER,                         -- SQLite has no native bool
+    liquidity TEXT,                           -- string-decimal for precision
+    sqrt_price_x96 TEXT,
+
+    -- Lending fields -------------------------------------------------
+    supply_balance TEXT,
+    borrow_balance TEXT,
+    health_factor TEXT,
+    supply_apy_pct TEXT,
+    borrow_apy_pct TEXT,
+    interest_accrued_since_last TEXT,
+
+    -- Perp fields (postponed — VIB-3872) -----------------------------
+    mark_price TEXT,
+    unrealized_pnl TEXT,
+    funding_accrued_since_last TEXT,
+    liquidation_price TEXT,
+    margin_utilisation_pct TEXT,
+
+    -- Reconciliation + provenance -----------------------------------
+    delta_vs_protocol_pct TEXT,               -- G14 dust check input
+    value_confidence TEXT NOT NULL DEFAULT 'ESTIMATED',
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    formula_version INTEGER NOT NULL DEFAULT 1,
+    matching_policy_version INTEGER NOT NULL DEFAULT 1,
+    -- ON DELETE CASCADE so cleanup_old_snapshots() and any save_portfolio_snapshot
+    -- INSERT-OR-REPLACE on the parent doesn't trip an FK error once Track C
+    -- rows have been written — SQLite REPLACE is delete-then-insert, which
+    -- without CASCADE would block on the child's existence (CodeRabbit
+    -- finding, 2026-05-02).
+    FOREIGN KEY (snapshot_id) REFERENCES portfolio_snapshots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pss_snapshot
+ON position_state_snapshots (snapshot_id);
+
+CREATE INDEX IF NOT EXISTS idx_pss_strategy_time
+ON position_state_snapshots (strategy_id, captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pss_position
+ON position_state_snapshots (deployment_id, position_id, captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pss_cycle
+ON position_state_snapshots (cycle_id);
 """
 
 
@@ -2494,6 +2562,141 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_cleanup)
+
+    # =========================================================================
+    # Position-state snapshots (Track C / AttemptNo17 §3 D4 / VIB-3891)
+    # =========================================================================
+
+    async def save_position_state_snapshots(
+        self,
+        snapshot_id: int,
+        rows: list,
+    ) -> int:
+        """Bulk-insert ``position_state_snapshots`` rows tied to a parent
+        ``portfolio_snapshots.id``.
+
+        Each row in ``rows`` must be a
+        :class:`almanak.framework.accounting.position_state.PositionStateRow`.
+        The caller is responsible for materializing those rows from open
+        positions — this method only persists them. We accept ``Any`` in
+        the type signature to keep the import surface from circular-stamping
+        the accounting module from the state backend at module-load time
+        (state backend is imported before the accounting module).
+
+        Returns the number of rows written. ``0`` is a valid return value
+        when the snapshot had no open positions; that's a measured zero,
+        not a failure. The rows are persisted in the same write-lock window
+        as a single transaction so the time series cannot have a gap that
+        looks like "no positions" but is actually a partial-write crash.
+        """
+        if not rows:
+            return 0
+        if not self._initialized:
+            await self.initialize()
+
+        # Materialize the value tuples eagerly while the caller still owns
+        # the dataclass references — avoids holding the GIL inside the
+        # executor longer than the actual sqlite write.
+        captured_rows: list[tuple] = []
+        for r in rows:
+            captured_rows.append(
+                (
+                    snapshot_id,
+                    r.strategy_id,
+                    r.deployment_id,
+                    r.cycle_id,
+                    r.timestamp.isoformat() if r.timestamp else "",
+                    r.position_id,
+                    r.position_type,
+                    r.current_tick,
+                    # SQLite has no native bool — store 0/1, but preserve
+                    # the None case (unmeasured ≠ False).
+                    None if r.in_range is None else int(bool(r.in_range)),
+                    None if r.liquidity is None else str(r.liquidity),
+                    None if r.sqrt_price_x96 is None else str(r.sqrt_price_x96),
+                    None if r.supply_balance is None else str(r.supply_balance),
+                    None if r.borrow_balance is None else str(r.borrow_balance),
+                    None if r.health_factor is None else str(r.health_factor),
+                    None if r.supply_apy_pct is None else str(r.supply_apy_pct),
+                    None if r.borrow_apy_pct is None else str(r.borrow_apy_pct),
+                    None if r.interest_accrued_since_last is None else str(r.interest_accrued_since_last),
+                    None if r.mark_price is None else str(r.mark_price),
+                    None if r.unrealized_pnl is None else str(r.unrealized_pnl),
+                    None if r.funding_accrued_since_last is None else str(r.funding_accrued_since_last),
+                    None if r.liquidation_price is None else str(r.liquidation_price),
+                    None if r.margin_utilisation_pct is None else str(r.margin_utilisation_pct),
+                    None if r.delta_vs_protocol_pct is None else str(r.delta_vs_protocol_pct),
+                    r.value_confidence,
+                    r.schema_version,
+                    r.formula_version,
+                    r.matching_policy_version,
+                )
+            )
+
+        def _sync_save() -> int:
+            with self._db_lock:
+                self._conn.executemany(  # type: ignore[union-attr]
+                    """
+                    INSERT INTO position_state_snapshots (
+                        snapshot_id, strategy_id, deployment_id, cycle_id,
+                        captured_at, position_id, position_type,
+                        current_tick, in_range, liquidity, sqrt_price_x96,
+                        supply_balance, borrow_balance, health_factor,
+                        supply_apy_pct, borrow_apy_pct,
+                        interest_accrued_since_last,
+                        mark_price, unrealized_pnl,
+                        funding_accrued_since_last, liquidation_price,
+                        margin_utilisation_pct,
+                        delta_vs_protocol_pct, value_confidence,
+                        schema_version, formula_version, matching_policy_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    captured_rows,
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+            return len(captured_rows)
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_save)
+
+    async def get_position_state_snapshots(
+        self,
+        snapshot_id: int | None = None,
+        strategy_id: str | None = None,
+        position_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Read back ``position_state_snapshots`` rows, filtered as needed.
+
+        Used by the Accountant Test cell evaluators (G14, G15, LP2, LP6,
+        L2/L3/L5) and by debug/inspection tools. Filters are AND'd; pass
+        ``None`` to skip a dimension.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list[dict]:
+            where: list[str] = []
+            params: list = []
+            if snapshot_id is not None:
+                where.append("snapshot_id = ?")
+                params.append(snapshot_id)
+            if strategy_id is not None:
+                where.append("strategy_id = ?")
+                params.append(strategy_id)
+            if position_id is not None:
+                where.append("position_id = ?")
+                params.append(position_id)
+            sql = "SELECT * FROM position_state_snapshots"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY captured_at DESC LIMIT ?"
+            params.append(limit)
+            cursor = self._conn.execute(sql, params)  # type: ignore[union-attr]
+            return [dict(row) for row in cursor.fetchall()]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
 
     # =========================================================================
     # Transaction Ledger (VIB-2402)

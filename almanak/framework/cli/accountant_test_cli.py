@@ -107,7 +107,29 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Write the markdown report to this file (defaults to stdout).",
     )
+    # VIB-3870: gating modes. The default behaviour (exit 0 unless any cell
+    # FAILs) is the *progress scorecard* mode — fine for daily Anvil
+    # smokes. CI / production deploys should use --strict (any non-PASS
+    # status fails) or --require-cells (specific cells must PASS).
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="Strict mode: exit non-zero on any non-PASS cell (FAIL, XFAIL, or SKIP). "
+        "Use this for CI / production-readiness gating — XFAIL on a Track-C-dependent "
+        "cell will fail the gate, which is the correct behaviour for ship signals.",
+    )
+    p.add_argument(
+        "--require-cells",
+        default=None,
+        help="Comma-separated cell IDs that must PASS (e.g. 'G2,G6,G12,LP1,LP3'). "
+        "Exits non-zero if any listed cell is not PASS. Mutually exclusive with --strict; "
+        "use this when only a subset of cells is meaningful for a given deploy gate.",
+    )
     args = p.parse_args(argv)
+
+    if args.strict and args.require_cells:
+        sys.stderr.write("error: --strict and --require-cells are mutually exclusive — pick one\n")
+        return 2
 
     db_path = _resolve_db_path(args.working_dir, args.db)
     report = run_against_sqlite(db_path, primitive=args.primitive)
@@ -121,8 +143,32 @@ def main(argv: list[str] | None = None) -> int:
     else:
         sys.stdout.write(md + "\n")
 
-    # Exit non-zero when at least one cell FAILed (XFAIL is fine — those are
-    # tracked-as-deferred per the §6 Track structure). SKIP is fine.
+    # Default: exit non-zero only on FAIL. XFAIL/SKIP are deferred-tracking
+    # statuses per AttemptNo17 §6 and don't gate the progress scorecard.
+    if args.require_cells:
+        required_ids = {x.strip() for x in args.require_cells.split(",") if x.strip()}
+        cells_by_id = {c.cell_id: c for c in report.cells}
+        unknown = required_ids - set(cells_by_id.keys())
+        if unknown:
+            sys.stderr.write(f"error: --require-cells references unknown cell IDs: {sorted(unknown)}\n")
+            return 2
+        not_passing = [cid for cid in sorted(required_ids) if cells_by_id[cid].status != "PASS"]
+        if not_passing:
+            sys.stderr.write(
+                f"--require-cells gate: {len(not_passing)} of {len(required_ids)} required "
+                f"cells did not PASS: {not_passing}\n"
+            )
+            return 1
+        return 0
+    if args.strict:
+        non_pass = [c for c in report.cells if c.status != "PASS"]
+        if non_pass:
+            summary = ", ".join(f"{c.cell_id}={c.status}" for c in non_pass[:10])
+            sys.stderr.write(
+                f"--strict gate: {len(non_pass)} of {report.total_cells} cells did not PASS (e.g. {summary})\n"
+            )
+            return 1
+        return 0
     return 1 if report.failed > 0 else 0
 
 

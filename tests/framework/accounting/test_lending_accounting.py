@@ -567,7 +567,7 @@ class TestHandleLendingPostState:
         assert event.health_factor_after == Decimal("2.5")
 
     def test_missing_post_state_json_yields_estimated_confidence(self) -> None:
-        """Without post_state_json, confidence is ESTIMATED (VIB-3474 pending)."""
+        """Without post_state_json, confidence is ESTIMATED (gateway read unavailable)."""
         from almanak.framework.accounting.models import AccountingConfidence
 
         led_id = str(uuid.uuid4())

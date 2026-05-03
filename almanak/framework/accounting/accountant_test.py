@@ -35,6 +35,8 @@ from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
     MATCHING_POLICY_VERSION,
     SCHEMA_VERSION,
+    is_v1_event_type,
+    validate_payload,
 )
 
 Primitive = Literal["lp", "looping", "perp"]
@@ -71,6 +73,16 @@ class AccountantReport:
     on_chain_footprint: list[dict[str, Any]] = field(default_factory=list)
     g6_decomposition: dict[str, Any] = field(default_factory=dict)
     db_dump_path: str | None = None
+    # VIB-3868: every accounting_events row whose payload failed Pydantic
+    # validation against payload_schemas.py. Cells that read this row's
+    # payload FAIL with the captured error — the permissive `_json` helper
+    # used to silently substitute `{}` for malformed payloads, hiding the
+    # contract drift.
+    payload_validation_errors: list[dict[str, Any]] = field(default_factory=list)
+    # VIB-3868: list of cells that flipped to FAIL specifically because of
+    # an upstream payload validation error. Lets reviewers triage cell-status
+    # changes between runs without re-deriving the propagation by hand.
+    cells_blocked_by_payload_errors: list[str] = field(default_factory=list)
 
     @property
     def total_cells(self) -> int:
@@ -132,6 +144,19 @@ class AccountantReport:
             lines.append("## G6 decomposition (always emitted)")
             for k, v in self.g6_decomposition.items():
                 lines.append(f"- {k}: {v}")
+            lines.append("")
+        if self.payload_validation_errors:
+            # VIB-3868: surface schema mismatches at top level so reviewers
+            # can triage them without combing through cell diagnostics.
+            lines.append("## Payload validation errors")
+            lines.append("")
+            for rec in self.payload_validation_errors:
+                lines.append(
+                    f"- row_id=`{rec.get('row_id')}` event_type=`{rec.get('event_type')}` error={rec.get('error')}"
+                )
+            if self.cells_blocked_by_payload_errors:
+                lines.append("")
+                lines.append(f"_Cells blocked by validation errors: {', '.join(self.cells_blocked_by_payload_errors)}_")
             lines.append("")
         if self.on_chain_footprint:
             lines.append("## On-chain footprint")
@@ -229,10 +254,181 @@ def _json(s: Any) -> dict[str, Any]:
         return {}
 
 
+# ─── VIB-3868: typed payload reads ───────────────────────────────────────
+
+
+def _project_payload_for_v1_validation(payload: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    """Map writer output → v1 spec shape before Pydantic validation.
+
+    The typed event writers (``LPAccountingEvent``, ``LendingAccountingEvent``,
+    ``PerpAccountingEvent``) emit names that pre-date the AttemptNo17 §1.2 spec
+    (``amount_token``/``supply_apr_bps``/``borrow_apr_bps`` instead of
+    ``amount``/``supply_apr_pct``/``borrow_apr_pct``; LP omits ``protocol``
+    because the position_key carries it). Without this projection step,
+    every real-run row fails validation against the v1 schemas — Codex P1
+    audit finding (2026-05-02).
+
+    The projection is read-only on the writer's persisted shape (we never
+    mutate the row); we just return a dict suitable for the schema. Aliases
+    populate spec names only when the spec name is missing — never overwrite
+    a writer that already emits the canonical name.
+    """
+    et = (payload.get("event_type") or "").upper()
+    out = dict(payload)
+
+    # Inject ``protocol`` from the row's protocol column when the payload
+    # itself doesn't carry it (LP/Perp writers don't emit it; the row
+    # column is the canonical source).
+    if not out.get("protocol"):
+        row_protocol = (row.get("protocol") or "").strip()
+        if row_protocol:
+            out["protocol"] = row_protocol
+
+    # Lending: amount_token → amount (SUPPLY/REPAY/WITHDRAW) or borrowed_amount (BORROW)
+    if et in {"SUPPLY", "REPAY", "DELEVERAGE", "WITHDRAW"} and "amount" not in out:
+        if out.get("amount_token") is not None:
+            out["amount"] = out["amount_token"]
+    if et == "BORROW" and "borrowed_amount" not in out:
+        if out.get("amount_token") is not None:
+            out["borrowed_amount"] = out["amount_token"]
+
+    # APR bps → pct projection (10000 bps = 100%, so bps / 100 = pct).
+    # Gemini (2026-05-02): narrow the except to the only error classes
+    # ``Decimal(str(bps))`` and division can raise; let unexpected ones
+    # propagate so refactor regressions surface loudly.
+    from decimal import Decimal as _Dec
+    from decimal import InvalidOperation as _InvalidOp
+
+    if et in {"SUPPLY", "WITHDRAW"} and "supply_apr_pct" not in out:
+        bps = out.get("supply_apr_bps")
+        if bps is not None:
+            try:
+                out["supply_apr_pct"] = _Dec(str(bps)) / _Dec("100")
+            except (_InvalidOp, TypeError, ValueError):
+                pass
+    if et in {"BORROW", "REPAY", "DELEVERAGE"} and "borrow_apr_pct" not in out:
+        bps = out.get("borrow_apr_bps")
+        if bps is not None:
+            try:
+                out["borrow_apr_pct"] = _Dec(str(bps)) / _Dec("100")
+            except (_InvalidOp, TypeError, ValueError):
+                pass
+
+    return out
+
+
+def _typed_acct_payloads(
+    acct_events: list[dict[str, Any]],
+) -> tuple[dict[Any, dict[str, Any]], dict[Any, str], list[dict[str, Any]]]:
+    """Decode + Pydantic-validate every ``accounting_events.payload_json``.
+
+    Returns three values (VIB-3868):
+
+    - ``payloads_by_id`` — maps each row's ``id`` to a *validated* dict.
+      For event_types in the v1 surface (``payload_schemas._PAYLOAD_MODELS``),
+      the dict is the result of ``model.model_dump()``. For non-v1 types
+      (PENDLE, POLYMARKET, …) the raw decoded dict pass-through is preserved.
+      On validation failure the entry is ``{}`` so downstream cells see
+      "no data" rather than malformed data — and the cell that *cares* about
+      this row's event_type can FAIL via the ``errors_by_id`` lookup.
+    - ``errors_by_id`` — maps row ``id`` → human-readable error message for
+      every row whose payload failed Pydantic validation.
+    - ``error_records`` — public-facing list with `{row_id, event_type,
+      error}` entries; surfaced on the report so reviewers can diff
+      validation drift across runs.
+
+    Why "validated then dumped" instead of returning the model instance?
+    Cells today read payloads as plain dicts (``p.get("foo")``); preserving
+    that read shape keeps the diff small and avoids accidentally typing
+    every cell against the model class. The validation step still happens —
+    schema-incompatible payloads land in ``errors_by_id`` and never reach
+    the cell.
+
+    Codex P1 (2026-05-02): payloads are projected from the writer's persisted
+    shape onto the v1 spec shape via ``_project_payload_for_v1_validation``
+    before validation. The schemas use ``extra="ignore"`` so writer-only
+    fields (``lp_token_amount``, ``fees0_collected``, etc.) are silently
+    dropped — the validation still fires on missing/wrong-typed required
+    fields.
+    """
+    payloads_by_id: dict[Any, dict[str, Any]] = {}
+    errors_by_id: dict[Any, str] = {}
+    error_records: list[dict[str, Any]] = []
+    for r in acct_events:
+        row_id = r.get("id")
+        et = r.get("event_type") or ""
+        decoded = _json(r.get("payload_json"))
+        if not is_v1_event_type(et):
+            # Out of v1 scope — preserve the decoded dict but do NOT validate.
+            # AttemptNo17 §8.5 explicitly tracks PENDLE / POLYMARKET / etc.
+            # under v2 placeholder tickets; surfacing v1 schema mismatches on
+            # them would be noise.
+            payloads_by_id[row_id] = decoded
+            continue
+        # Project writer output → spec shape before validation (Codex P1).
+        projected = _project_payload_for_v1_validation(decoded, r)
+        try:
+            validated = validate_payload(et, projected)
+            payloads_by_id[row_id] = validated.model_dump() if validated is not None else projected
+        except ValueError as e:
+            errors_by_id[row_id] = str(e)
+            error_records.append({"row_id": row_id, "event_type": et, "error": str(e)})
+            payloads_by_id[row_id] = {}
+    return payloads_by_id, errors_by_id, error_records
+
+
+def _payload_block_cell(
+    cell_id: str,
+    description: str,
+    rows: list[dict[str, Any]],
+    errors_by_id: dict[Any, str],
+) -> CellResult | None:
+    """Return a FAIL ``CellResult`` if any of ``rows`` had a payload validation
+    error; otherwise return ``None`` so the caller can run its real predicate.
+
+    A cell's data is unusable when the upstream payload didn't match the
+    frozen Pydantic schema. Today's cells used to silently treat that as
+    "field absent" and drop into XFAIL/SKIP — VIB-3868's correctness
+    contract: surface the error here so the diagnostic carries the schema
+    mismatch reason and the cell flips to FAIL, not XFAIL.
+    """
+    if not errors_by_id:
+        return None
+    blocking = [(r.get("id"), errors_by_id[r.get("id")]) for r in rows if r.get("id") in errors_by_id]
+    if not blocking:
+        return None
+    sample = blocking[:3]
+    return CellResult(
+        cell_id,
+        description,
+        "FAIL",
+        f"{len(blocking)} payload(s) failed Pydantic validation; cell data unusable. e.g. {sample!r}",
+    )
+
+
 # ─── Cell predicates ─────────────────────────────────────────────────────
 
 
-def _cell_g1_money_trail(rows: list[dict[str, Any]]) -> CellResult:
+def _cell_g1_money_trail(
+    rows: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+) -> CellResult:
+    """G1 — Money trail (every credit/debit → tx_hash + USD@block).
+
+    VIB-3868 (B): G1 fails strictly when any successful SWAP ledger row is
+    missing token amounts (``amount_in``/``amount_out``) **or** when the
+    paired ``accounting_events`` row lacks both USD valuations
+    (``amount_in_usd`` / ``amount_out_usd``). The previous implementation
+    counted missing token amounts but never enforced the USD pillar, so a
+    swap that landed on-chain without USD values silently passed — exactly
+    the false positive the cell name claims to prevent.
+
+    The pairing rule is ledger.id == accounting_events.ledger_entry_id (the
+    foreign key wired by ``AccountingWriter``). When a SWAP ledger row has
+    no matching accounting_events row at all, that's also a money-trail
+    failure — the typed payload is the *only* place USD valuations live.
+    """
     if not rows:
         return CellResult(
             "G1",
@@ -240,35 +436,74 @@ def _cell_g1_money_trail(rows: list[dict[str, Any]]) -> CellResult:
             "FAIL",
             "transaction_ledger empty",
         )
-    missing_hash = [r for r in rows if not r.get("tx_hash")]
-    # Enforce both pillars of the money-trail contract: every successful
-    # ledger row must carry a tx_hash AND every SWAP row must record both
-    # amount_in and amount_out. ``missing_usd`` was previously computed but
-    # not enforced — a swap that landed on-chain without amounts in the
-    # ledger silently passed G1, leaving the money trail half-broken.
-    missing_usd = [
-        r for r in rows if r.get("intent_type") == "SWAP" and not (r.get("amount_in") and r.get("amount_out"))
+    # Successful intents only — failed intents are evaluated under G11
+    # (gas-only money trail). Mixing the two would FAIL G1 for a reverted
+    # SWAP that legitimately has no amount_out, masking the actual gap.
+    successful = [r for r in rows if r.get("success")]
+    missing_hash = [r for r in successful if not r.get("tx_hash")]
+    missing_token_amounts = [
+        r for r in successful if r.get("intent_type") == "SWAP" and not (r.get("amount_in") and r.get("amount_out"))
     ]
+    # Cross-table USD pillar: every successful SWAP ledger row must have a
+    # matching accounting_events row whose validated SwapEventPayload
+    # populates BOTH amount_in_usd and amount_out_usd. ``acct_payloads`` is
+    # the validated map from ``_typed_acct_payloads`` — a row whose payload
+    # failed Pydantic validation lands as ``{}`` here, which counts as
+    # missing USD (and the matching cell-level error is also surfaced via
+    # the report's ``payload_validation_errors`` list).
+    swap_acct_by_ledger_id: dict[Any, dict[str, Any]] = {}
+    for ae in acct_events:
+        if ae.get("event_type") != "SWAP":
+            continue
+        leg = ae.get("ledger_entry_id")
+        if leg is None:
+            continue
+        swap_acct_by_ledger_id[leg] = acct_payloads.get(ae.get("id"), {})
+
+    missing_swap_usd: list[tuple[Any, str]] = []
+    for r in successful:
+        if r.get("intent_type") != "SWAP":
+            continue
+        ledger_id = r.get("id")
+        payload = swap_acct_by_ledger_id.get(ledger_id)
+        if payload is None:
+            missing_swap_usd.append((ledger_id, "no SwapEventPayload row"))
+            continue
+        in_usd = payload.get("amount_in_usd")
+        out_usd = payload.get("amount_out_usd")
+        if in_usd in (None, "") or out_usd in (None, ""):
+            missing_swap_usd.append((ledger_id, f"amount_in_usd={in_usd!r} amount_out_usd={out_usd!r}"))
+
     if missing_hash:
         return CellResult(
             "G1",
             "Money trail",
             "FAIL",
-            f"{len(missing_hash)} ledger rows missing tx_hash",
+            f"{len(missing_hash)} successful ledger rows missing tx_hash",
         )
-    if missing_usd:
-        sample = [r.get("id") for r in missing_usd[:3]]
+    if missing_token_amounts:
+        sample = [r.get("id") for r in missing_token_amounts[:3]]
         return CellResult(
             "G1",
             "Money trail",
             "FAIL",
-            f"{len(missing_usd)} SWAP rows missing amount_in/amount_out (e.g. {sample!r})",
+            f"{len(missing_token_amounts)} SWAP rows missing amount_in/amount_out (e.g. {sample!r})",
         )
+    if missing_swap_usd:
+        sample_usd = missing_swap_usd[:3]
+        return CellResult(
+            "G1",
+            "Money trail",
+            "FAIL",
+            f"{len(missing_swap_usd)} SWAP rows missing USD valuation in SwapEventPayload (e.g. {sample_usd!r})",
+        )
+    swap_count = sum(1 for r in successful if r.get("intent_type") == "SWAP")
     return CellResult(
         "G1",
         "Money trail",
         "PASS",
-        f"{len(rows)} ledger rows; all tx_hashes present; all SWAP rows carry amounts",
+        f"{len(rows)} ledger rows ({len(successful)} successful, {swap_count} SWAP); "
+        "all tx_hashes present; SWAP rows carry token amounts AND USD valuations",
     )
 
 
@@ -410,6 +645,8 @@ def _cell_g6_reconciliation(
     pos_events: list[dict[str, Any]],
     acct_events: list[dict[str, Any]],
     primitive: Primitive,
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
 ) -> tuple[CellResult, dict[str, Any]]:
     """G6 reconciliation: wallet ≡ component within ε, decomposition ALWAYS emitted.
 
@@ -417,6 +654,19 @@ def _cell_g6_reconciliation(
     post-IL outcome. IL is a decomposition of the LP open→close delta, lives
     in LP4/LP5 attribution only.
     """
+    # VIB-3868: any acct_event with a malformed payload would silently
+    # contribute zero to the component PnL through ``_json`` returning ``{}``
+    # — exactly the false-positive shape Codex flagged. Pre-empt the whole
+    # cell with a FAIL when validation drift exists; surfacing the typed
+    # error here keeps the diagnostic actionable.
+    blocked = _payload_block_cell(
+        "G6",
+        "Reconciliation (wallet ≡ component)",
+        acct_events,
+        payload_errors,
+    )
+    if blocked is not None:
+        return blocked, {}
     # Wallet method: equity_final − equity_initial across all priced
     # snapshots. ``_snapshot_equity`` sums total_value_usd (deployed) +
     # available_cash_usd (uninvested wallet) — a post-teardown snapshot
@@ -460,50 +710,171 @@ def _cell_g6_reconciliation(
     sum_gas = Decimal(0)
     il_diagnostic = Decimal(0)
 
+    # VIB-3869 (A): per-bucket null counts.
+    # The bug the cell hides today: `if rpnl is not None: sum_swap += rpnl`
+    # silently treats a null `realized_pnl_usd` on a SWAP payload as zero.
+    # On a hosted run where every SWAP payload had `realized_pnl_usd=null`,
+    # `Σ_swaps_usd = 0` would reconcile against a wallet PnL that's also
+    # zero — a false positive. Counting the nulls separately surfaces this
+    # as "the inputs to the reconciliation are NULL, not measured zero".
+    null_swap_rpnl = 0
+    null_lp_close_rpnl = 0
+    null_lp_fees = 0
+    null_perp_rpnl = 0
+    null_perp_funding = 0
+    null_withdraw_interest = 0
+    null_repay_interest = 0
+
+    # VIB-3869 (B): notional accumulators for primitive-aware tolerance.
+    notional_traded = Decimal(0)  # LP / Spot scaling base
+    debt_outstanding = Decimal(0)  # Looping running debt
+    max_debt = Decimal(0)  # Looping scaling base
+    max_perp_notional = Decimal(0)  # Perp scaling base
+
     for r in ledger:
         gas = _dec(r.get("gas_usd"))
         if gas is not None:
             sum_gas += gas
 
+    # Time-ordered iteration so debt_outstanding tracks the actual running
+    # liability through BORROW → REPAY pairs. ``acct_events`` was already
+    # sorted by timestamp in ``run_against_sqlite``.
     for r in acct_events:
-        p = _json(r.get("payload_json"))
+        p = acct_payloads.get(r.get("id"), {})
         et = r.get("event_type")
         rpnl = _dec(p.get("realized_pnl_usd"))
-        if et == "SWAP" and rpnl is not None:
-            sum_swap += rpnl
+        if et == "SWAP":
+            if rpnl is None:
+                null_swap_rpnl += 1
+            else:
+                sum_swap += rpnl
+            amt_in_usd = _dec(p.get("amount_in_usd"))
+            if amt_in_usd is not None:
+                notional_traded += abs(amt_in_usd)
         if et in ("LP_OPEN", "LP_CLOSE"):
             il = _dec(p.get("il_usd"))
             if il is not None:
                 il_diagnostic += il
-            if et == "LP_CLOSE" and rpnl is not None:
-                sum_lp += rpnl
+            if et == "LP_CLOSE":
+                if rpnl is None:
+                    null_lp_close_rpnl += 1
+                else:
+                    sum_lp += rpnl
             fees_usd = _dec(p.get("fees_total_usd"))
-            if fees_usd is not None:
+            if fees_usd is None and et == "LP_CLOSE":
+                # Only LP_CLOSE is expected to emit `fees_total_usd`;
+                # LP_OPEN doesn't have realized fees yet.
+                null_lp_fees += 1
+            elif fees_usd is not None:
                 sum_fees += fees_usd
+            amt0_usd = _dec(p.get("amount0_usd"))
+            amt1_usd = _dec(p.get("amount1_usd"))
+            if amt0_usd is not None:
+                notional_traded += abs(amt0_usd)
+            if amt1_usd is not None:
+                notional_traded += abs(amt1_usd)
+        if et == "BORROW":
+            borrowed = _dec(p.get("borrowed_amount_usd"))
+            if borrowed is not None:
+                debt_outstanding += borrowed
+                if debt_outstanding > max_debt:
+                    max_debt = debt_outstanding
+                notional_traded += abs(borrowed)
         if et == "WITHDRAW":
             interest = _dec(p.get("interest_accrued_usd"))
-            if interest is not None:
+            if interest is None:
+                null_withdraw_interest += 1
+            else:
                 sum_interest += interest
-        if et == "REPAY":
+            amt_usd = _dec(p.get("amount_usd"))
+            if amt_usd is not None:
+                notional_traded += abs(amt_usd)
+        if et in ("REPAY", "DELEVERAGE"):
             interest = _dec(p.get("interest_paid_usd"))
-            if interest is not None:
+            if interest is None:
+                null_repay_interest += 1
+            else:
                 sum_interest -= interest
+            principal = _dec(p.get("principal_repaid_usd"))
+            if principal is not None:
+                debt_outstanding -= principal
+                # Clamp at zero — partial-repay accounting noise can drive
+                # the running tally slightly negative without affecting the
+                # high-water mark.
+                if debt_outstanding < Decimal(0):
+                    debt_outstanding = Decimal(0)
+            amt_usd = _dec(p.get("amount_usd"))
+            if amt_usd is not None:
+                notional_traded += abs(amt_usd)
         if et == "PERP_CLOSE":
             funding_p = _dec(p.get("funding_paid_usd"))
             funding_r = _dec(p.get("funding_received_usd"))
+            # Funding is "all-or-nothing" per row: a payload that emitted
+            # neither is unmeasured. Both being zero is a measured zero
+            # (no funding accrued) and is fine.
+            if funding_p is None and funding_r is None:
+                null_perp_funding += 1
             if funding_p is not None:
                 sum_funding -= funding_p
             if funding_r is not None:
                 sum_funding += funding_r
-            if rpnl is not None:
+            if rpnl is None:
+                null_perp_rpnl += 1
+            else:
                 sum_perp += rpnl
+            size = _dec(p.get("size"))
+            exit_price = _dec(p.get("exit_price"))
+            if size is not None and exit_price is not None:
+                notional = abs(size) * abs(exit_price)
+                if notional > max_perp_notional:
+                    max_perp_notional = notional
+        if et == "PERP_OPEN":
+            size = _dec(p.get("size"))
+            entry_price = _dec(p.get("entry_price"))
+            if size is not None and entry_price is not None:
+                notional = abs(size) * abs(entry_price)
+                if notional > max_perp_notional:
+                    max_perp_notional = notional
 
     component_pnl = sum_swap + sum_lp + sum_perp + sum_fees + sum_funding + sum_interest - sum_gas
 
-    eps_pct = Decimal("0.0025") if primitive in ("lp", "looping") else Decimal("0.01")
+    # VIB-3869 (B): primitive-aware notional-scaled tolerance.
+    # Replaces the prior `max($0.50, eps_pct × capital)` rule, which on a
+    # $5 validation run gave a $0.50 floor — i.e. 10% of capital — masking
+    # real reconciliation errors. The new floor is $0.10 (rounding /
+    # oracle-noise floor) and the percent is scaled against the right
+    # *notional* base for the primitive:
+    #   - LP/Spot: 0.25% × notional_traded (sum of swap + LP open/close USD)
+    #   - Looping: 0.10% × max(notional_traded, max_debt_outstanding)
+    #   - Perp:    0.05% × max_notional_exposure
+    floor = Decimal("0.10")
+    eps_floor_label = "$0.10"
+    if primitive == "lp":
+        eps_pct = Decimal("0.0025")
+        scaling_base = notional_traded
+        scaling_label = "notional_traded"
+    elif primitive == "looping":
+        eps_pct = Decimal("0.0010")
+        scaling_base = max(notional_traded, max_debt)
+        scaling_label = "max(notional_traded, max_debt_outstanding)"
+    else:  # perp
+        eps_pct = Decimal("0.0005")
+        scaling_base = max_perp_notional
+        scaling_label = "max_perp_notional"
+    eps = max(floor, eps_pct * scaling_base)
     capital = max(abs(initial), abs(final))
-    eps = max(Decimal("0.5"), eps_pct * capital)
     gap = abs(wallet_pnl - component_pnl)
+
+    null_breakdown = {
+        "Σ_swaps_usd_null_count": null_swap_rpnl,
+        "Σ_lp_usd_null_count": null_lp_close_rpnl,
+        "Σ_lp_fees_null_count": null_lp_fees,
+        "Σ_perp_usd_null_count": null_perp_rpnl,
+        "Σ_funding_usd_null_count": null_perp_funding,
+        "Σ_interest_supply_null_count": null_withdraw_interest,
+        "Σ_interest_borrow_null_count": null_repay_interest,
+    }
+    has_nulls = any(v > 0 for v in null_breakdown.values())
 
     decomp = {
         "wallet_pnl_usd": str(wallet_pnl),
@@ -518,15 +889,39 @@ def _cell_g6_reconciliation(
         "gap_usd": str(gap),
         "ε_threshold_usd": str(eps),
         "ε_pct": str(eps_pct),
+        "ε_floor_usd": eps_floor_label,
+        "ε_scaling_base_usd": str(scaling_base),
+        "ε_scaling_base_label": scaling_label,
+        "capital_usd": str(capital),
         "il_diagnostic_usd_NOT_in_PnL": str(il_diagnostic),
+        **{k: str(v) for k, v in null_breakdown.items()},
     }
+
+    # VIB-3869 (A): any null in a bucket where the row's intent_type would
+    # normally emit a value FAILs G6 — the reconciliation result is
+    # otherwise running on unmeasured zero, not a real signal.
+    if has_nulls:
+        nonzero = {k: v for k, v in null_breakdown.items() if v > 0}
+        return (
+            CellResult(
+                "G6",
+                "Reconciliation",
+                "FAIL",
+                f"component buckets contain unmeasured nulls: {nonzero}; "
+                f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap} "
+                "(reconciliation result is not trustworthy until inputs are populated)",
+                decomposition=decomp,
+            ),
+            decomp,
+        )
     if gap <= eps:
         return (
             CellResult(
                 "G6",
                 "Reconciliation",
                 "PASS",
-                f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap} (ε=${eps})",
+                f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap} "
+                f"(ε=${eps} = {eps_pct} × {scaling_label}=${scaling_base}, floor={eps_floor_label})",
                 decomposition=decomp,
             ),
             decomp,
@@ -536,7 +931,8 @@ def _cell_g6_reconciliation(
             "G6",
             "Reconciliation",
             "FAIL",
-            f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap} > ε=${eps}",
+            f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap} > ε=${eps} "
+            f"({eps_pct} × {scaling_label}=${scaling_base}, floor={eps_floor_label})",
             decomposition=decomp,
         ),
         decomp,
@@ -640,22 +1036,33 @@ def _cell_g10_multi_tx_atomicity(
 ) -> CellResult:
     """G10 — Multi-tx atomicity.
 
-    A successful intent must produce exactly ONE ledger row regardless of
-    how many on-chain transactions it took to land (e.g. APPROVE+SUPPLY,
-    NPM.multicall LP_CLOSE). The cell detects "same intent recorded N times"
-    by collapsing on the intent's natural identity within a cycle:
-    ``(cycle_id, intent_type, tx_hash)``. ``tx_hash`` is what makes two rows
-    "the same intent" — the framework writes one row per dispatched intent,
-    so two rows sharing all three fields are a duplicate write.
+    Two distinct contracts (VIB-3868 (C) tightening):
 
-    Including ``id`` (the ledger row PK) here would make this cell a
-    tautology — every row has a unique PK, so dups would always be empty.
+    1. **No double-writes**: a successful intent must produce exactly ONE
+       ledger row regardless of how many on-chain transactions it took to
+       land (APPROVE+SUPPLY, NPM.multicall LP_CLOSE, …). The cell detects
+       "same intent recorded N times" by collapsing on
+       ``(cycle_id, intent_type, tx_hash)`` — sharing those three fields is
+       what makes two rows "the same intent". Grouping by ``id`` (the PK)
+       would be a tautology because every row has a unique PK.
+
+    2. **Cycle-level atomicity**: rows that share a ``cycle_id`` must agree
+       on outcome — every dispatched intent within the cycle either
+       succeeded or every dispatched intent reverted. A cycle that had
+       APPROVE succeed and SUPPLY revert is the failure mode this cell
+       must catch. Pre-VIB-3868 G10 grouped only by intent identity, so
+       mixed-status cycles silently passed — exactly the false positive
+       Codex flagged in PR #1997 review.
+
+    A cycle with a single landed row is uniform-by-construction (no mixed
+    status possible) and contributes nothing to either check.
     """
+    # ── Contract 1: no double-writes ────────────────────────────────────
     by_intent: dict[Any, int] = {}
     for r in ledger:
         # Skip teardown rows whose tx_hash may be NULL until the intent
         # confirms; G10 evaluates only landed intents (success/fail with a
-        # dispatched TX). A None tx_hash on a "in-flight" row would otherwise
+        # dispatched TX). A None tx_hash on an "in-flight" row would otherwise
         # collide with other in-flight rows in the same cycle.
         tx_hash = r.get("tx_hash")
         if not tx_hash:
@@ -671,11 +1078,45 @@ def _cell_g10_multi_tx_atomicity(
             "FAIL",
             f"{len(dups)} ledger entries duplicated for the same intent (e.g. {sample!r} ×{dups[sample]})",
         )
+
+    # ── Contract 2: cycle-level uniform status ─────────────────────────
+    # Group rows that landed (have tx_hash) by cycle_id. A cycle is "mixed"
+    # when at least one row succeeded and at least one row failed — that's
+    # the partial-unwind / partial-supply / leaked-state bug that breaks
+    # accounting recoverability.
+    cycles: dict[Any, list[dict[str, Any]]] = {}
+    for r in ledger:
+        if not r.get("tx_hash"):
+            continue
+        cyc = r.get("cycle_id")
+        if cyc is None or cyc == "":
+            continue
+        cycles.setdefault(cyc, []).append(r)
+
+    mixed: list[tuple[Any, int, int]] = []  # (cycle_id, success_count, fail_count)
+    for cyc, rs in cycles.items():
+        if len(rs) < 2:
+            continue
+        successes = sum(1 for r in rs if r.get("success"))
+        fails = len(rs) - successes
+        if successes > 0 and fails > 0:
+            mixed.append((cyc, successes, fails))
+    if mixed:
+        sample = mixed[:3]
+        return CellResult(
+            "G10",
+            "Multi-tx atomicity",
+            "FAIL",
+            f"{len(mixed)} cycles have mixed-status ledger rows (some succeeded, some reverted) — e.g. {sample!r}",
+        )
+
+    multi_row_cycles = sum(1 for rs in cycles.values() if len(rs) > 1)
     return CellResult(
         "G10",
         "Multi-tx atomicity",
         "PASS",
-        f"{len(ledger)} ledger rows: 1:1 with intents",
+        f"{len(ledger)} ledger rows; no duplicates; "
+        f"{multi_row_cycles}/{len(cycles)} cycles span multiple intents and all are uniform-status",
     )
 
 
@@ -756,7 +1197,16 @@ def _cell_g12_oracle_consistency(ledger: list[dict[str, Any]]) -> CellResult:
     )
 
 
-def _cell_g13_lot_matching(ledger: list[dict[str, Any]], acct_events: list[dict[str, Any]]) -> CellResult:
+def _cell_g13_lot_matching(
+    ledger: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> CellResult:
+    """G13 — Lot-matching policy declared + versioned (VIB-3868: validated reads)."""
+    blocked = _payload_block_cell("G13", "Lot-matching policy declared + versioned", acct_events, payload_errors)
+    if blocked is not None:
+        return blocked
     versions: set[int] = set()
     bad_rows: list[Any] = []
 
@@ -775,7 +1225,7 @@ def _cell_g13_lot_matching(ledger: list[dict[str, Any]], acct_events: list[dict[
         elif r.get("matching_policy_version") not in (None, ""):
             bad_rows.append(("ledger", r.get("id")))
     for r in acct_events:
-        p = _json(r.get("payload_json"))
+        p = acct_payloads.get(r.get("id"), {})
         v = _coerce(p.get("matching_policy_version"))
         if v is not None:
             versions.add(v)
@@ -867,27 +1317,20 @@ def _cell_g15_multi_period_self_consistency(
 ) -> CellResult:
     """G15: Multi-period MtM self-consistency.
 
-    The honest predicate: at every iteration, the SDK's MtM (sum of
-    ``position_state_snapshots.value_usd`` across open positions, plus
-    available cash) must equal the on-chain position state ± dust within
-    a per-iteration tolerance, AND consecutive iterations must telescope
-    to the endpoint delta of *priced* equity changes (i.e. P&L attributable
-    to time / market moves, separate from the same-day open→close pairs
-    handled by G6).
+    The honest predicate (post-Track-C wiring, VIB-3891): every snapshot
+    that *had open positions* must have a corresponding set of
+    ``position_state_snapshots`` rows — one per position. A snapshot
+    where the strategy held 3 LP positions but only 2 Track C rows
+    landed is a coverage gap that would silently skew the time-series
+    the cell is supposed to validate.
 
-    That predicate requires :class:`position_state_snapshots` rows — Track C
-    in `Accounting-AttemptNo17.md`. Track C is library code only on this
-    branch (no production callers — see VIB-3866 for the truth-table
-    correction). Without those rows, every implementation reduces to a
-    telescoping sum over `portfolio_snapshots.equity` which is a tautology
-    (Σ(s[i+1] - s[i]) ≡ s[-1] - s[0] for any monotonic measured series)
-    and was masquerading as a PASS in earlier iterations of this test —
-    flagged in Codex's PR-review (VIB-3865).
-
-    Until Track C lands, this cell is **XFAIL by design**. A passing G15
-    would be a regression — it would re-introduce a false positive that
-    drives mainnet decisions on an arithmetic identity rather than a
-    real reconciliation.
+    Pre-VIB-3865 this cell was a telescoping tautology
+    (``Σ(s[i+1] - s[i]) ≡ s[-1] - s[0]`` for any monotonic measured series)
+    and was masquerading as a PASS. The fix replaces that with a
+    coverage check that actually depends on Track C inputs — and the
+    cell stays XFAIL when no Track C rows exist anywhere, because
+    "no rows at all" is the deferred-tracking case (materializer not
+    wired yet), not a coverage failure.
     """
     if not position_state_rows:
         return CellResult(
@@ -898,16 +1341,93 @@ def _cell_g15_multi_period_self_consistency(
             "until materializer lands — VIB-3866 truth correction",
         )
 
-    # When Track C lands, replace this branch with the real per-iteration
-    # SDK-vs-on-chain reconciliation against position_state_snapshots.
-    # Until then, we deliberately do not score against portfolio_snapshots
-    # alone — see docstring.
+    # Coverage check: every snapshot that reported open positions must
+    # have at least one Track C row tied to it. A row count below the
+    # snapshot's open-position count is a partial-write — surface it
+    # rather than silently masking with the telescope identity.
+    snapshot_position_counts: dict[Any, int] = {}
+    unreadable_snapshots: list[Any] = []
+    for s in snapshots:
+        positions_json = s.get("positions_json")
+        if not positions_json or positions_json == "[]":
+            continue
+        try:
+            positions = json.loads(positions_json)
+        except (json.JSONDecodeError, TypeError):
+            # CodeRabbit (2026-05-02): unreadable JSON is NOT "no positions".
+            # Surface as a coverage failure rather than silently passing
+            # G15 as cash-only — that's the exact masking the cell was
+            # rewritten to catch (VIB-3891 coverage check).
+            unreadable_snapshots.append(s.get("id"))
+            continue
+        # CodeRabbit (2026-05-02 round 3): valid JSON with the wrong root
+        # shape (``{}``, ``42``, etc.) is also unreadable for the coverage
+        # check. Treat as malformed rather than "no positions".
+        if not isinstance(positions, list):
+            unreadable_snapshots.append(s.get("id"))
+            continue
+        if positions:
+            snapshot_position_counts[s.get("id")] = len(positions)
+
+    if unreadable_snapshots:
+        sample = unreadable_snapshots[:3]
+        return CellResult(
+            "G15",
+            "Multi-period MtM self-consistency",
+            "FAIL",
+            f"{len(unreadable_snapshots)} snapshot(s) have malformed positions_json "
+            f"(JSONDecodeError/TypeError); e.g. {sample!r} — coverage check cannot "
+            "reliably classify those snapshots as position-bearing or cash-only",
+        )
+
+    if not snapshot_position_counts:
+        # Track C rows exist but the strategy never reported open
+        # positions on any snapshot — nothing to reconcile against.
+        # Treat as PASS: the materializer is wired and chose to write
+        # nothing useful (e.g. a strategy that holds only cash). A FAIL
+        # here would penalise the strategy for being position-less.
+        return CellResult(
+            "G15",
+            "Multi-period MtM self-consistency",
+            "PASS",
+            f"{len(position_state_rows)} Track C rows present; no snapshots reported "
+            "open positions (cash-only strategy or pre-deploy snapshot)",
+        )
+
+    track_c_by_snapshot: dict[Any, int] = {}
+    for r in position_state_rows:
+        sid = r.get("snapshot_id")
+        if sid is None:
+            continue
+        track_c_by_snapshot[sid] = track_c_by_snapshot.get(sid, 0) + 1
+
+    gaps: list[tuple[Any, int, int]] = []
+    for sid, expected in snapshot_position_counts.items():
+        actual = track_c_by_snapshot.get(sid, 0)
+        # CodeRabbit (2026-05-02): also fail on over-coverage. The DDL has no
+        # uniqueness constraint so a retry / double-call could insert the same
+        # position twice; ``actual > expected`` is just as much a coverage
+        # contract violation as ``actual < expected`` and silently passing
+        # an over-counted snapshot would mask the duplication regression.
+        if actual != expected:
+            gaps.append((sid, expected, actual))
+    if gaps:
+        sample = gaps[:3]
+        return CellResult(
+            "G15",
+            "Multi-period MtM self-consistency",
+            "FAIL",
+            f"{len(gaps)} snapshot(s) with mismatched Track C coverage "
+            f"(expected = open positions, actual = position_state rows; "
+            f"either under- or over-counted); e.g. {sample!r}",
+        )
     return CellResult(
         "G15",
         "Multi-period MtM self-consistency",
-        "XFAIL",
-        f"position_state_snapshots present ({len(position_state_rows)} rows) but the "
-        "Track-C-aware reconciliation predicate is not yet implemented — VIB-3866",
+        "PASS",
+        f"every snapshot with open positions has Track C coverage "
+        f"({len(snapshot_position_counts)} snapshots, "
+        f"{sum(track_c_by_snapshot.values())} Track C rows)",
     )
 
 
@@ -915,8 +1435,15 @@ def _cell_g15_multi_period_self_consistency(
 
 
 def _cells_lp(
-    pos_events: list[dict[str, Any]], acct_events: list[dict[str, Any]], snapshots: list[dict[str, Any]]
+    pos_events: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+    position_state_rows: list[dict[str, Any]] | None = None,
 ) -> list[CellResult]:
+    position_state_rows = position_state_rows or []
+    lp_state_rows = [r for r in position_state_rows if r.get("position_type") == "LP"]
     out: list[CellResult] = []
     # LP1: range exposure
     has_ticks = any(r.get("tick_lower") is not None and r.get("tick_upper") is not None for r in pos_events)
@@ -928,15 +1455,39 @@ def _cells_lp(
             "found tick_lower/upper on position_events" if has_ticks else "no position_events row carries ticks",
         )
     )
-    # LP2: in-range time
-    out.append(
-        CellResult(
-            "LP2",
-            "In-range time (fraction over hold)",
-            "XFAIL",
-            "position_state_snapshots not wired (Track C); deferred",
+    # LP2: in-range time fraction (Track C)
+    if lp_state_rows:
+        in_range_rows = [r for r in lp_state_rows if r.get("in_range") is not None]
+        if in_range_rows:
+            in_range_count = sum(1 for r in in_range_rows if r.get("in_range"))
+            fraction = in_range_count / len(in_range_rows)
+            out.append(
+                CellResult(
+                    "LP2",
+                    "In-range time (fraction over hold)",
+                    "PASS",
+                    f"{in_range_count}/{len(in_range_rows)} samples in-range ({fraction:.2%}); track-c rows present",
+                )
+            )
+        else:
+            out.append(
+                CellResult(
+                    "LP2",
+                    "In-range time (fraction over hold)",
+                    "FAIL",
+                    f"{len(lp_state_rows)} LP track-c rows but none has in_range populated — "
+                    "LP observer is not emitting in_range",
+                )
+            )
+    else:
+        out.append(
+            CellResult(
+                "LP2",
+                "In-range time (fraction over hold)",
+                "XFAIL",
+                "no LP rows in position_state_snapshots (no LP observers wired or no LP positions)",
+            )
         )
-    )
     # LP3: fees per position
     fees_seen = any(r.get("fees_token0") or r.get("fees_token1") for r in pos_events)
     out.append(
@@ -947,21 +1498,28 @@ def _cells_lp(
             "position_events.fees_token0/1 populated" if fees_seen else "no fees_token0/1 on any position_event",
         )
     )
-    # LP4: IL diagnostic
-    has_il = False
-    for r in acct_events:
-        p = _json(r.get("payload_json"))
-        if p.get("il_usd") is not None:
-            has_il = True
-            break
-    out.append(
-        CellResult(
-            "LP4",
-            "Impermanent loss (diagnostic, NOT in net PnL)",
-            "PASS" if has_il else "XFAIL",
-            "il_usd in LP_CLOSE payload" if has_il else "il_usd not yet emitted by LP close handler",
+    # LP4: IL diagnostic — VIB-3868: malformed LP payloads can no longer
+    # silently land here as "il_usd missing" → XFAIL. A schema mismatch
+    # surfaces as FAIL via _payload_block_cell.
+    lp_acct = [r for r in acct_events if r.get("event_type") in ("LP_OPEN", "LP_CLOSE")]
+    blocked = _payload_block_cell("LP4", "Impermanent loss (diagnostic, NOT in net PnL)", lp_acct, payload_errors)
+    if blocked is not None:
+        out.append(blocked)
+    else:
+        has_il = False
+        for r in lp_acct:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("il_usd") is not None:
+                has_il = True
+                break
+        out.append(
+            CellResult(
+                "LP4",
+                "Impermanent loss (diagnostic, NOT in net PnL)",
+                "PASS" if has_il else "XFAIL",
+                "il_usd in LP_CLOSE payload" if has_il else "il_usd not yet emitted by LP close handler",
+            )
         )
-    )
     # LP5: open→close delta decomposition
     out.append(
         CellResult(
@@ -971,137 +1529,302 @@ def _cells_lp(
             "attribution_json LP decomposition not yet computed",
         )
     )
-    # LP6: liquidity over time
-    out.append(
-        CellResult(
-            "LP6",
-            "Liquidity over time",
-            "XFAIL",
-            "needs position_state_snapshots (Track C)",
-        )
-    )
-    return out
-
-
-def _cells_lending(acct_events: list[dict[str, Any]], snapshots: list[dict[str, Any]]) -> list[CellResult]:
-    out: list[CellResult] = []
-    # L1: net carry
-    interest_supply = Decimal(0)
-    interest_borrow = Decimal(0)
-    for r in acct_events:
-        p = _json(r.get("payload_json"))
-        if r.get("event_type") == "WITHDRAW" and p.get("interest_accrued_usd"):
-            interest_supply += _dec(p.get("interest_accrued_usd")) or Decimal(0)
-        if r.get("event_type") == "REPAY" and p.get("interest_paid_usd"):
-            interest_borrow += _dec(p.get("interest_paid_usd")) or Decimal(0)
-    if interest_supply or interest_borrow:
-        out.append(
-            CellResult(
-                "L1",
-                "Net carry (supply_int − borrow_int)",
-                "PASS",
-                f"supply=${interest_supply} borrow=${interest_borrow} net=${interest_supply - interest_borrow}",
+    # LP6: liquidity over time (Track C)
+    if lp_state_rows:
+        # CodeRabbit (2026-05-02): position_state.py materialises liquidity as
+        # an integer column, so SQLite reads it back as int 0 — not the
+        # string "0". Include numeric 0 in the empty-set check so LP6
+        # doesn't pass on rows that genuinely have zero liquidity.
+        liq_rows = [r for r in lp_state_rows if r.get("liquidity") not in (None, "", "0", 0)]
+        if liq_rows:
+            out.append(
+                CellResult(
+                    "LP6",
+                    "Liquidity over time",
+                    "PASS",
+                    f"{len(liq_rows)}/{len(lp_state_rows)} LP rows carry non-zero liquidity",
+                )
             )
-        )
+        else:
+            out.append(
+                CellResult(
+                    "LP6",
+                    "Liquidity over time",
+                    "FAIL",
+                    f"{len(lp_state_rows)} LP track-c rows but none has non-zero liquidity — "
+                    "LP observer is not reading pool liquidity",
+                )
+            )
     else:
         out.append(
             CellResult(
-                "L1",
-                "Net carry",
+                "LP6",
+                "Liquidity over time",
                 "XFAIL",
-                "no interest_*_usd captured (needs Track C materializer for accrual or REPAY/WITHDRAW with interest split)",
+                "no LP rows in position_state_snapshots",
             )
         )
-    # L2: HF/LTV trajectory
-    out.append(
-        CellResult(
-            "L2",
-            "HF / LTV trajectory",
-            "XFAIL",
-            "needs position_state_snapshots (Track C)",
+    return out
+
+
+def _cells_lending(
+    acct_events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+    position_state_rows: list[dict[str, Any]] | None = None,
+) -> list[CellResult]:
+    position_state_rows = position_state_rows or []
+    lending_state_rows = [r for r in position_state_rows if r.get("position_type") == "LENDING"]
+    out: list[CellResult] = []
+    # L1: net carry — VIB-3868 validated reads. A WITHDRAW/REPAY payload
+    # that fails Pydantic validation FAILs L1 with the schema-mismatch
+    # message instead of silently summing zero interest.
+    lending_acct = [r for r in acct_events if r.get("event_type") in ("WITHDRAW", "REPAY", "DELEVERAGE")]
+    blocked = _payload_block_cell("L1", "Net carry (supply_int − borrow_int)", lending_acct, payload_errors)
+    # CodeRabbit (2026-05-02): a malformed payload only invalidates the
+    # payload-driven cells (L1 / L4 / L6). L2 / L3 / L5 read Track-C
+    # ``position_state_rows`` and are independent of the payload schema —
+    # do NOT short-circuit them on a payload validation failure.
+    payload_blocked = blocked is not None
+    if blocked is not None:
+        out.append(blocked)
+        out.append(
+            CellResult(
+                "L4",
+                "Principal vs interest at REPAY",
+                "FAIL",
+                "lending payload(s) failed Pydantic validation; cell data unusable",
+            )
         )
-    )
-    # L3: liquidation buffer
-    out.append(
-        CellResult(
-            "L3",
-            "Liquidation buffer",
-            "XFAIL",
-            "needs L2 + per-asset thresholds (Track C)",
+        out.append(
+            CellResult(
+                "L6",
+                "Loop-leg attribution",
+                "FAIL",
+                "lending payload(s) failed Pydantic validation; cell data unusable",
+            )
         )
-    )
-    # L4: principal vs interest at REPAY.
+    if not payload_blocked:
+        # CodeRabbit (2026-05-02): truthiness checks collapse Decimal("0") /
+        # "0" into "missing", which downgrades a measured-zero-carry run to
+        # XFAIL (Empty ≠ zero per CLAUDE.md). Use explicit ``not in (None, "")``
+        # to preserve measured zero. Also include DELEVERAGE — the rest of
+        # this file treats it as a REPAY-class event; missing it under-counts
+        # borrow interest on deleveraging loops.
+        interest_supply = Decimal(0)
+        interest_borrow = Decimal(0)
+        for r in acct_events:
+            p = acct_payloads.get(r.get("id"), {})
+            accrued = p.get("interest_accrued_usd")
+            if r.get("event_type") == "WITHDRAW" and accrued not in (None, ""):
+                interest_supply += _dec(accrued) or Decimal(0)
+            paid = p.get("interest_paid_usd")
+            if r.get("event_type") in ("REPAY", "DELEVERAGE") and paid not in (None, ""):
+                interest_borrow += _dec(paid) or Decimal(0)
+        if interest_supply or interest_borrow:
+            out.append(
+                CellResult(
+                    "L1",
+                    "Net carry (supply_int − borrow_int)",
+                    "PASS",
+                    f"supply=${interest_supply} borrow=${interest_borrow} net=${interest_supply - interest_borrow}",
+                )
+            )
+        else:
+            out.append(
+                CellResult(
+                    "L1",
+                    "Net carry",
+                    "XFAIL",
+                    "no interest_*_usd captured (needs Track C materializer for accrual or REPAY/WITHDRAW with interest split)",
+                )
+            )
+    # L2: HF/LTV trajectory (Track C)
+    if lending_state_rows:
+        hf_rows = [r for r in lending_state_rows if r.get("health_factor") not in (None, "")]
+        if hf_rows:
+            out.append(
+                CellResult(
+                    "L2",
+                    "HF / LTV trajectory",
+                    "PASS",
+                    f"{len(hf_rows)}/{len(lending_state_rows)} lending track-c rows carry health_factor",
+                )
+            )
+        else:
+            out.append(
+                CellResult(
+                    "L2",
+                    "HF / LTV trajectory",
+                    "FAIL",
+                    f"{len(lending_state_rows)} lending track-c rows but none has health_factor — "
+                    "lending observer is not reading HF (depends on VIB-3474)",
+                )
+            )
+    else:
+        out.append(
+            CellResult(
+                "L2",
+                "HF / LTV trajectory",
+                "XFAIL",
+                "no LENDING rows in position_state_snapshots",
+            )
+        )
+    # L3: liquidation buffer (Track C). Reuses HF samples; the buffer is
+    # min(HF) > 1.0 across the trajectory.
+    if lending_state_rows:
+        hf_decimals: list[Decimal] = []
+        for r in lending_state_rows:
+            try:
+                hf = Decimal(str(r.get("health_factor")))
+                hf_decimals.append(hf)
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+        if hf_decimals:
+            min_hf = min(hf_decimals)
+            if min_hf > Decimal("1.0"):
+                out.append(
+                    CellResult(
+                        "L3",
+                        "Liquidation buffer",
+                        "PASS",
+                        f"min(HF) = {min_hf} across {len(hf_decimals)} samples (> 1.0)",
+                    )
+                )
+            else:
+                out.append(
+                    CellResult(
+                        "L3",
+                        "Liquidation buffer",
+                        "FAIL",
+                        f"min(HF) = {min_hf} ≤ 1.0 — strategy entered liquidation territory",
+                    )
+                )
+        else:
+            out.append(
+                CellResult(
+                    "L3",
+                    "Liquidation buffer",
+                    "FAIL",
+                    f"{len(lending_state_rows)} lending rows but no parseable health_factor",
+                )
+            )
+    else:
+        out.append(
+            CellResult(
+                "L3",
+                "Liquidation buffer",
+                "XFAIL",
+                "no LENDING rows in position_state_snapshots",
+            )
+        )
+    # L4: principal vs interest at REPAY (skip when payload validation blocked above).
     # Both spec names (``principal_repaid_usd`` / ``interest_paid_usd``) and
     # legacy ``*_delta_usd`` names are accepted — the writer projects from
     # the legacy fields to the spec names (see writer._project_lending_aliases).
     # ``interest_paid_usd`` may be None in cases where there were no matching
     # BORROW lots (FIFO miss) — that's UNAVAILABLE rather than a fail. The
     # cell looks for AT LEAST ONE REPAY row where the split was emittable.
-    has_split = False
-    repay_rows = 0
-    for r in acct_events:
-        if r.get("event_type") in ("REPAY", "DELEVERAGE"):
-            repay_rows += 1
-            p = _json(r.get("payload_json"))
-            principal = p.get("principal_repaid_usd")
-            if principal is None:
-                principal = p.get("principal_delta_usd")
-            interest = p.get("interest_paid_usd")
-            if interest is None:
-                interest = p.get("interest_delta_usd")
-            if principal is not None and interest is not None:
-                has_split = True
-                break
-    if has_split:
-        out.append(
-            CellResult(
-                "L4",
-                "Principal vs interest at REPAY",
-                "PASS",
-                f"REPAY payload has principal/interest split ({repay_rows} REPAY-class rows)",
+    if not payload_blocked:
+        has_split = False
+        repay_rows = 0
+        for r in acct_events:
+            if r.get("event_type") in ("REPAY", "DELEVERAGE"):
+                repay_rows += 1
+                p = acct_payloads.get(r.get("id"), {})
+                principal = p.get("principal_repaid_usd")
+                if principal is None:
+                    principal = p.get("principal_delta_usd")
+                interest = p.get("interest_paid_usd")
+                if interest is None:
+                    interest = p.get("interest_delta_usd")
+                if principal is not None and interest is not None:
+                    has_split = True
+                    break
+        if has_split:
+            out.append(
+                CellResult(
+                    "L4",
+                    "Principal vs interest at REPAY",
+                    "PASS",
+                    f"REPAY payload has principal/interest split ({repay_rows} REPAY-class rows)",
+                )
             )
-        )
-    elif repay_rows == 0:
-        out.append(
-            CellResult(
-                "L4",
-                "Principal vs interest at REPAY",
-                "SKIP",
-                "no REPAY rows in this run — split contract is unexercised",
+        elif repay_rows == 0:
+            out.append(
+                CellResult(
+                    "L4",
+                    "Principal vs interest at REPAY",
+                    "SKIP",
+                    "no REPAY rows in this run — split contract is unexercised",
+                )
             )
-        )
+        else:
+            out.append(
+                CellResult(
+                    "L4",
+                    "Principal vs interest at REPAY",
+                    "FAIL",
+                    f"{repay_rows} REPAY rows but principal/interest split missing — "
+                    "FIFO basis store may not have a matching BORROW lot",
+                )
+            )
+    # L5: APR/APY snapshot (Track C)
+    if lending_state_rows:
+        apr_rows = [
+            r
+            for r in lending_state_rows
+            if r.get("supply_apy_pct") not in (None, "") or r.get("borrow_apy_pct") not in (None, "")
+        ]
+        if apr_rows:
+            out.append(
+                CellResult(
+                    "L5",
+                    "APR / APY snapshot",
+                    "PASS",
+                    f"{len(apr_rows)}/{len(lending_state_rows)} lending track-c rows carry "
+                    "supply_apy_pct and/or borrow_apy_pct",
+                )
+            )
+        else:
+            out.append(
+                CellResult(
+                    "L5",
+                    "APR / APY snapshot",
+                    "FAIL",
+                    f"{len(lending_state_rows)} lending rows but none has APR/APY — "
+                    "lending observer is not reading rates",
+                )
+            )
     else:
         out.append(
             CellResult(
-                "L4",
-                "Principal vs interest at REPAY",
-                "FAIL",
-                f"{repay_rows} REPAY rows but principal/interest split missing — "
-                "FIFO basis store may not have a matching BORROW lot",
+                "L5",
+                "APR / APY snapshot",
+                "XFAIL",
+                "no LENDING rows in position_state_snapshots",
             )
         )
-    # L5: APR/APY snapshot
-    out.append(
-        CellResult(
-            "L5",
-            "APR / APY snapshot",
-            "XFAIL",
-            "needs position_state_snapshots (Track C) capturing supply_apr/borrow_apr per iteration",
+    # L6: loop-leg attribution (skip when payload validation blocked above).
+    if not payload_blocked:
+        out.append(
+            CellResult(
+                "L6",
+                "Loop-leg attribution",
+                "XFAIL",
+                "loop-leg attribution not in v1 of typed-column writer",
+            )
         )
-    )
-    # L6: loop-leg attribution
-    out.append(
-        CellResult(
-            "L6",
-            "Loop-leg attribution",
-            "XFAIL",
-            "loop-leg attribution not in v1 of typed-column writer",
-        )
-    )
     return out
 
 
-def _cells_perp(acct_events: list[dict[str, Any]], pos_events: list[dict[str, Any]]) -> list[CellResult]:
+def _cells_perp(
+    acct_events: list[dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> list[CellResult]:
     out: list[CellResult] = []
     has_open = any(r.get("event_type") == "PERP_OPEN" for r in pos_events)
     has_close = any(r.get("event_type") == "PERP_CLOSE" for r in pos_events)
@@ -1121,38 +1844,47 @@ def _cells_perp(acct_events: list[dict[str, Any]], pos_events: list[dict[str, An
             "needs position_state_snapshots (Track C)",
         )
     )
-    has_fee_split = False
-    for r in acct_events:
-        p = _json(r.get("payload_json"))
-        if r.get("event_type") in ("PERP_OPEN", "PERP_CLOSE") and (
-            p.get("open_fee_usd") is not None or p.get("close_fee_usd") is not None
-        ):
-            has_fee_split = True
-            break
-    out.append(
-        CellResult(
-            "P3",
-            "Open + close fees + price impact (separable)",
-            "PASS" if has_fee_split else "XFAIL",
-            "fee fields in PERP_*_PAYLOAD" if has_fee_split else "fee fields not yet populated",
+    perp_acct = [r for r in acct_events if r.get("event_type") in ("PERP_OPEN", "PERP_CLOSE")]
+    blocked_p3 = _payload_block_cell("P3", "Open + close fees + price impact (separable)", perp_acct, payload_errors)
+    if blocked_p3 is not None:
+        out.append(blocked_p3)
+    else:
+        has_fee_split = False
+        for r in perp_acct:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("open_fee_usd") is not None or p.get("close_fee_usd") is not None:
+                has_fee_split = True
+                break
+        out.append(
+            CellResult(
+                "P3",
+                "Open + close fees + price impact (separable)",
+                "PASS" if has_fee_split else "XFAIL",
+                "fee fields in PERP_*_PAYLOAD" if has_fee_split else "fee fields not yet populated",
+            )
         )
-    )
     out.append(CellResult("P4", "Liquidation buffer over time", "XFAIL", "Track C"))
-    has_realized = False
-    for r in acct_events:
-        if r.get("event_type") == "PERP_CLOSE":
-            p = _json(r.get("payload_json"))
+    perp_close_acct = [r for r in acct_events if r.get("event_type") == "PERP_CLOSE"]
+    blocked_p5 = _payload_block_cell(
+        "P5", "Realised PnL with funding/fees decomposition", perp_close_acct, payload_errors
+    )
+    if blocked_p5 is not None:
+        out.append(blocked_p5)
+    else:
+        has_realized = False
+        for r in perp_close_acct:
+            p = acct_payloads.get(r.get("id"), {})
             if p.get("realized_pnl_usd") is not None:
                 has_realized = True
                 break
-    out.append(
-        CellResult(
-            "P5",
-            "Realised PnL with funding/fees decomposition",
-            "PASS" if has_realized else "XFAIL",
-            "PERP_CLOSE.realized_pnl_usd present" if has_realized else "realized_pnl_usd null/missing",
+        out.append(
+            CellResult(
+                "P5",
+                "Realised PnL with funding/fees decomposition",
+                "PASS" if has_realized else "XFAIL",
+                "PERP_CLOSE.realized_pnl_usd present" if has_realized else "realized_pnl_usd null/missing",
+            )
         )
-    )
     out.append(CellResult("P6", "Margin utilisation over time", "XFAIL", "Track C"))
     return out
 
@@ -1160,22 +1892,27 @@ def _cells_perp(acct_events: list[dict[str, Any]], pos_events: list[dict[str, An
 # ─── Top-level runner ────────────────────────────────────────────────────
 
 
-def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> AccountantReport:
-    """Run the Accountant Test against a SQLite DB file."""
-    conn = _connect(db_path)
-    try:
-        ledger = _table_rows(conn, "transaction_ledger")
-        pos_events = _table_rows(conn, "position_events")
-        acct_events = _table_rows(conn, "accounting_events")
-        snapshots = _table_rows(conn, "portfolio_snapshots")
-        metrics = _table_rows(conn, "portfolio_metrics")
-        # Track C surface — empty list when the materializer hasn't been
-        # wired (current state on this branch). Both G14 and G15 stay
-        # XFAIL in that case by design.
-        position_state_rows = _table_rows(conn, "position_state_snapshots")
-    finally:
-        conn.close()
+def evaluate_cells(
+    *,
+    ledger: list[dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    metrics: list[dict[str, Any]],
+    position_state_rows: list[dict[str, Any]],
+    primitive: Primitive,
+    db_dump_path: str | None = None,
+) -> AccountantReport:
+    """Evaluate the cell matrix against pre-fetched rows.
 
+    Decoupled from sqlite I/O so callers like the filtered reporting API
+    (VIB-3870) can pass pre-filtered rows (by strategy_id, cycle_ids, time
+    window, …) without rewriting the cell predicates.
+
+    Sorts the input lists in-place by timestamp / iteration_number — cells
+    assume time-ordered rows for running aggregations (see the BORROW →
+    REPAY tracker in G6).
+    """
     snapshots.sort(key=lambda r: (r.get("iteration_number") or 0, r.get("timestamp") or ""))
     ledger.sort(key=lambda r: r.get("timestamp") or "")
     pos_events.sort(key=lambda r: r.get("timestamp") or "")
@@ -1188,13 +1925,21 @@ def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> Accounta
     if ledger:
         network = ledger[0].get("chain") or ""
 
+    # VIB-3868: typed payload reads. Every cell that reads a payload field
+    # goes through this validated map; rows whose payload failed Pydantic
+    # validation are surfaced via ``payload_errors`` and FAIL the cells
+    # downstream of them.
+    acct_payloads, payload_errors, payload_error_records = _typed_acct_payloads(acct_events)
+
     cells: list[CellResult] = []
-    cells.append(_cell_g1_money_trail(ledger))
+    cells.append(_cell_g1_money_trail(ledger, acct_events, acct_payloads))
     cells.append(_cell_g2_cost_ledger(ledger))
     cells.append(_cell_g3_yield_ledger(pos_events, acct_events))
     cells.append(_cell_g4_capital_deployed(snapshots))
     cells.append(_cell_g5_initial_vs_current(metrics, snapshots))
-    g6, decomp = _cell_g6_reconciliation(snapshots, ledger, pos_events, acct_events, primitive)
+    g6, decomp = _cell_g6_reconciliation(
+        snapshots, ledger, pos_events, acct_events, primitive, acct_payloads, payload_errors
+    )
     cells.append(g6)
     cells.append(_cell_g7_attribution(ledger, pos_events, acct_events))
     cells.append(_cell_g8_time_series(snapshots))
@@ -1202,16 +1947,46 @@ def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> Accounta
     cells.append(_cell_g10_multi_tx_atomicity(ledger, pos_events, acct_events))
     cells.append(_cell_g11_failed_intents(ledger))
     cells.append(_cell_g12_oracle_consistency(ledger))
-    cells.append(_cell_g13_lot_matching(ledger, acct_events))
+    cells.append(_cell_g13_lot_matching(ledger, acct_events, acct_payloads, payload_errors))
     cells.append(_cell_g14_sdk_eq_onchain(snapshots, position_state_rows))
     cells.append(_cell_g15_multi_period_self_consistency(snapshots, position_state_rows))
 
     if primitive == "lp":
-        cells.extend(_cells_lp(pos_events, acct_events, snapshots))
+        cells.extend(
+            _cells_lp(
+                pos_events,
+                acct_events,
+                snapshots,
+                acct_payloads,
+                payload_errors,
+                position_state_rows,
+            )
+        )
     elif primitive == "looping":
-        cells.extend(_cells_lending(acct_events, snapshots))
+        cells.extend(
+            _cells_lending(
+                acct_events,
+                snapshots,
+                acct_payloads,
+                payload_errors,
+                position_state_rows,
+            )
+        )
     elif primitive == "perp":
-        cells.extend(_cells_perp(acct_events, pos_events))
+        cells.extend(_cells_perp(acct_events, pos_events, acct_payloads, payload_errors))
+
+    # Track which cells flipped to FAIL specifically because of payload
+    # validation drift. Lets reviewers diff cell-status changes between
+    # runs without re-deriving propagation by hand.
+    cells_blocked: list[str] = []
+    if payload_errors:
+        for c in cells:
+            if (
+                c.status == "FAIL"
+                and "payload" in c.diagnostic.lower()
+                and ("validation" in c.diagnostic.lower() or "pydantic" in c.diagnostic.lower())
+            ):
+                cells_blocked.append(c.cell_id)
 
     footprint = [
         {
@@ -1231,6 +2006,42 @@ def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> Accounta
         cells=cells,
         on_chain_footprint=footprint,
         g6_decomposition=decomp,
+        db_dump_path=db_dump_path,
+        payload_validation_errors=payload_error_records,
+        cells_blocked_by_payload_errors=cells_blocked,
+    )
+
+
+def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> AccountantReport:
+    """Run the Accountant Test against a SQLite DB file.
+
+    Thin shim around :func:`evaluate_cells` — fetches the canonical row
+    set from the strategy's local DB. For filtered queries (by date,
+    cycle, deployment, …) use
+    :func:`almanak.framework.accounting.reporting.accountant_query.accountant_report_from_db`
+    instead.
+    """
+    conn = _connect(db_path)
+    try:
+        ledger = _table_rows(conn, "transaction_ledger")
+        pos_events = _table_rows(conn, "position_events")
+        acct_events = _table_rows(conn, "accounting_events")
+        snapshots = _table_rows(conn, "portfolio_snapshots")
+        metrics = _table_rows(conn, "portfolio_metrics")
+        # Track C surface — empty list when the materializer hasn't been
+        # wired (current state on this branch). Both G14 and G15 stay
+        # XFAIL in that case by design.
+        position_state_rows = _table_rows(conn, "position_state_snapshots")
+    finally:
+        conn.close()
+    return evaluate_cells(
+        ledger=ledger,
+        pos_events=pos_events,
+        acct_events=acct_events,
+        snapshots=snapshots,
+        metrics=metrics,
+        position_state_rows=position_state_rows,
+        primitive=primitive,
         db_dump_path=str(db_path),
     )
 
@@ -1239,5 +2050,6 @@ __all__ = [
     "AccountantReport",
     "CellResult",
     "Primitive",
+    "evaluate_cells",
     "run_against_sqlite",
 ]

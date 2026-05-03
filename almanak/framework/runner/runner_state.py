@@ -281,6 +281,173 @@ def _make_unavailable_snapshot(
     )
 
 
+async def _persist_position_state_snapshots(
+    runner: Any,
+    snapshot: PortfolioSnapshot,
+    snapshot_id: int,
+) -> int:
+    """Track C local-SQLite caller (VIB-3891).
+
+    For each position on the parent ``PortfolioSnapshot``, materialize a
+    typed ``position_state_snapshots`` row and persist it bound to
+    ``snapshot_id``. This is the wiring half — protocol-specific
+    enrichment lives in the connector adapters and lands in
+    ``PositionValue.details`` upstream of this call.
+
+    Returns the number of rows written (``0`` is a measured zero — the
+    strategy had no open positions or no recognisable position types).
+
+    Failures here are **logged and swallowed** rather than re-raised:
+    the parent snapshot row is the durable PnL record, and a Track C
+    write failure should not regress the equity curve. The reverse path
+    (parent snapshot fails) is already handled by ``capture_portfolio_snapshot``'s
+    AccountingPersistenceError gate.
+
+    Hosted-mode short-circuit lives inside ``materialise_position_state``
+    itself per VIB-3866 / Codex Finding 2 — the materializer returns
+    ``None`` and fires the ``accounting_continuous_fields_unavailable``
+    gauge so dashboards page when leveraged hosted strategies have
+    continuous-accrual unavailable. This caller is therefore a no-op in
+    hosted mode (every materialize call returns None → nothing to save).
+    """
+    # Mode-aware persistence (Codex P1 / CodeRabbit / Claude pr-auditor 2026-05-02):
+    # in live mode, a Track C write failure must surface as
+    # ``AccountingPersistenceError`` so the runner flips to ACCOUNTING_FAILED
+    # rather than silently masking the gap that G15/LP2/L2 are designed to
+    # detect. Paper and dry-run keep the loud-but-non-blocking semantics
+    # (log + continue) per the teardown lane pattern.
+    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+    from almanak.framework.state.exceptions import AccountingWriteKind
+
+    try:
+        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+    except Exception:  # noqa: BLE001
+        execution_mode = None
+    is_live = bool(execution_mode and str(execution_mode).lower() == "live")
+
+    state_manager = getattr(runner, "state_manager", None)
+    if state_manager is None or not hasattr(state_manager, "save_position_state_snapshots"):
+        # Backend doesn't support Track C writes (legacy GatewayStateManager,
+        # older custom backends, test doubles). This is the deployment-time
+        # capability gate, NOT a runtime accounting failure: the matrix
+        # (G15/LP2/L2) detects under-coverage from the read side, and the
+        # cell stays XFAIL when the table isn't populated. We don't punish
+        # the runner for running on a backend that pre-dates VIB-3891.
+        return 0
+
+    positions = list(getattr(snapshot, "positions", None) or [])
+    if not positions:
+        return 0
+
+    # Gateway client + market are needed by the materializer for
+    # protocol-specific re-reads. The materializer falls back to data
+    # already in ``position.details`` when those aren't passed (today's
+    # connector adapters land in-range / tick / HF / APR fields there
+    # before the snapshot is taken).
+    market = None
+    try:
+        # ``create_market_snapshot`` is the same hook ``_value_via_portfolio_valuer``
+        # uses; reusing it here keeps Track C reads in lockstep with the
+        # snapshot's pricing context. Strategy may not implement it
+        # (multi-chain shape) — that's a soft gap, not an error.
+        strategy = getattr(runner, "_current_strategy", None) or getattr(runner, "strategy", None)
+        if strategy is not None and hasattr(strategy, "create_market_snapshot"):
+            market = strategy.create_market_snapshot()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Track C: market snapshot fetch failed: %s", e)
+        market = None
+
+    prices = None
+    if market is not None and hasattr(market, "prices"):
+        try:
+            prices = market.prices
+        except Exception:  # noqa: BLE001
+            prices = None
+
+    deployment_id = (
+        getattr(runner, "deployment_id", "") or getattr(snapshot, "deployment_id", "") or snapshot.strategy_id
+    )
+    cycle_id = getattr(runner, "_last_cycle_id", "") or getattr(snapshot, "cycle_id", "") or ""
+
+    from almanak.framework.accounting.position_state import materialise_position_state
+
+    rows: list = []
+    for position in positions:
+        try:
+            row = materialise_position_state(
+                position=position,
+                market=market,
+                prices=prices,
+                strategy_id=snapshot.strategy_id,
+                deployment_id=deployment_id,
+                cycle_id=cycle_id,
+                timestamp=snapshot.timestamp,
+            )
+        except Exception as e:  # noqa: BLE001
+            # CodeRabbit (2026-05-02): in live mode a per-position
+            # materialization regression is a coverage gap — fail closed
+            # so it surfaces as ACCOUNTING_FAILED instead of silently
+            # dropping a row that G15 / LP2 / L2 are designed to detect.
+            # Paper / dry-run keeps the loud-but-non-blocking semantics
+            # (Gemini 2026-05-02: log ERROR with exc_info so a programming
+            # error like AttributeError/TypeError still surfaces clearly).
+            if is_live:
+                raise AccountingPersistenceError(
+                    AccountingWriteKind.SNAPSHOT,
+                    strategy_id=snapshot.strategy_id,
+                    cause=e,
+                ) from e
+            logger.error(
+                "Track C: materialise_position_state failed for position %r: %s",
+                getattr(position, "label", "?"),
+                e,
+                exc_info=True,
+            )
+            continue
+        if row is not None:
+            rows.append(row)
+
+    if not rows:
+        return 0
+
+    try:
+        return await state_manager.save_position_state_snapshots(snapshot_id, rows)
+    except AccountingPersistenceError:
+        # Already typed — propagate untouched in live mode.
+        if is_live:
+            raise
+        logger.error(
+            "Track C: AccountingPersistenceError saving %d rows for %s (non-live, continuing)",
+            len(rows),
+            snapshot.strategy_id,
+            exc_info=True,
+        )
+        return 0
+    except Exception as e:  # noqa: BLE001
+        # In live mode, an untyped exception (disk full, schema/FK issue,
+        # backend regression) MUST raise as AccountingPersistenceError so
+        # the runner flips to ACCOUNTING_FAILED. In paper/dry-run, log
+        # loud-but-non-blocking per teardown lane semantics.
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.SNAPSHOT,
+                strategy_id=snapshot.strategy_id,
+                cause=e,
+            ) from e
+        # Per CLAUDE.md §A4: paper/dry-run modes "log ERROR and continue" —
+        # not WARNING. The earlier AccountingPersistenceError branch already
+        # uses logger.error; align the broad-exception branch with the
+        # contract.
+        logger.error(
+            "Track C: failed to persist %d position_state_snapshot rows for %s: %s",
+            len(rows),
+            snapshot.strategy_id,
+            e,
+            exc_info=True,
+        )
+        return 0
+
+
 async def _persist_snapshot_and_metrics(
     runner: Any,
     snapshot: PortfolioSnapshot,
@@ -434,6 +601,18 @@ async def capture_portfolio_snapshot(
                 snapshot_id,
                 snapshot.value_confidence.value,
             )
+            # Track C (VIB-3891): per-iteration position-state snapshots.
+            # Best-effort — internally swallows failures so a Track C write
+            # cannot regress the equity curve. Hosted mode is a no-op via
+            # ``materialise_position_state``'s built-in short-circuit until
+            # VIB-3871's metrics-database PR ships.
+            written = await _persist_position_state_snapshots(runner, snapshot, snapshot_id)
+            if written > 0:
+                logger.debug(
+                    "Track C: wrote %d position_state_snapshot rows for snapshot id=%d",
+                    written,
+                    snapshot_id,
+                )
 
         # Mirror valuation fields onto strategy state (always persist, even zero,
         # to avoid stale dashboard values).

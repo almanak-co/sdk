@@ -728,6 +728,90 @@ def capture_lending_pre_state(
     return None
 
 
+def capture_lending_post_state(
+    *,
+    intent: Any,
+    chain: str,
+    wallet_address: str,
+    gateway_client: Any | None,
+    price_oracle: dict | None,
+) -> AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None:
+    """Read on-chain lending state AFTER the transaction confirms (VIB-3474).
+
+    The post-state capture is the missing piece that ships
+    ``transaction_ledger.post_state_json`` for lending intents. The legacy
+    ``build_lending_accounting_event()`` performed the same read inline; we now
+    expose it as a standalone capture so the runner can populate the column
+    *before* it is serialised to the ledger row, which the new
+    ``category_handlers/lending_handler.py`` then reads back.
+
+    The implementation is identical to ``capture_lending_pre_state`` — the
+    difference is purely temporal (called by the runner after TX confirmation).
+    Block-anchored reads are not yet wired (gateway prerequisite); the read
+    targets the latest block, which on a confirmed TX is the post-confirmation
+    state.
+
+    Returns ``None`` (silently, with a debug log) when the intent isn't a
+    supported lending protocol or any gateway call fails. Never raises; never
+    fabricates stale data.
+    """
+    return capture_lending_pre_state(
+        intent=intent,
+        chain=chain,
+        wallet_address=wallet_address,
+        gateway_client=gateway_client,
+        price_oracle=price_oracle,
+    )
+
+
+def lending_state_to_dict(
+    state: AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None,
+    *,
+    protocol: str,
+) -> dict[str, Any] | None:
+    """Serialize a captured lending state to the ``pre_state_json`` /
+    ``post_state_json`` shape that ``category_handlers/lending_handler.py`` reads.
+
+    Returns ``None`` when ``state`` is ``None`` so callers can fall through
+    to the wallet-balances-only path without fabricating zeros.
+
+    Schema (Accounting-AttemptNo17 §3 D3):
+    ```json
+    {
+        "protocol": "aave_v3",
+        "collateral_usd": "15420.50",
+        "debt_usd": "8200.00",
+        "health_factor": "1.882",
+        "liquidation_threshold_bps": 8500,
+        "lltv": "0.86"
+    }
+    ```
+
+    All numeric fields are stringified Decimals — the handler parses with
+    ``Decimal(str(post_state["..."]))`` so JSON round-trip is loss-free.
+    """
+    if state is None:
+        return None
+    out: dict[str, Any] = {"protocol": protocol.lower()}
+    # collateral_usd / debt_usd / health_factor are present on every state type.
+    out["collateral_usd"] = str(state.collateral_usd) if state.collateral_usd is not None else None
+    out["debt_usd"] = str(state.debt_usd) if state.debt_usd is not None else None
+    out["health_factor"] = str(state.health_factor) if state.health_factor is not None else None
+    if isinstance(state, AaveAccountState):
+        out["liquidation_threshold_bps"] = int(state.liquidation_threshold_bps)
+    elif isinstance(state, MorphoBlueAccountState):
+        out["lltv"] = str(state.lltv)
+        # Morpho Blue: lltv IS the liquidation threshold; surface it in bps too
+        # so the handler's lltv-aware path doesn't need to branch on protocol.
+        try:
+            out["liquidation_threshold_bps"] = int(
+                (state.lltv * Decimal("10000")).to_integral_value(rounding="ROUND_HALF_UP")
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+    return out
+
+
 def _derive_position_key(protocol: str, chain: str, wallet: str, market_id: str | None, asset: str) -> str:
     """Canonical position key for a lending position."""
     parts = ["lending", chain.lower(), protocol.lower(), wallet.lower()]

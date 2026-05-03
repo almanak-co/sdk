@@ -38,9 +38,22 @@ MATCHING_POLICY_VERSION = 1  # 1 = FIFO hardcoded
 
 
 class _Base(BaseModel):
-    """Shared config for all payload models — frozen + extra forbidden."""
+    """Shared config for all payload models.
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+    Frozen + ``extra="ignore"`` (not ``forbid``) because the typed event writers
+    emit additional protocol-specific fields (e.g. ``LPAccountingEvent`` ships
+    ``lp_token_amount``, ``fees0_collected``; ``LendingAccountingEvent`` ships
+    ``collateral_value_*``, ``debt_value_*``, etc.) that are NOT in the v1 spec
+    surface. Rejecting those would fail every real-run payload at the
+    Accountant Test boundary (Codex P1, 2026-05-02).
+
+    The "fail loudly on drift" intent is preserved at field level — required
+    spec fields with no default still fail validation when missing/wrong-typed.
+    Unknown extras are dropped during ``model_dump()`` so cells read a
+    canonical shape regardless of which writer produced the row.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore", arbitrary_types_allowed=True)
 
 
 class _Versioned(_Base):

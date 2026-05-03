@@ -161,31 +161,75 @@ def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
     return ExecutionMode.LIVE
 
 
-def _build_pre_state_for_ledger(pre_snapshot: Any) -> dict[str, Any] | None:
+def _merge_lending_state(target: dict[str, Any] | None, lending_dict: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Overlay lending protocol state fields onto an existing pre/post-state dict.
+
+    Returns ``target`` (mutated) when ``lending_dict`` is non-empty, otherwise
+    the original ``target`` untouched. When ``target`` is ``None`` and
+    ``lending_dict`` is non-empty, the lending dict alone is enough to
+    populate the ledger column (VIB-3474: the lending handler reads
+    ``collateral_usd`` / ``debt_usd`` / ``health_factor`` /
+    ``liquidation_threshold_bps`` directly — wallet balances aren't required).
+
+    Layered overlay so the ledger writer ends up with ONE merged dict per
+    column, never two parallel JSON blobs the handler has to choose between.
+    """
+    if not lending_dict:
+        return target
+    if target is None:
+        target = {"source": "lending_capture"}
+    else:
+        target = {**target, "source": (target.get("source") or "") + "+lending_capture"}
+    target.update(lending_dict)
+    return target
+
+
+def _build_pre_state_for_ledger(
+    pre_snapshot: Any,
+    lending_pre_state: Any | None = None,
+    *,
+    protocol: str = "",
+) -> dict[str, Any] | None:
     """Build a ``pre_state`` dict for the ledger writer from a balance snapshot.
 
     Accounting-AttemptNo17 §A4 (VIB-3480 columns finally populated): the
     runner is the single capture point. Without this, ``pre_state_json`` was
     NULL on every ledger row.
 
-    Returns ``None`` when ``pre_snapshot`` is missing — leaves the column at
-    its default empty string. Honest absence over fabricated data.
+    VIB-3474: when ``lending_pre_state`` is supplied (typed AaveAccountState /
+    MorphoBlueAccountState / CompoundV3AccountState), its serialized fields
+    are merged into the dict so the lending handler's pre-state read returns
+    real collateral_usd / debt_usd / health_factor / liquidation_threshold
+    instead of ``None`` with ``unavailable_reason``.
+
+    Returns ``None`` only when both wallet balances AND lending state are
+    missing — honest absence over fabricated data.
     """
-    if pre_snapshot is None:
-        return None
-    balances = getattr(pre_snapshot, "balances", None) or {}
-    if not balances:
-        return None
-    timestamp = getattr(pre_snapshot, "timestamp", None)
-    captured_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
-    return {
-        "wallet_balances": {k: str(v) for k, v in balances.items()},
-        "captured_at": captured_at,
-        "source": "balance_provider",
-    }
+    base: dict[str, Any] | None = None
+    if pre_snapshot is not None:
+        balances = getattr(pre_snapshot, "balances", None) or {}
+        if balances:
+            timestamp = getattr(pre_snapshot, "timestamp", None)
+            captured_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+            base = {
+                "wallet_balances": {k: str(v) for k, v in balances.items()},
+                "captured_at": captured_at,
+                "source": "balance_provider",
+            }
+    if lending_pre_state is not None:
+        from almanak.framework.accounting.lending_accounting import lending_state_to_dict
+
+        lending_dict = lending_state_to_dict(lending_pre_state, protocol=protocol)
+        base = _merge_lending_state(base, lending_dict)
+    return base
 
 
-def _build_post_state_for_ledger(recon: dict[str, Any] | None) -> dict[str, Any] | None:
+def _build_post_state_for_ledger(
+    recon: dict[str, Any] | None,
+    lending_post_state: Any | None = None,
+    *,
+    protocol: str = "",
+) -> dict[str, Any] | None:
     """Build a ``post_state`` dict for the ledger writer from a reconciliation report.
 
     The reconciliation step in ``_single_chain_handle_success`` already
@@ -194,21 +238,32 @@ def _build_post_state_for_ledger(recon: dict[str, Any] | None) -> dict[str, Any]
     ledger row's ``post_state_json`` matches the reconciliation balances
     byte-for-byte (zero drift between the recon report and the ledger).
 
-    Returns ``None`` when reconciliation didn't produce post_balances —
-    typical paths: pre-execution failure, no intent tokens, or every
-    balance query failed.
+    VIB-3474: when ``lending_post_state`` is supplied, its serialized fields
+    are merged in so ``transaction_ledger.post_state_json`` carries the
+    collateral / debt / HF / liquidation_threshold / lltv that the lending
+    category handler reads to populate ``collateral_value_after_usd``,
+    ``debt_value_after_usd``, ``health_factor_after``, and
+    ``liquidation_threshold``.
+
+    Returns ``None`` only when both reconciliation and lending post-state are
+    missing.
     """
-    if not recon:
-        return None
-    post_balances = recon.get("post_balances")
-    if not post_balances:
-        return None
-    return {
-        "wallet_balances": dict(post_balances),
-        "captured_at": recon.get("post_timestamp", "") or "",
-        "source": "balance_provider",
-        "incident": bool(recon.get("incident", False)),
-    }
+    base: dict[str, Any] | None = None
+    if recon:
+        post_balances = recon.get("post_balances")
+        if post_balances:
+            base = {
+                "wallet_balances": dict(post_balances),
+                "captured_at": recon.get("post_timestamp", "") or "",
+                "source": "balance_provider",
+                "incident": bool(recon.get("incident", False)),
+            }
+    if lending_post_state is not None:
+        from almanak.framework.accounting.lending_accounting import lending_state_to_dict
+
+        lending_dict = lending_state_to_dict(lending_post_state, protocol=protocol)
+        base = _merge_lending_state(base, lending_dict)
+    return base
 
 
 # =============================================================================
@@ -283,6 +338,14 @@ class SingleChainExecutionState:
     compiler: Any = None
     state_machine: Any = None
     pre_snapshot: Any | None = None
+    # VIB-3474: lending-protocol state captured BEFORE submission so
+    # transaction_ledger.pre_state_json carries collateral_usd / debt_usd /
+    # health_factor / liquidation_threshold_bps for every SUPPLY/BORROW/
+    # REPAY/WITHDRAW. Typed protocol state object (AaveAccountState |
+    # MorphoBlueAccountState | CompoundV3AccountState) or None. The runner
+    # is the single capture point — see the `_init_single_chain_state`
+    # caller and `_capture_lending_pre_state_safe`.
+    lending_pre_state: Any | None = None
     # --- Running bookkeeping (updated by state-machine loop) ---
     last_execution_result: Any | None = None
     last_execution_context: Any | None = None
@@ -2619,6 +2682,85 @@ class StrategyRunner:
         # Non-fatal: on failure we fall back to the legacy post-only mode.
         state.pre_snapshot = await self._snapshot_balances_for_intent(intent)
 
+        # VIB-3474: capture lending protocol state (collateral / debt / HF /
+        # liquidation_threshold) BEFORE submission for SUPPLY/BORROW/REPAY/
+        # WITHDRAW intents.  Without this, transaction_ledger.pre_state_json
+        # is empty for every lending row and the AccountingProcessor's lending
+        # handler emits ESTIMATED confidence with unavailable_reason —
+        # blocking G6 (looping reconciliation) and L4 (principal vs interest)
+        # in the Accountant Test.
+        state.lending_pre_state = self._capture_lending_state_safe(
+            intent=intent,
+            chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
+            gateway_client=state.gateway_client,
+            price_oracle=state.price_oracle,
+            phase="pre",
+        )
+
+    @staticmethod
+    def _capture_lending_state_safe(
+        *,
+        intent: Any,
+        chain: str,
+        wallet_address: str,
+        gateway_client: Any | None,
+        price_oracle: dict | None,
+        phase: str,
+    ) -> Any | None:
+        """Best-effort lending pre/post state capture (VIB-3474).
+
+        Wraps ``capture_lending_pre_state`` / ``capture_lending_post_state``
+        so a gateway hiccup or unsupported protocol never raises into the
+        runner.  Returns the typed protocol state object on success (Aave
+        / Morpho Blue / Compound V3) or ``None`` when:
+          - ``gateway_client`` is missing (local-without-gateway, paper)
+          - intent isn't a lending intent (SWAP, LP_*, PERP_*, …)
+          - protocol isn't yet supported (Spark, Radiant V2, JoeLend, …)
+          - any underlying gateway eth_call fails
+
+        Returning ``None`` is correct: the ledger writer treats it as
+        "no lending state captured" and the column stays empty — the
+        legacy unavailable_reason path. Never fabricates state.
+
+        CodeRabbit + Claude pr-auditor (2026-05-02): the except clause is
+        narrowed to network-class errors (``ConnectionError`` /
+        ``TimeoutError`` / ``OSError``) so refactor regressions
+        (``ImportError`` / ``AttributeError`` / ``TypeError``) propagate
+        loudly. The underlying ``capture_lending_*`` helpers ALREADY
+        swallow ``Exception`` internally and return ``None`` on
+        gateway-side failures — so this outer except only fires on a
+        programming error in the import / dispatch path, which is
+        exactly the case we want to surface.
+        """
+        if gateway_client is None:
+            return None
+        intent_type = getattr(intent, "intent_type", None)
+        intent_type_value = getattr(intent_type, "value", None)
+        if intent_type_value is not None:
+            intent_type_str = str(intent_type_value).upper()
+        else:
+            intent_type_str = str(intent_type or "").upper()
+        if intent_type_str not in {"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DELEVERAGE"}:
+            return None
+        try:
+            from almanak.framework.accounting.lending_accounting import (
+                capture_lending_post_state,
+                capture_lending_pre_state,
+            )
+
+            capture = capture_lending_pre_state if phase == "pre" else capture_lending_post_state
+            return capture(
+                intent=intent,
+                chain=chain,
+                wallet_address=wallet_address,
+                gateway_client=gateway_client,
+                price_oracle=price_oracle,
+            )
+        except (ConnectionError, TimeoutError, OSError):
+            logger.debug("lending %s-state capture failed (transient/non-fatal)", phase, exc_info=True)
+            return None
+
     @staticmethod
     def _refresh_price_oracle_for_ledger(market: Any | None, intent: AnyIntent) -> dict | None:
         """Best-effort price-oracle refresh at ledger-write time.
@@ -3221,8 +3363,29 @@ class StrategyRunner:
         # balance observations so transaction_ledger.pre_state_json /
         # post_state_json land populated. The reconciliation step above
         # already computed both — we just thread them through.
-        pre_state = _build_pre_state_for_ledger(state.pre_snapshot)
-        post_state = _build_post_state_for_ledger(recon)
+        # VIB-3474: capture lending protocol state (collateral / debt / HF)
+        # AFTER the TX confirms, then merge into both pre_state and post_state
+        # before they are serialized to the ledger row.  ``state.lending_pre_state``
+        # was captured by ``_init_single_chain_state`` *before* submission.
+        intent_protocol = (getattr(intent, "protocol", "") or "").lower()
+        lending_post_state = self._capture_lending_state_safe(
+            intent=intent,
+            chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
+            gateway_client=state.gateway_client,
+            price_oracle=state.price_oracle,
+            phase="post",
+        )
+        pre_state = _build_pre_state_for_ledger(
+            state.pre_snapshot,
+            state.lending_pre_state,
+            protocol=intent_protocol,
+        )
+        post_state = _build_post_state_for_ledger(
+            recon,
+            lending_post_state,
+            protocol=intent_protocol,
+        )
         # Mainnet 2026-05-01 finding: state.price_oracle was empty for the
         # very first SWAP iteration of an indicator strategy because market
         # warming hadn't completed by execution time. Refresh-and-merge the
@@ -3381,7 +3544,11 @@ class StrategyRunner:
             # warming. Without this, a slippage breach still landed gas on-
             # chain but the ledger row wrote ``gas_usd=""``.
             price_oracle=self._merge_oracle_for_ledger(state, intent),
-            pre_state=_build_pre_state_for_ledger(state.pre_snapshot),
+            pre_state=_build_pre_state_for_ledger(
+                state.pre_snapshot,
+                state.lending_pre_state,
+                protocol=(getattr(intent, "protocol", "") or "").lower(),
+            ),
         )
 
         # Persist state even when circuit breaker fails; on-chain state already changed.
@@ -3474,8 +3641,26 @@ class StrategyRunner:
             # refresh+merge so the reconciliation-failure row also carries
             # the full oracle and a populated ``gas_usd``.
             price_oracle=self._merge_oracle_for_ledger(state, intent),
-            pre_state=_build_pre_state_for_ledger(state.pre_snapshot),
-            post_state=_build_post_state_for_ledger(recon),
+            pre_state=_build_pre_state_for_ledger(
+                state.pre_snapshot,
+                state.lending_pre_state,
+                protocol=(getattr(intent, "protocol", "") or "").lower(),
+            ),
+            post_state=_build_post_state_for_ledger(
+                recon,
+                # Reconciliation-incident path: the on-chain TX still landed
+                # so post-state is meaningful. Re-read here to keep the
+                # ledger row's lending fields aligned with reality.
+                self._capture_lending_state_safe(
+                    intent=intent,
+                    chain=strategy.chain,
+                    wallet_address=strategy.wallet_address,
+                    gateway_client=state.gateway_client,
+                    price_oracle=state.price_oracle,
+                    phase="post",
+                ),
+                protocol=(getattr(intent, "protocol", "") or "").lower(),
+            ),
         )
 
         # Persist strategy state even on reconciliation failure: the
@@ -3552,7 +3737,11 @@ class StrategyRunner:
             # ledger row carries the full oracle and ``gas_usd`` is non-
             # empty when there's gas to convert.
             price_oracle=self._merge_oracle_for_ledger(state, intent),
-            pre_state=_build_pre_state_for_ledger(state.pre_snapshot),
+            pre_state=_build_pre_state_for_ledger(
+                state.pre_snapshot,
+                state.lending_pre_state,
+                protocol=(getattr(intent, "protocol", "") or "").lower(),
+            ),
         )
 
         # Run revert diagnostics only for on-chain execution failures.

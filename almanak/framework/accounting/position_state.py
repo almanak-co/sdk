@@ -132,9 +132,40 @@ def materialise_position_state(
     if pos_type is None:
         return None
 
-    pos_id = str(getattr(position, "position_id", "") or getattr(position, "id", ""))
+    # VIB-3891: ``PortfolioSnapshot.positions`` carries ``PositionValue``
+    # objects which keep protocol-specific identifiers (Uniswap V3 NFT id,
+    # Aave reserve, GMX market) inside ``details`` rather than as a direct
+    # attribute. Walk the common shapes so the runner caller can pass
+    # PositionValue rows in directly without an adapter layer.
+    details_for_id = getattr(position, "details", None)
+    if not isinstance(details_for_id, dict):
+        details_for_id = {}
+    # CodeRabbit (2026-05-02): the ``or`` chain treated valid ``0``
+    # identifiers (token_id / nft_id == 0) as missing. Filter on
+    # "not None and not empty string" so numeric 0 is preserved.
+    _id_candidates = (
+        getattr(position, "position_id", None),
+        getattr(position, "id", None),
+        details_for_id.get("position_id"),
+        details_for_id.get("nft_id"),
+        details_for_id.get("token_id"),
+    )
+    _raw_id = next((v for v in _id_candidates if v is not None and v != ""), "")
+    pos_id = str(_raw_id)
     if not pos_id:
-        return None
+        # Last-resort identity: ``protocol:chain:label`` is enough for
+        # lending and perp positions where the protocol stamps a
+        # canonical market identifier in the label rather than the id
+        # field. Skip if even that is missing — silently dropping a row
+        # is preferable to writing one keyed by an empty position_id
+        # which would collide with every other unidentified row.
+        protocol = str(getattr(position, "protocol", "") or "")
+        chain = str(getattr(position, "chain", "") or "")
+        label = str(getattr(position, "label", "") or "")
+        if protocol and label:
+            pos_id = f"{protocol}:{chain}:{label}"
+        else:
+            return None
 
     common = {
         "snapshot_id": None,  # caller sets after parent insert
@@ -156,12 +187,38 @@ def materialise_position_state(
 
 
 def _classify_position(position: Any) -> PositionType | None:
-    """Classify a PositionInfo / equivalent into the materializer's enum."""
+    """Classify a PositionInfo / PositionValue / equivalent into the
+    materializer's enum.
+
+    Recognises:
+
+    * ``teardown.models.PositionType`` values used on ``PortfolioSnapshot.positions``
+      (``LP`` / ``SUPPLY`` / ``BORROW`` / ``PERP`` / ``VAULT`` / ``STAKE``).
+      ``SUPPLY`` and ``BORROW`` are two sides of the same lending position
+      and collapse into ``LENDING`` here — Track-C-dependent cells (L2/L3/L5)
+      are protocol-side metrics, not side-specific.
+    * Protocol-name-style strings used by older callers
+      (``UNISWAP_V3``, ``AAVE_V3``, ``GMX_V2``, …) for backward compat.
+
+    Returns ``None`` for ``VAULT`` / ``STAKE`` / ``PREDICTION`` / ``CEX`` /
+    ``TOKEN`` and any other shape the materializer doesn't understand —
+    the caller logs a debug-level skip and moves on.
+    """
     pt = getattr(position, "position_type", None) or getattr(position, "type", None) or ""
     pt = str(pt).upper()
     if pt in ("LP", "UNI_V3", "UNISWAP_V3", "AERODROME", "AERODROME_LP", "TRADERJOE_LP"):
         return "LP"
-    if pt in ("LENDING", "AAVE_V3", "AAVE", "MORPHO", "COMPOUND_V3", "COMPOUND"):
+    if pt in (
+        "LENDING",
+        "SUPPLY",
+        "BORROW",
+        "AAVE_V3",
+        "AAVE",
+        "MORPHO",
+        "MORPHO_BLUE",
+        "COMPOUND_V3",
+        "COMPOUND",
+    ):
         return "LENDING"
     if pt in ("PERP", "GMX", "GMX_V2", "DRIFT", "HYPERLIQUID"):
         return "PERP"

@@ -4,8 +4,11 @@ Reads all inputs from the ledger row (extracted_data_json, price_inputs_json,
 post_state_json) — no live chain calls.  Ports the math from lending_accounting.py.
 
 Post-state fields (collateral, debt, health factor) are populated from
-post_state_json when available (VIB-3474).  Until that VIB ships, post_state_json
-is empty and those fields are None with confidence = ESTIMATED.
+post_state_json. The runner captures lending protocol state via
+``capture_lending_post_state()`` and serialises it into the ledger row at write
+time (VIB-3474). When the read fails (gateway error, unsupported protocol,
+non-lending intent), post_state stays empty and confidence falls back to
+ESTIMATED with an unavailable_reason — never fabricated.
 """
 
 from __future__ import annotations
@@ -183,7 +186,7 @@ def handle_lending(
         elif intent_type_str in ("SUPPLY", "WITHDRAW"):
             principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
 
-    # ── Post-state from post_state_json (populated by VIB-3474) ─────────────────
+    # ── Post-state from post_state_json (VIB-3474: populated by the runner) ─────
     collateral_after: Decimal | None = None
     debt_after: Decimal | None = None
     net_equity_after: Decimal | None = None
@@ -207,7 +210,9 @@ def handle_lending(
 
     has_post_state = collateral_after is not None or hf_after is not None
     confidence = AccountingConfidence.HIGH if has_post_state else AccountingConfidence.ESTIMATED
-    unavailable_reason = "" if has_post_state else "post_state_json not yet populated (VIB-3474 pending)"
+    unavailable_reason = (
+        "" if has_post_state else "post_state_json missing or invalid (gateway read unavailable for this row)"
+    )
 
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
