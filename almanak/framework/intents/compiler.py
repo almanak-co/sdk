@@ -2089,6 +2089,20 @@ class IntentCompiler:
         response = self._gateway_client.enso.GetRoute(request, timeout=30.0)  # type: ignore[union-attr]
 
         if not response.success:
+            # VIB-3828: when the upstream Enso route simulation reverts with a
+            # known router custom-error selector (e.g. ``0xef3dcb2f`` on Base),
+            # raise the typed ``EnsoRouterRevertError`` so the state machine
+            # classifies as ``COMPILATION_PERMANENT`` instead of falling
+            # through to the generic ``REVERT`` retry class. Unknown
+            # selectors and selector-free errors fall through to the existing
+            # ``RuntimeError`` path unchanged.
+            from ..connectors.enso import check_known_router_revert
+
+            check_known_router_revert(
+                response.error,
+                chain=chain or self.chain,
+                route_summary=f"{token_in} -> {token_out}",
+            )
             raise RuntimeError(f"Gateway Enso GetRoute failed: {response.error}")
 
         gas_str = response.gas or response.gas_estimate

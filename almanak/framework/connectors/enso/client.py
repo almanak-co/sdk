@@ -47,6 +47,7 @@ from .exceptions import (
     EnsoConfigError,
     EnsoValidationError,
     PriceImpactExceedsThresholdError,
+    check_known_router_revert,
 )
 from .models import (
     BundleAction,
@@ -859,6 +860,18 @@ class EnsoClient:
             method_name="GetRoute",
         )
         if not response.success:
+            # VIB-3828: when the Enso route simulation reverts with a known
+            # router custom-error selector, raise the typed
+            # ``EnsoRouterRevertError`` so the state machine classifies as
+            # ``COMPILATION_PERMANENT`` instead of falling through to the
+            # generic ``REVERT`` retry class. Unknown selectors and
+            # selector-free errors fall through to the existing
+            # ``EnsoAPIError`` path unchanged.
+            check_known_router_revert(
+                response.error,
+                chain=self.config.chain_name,
+                route_summary=f"{token_in} -> {token_out}",
+            )
             raise EnsoAPIError(
                 message=f"Gateway Enso GetRoute failed: {response.error}",
                 status_code=0,

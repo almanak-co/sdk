@@ -48,6 +48,7 @@ from .exceptions import (
     EnsoRouterRevertError,
     EnsoValidationError,
     PriceImpactExceedsThresholdError,
+    check_known_router_revert,
 )
 from .models import (
     Hop,
@@ -82,4 +83,6 @@ __all__ = [
     "EnsoConfigError",
     "EnsoRouterRevertError",
     "PriceImpactExceedsThresholdError",
+    # VIB-3828: typed-revert helper used at gateway-failure boundaries
+    "check_known_router_revert",
 ]

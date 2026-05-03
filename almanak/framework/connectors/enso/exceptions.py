@@ -4,7 +4,28 @@ This module defines custom exceptions for the Enso SDK, providing
 detailed error information for debugging and error handling.
 """
 
+import logging
+import re
+from types import MappingProxyType
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# 4-byte selector regex used by ``check_known_router_revert`` to extract a
+# Solidity custom-error selector from raw Enso error strings.
+#
+# - Leading ``\b`` requires a word boundary so we skip selectors embedded
+#   mid-token (e.g. inside a tx hash like ``0x1234ef3dcb2f...``). The literal
+#   ``0x`` is preceded by punctuation/whitespace in every realistic emitter
+#   (``"reverted: 0x..."``, ``"selector=0x..."``, ``"data: 0x..."``).
+# - ``0[xX]`` accepts both lowercase and uppercase hex prefixes — Enso has
+#   historically used lowercase but Solidity tooling sometimes upper-cases.
+# - ``[0-9a-fA-F]{8}`` consumes the 4-byte selector. Critically there is
+#   NO trailing word boundary: real Solidity custom errors with arguments
+#   surface as ``0x<selector><32-byte-args...>`` (ABI-encoded) and we MUST
+#   match the leading 4 bytes there. The leading ``\b`` is sufficient to
+#   prevent false positives inside arbitrary hex substrings.
+_SELECTOR_RE = re.compile(r"\b0[xX][0-9a-fA-F]{8}")
 
 
 class EnsoError(Exception):
@@ -267,16 +288,34 @@ class EnsoRouterRevertError(EnsoError):
     # surfaces them in QA. ``None`` means "selector observed but root cause
     # still under investigation" — strategy still benefits from the typed
     # error + permanent-keyword classification.
-    KNOWN_REVERT_SELECTORS: dict[str, str | None] = {
-        # VIB-3828 / BUG-43 — leverage_loop_cross_chain on Base
-        "0xef3dcb2f": (
-            "Likely a router-side route-validation custom error (under "
-            "investigation; see VIB-3828). May be triggered by a token "
-            "address not recognized by Enso's chain-specific token map "
-            "(sister of BUG-55), an empty / shallow route, or slippage "
-            "tighter than the route's natural fee tier supports."
-        ),
-    }
+    # NOTE: diagnosis hints are concatenated into the final exception
+    # message, which is fed to ``IntentStateMachine._categorize_error``.
+    # That classifier matches a hard-coded keyword set BEFORE the
+    # ``COMPILATION_PERMANENT`` keyword block (see state_machine.py
+    # ``_categorize_error`` lines 983-999). Any hint containing one of
+    # ``insufficient``/``funds``/``balance``/``gas``/``limit``/``price``/
+    # ``nonce``/``timeout``/``revert``/``slippage``/``rate limit``/
+    # ``connection``/``network`` short-circuits to a transient/retryable
+    # class — defeating the typed exception's purpose. A regression guard
+    # in ``test_router_revert_error_vib_3828.py`` asserts every entry in
+    # this table classifies as ``COMPILATION_PERMANENT`` end-to-end.
+    #
+    # Wrapped in ``MappingProxyType`` so accidental writes from downstream
+    # callers (or parallel xdist workers) cannot mutate the global
+    # classification table at runtime. Only the source declaration below
+    # can change the entries.
+    KNOWN_REVERT_SELECTORS: MappingProxyType[str, str | None] = MappingProxyType(
+        {
+            # VIB-3828 / BUG-43 — leverage_loop_cross_chain on Base
+            "0xef3dcb2f": (
+                "Likely a router-side route-validation custom error (under "
+                "investigation; see VIB-3828). May be triggered by a token "
+                "address not recognized by Enso's chain-specific token map "
+                "(sister of BUG-55), an empty / shallow route, or a tolerance "
+                "setting the route's natural fee tier cannot satisfy."
+            ),
+        }
+    )
 
     def __init__(
         self,
@@ -285,6 +324,7 @@ class EnsoRouterRevertError(EnsoError):
         chain: str,
         route_summary: str = "",
         diagnosis_hint: str | None = None,
+        original_error: str | None = None,
     ) -> None:
         # Canonicalize to ``0x`` + 8 lowercase hex chars so callers passing
         # raw revert data (e.g. ``"ef3dcb2f<padding...>"``), uppercase, or
@@ -294,6 +334,12 @@ class EnsoRouterRevertError(EnsoError):
         self.selector = f"0x{raw[:8]}"
         self.chain = chain
         self.route_summary = route_summary
+        # Preserve the raw upstream error string for log inspection / tooling
+        # WITHOUT leaking it into ``str(self)`` — that would re-introduce
+        # state-machine pre-classification keywords (``revert``/``slippage``/
+        # ...) that the structural guardrail goes to lengths to keep out.
+        # See ``check_known_router_revert`` for the canonical access pattern.
+        self.original_error = original_error
         self.diagnosis_hint = (
             diagnosis_hint if diagnosis_hint is not None else self.KNOWN_REVERT_SELECTORS.get(self.selector)
         )
@@ -303,3 +349,63 @@ class EnsoRouterRevertError(EnsoError):
         if self.diagnosis_hint:
             msg += f". Diagnosis hint: {self.diagnosis_hint}"
         super().__init__(msg)
+
+
+def check_known_router_revert(
+    error_str: str,
+    *,
+    chain: str,
+    route_summary: str = "",
+) -> None:
+    """Inspect an Enso route error string for a known router-revert selector.
+
+    Conservative classifier (VIB-3828): only raises when a selector explicitly
+    listed in :attr:`EnsoRouterRevertError.KNOWN_REVERT_SELECTORS` appears in
+    the message. Unknown selectors and selector-free strings return ``None``,
+    leaving the original error path intact so callers can raise their existing
+    exception type with the unchanged message.
+
+    Operator visibility for the raw upstream error is preserved two ways:
+    (1) a WARNING log line emitted before raising, and (2) the
+    ``original_error`` attribute on :class:`EnsoRouterRevertError`. The raw
+    error string is intentionally NOT placed into ``str(err)`` — doing so
+    would smuggle ``IntentStateMachine._categorize_error`` pre-classification
+    keywords (``revert``/``slippage``/``timeout``/...) into the message and
+    defeat the typed ``COMPILATION_PERMANENT`` classification.
+
+    Args:
+        error_str: The raw error message returned by the gateway or direct
+            Enso API call (e.g. ``"Gateway Enso GetRoute failed: HTTP 400:
+            execution reverted: 0xef3dcb2f"``).
+        chain: The chain the route was attempted on. Used to construct the
+            typed exception so strategy authors get chain context in logs.
+        route_summary: Optional human-facing route description (e.g.
+            ``"USDC -> WETH"`` or token addresses). MUST be free of the
+            state-machine pre-classification keywords listed above. When in
+            doubt, leave empty — the raw error is preserved separately via
+            ``original_error`` and the warning log.
+
+    Raises:
+        EnsoRouterRevertError: when the message contains a 4-byte selector
+            present in :attr:`EnsoRouterRevertError.KNOWN_REVERT_SELECTORS`.
+    """
+    if not error_str:
+        return
+    for match in _SELECTOR_RE.finditer(error_str):
+        selector = match.group(0).lower()
+        if selector in EnsoRouterRevertError.KNOWN_REVERT_SELECTORS:
+            logger.warning(
+                "Enso router emitted known custom-error selector %s on %s "
+                "(route=%s); raising typed EnsoRouterRevertError for "
+                "fail-fast classification. Raw upstream error: %s",
+                selector,
+                chain,
+                route_summary or "<unspecified>",
+                error_str,
+            )
+            raise EnsoRouterRevertError(
+                selector=selector,
+                chain=chain,
+                route_summary=route_summary,
+                original_error=error_str,
+            )
