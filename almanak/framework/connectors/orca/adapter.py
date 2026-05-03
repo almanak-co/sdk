@@ -139,6 +139,19 @@ class OrcaAdapter:
                 amount_b=amount_b,
             )
 
+            # VIB-3818 pre-flight: ensure both tick array PDAs exist on-chain
+            # before submitting. Without this, increase_liquidity reverts with
+            # 0xbbf (InitializedTickArrayNotFound) and the keeper fee is burnt.
+            # Skipped silently when no rpc_url is configured (compile path may
+            # legitimately run offline for unit tests / dry-runs).
+            if self.config.rpc_url:
+                self.sdk.validate_tick_arrays_initialized(
+                    pool=pool,
+                    tick_lower=metadata["tick_lower"],
+                    tick_upper=metadata["tick_upper"],
+                    rpc_url=self.config.rpc_url,
+                )
+
             # Serialize instructions into a VersionedTransaction
             placeholder_blockhash = Hash.default()
             from solders.pubkey import Pubkey

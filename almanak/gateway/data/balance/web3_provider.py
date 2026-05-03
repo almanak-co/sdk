@@ -133,6 +133,29 @@ class TokenMetadata:
         }
 
 
+def _reject_non_evm_chain(chain: str) -> None:
+    """VIB-3896 fail-fast guard: reject non-EVM chains at construction.
+
+    Resolves ``chain`` against the canonical ``Chain`` / ``CHAIN_FAMILY_MAP``
+    registry in :mod:`almanak.core.enums` and raises :class:`NonEvmChainError`
+    if the family is not EVM. Unknown chains are tolerated (caller's
+    chain-name typos are surfaced by downstream RPC paths) — only an
+    explicit Solana-family registration triggers the guard.
+    """
+
+    from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+
+    if chain is None:
+        return  # caller already in error path — no point classifying further
+    try:
+        chain_enum = Chain(str(chain).strip().upper())
+    except (ValueError, AttributeError):
+        return  # unknown chain — no registration → not a known non-EVM chain
+    family = CHAIN_FAMILY_MAP.get(chain_enum)
+    if family is not None and family is not ChainFamily.EVM:
+        raise NonEvmChainError(chain=chain, family=family.value)
+
+
 # Chain-specific native token symbols
 NATIVE_TOKEN_SYMBOLS: dict[str, str] = {
     "ethereum": "ETH",
@@ -270,6 +293,37 @@ class TokenNotFoundError(DataSourceError):
         )
 
 
+class NonEvmChainError(ValueError):
+    """Raised when ``Web3BalanceProvider`` is constructed for a non-EVM chain.
+
+    ``Web3BalanceProvider`` only speaks EVM JSON-RPC (eth_call, eth_getBalance,
+    ABI-encoded ERC-20 reads). Constructing it with ``chain='solana'`` (or any
+    future non-EVM chain) leaves a degenerate provider in place: every
+    subsequent RPC call would either fail at the wire layer or — worse —
+    silently return an EVM-shaped fallback (e.g. the ``ETH`` native-symbol
+    default that VIB-3816 patched as a stop-gap).
+
+    Callers MUST route non-EVM chains to a chain-family-appropriate provider
+    (``SolanaBalanceProvider`` etc.) at construction time. This guard is the
+    canonical fail-fast checkpoint for VIB-3896 (PR #2005 Tier-3 audit
+    follow-up).
+
+    Attributes:
+        chain: The non-EVM chain that was rejected.
+        family: The detected ``ChainFamily`` value.
+    """
+
+    def __init__(self, chain: str, family: str) -> None:
+        self.chain = chain
+        self.family = family
+        super().__init__(
+            f"Web3BalanceProvider does not support chain '{chain}' "
+            f"(family={family!r}). Web3BalanceProvider speaks EVM JSON-RPC "
+            f"only — route non-EVM chains to a chain-family-appropriate "
+            f"balance provider (e.g. SolanaBalanceProvider) at construction."
+        )
+
+
 # =============================================================================
 # Web3 Balance Provider
 # =============================================================================
@@ -330,6 +384,13 @@ class Web3BalanceProvider:
             token_resolver: Optional TokenResolver instance. Defaults to get_token_resolver().
         """
         self._rpc_url = rpc_url
+        # VIB-3896: fail-fast for non-EVM chains. Constructing a Web3-based
+        # balance provider for Solana (or any future Solana-family chain) leaves
+        # a degenerate provider whose every RPC call either crashes at the wire
+        # layer or silently returns an EVM-shaped fallback. Use the canonical
+        # ChainFamily registry from almanak.core.enums so this stays in sync as
+        # new chains are added.
+        _reject_non_evm_chain(chain)
         self._wallet_address = AsyncWeb3.to_checksum_address(wallet_address)
         self._chain = chain.lower()
         self._cache_ttl = cache_ttl

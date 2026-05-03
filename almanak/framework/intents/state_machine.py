@@ -1035,6 +1035,29 @@ class IntentStateMachine:
             # Retrying with the same range/amounts always reproduces the M0
             # revert, so classify as terminal to skip the retry storm.
             "mint zero liquidity",
+            # VIB-3818: OrcaTickArrayUninitializedError.ERROR_PREFIX
+            # (orca/exceptions.py) surfaces from the LP_OPEN compile-time
+            # tick-array pre-flight in orca/adapter.py. Retrying with the same
+            # tick range always reproduces the on-chain 0xbbf revert
+            # (InitializedTickArrayNotFound), so classify as terminal — the
+            # strategy must widen the range or pick a different pool.
+            "orca tick array(s) not initialized",
+            # VIB-3817: Anchor error 101 (InstructionFallbackNotFound) — the
+            # on-chain Solana program received an instruction whose 8-byte
+            # discriminator doesn't match any handler in its IDL. Always a
+            # version-skew issue (program upgraded, vendored discriminator
+            # stale); retrying with the same instruction reproduces it. Two
+            # variants of the literal show up in different RPC error paths:
+            # the JSON-RPC ``custom: 101`` envelope and the program-log
+            # ``InstructionFallbackNotFound`` line.
+            "instructionfallbacknotfound",
+            "drift instruction not recognized by on-chain program",
+            # VIB-3817: defence-in-depth for the boot-time discriminator
+            # self-check (`verify_drift_discriminators`). The check normally
+            # halts strategy startup before any intent dispatch, but if the
+            # SDK is ever lazily constructed inside a compile path, the typed
+            # error message needs to short-circuit retries here too.
+            "drift discriminator mismatch",
         )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"

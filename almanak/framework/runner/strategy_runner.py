@@ -4920,11 +4920,25 @@ class StrategyRunner:
                 failed_intent = intents[failed_intent_index]
                 failed_chain = getattr(failed_intent, "chain", strategy.chain)
 
-                # Create a chain-specific balance provider for diagnostics
+                # Create a chain-specific balance provider for diagnostics.
+                # VIB-3896: skip the EVM revert-diagnostic path for non-EVM
+                # chains — Web3BalanceProvider only speaks EVM JSON-RPC, and
+                # constructing it for chain='solana' would raise NonEvmChainError
+                # before we even reach diagnose_revert. Solana strategies surface
+                # their failure modes through their own connector adapters.
+                from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
                 from almanak.gateway.data.balance import Web3BalanceProvider
 
+                try:
+                    failed_chain_family = (
+                        CHAIN_FAMILY_MAP.get(Chain(str(failed_chain).strip().upper())) if failed_chain else None
+                    )
+                except (ValueError, AttributeError):
+                    failed_chain_family = None
+                is_evm_chain = failed_chain_family is None or failed_chain_family is ChainFamily.EVM
+
                 chain_rpc = state.rpc_urls.get(failed_chain)
-                if chain_rpc:
+                if chain_rpc and is_evm_chain:
                     chain_balance_provider = Web3BalanceProvider(
                         rpc_url=chain_rpc,
                         wallet_address=strategy.wallet_address,
@@ -4961,6 +4975,13 @@ class StrategyRunner:
                             gas_warnings=cross_chain_gas_warnings,
                         )
                         logger.error(diagnostic.format())
+                elif chain_rpc and not is_evm_chain:
+                    logger.error(
+                        f"EXECUTION FAILURE on non-EVM chain: {error_message}\n"
+                        f"  Intent: {failed_intent.intent_type.value} | Chain: {failed_chain}\n"
+                        f"  EVM revert-diagnostic skipped (Web3BalanceProvider is EVM-only). "
+                        f"See connector adapter logs for chain-family-specific diagnostics."
+                    )
         except Exception as diag_error:
             logger.warning(f"Revert diagnostic failed: {diag_error}", exc_info=True)
 

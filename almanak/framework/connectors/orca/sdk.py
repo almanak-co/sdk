@@ -18,6 +18,7 @@ Reference: https://github.com/orca-so/whirlpools
 
 from __future__ import annotations
 
+import binascii
 import logging
 import struct
 from typing import Any
@@ -55,7 +56,12 @@ from .constants import (
 )
 
 WSOL_MINT = WRAPPED_NATIVE["solana"]
-from .exceptions import OrcaAPIError, OrcaConfigError, OrcaPoolError
+from .exceptions import (
+    OrcaAPIError,
+    OrcaConfigError,
+    OrcaPoolError,
+    OrcaTickArrayUninitializedError,
+)
 from .models import OrcaPool, OrcaPosition
 
 logger = logging.getLogger(__name__)
@@ -339,6 +345,129 @@ class OrcaWhirlpoolSDK:
             liquidity=liquidity,
             position_address=str(pda),
         )
+
+    def validate_tick_arrays_initialized(
+        self,
+        pool: OrcaPool,
+        tick_lower: int,
+        tick_upper: int,
+        rpc_url: str,
+    ) -> None:
+        """VIB-3818 pre-flight: ensure both tick array PDAs exist on-chain.
+
+        Orca's ``increase_liquidity`` CPI fails with program error ``0xbbf``
+        (3007 — ``InitializedTickArrayNotFound``) when either the lower-bound
+        or upper-bound tick array PDA has not yet been initialized on-chain.
+        This happens on:
+
+        * Forked validators that cloned the program but not its child PDAs
+          (post-VIB-3753 scenario).
+        * Real mainnet ranges that fall outside currently active tick arrays
+          (well-known issue for thinly-traded pools).
+
+        Raising at compile time turns a wasted on-chain revert into a clean
+        framework HOLD signal that strategies can react to.
+
+        Args:
+            pool: Resolved pool info (used for ``tick_spacing`` + address).
+            tick_lower: Spacing-aligned lower tick of the requested LP range.
+            tick_upper: Spacing-aligned upper tick of the requested LP range.
+            rpc_url: Solana RPC endpoint to query account state from.
+
+        Raises:
+            OrcaTickArrayUninitializedError: When at least one of the two
+                tick-array PDAs (lower / upper) returns ``null`` from
+                ``getMultipleAccounts``.
+        """
+        pool_pubkey = Pubkey.from_string(pool.address)
+        ta_lower_start = self._tick_array_start_index(tick_lower, pool.tick_spacing)
+        ta_upper_start = self._tick_array_start_index(tick_upper, pool.tick_spacing)
+        tick_array_lower = self._find_tick_array_pda(pool_pubkey, ta_lower_start)
+        tick_array_upper = self._find_tick_array_pda(pool_pubkey, ta_upper_start)
+
+        # Dedupe: when range fits inside one tick array, both PDAs collide.
+        unique_pdas: list[Pubkey] = [tick_array_lower]
+        if tick_array_upper != tick_array_lower:
+            unique_pdas.append(tick_array_upper)
+
+        # GATEWAY_VIOLATION (VIB-3916): direct Solana JSON-RPC from framework
+        # code, mirroring the existing pattern in `get_position_state` above.
+        # The pre-flight only fires when the caller explicitly plumbs `rpc_url`
+        # (local Anvil dev / tests). Hosted strategy containers do not set
+        # `rpc_url` — the on-chain ``0xbbf`` revert classification
+        # (state_machine permanent_keywords) is the production safety net there.
+        # Migration of every direct-RPC call in this SDK to the gateway pattern
+        # is tracked under VIB-3916 (sister of VIB-2986 PR #1533 for EVM
+        # connectors).
+        try:
+            resp = self.session.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getMultipleAccounts",
+                    "params": [
+                        [str(pda) for pda in unique_pdas],
+                        {"encoding": "base64"},
+                    ],
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            result = resp.json().get("result")
+        except Exception as exc:
+            # Fail open on transient RPC errors — the on-chain tx will surface
+            # the real issue. The previous `raise_for_status()` short-circuited
+            # the intended fail-open semantics by raising before we could log.
+            logger.warning(f"Tick-array pre-flight skipped: RPC error (pool={pool.address[:8]}..., err={exc!r})")
+            return
+
+        if not result or not isinstance(result.get("value"), list):
+            # If the RPC itself is unhealthy we don't want to block compilation
+            # on a transient network failure — the on-chain tx will still
+            # surface the real issue. Log and let the open proceed.
+            logger.warning(
+                f"Tick-array pre-flight skipped: getMultipleAccounts returned "
+                f"no valid value (pool={pool.address[:8]}..., resp={resp.text[:200]})"
+            )
+            return
+
+        values = result["value"]
+        # Sanity: getMultipleAccounts always returns one entry per requested key
+        if len(values) != len(unique_pdas):
+            logger.warning(
+                f"Tick-array pre-flight skipped: getMultipleAccounts returned "
+                f"{len(values)} entries for {len(unique_pdas)} PDAs"
+            )
+            return
+
+        missing: list[str] = []
+        for pda, entry in zip(unique_pdas, values, strict=True):
+            if entry is None:
+                missing.append(str(pda))
+                continue
+            # An initialized tick array PDA is non-empty. Solana returns a
+            # base64-encoded data tuple; an empty data array would mean the
+            # account is rent-exempt but uninitialized.
+            data_field = entry.get("data") if isinstance(entry, dict) else None
+            if not data_field:
+                missing.append(str(pda))
+                continue
+            if isinstance(data_field, list) and data_field:
+                try:
+                    raw = binascii.a2b_base64(data_field[0])
+                except (binascii.Error, TypeError):
+                    raw = b""
+                if len(raw) == 0:
+                    missing.append(str(pda))
+
+        if missing:
+            raise OrcaTickArrayUninitializedError(
+                pool_address=pool.address,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                missing_tick_arrays=missing,
+            )
 
     # =========================================================================
     # Instruction builders

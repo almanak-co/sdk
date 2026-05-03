@@ -19,6 +19,7 @@ Reference: https://github.com/drift-labs/protocol-v2
 from __future__ import annotations
 
 import binascii
+import hashlib
 import json
 import logging
 import struct
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 from .constants import (
     ASSOCIATED_TOKEN_PROGRAM_ID,
     DEPOSIT_DISCRIMINATOR,
+    DRIFT_INSTRUCTION_NAMES,
     DRIFT_PROGRAM_ID,
     INITIALIZE_USER_DISCRIMINATOR,
     INITIALIZE_USER_STATS_DISCRIMINATOR,
@@ -58,7 +60,12 @@ from .constants import (
     USER_SPOT_POSITIONS_OFFSET,
     USER_STATS_SEED,
 )
-from .exceptions import DriftAccountNotFoundError, DriftConfigError, DriftMarketError
+from .exceptions import (
+    DriftAccountNotFoundError,
+    DriftConfigError,
+    DriftDiscriminatorMismatchError,
+    DriftMarketError,
+)
 from .models import (
     DriftPerpPosition,
     DriftSpotPosition,
@@ -67,6 +74,39 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def anchor_discriminator(instruction_name: str) -> bytes:
+    """Compute the canonical Anchor instruction discriminator.
+
+    Anchor encodes each instruction handler with a 8-byte discriminator
+    derived from ``sha256("global:" + instruction_name)[:8]``. This helper
+    is the single source of truth for the formula — both the SDK self-check
+    and any future regeneration tooling must go through it.
+    """
+
+    return hashlib.sha256(f"global:{instruction_name}".encode()).digest()[:8]
+
+
+def verify_drift_discriminators() -> None:
+    """VIB-3817 self-check: every vendored Drift discriminator must match
+    the canonical Anchor encoding.
+
+    Called once at SDK construction. Catches silent edits to ``constants.py``
+    that would brick the connector long before any tx is submitted. Does
+    NOT protect against Drift renaming an instruction — that produces
+    ``InstructionFallbackNotFound`` at runtime, surfaced via
+    :class:`DriftInstructionFallbackError`.
+    """
+
+    for name, vendored in DRIFT_INSTRUCTION_NAMES.items():
+        expected = anchor_discriminator(name)
+        if vendored != expected:
+            raise DriftDiscriminatorMismatchError(
+                instruction_name=name,
+                expected=expected,
+                actual=vendored,
+            )
 
 
 class DriftSDK:
@@ -95,6 +135,9 @@ class DriftSDK:
     ) -> None:
         if not wallet_address:
             raise DriftConfigError("wallet_address is required", parameter="wallet_address")
+
+        # VIB-3817: catch silent constant edits before they ship.
+        verify_drift_discriminators()
 
         self.wallet_address = wallet_address
         self.rpc_url = rpc_url

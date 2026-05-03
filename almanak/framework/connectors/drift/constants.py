@@ -40,12 +40,28 @@ SPOT_MARKET_SEED = b"spot_market"
 # =========================================================================
 # Instruction Discriminators (Anchor: sha256("global:<method>")[:8])
 # =========================================================================
+# VIB-3817: each constant below MUST equal sha256("global:<name>")[:8]; the
+# DRIFT_INSTRUCTION_NAMES map below records the canonical Anchor name for
+# every discriminator so anchor_discriminator() can re-derive and verify
+# them at SDK construction. If Drift renames an instruction, the constant
+# AND the entry in DRIFT_INSTRUCTION_NAMES both need updating.
 
 PLACE_PERP_ORDER_DISCRIMINATOR = bytes.fromhex("45a15dca787e4cb9")
 INITIALIZE_USER_DISCRIMINATOR = bytes.fromhex("6f11b9fa3c7a26fe")
 INITIALIZE_USER_STATS_DISCRIMINATOR = bytes.fromhex("fef34862fb82a8d5")
 DEPOSIT_DISCRIMINATOR = bytes.fromhex("f223c68952e1f2b6")
 CANCEL_ORDER_DISCRIMINATOR = bytes.fromhex("5f81edf00831df84")
+
+# VIB-3817 self-check map — see DriftDiscriminatorMismatchError. Pairs every
+# vendored discriminator with its source Anchor instruction name so the SDK
+# can re-derive and assert at construction time.
+DRIFT_INSTRUCTION_NAMES: dict[str, bytes] = {
+    "place_perp_order": PLACE_PERP_ORDER_DISCRIMINATOR,
+    "initialize_user": INITIALIZE_USER_DISCRIMINATOR,
+    "initialize_user_stats": INITIALIZE_USER_STATS_DISCRIMINATOR,
+    "deposit": DEPOSIT_DISCRIMINATOR,
+    "cancel_order": CANCEL_ORDER_DISCRIMINATOR,
+}
 
 # =========================================================================
 # Perp Market Indexes (index → symbol)
