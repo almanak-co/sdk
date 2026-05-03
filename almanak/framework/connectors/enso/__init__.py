@@ -45,6 +45,7 @@ from .exceptions import (
     EnsoAPIError,
     EnsoConfigError,
     EnsoError,
+    EnsoRouterRevertError,
     EnsoValidationError,
     PriceImpactExceedsThresholdError,
 )
@@ -79,5 +80,6 @@ __all__ = [
     "EnsoAPIError",
     "EnsoValidationError",
     "EnsoConfigError",
+    "EnsoRouterRevertError",
     "PriceImpactExceedsThresholdError",
 ]

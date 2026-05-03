@@ -82,7 +82,16 @@ GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
         "data_store": "0x2F0b22339414ADeD7D5F06f9D604c7fF5b2fe3f6",
         "reader": "0x2eFEE1950ededC65De687b40Fd30a7B5f4544aBd",
         "synthetics_reader": "0x62Cb8740E6986B29dC671B2EB596676f60590A5B",
-        "order_vault": "0xee7d43517A62Fa0ac642E22Eb93A93f82D0d3dF6",
+        # VIB-3820: was 0xee7d43517A62Fa0ac642E22Eb93A93f82D0d3dF6 (stale).
+        # Verified canonical against
+        # github.com/gmx-io/gmx-synthetics/deployments/avalanche/OrderVault.json
+        # on 2026-05-02. The canonical value already matches
+        # almanak/core/contracts.py:GMX_V2["avalanche"]["order_vault"], which
+        # is the address actually used by the SDK hot path
+        # (gmx_v2/sdk.py:_build_chain_address_map). The drifted value here
+        # was dead data but masqueraded as official source — anyone reading
+        # adapter.py to verify on-chain state would have been misled.
+        "order_vault": "0xD3D60D22d415aD43b7e64b510D86A30f19B1B12C",
         "deposit_vault": "0x90c670825d0C62ede1c5ee9571d6d9a17A722DFF",
         "withdrawal_vault": "0xf5F30B10141E1F63FC11eD772931A8294a591996",
         "router": "0x820F5FfC5b525cD4d88Cd91aCf2c28F16530Cc68",

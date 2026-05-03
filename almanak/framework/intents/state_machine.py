@@ -1035,6 +1035,22 @@ class IntentStateMachine:
             # Retrying with the same range/amounts always reproduces the M0
             # revert, so classify as terminal to skip the retry storm.
             "mint zero liquidity",
+            # VIB-3825: LendingBorrowNotEnabledError.ERROR_PREFIX
+            # (intent_errors.py) surfaces from the BORROW compile-time
+            # borrowable pre-flight in compiler_lending._check_lending_reserve_borrowable.
+            # Retrying with the same asset always reproduces the on-chain
+            # Aave V3 code 11 (BORROWING_NOT_ENABLED) revert — strategy must
+            # HOLD until governance enables borrowing or pick a different
+            # borrow asset.
+            "lending borrow not enabled",
+            # VIB-3828: EnsoRouterRevertError.ERROR_PREFIX
+            # (enso/exceptions.py) surfaces when the Enso router reverts with
+            # a known custom-error selector (e.g. 0xef3dcb2f on Base —
+            # leverage_loop_cross_chain). Selector-driven reverts repeat
+            # deterministically for the same route, so classify as terminal —
+            # the strategy must adjust the route, target token, or slippage
+            # before retrying.
+            "enso router rejected route with selector",
             # VIB-3818: OrcaTickArrayUninitializedError.ERROR_PREFIX
             # (orca/exceptions.py) surfaces from the LP_OPEN compile-time
             # tick-array pre-flight in orca/adapter.py. Retrying with the same

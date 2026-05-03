@@ -145,6 +145,52 @@ class LpOpenZeroLiquidityError(ValueError):
         )
 
 
+class LendingBorrowNotEnabledError(ValueError):
+    """Raised when a BORROW intent targets a reserve with ``borrowingEnabled=false``.
+
+    Aave V3 (and V2-fork) reserves can be flagged supply-only by governance —
+    every BORROW against such an asset reverts on-chain with short-string code
+    ``11`` (``BORROWING_NOT_ENABLED``). The compile-time pre-flight in
+    :func:`almanak.framework.intents.compiler_lending._check_lending_reserve_borrowable`
+    fires this typed error so strategies can match on the stable error-message
+    prefix and emit ``Intent.hold(...)`` instead of burning gas on the
+    on-chain revert.
+
+    Concrete trigger: ``aave_v3_aerodrome_leveraged_lp_base`` (USDC borrow on
+    Base) per the QA April-31 harness, BUG-35 / VIB-3825.
+
+    Attributes:
+        chain: The chain the BORROW targets.
+        protocol: The lending protocol (e.g. ``"aave_v3"``).
+        asset_symbol: The borrow asset symbol that is not borrowable.
+        asset_address: The borrow asset's contract address.
+        reason: Human-facing diagnostic message including the
+            ``borrowingEnabled=False`` flag.
+
+    Strategies can match on the stable error-message prefix
+    (``"Lending borrow not enabled"``) returned in
+    ``CompilationResult.error`` to emit a clean ``Intent.hold(...)``.
+    """
+
+    ERROR_PREFIX = "Lending borrow not enabled"
+
+    def __init__(
+        self,
+        *,
+        chain: str,
+        protocol: str,
+        asset_symbol: str,
+        asset_address: str,
+        reason: str,
+    ) -> None:
+        self.chain = chain
+        self.protocol = protocol
+        self.asset_symbol = asset_symbol
+        self.asset_address = asset_address
+        self.reason = reason
+        super().__init__(f"{self.ERROR_PREFIX} for {asset_symbol} on {protocol} {chain}: {reason}")
+
+
 class InvalidCollateralForMarketError(ValueError):
     """Raised when a perp intent specifies a collateral that is invalid for the market.
 

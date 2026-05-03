@@ -222,3 +222,84 @@ class EnsoTransactionError(EnsoError):
         if self.error_data:
             error_msg += f"\nDetails: {self.error_data}"
         return error_msg
+
+
+class EnsoRouterRevertError(EnsoError):
+    """Raised when the Enso router reverts with a known custom-error selector.
+
+    The Enso router emits chain-and-route-specific custom errors. Two were
+    observed by the QA April-31 harness:
+
+    * ``0xef3dcb2f`` — VIB-3828 (BUG-43). Surfaces from the
+      ``leverage_loop_cross_chain`` strategy on Base. Same selector previously
+      seen in BUG-55 (Enso "amount inflation") was diagnosed as a logging bug
+      (closed by VIB-3747); the on-chain reverts here are real.
+
+    Without the live ABI, the four-byte selector is the only stable handle —
+    so we log it verbatim and let strategies match on the
+    ``KNOWN_REVERT_SELECTORS`` table for fail-fast classification.
+    Decoding (signature recovery) lives outside this class — see
+    ``almanak/framework/connectors/enso/`` README + the upstream Enso router
+    source ``contracts/EnsoShortcuts.sol``.
+
+    Attributes:
+        selector: The 4-byte selector observed (``"0xef3dcb2f"`` etc.).
+        chain: The chain the revert was observed on.
+        route_summary: Human-facing description of the failing leg
+            (token in/out, route hops, etc.).
+        diagnosis_hint: Best-effort interpretation of what the selector
+            means (per QA April-31 investigation), or ``None`` if unknown.
+
+    Strategies can match on the stable error-message prefix
+    (the ``ERROR_PREFIX`` class attribute below) returned in the connector's
+    error path to emit a clean ``Intent.hold(...)``. The prefix intentionally
+    avoids the substring ``"revert"`` — the state machine classifies any
+    error containing ``"revert"`` as transient ``REVERT`` before consulting
+    the ``COMPILATION_PERMANENT`` keyword table.
+    """
+
+    # NOTE: avoid the literal "revert" in this prefix — the state machine
+    # classifies any error containing "revert" as transient REVERT before
+    # consulting the COMPILATION_PERMANENT keyword table. Use "rejected".
+    ERROR_PREFIX = "Enso router rejected route with selector"
+
+    # Selector → diagnosis hint table. Append new entries here as the router
+    # surfaces them in QA. ``None`` means "selector observed but root cause
+    # still under investigation" — strategy still benefits from the typed
+    # error + permanent-keyword classification.
+    KNOWN_REVERT_SELECTORS: dict[str, str | None] = {
+        # VIB-3828 / BUG-43 — leverage_loop_cross_chain on Base
+        "0xef3dcb2f": (
+            "Likely a router-side route-validation custom error (under "
+            "investigation; see VIB-3828). May be triggered by a token "
+            "address not recognized by Enso's chain-specific token map "
+            "(sister of BUG-55), an empty / shallow route, or slippage "
+            "tighter than the route's natural fee tier supports."
+        ),
+    }
+
+    def __init__(
+        self,
+        *,
+        selector: str,
+        chain: str,
+        route_summary: str = "",
+        diagnosis_hint: str | None = None,
+    ) -> None:
+        # Canonicalize to ``0x`` + 8 lowercase hex chars so callers passing
+        # raw revert data (e.g. ``"ef3dcb2f<padding...>"``), uppercase, or
+        # already-prefixed input all collapse to the same key — otherwise the
+        # ``KNOWN_REVERT_SELECTORS`` lookup silently misses the diagnosis hint.
+        raw = selector.lower().removeprefix("0x")
+        self.selector = f"0x{raw[:8]}"
+        self.chain = chain
+        self.route_summary = route_summary
+        self.diagnosis_hint = (
+            diagnosis_hint if diagnosis_hint is not None else self.KNOWN_REVERT_SELECTORS.get(self.selector)
+        )
+        msg = f"{self.ERROR_PREFIX} {self.selector} on {chain}"
+        if route_summary:
+            msg += f" (route: {route_summary})"
+        if self.diagnosis_hint:
+            msg += f". Diagnosis hint: {self.diagnosis_hint}"
+        super().__init__(msg)

@@ -61,11 +61,13 @@ class PoolReserveFrozenError(ValueError):
 
 
 # Decoded reserve configuration as returned by `getReserveConfigurationData`.
-# Used by both the collateral-eligibility check and the frozen-reserve check.
+# Used by the collateral-eligibility check, the frozen-reserve check, and the
+# VIB-3825 borrowable check.
 class _DecodedReserveConfig:
     __slots__ = (
         "ltv",
         "usage_as_collateral_enabled",
+        "borrowing_enabled",
         "is_active",
         "is_frozen",
     )
@@ -75,11 +77,13 @@ class _DecodedReserveConfig:
         *,
         ltv: int,
         usage_as_collateral_enabled: bool,
+        borrowing_enabled: bool,
         is_active: bool,
         is_frozen: bool,
     ) -> None:
         self.ltv = ltv
         self.usage_as_collateral_enabled = usage_as_collateral_enabled
+        self.borrowing_enabled = borrowing_enabled
         self.is_active = is_active
         self.is_frozen = is_frozen
 
@@ -168,6 +172,7 @@ def _fetch_reserve_config(
             return _DecodedReserveConfig(
                 ltv=0,
                 usage_as_collateral_enabled=False,
+                borrowing_enabled=False,
                 is_active=False,
                 is_frozen=True,
             )
@@ -206,6 +211,7 @@ def _fetch_reserve_config(
         return _DecodedReserveConfig(
             ltv=0,
             usage_as_collateral_enabled=False,
+            borrowing_enabled=False,
             is_active=False,
             is_frozen=True,
         )
@@ -230,6 +236,7 @@ def _fetch_reserve_config(
     try:
         ltv = int(raw[64:128], 16)
         usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
+        borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
         is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
         is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
     except ValueError:
@@ -238,6 +245,7 @@ def _fetch_reserve_config(
     return _DecodedReserveConfig(
         ltv=ltv,
         usage_as_collateral_enabled=usage_as_collateral_enabled,
+        borrowing_enabled=borrowing_enabled,
         is_active=is_active,
         is_frozen=is_frozen,
     )
@@ -288,6 +296,66 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
             f"Asset {asset_symbol} on Aave V3 {compiler.chain} is not collateral-eligible "
             f"(usageAsCollateralEnabled={config.usage_as_collateral_enabled}, ltv={config.ltv}). "
             "Use as supply-only (omit use_as_collateral) or pick a different asset."
+        )
+        cache[cache_key] = reason
+        return reason
+
+    cache[cache_key] = None
+    return None
+
+
+def _check_lending_reserve_borrowable(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+) -> str | None:
+    """VIB-3825 pre-flight: verify the asset has ``borrowingEnabled=true``.
+
+    Aave V3 (and Aave V2 forks) expose a per-reserve ``borrowingEnabled`` bit in
+    ``getReserveConfigurationData`` (word 6). When it is false, every BORROW
+    against the asset reverts on-chain with short-string code ``11`` (Aave V3:
+    ``BORROWING_NOT_ENABLED``) — burning gas + iterations of the strategy's
+    retry loop. Concrete trigger seen on Base in the Apr-31 harness:
+    ``aave_v3_aerodrome_leveraged_lp_base`` (USDC borrow).
+
+    Returns:
+        None when the reserve is borrowable (or the check could not be
+        performed). A human-readable error string when borrowing is
+        disabled. Caller should raise the typed
+        :class:`LendingBorrowNotEnabledError` so strategies can catch and
+        emit ``Intent.hold(...)`` instead of submitting a BORROW that
+        on-chain will revert.
+    """
+    if not _resolve_pool_data_provider(compiler.chain, protocol):
+        return None
+
+    cache = getattr(compiler, "_lending_borrowable_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_borrowable_cache = cache
+
+    cache_key = (compiler.chain, protocol, asset_address.lower())
+    if cache_key in cache:
+        return cache[cache_key]
+
+    config = _fetch_reserve_config(
+        compiler,
+        asset_address,
+        asset_symbol,
+        protocol=protocol,
+        pre_flight_label=f"{protocol} reserve-borrowable",
+    )
+    if config is None:
+        # Fail-open on transient gateway errors — do not cache the miss.
+        return None
+
+    if not config.borrowing_enabled:
+        reason = (
+            f"Reserve {asset_symbol} on {protocol} {compiler.chain} is not "
+            f"borrowable (borrowingEnabled=False). The reserve is "
+            f"supply-only — strategy must HOLD until governance enables "
+            f"borrowing or pick a different borrow asset."
         )
         cache[cache_key] = reason
         return reason
@@ -908,6 +976,46 @@ def _compile_borrow_aave_compatible(
             status=CompilationStatus.FAILED,
             error=f"{intent.protocol} not available on chain: {compiler.chain}",
             intent_id=intent.intent_id,
+        )
+
+    # VIB-3825: pre-flight the borrow asset's reserve state. Two governance bits
+    # gate a borrow on Aave-compatible pools, and they're independent —
+    # ``isActive``/``isFrozen`` (reserve-level pause) and ``borrowingEnabled``
+    # (per-asset toggle, code 11 = BORROWING_NOT_ENABLED). A frozen reserve can
+    # still report ``borrowingEnabled=true`` and a borrow against it will
+    # revert on-chain. Check active/frozen first (cheaper, hits the same
+    # ``getReserveConfigurationData`` cache as SUPPLY) so a paused or frozen
+    # reserve fails the compile before the borrowable check runs. Both checks
+    # fail open on RPC errors so placeholder-mode compiles still produce
+    # calldata; the on-chain revert remains the final guard.
+    frozen_reason = _check_lending_reserve_active(
+        compiler,
+        borrow_token.address,
+        borrow_token.symbol,
+        protocol_lower,
+    )
+    if frozen_reason is not None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=frozen_reason,
+            intent_id=intent.intent_id,
+        )
+
+    borrow_disabled_reason = _check_lending_reserve_borrowable(
+        compiler,
+        borrow_token.address,
+        borrow_token.symbol,
+        protocol_lower,
+    )
+    if borrow_disabled_reason is not None:
+        from .intent_errors import LendingBorrowNotEnabledError
+
+        raise LendingBorrowNotEnabledError(
+            chain=compiler.chain,
+            protocol=intent.protocol,
+            asset_symbol=borrow_token.symbol,
+            asset_address=borrow_token.address,
+            reason=borrow_disabled_reason,
         )
 
     collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
