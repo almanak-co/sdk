@@ -442,6 +442,38 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
         """Get the chain."""
         return self._chain
 
+    @property
+    def allocation_usd(self) -> Decimal | None:
+        """Strategy's declared starting allocation in USD (VIB-3882).
+
+        The runner's portfolio-baseline path uses this property to set
+        ``portfolio_metrics.initial_value_usd``. When ``None``, the runner
+        falls back to the legacy "first observed wallet total" heuristic
+        — preserved for strategies that haven't migrated to the new
+        contract.
+
+        The default implementation reads ``config.total_value_usd`` for
+        backwards compatibility (most demo / accounting strategies declare
+        their allocation there). Strategies that source their allocation
+        from elsewhere (a separate ``allocation.json``, an env var, a
+        hosted control plane) should override this property.
+
+        Why a property and not a class field: the contract is on the
+        strategy, not on the JSON file. A strategy author who wants
+        capital isolation from a shared test-wallet can declare it
+        independently of how their config is shaped.
+        """
+        raw = getattr(self.config, "total_value_usd", None)
+        if raw is None or raw == "":
+            return None
+        try:
+            value = Decimal(str(raw))
+        except (ArithmeticError, ValueError):
+            return None
+        if not value.is_finite() or value <= 0:
+            return None
+        return value
+
     @abstractmethod
     def run(self) -> Any:
         """Execute one iteration of the strategy.

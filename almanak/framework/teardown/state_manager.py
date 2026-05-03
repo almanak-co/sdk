@@ -436,6 +436,11 @@ class TeardownStateManager:
         Args:
             strategy_id: The strategy ID
             result: Optional result details (final balances, costs, etc.)
+                If ``result["intents"]`` is set, it's lifted onto
+                ``positions_closed`` (VIB-3920) so dashboard tabs and the
+                §1.2 G5 ship gate can read a non-zero close-count after a
+                successful teardown lifecycle. Pre-fix only ``status``
+                was updated and ``positions_closed`` always read 0.
 
         Returns:
             The updated request, or None if not found
@@ -447,6 +452,15 @@ class TeardownStateManager:
         request.status = TeardownStatus.COMPLETED
         request.completed_at = datetime.now(UTC)
 
+        # VIB-3920 — lift the closed count off the result payload onto
+        # the dedicated column. ``intents`` is what TeardownManager emits
+        # in `result_json`; same name as the ``intents_succeeded`` field
+        # on TeardownResult.
+        if result is not None:
+            intents_closed = result.get("intents")
+            if isinstance(intents_closed, int) and intents_closed >= 0:
+                request.positions_closed = intents_closed
+
         if result:
             with _open_connection(self.db_path) as conn:
                 conn.execute(
@@ -456,7 +470,7 @@ class TeardownStateManager:
                 conn.commit()
 
         self.update_request(request)
-        logger.info(f"Completed teardown for {strategy_id}")
+        logger.info(f"Completed teardown for {strategy_id} (positions_closed={request.positions_closed})")
         return request
 
     def mark_failed(

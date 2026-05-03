@@ -52,6 +52,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -199,8 +200,9 @@ class IntentEventContext:
     """Immutable bag of inputs shared across phase helpers (Phase 5i).
 
     Bundles the raw intent/result, pre-fetched ``extracted_data`` dict, and
-    the static wiring fields (deployment_id, chain, ledger_entry_id) so each
-    ``_apply_*`` helper has one parameter instead of six.
+    the static wiring fields (deployment_id, chain, ledger_entry_id,
+    price_oracle) so each ``_apply_*`` helper has one parameter instead of
+    seven.
     """
 
     intent: Any
@@ -209,6 +211,7 @@ class IntentEventContext:
     deployment_id: str
     chain: str
     ledger_entry_id: str
+    price_oracle: dict | None = None
 
 
 def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
@@ -240,14 +243,34 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
         position_id = str(intent.position_id)
 
     # Tx details from the result envelope (first transaction only).
+    # Gas USD precedence mirrors the ledger writer's
+    # ``observability.ledger._extract_tx_and_gas``:
+    #   1. honour a pre-computed ``result.gas_cost_usd`` if set (legacy
+    #      enrichers like the prediction-handler path);
+    #   2. otherwise compute from ``result.total_gas_cost_wei × native_usd``
+    #      via ``accounting.gas_pricing.compute_gas_usd`` — closes the gap
+    #      where ``position_events.gas_usd`` was empty even when the ledger
+    #      had real numbers, because the orchestrator only populates
+    #      ``total_gas_cost_wei``, not ``gas_cost_usd``.
     tx_hash = ""
     gas_usd = ""
     if result:
         if hasattr(result, "transaction_results") and result.transaction_results:
             tx_hash = result.transaction_results[0].tx_hash or ""
-        gas_cost = getattr(result, "gas_cost_usd", None)
-        if gas_cost is not None:
-            gas_usd = str(gas_cost)
+        gas_cost_legacy = getattr(result, "gas_cost_usd", None)
+        if gas_cost_legacy is not None:
+            gas_usd = str(gas_cost_legacy)
+        else:
+            from almanak.framework.accounting.gas_pricing import compute_gas_usd
+
+            gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+            computed = compute_gas_usd(
+                gas_cost_wei=gas_cost_wei,
+                chain=ctx.chain,
+                price_oracle=ctx.price_oracle,
+            )
+            if computed is not None:
+                gas_usd = str(computed)
 
     return PositionEvent(
         deployment_id=ctx.deployment_id,
@@ -269,6 +292,14 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     the LP pair tokens. Tokens prefer intent.token0/token1, falling back to
     intent.from_token/to_token when the LP intent carries the pair as the
     two swap sides.
+
+    VIB-3887: when ``lp_open_data`` carries ``current_tick``, derive
+    ``in_range`` directly from the bracket. The current_tick is sourced
+    from the gateway-side receipt parser (which has authority to call
+    ``slot0().tick`` after the mint receipt) — framework code consumes
+    it here, never populates it via direct RPC. When ``current_tick``
+    is None (gateway hasn't been updated, or the protocol has no range
+    semantic) ``in_range`` stays None — readers degrade gracefully.
     """
     lp_open = ctx.extracted.get("lp_open_data")
     if not (lp_open and hasattr(lp_open, "position_id")):
@@ -282,6 +313,13 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     event.liquidity = str(getattr(lp_open, "liquidity", "") or "")
     event.tick_lower = getattr(lp_open, "tick_lower", None)
     event.tick_upper = getattr(lp_open, "tick_upper", None)
+    # VIB-3887 — in_range derivation from gateway-supplied current_tick.
+    current_tick = getattr(lp_open, "current_tick", None)
+    if current_tick is not None and event.tick_lower is not None and event.tick_upper is not None:
+        # Uniswap V3 / TraderJoe / aerodrome convention: position is in
+        # range when tick_lower <= current_tick < tick_upper. Equality on
+        # the upper bound is exclusive.
+        event.in_range = event.tick_lower <= current_tick < event.tick_upper
     # VIB-3205 audit fix (Codex P1, pr-auditor Blocker #1): populate
     # amount0/amount1 + token0/token1 from the extracted LP open data.
     # Without these, `compute_impermanent_loss` short-circuits to None
@@ -573,6 +611,8 @@ def build_position_event_from_intent(
     result: Any,
     ledger_entry_id: str = "",
     chain: str = "",
+    price_oracle: dict | None = None,
+    recent_open_events: dict | None = None,
 ) -> PositionEvent | None:
     """Build a PositionEvent from an intent and execution result.
 
@@ -581,6 +621,16 @@ def build_position_event_from_intent(
 
     Sequences the phase helpers α → γ → δ → ε → ζ → η → θ. Ordering is
     load-bearing (see module docstring).
+
+    ``price_oracle`` (VIB-3883): mapping ``{SYMBOL: price}`` (Decimal /
+    str / float — coerced internally) used to populate
+    ``PositionEvent.value_usd`` on LP_OPEN events. Without this,
+    ``portfolio_snapshots.deployed_capital_usd`` reads zero even with
+    an open LP position because ``portfolio_valuer._enrich_lp_pnl``
+    derives ``cost_basis_usd`` from the OPEN event's ``value_usd``
+    column. Callers that don't have a price oracle in scope omit it —
+    the field stays empty and downstream readers degrade as they
+    already do.
     """
     extracted = getattr(result, "extracted_data", {}) if result else {}
     ctx = IntentEventContext(
@@ -590,6 +640,7 @@ def build_position_event_from_intent(
         deployment_id=deployment_id,
         chain=chain,
         ledger_entry_id=ledger_entry_id,
+        price_oracle=price_oracle,
     )
 
     # α + β — dispatch + seed.
@@ -610,5 +661,234 @@ def build_position_event_from_intent(
     _apply_perp(event, ctx)
     _apply_protocol_fees(event, ctx)
 
+    # ι — VIB-3883: populate value_usd for LP_OPEN so deployed_capital_usd
+    # on portfolio_snapshots reflects the deployed position size. Must run
+    # AFTER _apply_lp_open populates amount0/amount1.
+    if price_oracle:
+        _apply_lp_open_value_usd(event, price_oracle, chain=chain)
+
+    # κ — VIB-3919: LP_CLOSE column symmetry. The CLOSE event's
+    # tick_lower/tick_upper/liquidity/in_range come from the matching
+    # OPEN event (the bracket is immutable across the position
+    # lifecycle); value_usd at CLOSE = sum of received amounts × prices.
+    # Pre-fix the CLOSE row landed with all six columns empty even when
+    # the OPEN had populated them, breaking dashboard symmetry and the
+    # G5 ship gate. The runner threads ``recent_open_events`` (an
+    # in-memory cache keyed by ``(position_id, position_type)`` populated
+    # on every save_position_event success) so we can hydrate without
+    # a state-manager round-trip.
+    if event.event_type == "CLOSE" and event.position_type == "LP":
+        _apply_lp_close_columns(event, ctx, recent_open_events, price_oracle)
+
     # θ — final guard: drop events that never acquired a position_id.
     return event if event.position_id else None
+
+
+def _apply_lp_close_columns(
+    event: PositionEvent,
+    ctx: IntentEventContext,
+    recent_open_events: dict | None,
+    price_oracle: dict | None,
+) -> None:
+    """VIB-3919 — backfill the immutable LP_CLOSE columns from the prior
+    OPEN event + close-time pricing.
+
+    Carries forward ``tick_lower``, ``tick_upper``, ``liquidity`` from
+    the runner's ``recent_open_events`` cache. Sets ``in_range = False``
+    on CLOSE (the position is being burned; "in-range" semantics no
+    longer apply in any meaningful way — False > None for ledger
+    completeness). Computes ``value_usd`` from received amounts ×
+    prices when available.
+    """
+    pos_id = event.position_id or ""
+    if pos_id and recent_open_events:
+        cached = recent_open_events.get((pos_id, "LP"))
+        if cached is not None:
+            # Bracket is immutable; carry it forward verbatim.
+            tl = cached.get("tick_lower")
+            tu = cached.get("tick_upper")
+            liq = cached.get("liquidity")
+            if event.tick_lower is None and isinstance(tl, int):
+                event.tick_lower = tl
+            if event.tick_upper is None and isinstance(tu, int):
+                event.tick_upper = tu
+            if not event.liquidity and liq is not None:
+                event.liquidity = str(liq)
+    # in_range is unambiguously False post-close (NFT burned / liquidity
+    # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
+    # ``False`` as "out of range". Either is honest; False is more
+    # informative for the closed lifecycle stage.
+    if event.in_range is None:
+        event.in_range = False
+    # Compute value_usd from received amounts when prices available.
+    if not event.value_usd and price_oracle:
+        _apply_lp_close_value_usd(event, price_oracle, chain=ctx.chain)
+
+
+def _apply_lp_close_value_usd(event: PositionEvent, price_oracle: dict, chain: str = "") -> None:
+    """VIB-3919 — value_usd at CLOSE = received amount0 × price0 +
+    received amount1 × price1.
+
+    Mirrors ``_apply_lp_open_value_usd`` but reads the CLOSE-time
+    received amounts (already populated by ``_apply_lp_close``) instead
+    of the OPEN-time deposit amounts. Fails closed: if either price is
+    missing or decimals can't be resolved, ``value_usd`` stays "".
+    """
+    if event.event_type != "CLOSE" or event.position_type != "LP":
+        return
+    if event.value_usd:
+        return
+    amount0_str = event.amount0
+    amount1_str = event.amount1
+    token0 = (event.token0 or "").upper()
+    token1 = (event.token1 or "").upper()
+    if not (amount0_str and amount1_str and token0 and token1):
+        return
+    try:
+        from decimal import Decimal as _D
+
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        ti0 = resolver.resolve(token0, chain=chain)
+        ti1 = resolver.resolve(token1, chain=chain)
+        if ti0 is None or ti1 is None:
+            return
+        a0 = _D(str(amount0_str)) / _D(10**ti0.decimals)
+        a1 = _D(str(amount1_str)) / _D(10**ti1.decimals)
+
+        # Tolerant price lookup (matches _apply_lp_open_value_usd).
+        def _price(sym: str) -> _D | None:
+            entry = price_oracle.get(sym) or price_oracle.get(sym.upper())
+            if entry is None:
+                return None
+            if isinstance(entry, dict):
+                p = entry.get("price_usd")
+                return _D(str(p)) if p is not None else None
+            try:
+                return _D(str(entry))
+            except Exception:  # noqa: BLE001
+                return None
+
+        p0, p1 = _price(token0), _price(token1)
+        if p0 is None or p1 is None:
+            return
+        event.value_usd = str(a0 * p0 + a1 * p1)
+    except Exception:  # noqa: BLE001 — best-effort enrichment
+        logger.debug("LP_CLOSE value_usd compute failed", exc_info=True)
+
+
+def _apply_lp_open_value_usd(event: PositionEvent, price_oracle: dict, chain: str = "") -> None:
+    """Phase ι (VIB-3883) — compute ``value_usd`` for LP_OPEN events.
+
+    Reads ``amount0/1`` + ``token0/1`` off the event, scales the raw
+    on-chain integer amounts to human-readable units using the token
+    resolver, then multiplies each leg by the corresponding USD price.
+    Fails closed (leaves ``value_usd=""``) when either leg is unpriceable
+    OR token decimals can't be resolved — matches the fail-closed contract
+    used by ``compute_lp_cost_basis``.
+
+    Decimals scaling is critical (the bug pre-fix): ``_apply_lp_open``
+    writes ``amount0`` as the raw int from ``LPOpenData.amount0`` (e.g.
+    ``891556839636852`` for WETH 18-dec). Multiplying that integer by
+    the USD price directly produces ``$2e18`` of nonsense. We scale by
+    ``10 ** decimals`` to recover the human-readable amount before
+    pricing.
+
+    Only fires for LP_OPEN where amount0/1 are populated and prices
+    cover both legs. Other event types are unaffected.
+    """
+    if event.event_type != "OPEN" or event.position_type != "LP":
+        return
+    if event.value_usd:
+        return  # already set by something upstream — don't overwrite
+    amount0_str = event.amount0
+    amount1_str = event.amount1
+    token0 = (event.token0 or "").upper()
+    token1 = (event.token1 or "").upper()
+    if not (amount0_str and amount1_str and token0 and token1):
+        return
+
+    def _price(sym: str) -> Decimal | None:
+        # Tolerant of both nested ({price_usd: ...}) and flat shapes —
+        # mirrors the VIB-3885 helper for category handlers.
+        raw = price_oracle.get(sym) or price_oracle.get(sym.lower())
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            raw = raw.get("price_usd") or raw.get("price")
+            if raw is None:
+                return None
+        try:
+            d = Decimal(str(raw))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+        return d if d.is_finite() else None
+
+    p0 = _price(token0)
+    p1 = _price(token1)
+    if p0 is None or p1 is None:
+        return
+
+    # Resolve token decimals to scale raw on-chain integers. Without this
+    # ``Decimal("891556839636852") * Decimal("2301.69")`` writes 2e18 —
+    # the H2 production bug.
+    chain_lc = (chain or "").lower()
+    dec0 = _resolve_token_decimals(token0, chain_lc)
+    dec1 = _resolve_token_decimals(token1, chain_lc)
+    if dec0 is None or dec1 is None:
+        # Decimals unknown — fail closed rather than emit a wildly
+        # mis-scaled USD. lp_handler.py uses the same fail-closed
+        # contract on the cost_basis_usd path.
+        return
+
+    try:
+        a0_human = _scale_to_human(amount0_str, dec0)
+        a1_human = _scale_to_human(amount1_str, dec1)
+    except (ArithmeticError, ValueError):
+        return
+    if a0_human is None or a1_human is None:
+        return
+
+    total = a0_human * p0 + a1_human * p1
+    if total.is_finite() and total > Decimal("0"):
+        event.value_usd = str(total)
+
+
+def _resolve_token_decimals(symbol: str, chain: str) -> int | None:
+    """Best-effort token-decimals lookup; returns None on any failure.
+
+    Returns ``None`` (not a default like 18) so the caller can fail-closed
+    on unknown tokens rather than silently emit a 1e12-off USD value.
+    """
+    if not symbol or not chain:
+        return None
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        info = resolver.resolve(symbol, chain=chain)
+        return info.decimals if info is not None else None
+    except Exception:
+        return None
+
+
+def _scale_to_human(raw_str: str, decimals: int) -> Decimal | None:
+    """Convert a raw on-chain integer string to a human-readable Decimal.
+
+    Tolerant of an already-human input (e.g. ``"0.000891"``): if the
+    string parses to a Decimal that's already non-integer, we return it
+    unchanged. Pure integers get divided by ``10 ** decimals``.
+    """
+    try:
+        d = Decimal(str(raw_str))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    if not d.is_finite():
+        return None
+    if d == d.to_integral_value():
+        # Pure integer → assume raw on-chain units; scale down.
+        scale = Decimal(10) ** decimals
+        return d / scale
+    # Already a fractional Decimal → assume human-readable, return as-is.
+    return d

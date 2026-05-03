@@ -1017,7 +1017,7 @@ def page(strategies: list[Strategy]) -> None:
     # testability; see Phase 5b plan).
     from almanak.framework.dashboard.pages._detail_header import (
         render_chain_info_row,
-        render_key_metrics,
+        render_quant_header,
         render_strategy_header,
     )
 
@@ -1031,8 +1031,25 @@ def page(strategies: list[Strategy]) -> None:
         render_paper_session_detail(strategy)
         return
 
-    # Key metrics - include bridge fees for multi-chain
-    render_key_metrics(strategy)
+    # Senior-Quant header — money / risk / audit. Falls back to the
+    # legacy 4-tile metric grid when the gateway's aggregations are
+    # unavailable (gateway down, RPC error, fresh strategy with no rows).
+    from almanak.framework.dashboard.data_source import (
+        GatewayConnectionError,
+        get_quant_header,
+    )
+
+    quant_header = None
+    try:
+        quant_header = get_quant_header(strategy.id)
+    except GatewayConnectionError:
+        st.warning("Gateway unavailable — quant header degraded.")
+    except Exception as exc:  # noqa: BLE001 — page must remain renderable
+        # Any other failure (bad payload, gRPC stub mismatch, etc.) must
+        # not take down the entire detail page. Surface the issue and
+        # fall back to the legacy 4-tile metric grid via the renderer.
+        st.error(f"Quant header unavailable: {exc}")
+    render_quant_header(strategy, quant_header)
 
     st.divider()
 

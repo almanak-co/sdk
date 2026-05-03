@@ -2807,6 +2807,16 @@ class DashboardServiceStub(object):
                 request_serializer=gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetTransactionLedgerResponse.FromString,
                 _registered_method=True)
+        self.GetQuantHeader = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetQuantHeader',
+                request_serializer=gateway__pb2.GetQuantHeaderRequest.SerializeToString,
+                response_deserializer=gateway__pb2.QuantHeaderInfo.FromString,
+                _registered_method=True)
+        self.GetTradeTape = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetTradeTape',
+                request_serializer=gateway__pb2.GetTradeTapeRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetTradeTapeResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -2893,6 +2903,22 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetQuantHeader(self, request, context):
+        """Senior-Quant header aggregations: money trail, cost stack,
+        reconciliation, audit-trail completeness, Accountant posture.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTradeTape(self, request, context):
+        """Trade tape: ledger × accounting × position-event joined view, one
+        row per intent, with receipt-parsed and oracle-quote payloads.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -2950,6 +2976,16 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.GetTransactionLedger,
                     request_deserializer=gateway__pb2.GetTransactionLedgerRequest.FromString,
                     response_serializer=gateway__pb2.GetTransactionLedgerResponse.SerializeToString,
+            ),
+            'GetQuantHeader': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetQuantHeader,
+                    request_deserializer=gateway__pb2.GetQuantHeaderRequest.FromString,
+                    response_serializer=gateway__pb2.QuantHeaderInfo.SerializeToString,
+            ),
+            'GetTradeTape': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTradeTape,
+                    request_deserializer=gateway__pb2.GetTradeTapeRequest.FromString,
+                    response_serializer=gateway__pb2.GetTradeTapeResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -3253,6 +3289,60 @@ class DashboardService(object):
             '/almanak.gateway.proto.DashboardService/GetTransactionLedger',
             gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
             gateway__pb2.GetTransactionLedgerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetQuantHeader(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetQuantHeader',
+            gateway__pb2.GetQuantHeaderRequest.SerializeToString,
+            gateway__pb2.QuantHeaderInfo.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTradeTape(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetTradeTape',
+            gateway__pb2.GetTradeTapeRequest.SerializeToString,
+            gateway__pb2.GetTradeTapeResponse.FromString,
             options,
             channel_credentials,
             insecure,

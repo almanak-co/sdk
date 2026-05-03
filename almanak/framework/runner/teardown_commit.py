@@ -124,6 +124,8 @@ async def commit_teardown_intent(
     execution_context: Any,
     bundle_metadata: dict[str, Any] | None = None,
     teardown_cycle_id: str,
+    pre_snapshot: Any | None = None,
+    recon: dict[str, Any] | None = None,
 ) -> TeardownCommitOutcome:
     """Run the full success-path commit pipeline for one teardown intent.
 
@@ -221,6 +223,36 @@ async def commit_teardown_intent(
         # to the build_ledger_entry contract. Without this, every teardown
         # row landed with empty ``price_inputs_json`` and ``gas_usd``.
         teardown_price_oracle = getattr(runner, "_teardown_price_oracle", None)
+
+        # VIB-3918: build pre/post state dicts from the per-intent balance
+        # captures so ``transaction_ledger.pre_state_json`` and
+        # ``post_state_json`` land populated on every teardown row, lane-
+        # symmetric with iteration. ``pre_snapshot`` is captured by the
+        # teardown manager BEFORE ``orchestrator.execute``; ``recon`` is
+        # captured AFTER. Either may be ``None`` when the runner_helpers
+        # bag wasn't fully wired (older callers / unit-test stubs) — we
+        # silently fall back to ``None``, preserving the pre-VIB-3918
+        # empty-string column.
+        pre_state_dict: dict[str, Any] | None = None
+        post_state_dict: dict[str, Any] | None = None
+        try:
+            from .strategy_runner import (
+                _build_post_state_for_ledger,
+                _build_pre_state_for_ledger,
+            )
+
+            intent_protocol = (getattr(intent, "protocol", "") or "").lower()
+            if pre_snapshot is not None:
+                pre_state_dict = _build_pre_state_for_ledger(pre_snapshot, protocol=intent_protocol)
+            if recon is not None:
+                post_state_dict = _build_post_state_for_ledger(recon, protocol=intent_protocol)
+        except Exception as exc:  # noqa: BLE001 — never propagate state-building
+            logger.debug(
+                "commit_teardown_intent: pre/post state build failed for %s: %s",
+                strategy_id,
+                exc,
+            )
+
         try:
             ledger_entry_id = await runner._write_ledger_entry(
                 strategy,
@@ -228,6 +260,8 @@ async def commit_teardown_intent(
                 result=enriched_result,
                 success=True,
                 price_oracle=teardown_price_oracle,
+                pre_state=pre_state_dict,
+                post_state=post_state_dict,
             )
         except Exception as exc:  # noqa: BLE001 — never propagate
             logger.error(

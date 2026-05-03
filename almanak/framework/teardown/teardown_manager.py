@@ -942,6 +942,26 @@ class TeardownManager:
                         intent_description=self._describe_intent(intent_to_exec),
                     )
 
+                    # VIB-3918 — capture wallet balances IMMEDIATELY before
+                    # this intent's execution so the teardown ledger row's
+                    # ``pre_state_json`` reflects what the wallet held just
+                    # before this TX (not the pre-bracket snapshot, which
+                    # would be stale by the time the second teardown intent
+                    # runs — the swap-back's pre-state IS the LP_CLOSE's
+                    # post-state, not the pre-teardown snapshot).
+                    pre_intent_snapshot: Any = None
+                    if self.runner_helpers.has_per_intent_balances:
+                        try:
+                            pre_intent_snapshot = await self.runner_helpers.snapshot_intent_balances(  # type: ignore[misc]
+                                strategy, intent_to_exec
+                            )
+                        except Exception as exc:  # noqa: BLE001 — best-effort
+                            logger.debug(
+                                "teardown pre-intent balance snapshot failed for %s: %s",
+                                strategy.strategy_id,
+                                exc,
+                            )
+
                     # Execute via orchestrator
                     exec_result = await self.orchestrator.execute(
                         compilation_result.action_bundle,
@@ -960,6 +980,28 @@ class TeardownManager:
                             f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
                         )
 
+                        # VIB-3918 — reconcile post-execution balances now
+                        # that the TX has confirmed. The recon dict carries
+                        # ``post_balances`` and ``post_timestamp`` which
+                        # ``commit_teardown_intent`` threads into the ledger
+                        # writer's ``post_state_json``. Mirrors the iteration
+                        # lane at strategy_runner.py:3502.
+                        post_intent_recon: dict[str, Any] | None = None
+                        if self.runner_helpers.has_per_intent_balances and pre_intent_snapshot is not None:
+                            try:
+                                post_intent_recon = await self.runner_helpers.reconcile_post_balances(  # type: ignore[misc]
+                                    strategy,
+                                    intent_to_exec,
+                                    exec_result,
+                                    pre_snapshot=pre_intent_snapshot,
+                                )
+                            except Exception as exc:  # noqa: BLE001 — best-effort
+                                logger.debug(
+                                    "teardown post-intent reconcile failed for %s: %s",
+                                    strategy.strategy_id,
+                                    exc,
+                                )
+
                         # VIB-3773: drive the runner's full commit pipeline
                         # (enrich → ledger → outbox+fire → sidecar) for this
                         # successful on-chain teardown intent. The helper has
@@ -975,6 +1017,8 @@ class TeardownManager:
                                 execution_context=context,
                                 bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
                                 teardown_cycle_id=teardown_cycle_id,
+                                pre_snapshot=pre_intent_snapshot,
+                                recon=post_intent_recon,
                             )
                             if commit_outcome.accounting_degraded:
                                 accounting_degraded_records.extend(commit_outcome.degraded_writes)
@@ -1046,6 +1090,22 @@ class TeardownManager:
                 # Without this, a partial teardown leaves stale strategy state
                 # that causes the next deploy to retry already-completed ops.
                 try:
+                    # VIB-3922 — fire the framework-side intent-execution
+                    # hook BEFORE the user callback so the LPPositionTracker
+                    # clears the closed position from its in-memory dict.
+                    # Pre-fix the runner's per-iteration record_intent_execution
+                    # never saw teardown intents, so
+                    # ``strategy_state.__framework_lp_position_tracker__``
+                    # kept references to closed positions across teardown
+                    # → re-deploy boundaries.
+                    if hasattr(strategy, "_framework_record_intent_execution"):
+                        try:
+                            strategy._framework_record_intent_execution(intent, True, exec_result)
+                        except Exception as fhook_err:  # noqa: BLE001
+                            logger.warning(
+                                "VIB-3922: framework intent-execution hook raised in teardown lane (non-fatal): %s",
+                                fhook_err,
+                            )
                     if hasattr(strategy, "on_intent_executed"):
                         result = strategy.on_intent_executed(intent, True, exec_result)
                         # Handle strategies that return a coroutine

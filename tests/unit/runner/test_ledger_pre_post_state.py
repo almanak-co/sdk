@@ -80,10 +80,21 @@ def test_post_state_threads_incident_flag_for_recon_failure_path():
 
 
 def test_post_state_handles_missing_post_timestamp():
+    """VIB-3888: legacy recon without ``post_timestamp`` now stamps
+    ``datetime.now(UTC)`` rather than the empty-string the pre-VIB-3888
+    builder emitted. The reconciliation's existence implies the
+    post-balance read just ran a few ms earlier; an immediate-now stamp
+    is a closer approximation than NULL, which the Accountant Test G6
+    per-intent path needs to exist in some form."""
     recon = {"post_balances": {"USDC": "20.5"}}
     out = _build_post_state_for_ledger(recon)
     assert out is not None
-    assert out["captured_at"] == ""
+    # VIB-3888 — captured_at is non-empty and parseable as ISO-8601 even
+    # when the legacy recon shape didn't propagate ``post_timestamp``.
+    from datetime import datetime as _dt
+
+    assert out["captured_at"]
+    _dt.fromisoformat(out["captured_at"])  # raises if not parseable
 
 
 # ──────────────────────────────────────────────────────────────────────────────

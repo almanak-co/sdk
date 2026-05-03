@@ -123,6 +123,17 @@ class GatewaySettings(BaseSettings):
     # When False (default), gateway will fail to start without auth_token configured
     allow_insecure: bool = False
 
+    # VIB-3761/-3835: standalone-mode opt-in. When True, the gateway resolves
+    # its local SQLite path through the lenient ``local_db_path`` helper —
+    # which can fall back to ``~/.local/share/almanak/utility/almanak_state.db``.
+    # When False (default for local mode), the gateway uses the strict
+    # ``local_strategy_db_path`` helper, which raises ``LocalPathError`` rather
+    # than silently writing to the per-user utility DB. The CLI flag
+    # ``almanak gateway --standalone`` is the operator-facing surface; tests
+    # and ``almanak ax`` workflows that need a non-strategy gateway pass it
+    # explicitly. Hosted mode (``AGENT_ID`` set) ignores this field entirely.
+    standalone: bool = False
+
     model_config = {
         "env_prefix": "ALMANAK_GATEWAY_",
         "env_file": ".env",

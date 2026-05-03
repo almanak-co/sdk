@@ -214,15 +214,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 database_url=self.settings.database_url,
             )
         else:
-            # VIB-3761: route through the canonical local-path helper so
-            # every site that resolves the SQLite DB agrees. The
-            # cwd-relative ``./almanak_state.db`` default is removed —
-            # ALMANAK_STATE_DB / ALMANAK_STRATEGY_FOLDER / ALMANAK_GATEWAY_DB_PATH
-            # / utility default per ``almanak.framework.local_paths``.
-            from almanak.framework.local_paths import local_db_path
+            # VIB-3761/-3835: strict resolution by default; the gateway
+            # CLI's ``--standalone`` flag is the only operator-facing
+            # opt-in for the lenient utility-DB fallback.
+            from almanak.gateway._server_start_helpers import resolve_gateway_local_db_path
 
             backend_type = WarmBackendType.SQLITE
-            db_path = str(local_db_path())
+            db_path = str(resolve_gateway_local_db_path(self.settings))
             config = StateManagerConfig(
                 warm_backend=backend_type,
                 sqlite_config=SQLiteConfigLight(db_path=db_path),
@@ -232,7 +230,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         await self._state_manager.initialize()
 
         self._initialized = True
-        logger.debug(f"StateService initialized with {backend_type.name} backend")
+        mode = (
+            "POSTGRESQL"
+            if backend_type == WarmBackendType.POSTGRESQL
+            else ("STANDALONE" if self.settings.standalone else "STRATEGY-PINNED")
+        )
+        logger.info(
+            "StateService initialized with %s backend (%s)",
+            backend_type.name,
+            mode,
+        )
 
     async def LoadState(
         self,
@@ -594,6 +601,22 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
                     snapshot_dict["positions"] = positions
                     snapshot_dict["snapshot_metadata"] = snapshot_metadata
+                    # VIB-3894 — SaveSnapshotRequest is missing
+                    # ``deployed_capital_usd`` and ``wallet_total_value_usd``
+                    # on the proto wire. The runner's GatewayStateManager
+                    # smuggles them through the envelope's metadata under
+                    # ``__deployed_capital_usd__`` / ``__wallet_total_value_usd__``
+                    # keys; lift them onto the rebuilt snapshot here so the
+                    # SQLite writer persists the actual values rather than
+                    # the ``Decimal("0")`` default. Backwards-compatible:
+                    # legacy snapshots without the keys default to "0".
+                    if isinstance(snapshot_metadata, dict):
+                        dep_str = snapshot_metadata.pop("__deployed_capital_usd__", None)
+                        wtv_str = snapshot_metadata.pop("__wallet_total_value_usd__", None)
+                        if dep_str is not None:
+                            snapshot_dict["deployed_capital_usd"] = str(dep_str)
+                        if wtv_str is not None:
+                            snapshot_dict["wallet_total_value_usd"] = str(wtv_str)
                     # Extract accounting data from envelope (Phase 1c)
                     if isinstance(positions_payload, dict):
                         if "token_prices" in positions_payload:

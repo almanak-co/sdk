@@ -1904,16 +1904,41 @@ class PortfolioValuer:
         populates cost_basis_usd, unrealized_pnl_usd, entry_timestamp, and
         ledger_entry_id on the PositionValue.  No-op when no matching event exists.
 
+        VIB-3894: a runner-side ``_recent_open_events`` cache (populated when
+        ``save_position_event`` succeeds for an OPEN event) is consulted first
+        so the same-iteration snapshot fired right after LP_OPEN sees the
+        cost basis even when the underlying ``state_manager`` doesn't expose
+        ``get_position_events_sync`` (canonical case for ``GatewayStateManager``).
+
         Args:
             position_value: The PositionValue to enrich (mutated in place).
             position_info: Source PositionInfo carrying the position_id.
             position_type: Value passed to get_position_events_sync (e.g. "LP", "PERP").
         """
-        if not hasattr(self._accounting_store, "get_position_events_sync"):
-            return
-
         position_id = position_info.position_id
         if not position_id:
+            return
+
+        # VIB-3894 — recent-open cache lookup (in-memory, runner-side).
+        cache = getattr(self, "_recent_open_events", None) or {}
+        cached = cache.get((str(position_id), position_type))
+        if cached is not None:
+            try:
+                cost_basis = Decimal(str(cached.get("value_usd") or "0"))
+            except Exception:
+                cost_basis = Decimal("0")
+            if cost_basis > Decimal("0"):
+                position_value.cost_basis_usd = cost_basis
+                position_value.unrealized_pnl_usd = position_value.value_usd - cost_basis
+                ts = cached.get("timestamp") or ""
+                if isinstance(ts, str):
+                    position_value.entry_timestamp = ts
+                ledger_id = cached.get("ledger_entry_id") or ""
+                if ledger_id:
+                    position_value.ledger_entry_id = ledger_id
+                return
+
+        if not hasattr(self._accounting_store, "get_position_events_sync"):
             return
 
         events = self._accounting_store.get_position_events_sync(

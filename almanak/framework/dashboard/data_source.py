@@ -15,9 +15,11 @@ from typing import Any
 
 from almanak.framework.dashboard.gateway_client import (
     GatewayConnectionError,
+    QuantHeaderInfo,
     StrategyDetails,
     StrategySummary,
     TimelineEvent,
+    TradeTapeResponse,
     get_dashboard_client,
     reset_dashboard_client,
 )
@@ -45,10 +47,12 @@ __all__ = [
     "get_all_strategies",
     "get_available_strategies",
     "get_dashboard_client",
-    "purge_strategy_instance",
+    "get_quant_header",
     "get_strategy_details",
     "get_timeline",
+    "get_trade_tape",
     "is_gateway_available",
+    "purge_strategy_instance",
     "reset_gateway_connection",
 ]
 
@@ -407,3 +411,35 @@ def reset_gateway_connection() -> None:
     Call this to force a reconnection attempt on the next data access.
     """
     reset_dashboard_client()
+
+
+def get_quant_header(strategy_id: str) -> QuantHeaderInfo | None:
+    """Fetch the Senior-Quant header card aggregations from the gateway.
+
+    Returns None on connection / RPC failure rather than raising — the
+    detail page renders a degraded header rather than a stack trace.
+    """
+    client = get_dashboard_client()
+    if not client.is_connected:
+        client.connect()
+    try:
+        return client.get_quant_header(strategy_id)
+    except GatewayConnectionError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_quant_header failed for %s: %s", strategy_id, exc)
+        return None
+
+
+def get_trade_tape(strategy_id: str, limit: int = 50) -> TradeTapeResponse | None:
+    """Fetch the joined trade-tape rows from the gateway."""
+    client = get_dashboard_client()
+    if not client.is_connected:
+        client.connect()
+    try:
+        return client.get_trade_tape(strategy_id, limit=limit)
+    except GatewayConnectionError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_trade_tape failed for %s: %s", strategy_id, exc)
+        return None

@@ -12,11 +12,13 @@ These tests exercise the converter that re-shapes a PortfolioSnapshot's
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
 from almanak.framework.runner._run_loop_helpers import (
+    _ensure_native_gas_in_teardown_oracle,
     _portfolio_snapshot_to_price_oracle,
 )
 
@@ -111,3 +113,113 @@ def test_decimal_price_preserved_as_string():
     out = _portfolio_snapshot_to_price_oracle(snap)
     assert out is not None
     assert out["WETH"]["price_usd"] == "3245.501234567890"
+
+
+# ─── _ensure_native_gas_in_teardown_oracle (VIB-3918) ─────────────────────────
+
+
+class _FakeOracle:
+    """Stand-in for runner.price_oracle. Captures the call args and returns
+    a PriceResult-shaped object — enough for the helper's contract."""
+
+    def __init__(self, *, price: str | None = "3500.00", source: str = "gateway"):
+        self.calls: list[tuple[str, str, str | None]] = []
+        self._price = price
+        self._source = source
+
+    async def get_aggregated_price(self, token, quote="USD", *, chain=None):
+        self.calls.append((token, quote, chain))
+        if self._price is None:
+            raise RuntimeError("simulated oracle failure")
+        return SimpleNamespace(
+            price=Decimal(self._price),
+            source=self._source,
+            timestamp=datetime(2026, 5, 3, 14, 30, tzinfo=UTC),
+            confidence="HIGH",
+        )
+
+
+def _fake_runner(oracle: _FakeOracle | None) -> SimpleNamespace:
+    return SimpleNamespace(price_oracle=oracle, config=SimpleNamespace(chain=""))
+
+
+def _fake_strategy(chain: str = "arbitrum") -> SimpleNamespace:
+    return SimpleNamespace(chain=chain)
+
+
+def test_native_topoff_adds_eth_when_missing_on_arbitrum():
+    fake_oracle = _FakeOracle(price="3500.00")
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    teardown_oracle = {
+        "USDC": {"price_usd": "1.0", "oracle_source": "portfolio_valuer"},
+        "WETH": {"price_usd": "3500.00", "oracle_source": "portfolio_valuer"},
+    }
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
+    assert out is teardown_oracle  # mutated in place
+    assert "ETH" in out
+    assert out["ETH"]["price_usd"] == "3500.00"
+    assert out["ETH"]["oracle_source"] == "gateway"
+    assert out["ETH"]["confidence"] == "HIGH"
+    assert fake_oracle.calls == [("ETH", "USD", "arbitrum")]
+
+
+def test_native_topoff_skips_when_native_already_present():
+    fake_oracle = _FakeOracle()
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    teardown_oracle = {"ETH": {"price_usd": "3499.99", "oracle_source": "portfolio_valuer"}}
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
+    assert out["ETH"]["price_usd"] == "3499.99"
+    assert fake_oracle.calls == []  # no top-off call
+
+
+def test_native_topoff_returns_input_on_oracle_failure():
+    fake_oracle = _FakeOracle(price=None)  # raises on call
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    teardown_oracle = {"USDC": {"price_usd": "1.0"}}
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
+    assert out == {"USDC": {"price_usd": "1.0"}}
+    assert "ETH" not in out
+
+
+def test_native_topoff_polygon_uses_matic():
+    fake_oracle = _FakeOracle(price="0.85")
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("polygon")
+    teardown_oracle = {"USDC": {"price_usd": "1.0"}}
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
+    assert "MATIC" in out
+    assert out["MATIC"]["price_usd"] == "0.85"
+    assert fake_oracle.calls == [("MATIC", "USD", "polygon")]
+
+
+def test_native_topoff_noop_when_oracle_dict_empty():
+    fake_oracle = _FakeOracle()
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, None))
+    assert out is None
+    out_empty = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, {}))
+    assert out_empty == {}
+    assert fake_oracle.calls == []
+
+
+def test_native_topoff_noop_when_runner_has_no_price_oracle():
+    runner = _fake_runner(None)
+    strategy = _fake_strategy("arbitrum")
+    teardown_oracle = {"USDC": {"price_usd": "1.0"}}
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
+    assert "ETH" not in out
+
+
+def test_native_topoff_noop_when_chain_unknown():
+    fake_oracle = _FakeOracle()
+    runner = _fake_runner(fake_oracle)
+    strategy = SimpleNamespace(chain="")
+    runner.config = SimpleNamespace(chain="")
+    teardown_oracle = {"USDC": {"price_usd": "1.0"}}
+    out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
+    assert "ETH" not in out
+    assert fake_oracle.calls == []

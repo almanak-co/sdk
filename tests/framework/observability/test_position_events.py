@@ -141,6 +141,64 @@ class TestBuildPositionEvent:
         assert event.tx_hash == "0xdeadbeef"
         assert event.gas_usd == "2.50"
 
+    def test_gas_usd_computed_from_total_gas_cost_wei_when_legacy_field_absent(self):
+        """Regression: position_events.gas_usd was empty whenever the
+        orchestrator populated total_gas_cost_wei (the modern path) and
+        the legacy ``gas_cost_usd`` attribute was None. Same VIB-3658
+        class as transaction_ledger; the writer here must mirror the
+        ledger's ``compute_gas_usd`` precedence.
+        """
+        intent = MockIntent("LP_OPEN")
+        result = MockResult(position_id="12345", tx_hash="0xfeed")
+        # Strip the legacy field, set the modern one (200,000 gas × 0.5 gwei).
+        result.gas_cost_usd = None
+        result.total_gas_cost_wei = 200_000 * 500_000_000  # 0.5 gwei in wei
+        oracle = {"ETH": "3000.00"}
+        event = build_position_event_from_intent(
+            deployment_id="strat:abc",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+            price_oracle=oracle,
+        )
+        assert event is not None
+        # 200000 × 5e8 wei / 1e18 × $3000 = 0.0001 ETH × $3000 = $0.30
+        assert event.gas_usd == "0.300000"
+
+    def test_gas_usd_legacy_field_takes_precedence(self):
+        """When upstream already computed gas_cost_usd (e.g. prediction-handler
+        path), don't recompute — preserve backward compatibility."""
+        intent = MockIntent("LP_OPEN")
+        result = MockResult(position_id="12345", tx_hash="0xfeed")
+        result.total_gas_cost_wei = 200_000 * 500_000_000
+        # gas_cost_usd is "2.50" (default on MockResult) — that wins.
+        event = build_position_event_from_intent(
+            deployment_id="strat:abc",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+            price_oracle={"ETH": "3000.00"},
+        )
+        assert event is not None
+        assert event.gas_usd == "2.50"
+
+    def test_gas_usd_empty_when_no_oracle_and_no_legacy_field(self):
+        """Honest absence: no oracle, no legacy gas_cost_usd, no synthesis.
+        Ledger writer behaves identically; lane-symmetry preserved."""
+        intent = MockIntent("LP_OPEN")
+        result = MockResult(position_id="12345", tx_hash="0xfeed")
+        result.gas_cost_usd = None
+        result.total_gas_cost_wei = 200_000 * 500_000_000
+        event = build_position_event_from_intent(
+            deployment_id="strat:abc",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+            price_oracle=None,
+        )
+        assert event is not None
+        assert event.gas_usd == ""
+
 
 class TestIntentToEventMapping:
     """Verify the intent->event mapping covers LP and perps only."""

@@ -32,6 +32,74 @@ def format_usd(value: Decimal) -> str:
         return f"-${abs(value):,.2f}"
 
 
+def format_token_amount(amount: str | Decimal | int | float, symbol: str = "", chain: str = "") -> str:
+    """Render a token amount for the trade-tape headline (VIB-3890).
+
+    Pre-VIB-3890 the trade tape rendered ``891556839636852 WETH`` (raw 18-dec
+    integer) and ``0.000868768309352546 WETH`` (full 18-dec precision)
+    side-by-side — both unreadable to a Quant scanning a tape.
+
+    The formatter:
+    1. Returns the input unchanged when not numerically parseable (``""``,
+       protocol-specific aliases like "max", etc.).
+    2. Detects raw on-chain integer amounts (heuristic: integer ≥ 10⁶ and
+       the token resolver knows decimals) and scales them down before
+       formatting.
+    3. Renders ≥ 1 with two decimals + thousands separator (``2,294.33``);
+       < 1 with up to four significant figures (``0.0008688``); scientific
+       for tiny values (≤ 1e-9 → ``8.69e-13``).
+
+    Raw amounts MUST stay verbatim in the receipt-parsed expander block —
+    that's the audit trail the Quant audience needs. The formatter is for
+    headlines only.
+    """
+    if amount in (None, "", "—"):
+        return "—"
+    try:
+        d = Decimal(str(amount))
+    except (ArithmeticError, ValueError, TypeError):
+        return str(amount)
+    if not d.is_finite():
+        return str(amount)
+
+    # Heuristic raw-units detection: integers ≥ 10⁶ that match a known
+    # token's decimals get scaled down. False positives are bounded —
+    # human amounts ≥ 10⁶ are rare for the assets that use 18 decimals
+    # (a $1M position in WETH is 4_000+ ETH; the raw-int representation
+    # would be 4e21, not 4_000). For 6-dec USDC, 1M raw = 1 USDC, also
+    # within human range. The resolver's ``decimals`` value is the
+    # truth source.
+    if symbol and chain and d.is_finite() and d == d.to_integral_value() and abs(d) >= Decimal("1000000"):
+        decimals = _try_token_decimals(symbol, chain)
+        if decimals is not None and decimals > 0:
+            scale = Decimal(10) ** decimals
+            d = d / scale
+
+    abs_d = abs(d)
+    if abs_d == 0:
+        return "0"
+    if abs_d >= Decimal("1"):
+        return f"{d:,.2f}"
+    if abs_d >= Decimal("0.0001"):
+        # 4 significant figures for sub-1 values — keep precision for
+        # WETH-scale amounts (e.g. 0.000868 stays ``0.0008688``).
+        return f"{d:.4g}"
+    # Scientific for sub-0.0001 to avoid ``0.0000000000869``.
+    return f"{d:.4g}"
+
+
+def _try_token_decimals(symbol: str, chain: str) -> int | None:
+    """Best-effort decimals lookup. Returns None on any failure."""
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        info = resolver.resolve(symbol, chain=chain)
+        return info.decimals if info is not None else None
+    except Exception:
+        return None
+
+
 def format_pnl(value: Decimal) -> str:
     """Format PnL with sign indicator."""
     if value >= 0:

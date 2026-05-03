@@ -204,6 +204,14 @@ def _value_via_portfolio_valuer(
         if state_manager is not None and deployment_id:
             runner._portfolio_valuer.set_accounting_context(state_manager, deployment_id)
 
+        # VIB-3894 — share the runner's recent OPEN-event cache with the
+        # valuer so the same-iteration snapshot enriches cost_basis_usd
+        # without a get_position_events_sync call (the GatewayStateManager
+        # path does not expose that helper, leaving deployed_capital_usd=0
+        # right after LP_OPEN). The cache is updated when
+        # save_position_event succeeds and removed on CLOSE events.
+        runner._portfolio_valuer._recent_open_events = getattr(runner, "_recent_open_events", {})
+
         market = strategy.create_market_snapshot()
         snapshot = runner._portfolio_valuer.value(
             strategy=strategy,
@@ -589,7 +597,9 @@ async def capture_portfolio_snapshot(
             )
 
         # Build metrics for atomic co-write (VIB-2765).
-        metrics = await _build_metrics_for_snapshot(runner, strategy.strategy_id, snapshot)
+        # VIB-3882: pass the strategy so its declared ``allocation_usd``
+        # anchors the portfolio baseline.
+        metrics = await _build_metrics_for_snapshot(runner, strategy.strategy_id, snapshot, strategy=strategy)
         snapshot_id = await _persist_snapshot_and_metrics(runner, snapshot, metrics)
 
         if snapshot_id > 0:
@@ -636,11 +646,18 @@ async def _build_metrics_for_snapshot(
     runner: Any,
     strategy_id: str,
     snapshot: PortfolioSnapshot,
+    strategy: Any | None = None,
 ) -> PortfolioMetrics | None:
     """Build a PortfolioMetrics object for the given snapshot.
 
     On first run, establishes ``initial_value_usd`` as baseline.
     On subsequent runs, preserves the baseline and updates current value.
+
+    VIB-3882: when ``strategy`` exposes a non-None ``allocation_usd``
+    property, the baseline is anchored to that explicit allocation
+    rather than the first-observed wallet total. This isolates the
+    strategy's PnL from any unrelated wallet balance present at
+    bootstrap (a shared test wallet is the canonical case).
 
     Returns:
         A PortfolioMetrics ready to persist, or None if metrics shouldn't
@@ -678,12 +695,43 @@ async def _build_metrics_for_snapshot(
         existing = await runner.state_manager.get_portfolio_metrics(strategy_id)
 
         if existing is None:
-            # VIB-3614: total_value_usd is now strategy-scoped (positive positions only).
-            # On the very first snapshot the strategy may have no open positions yet
-            # (capital still in wallet). Fall back to available_cash_usd so the
-            # baseline reflects the strategy's starting capital rather than zero —
-            # a zero baseline makes every future PnL computation return zero.
-            initial = snapshot.total_value_usd or snapshot.available_cash_usd
+            # VIB-3882 (H1): the strategy can declare its allocation
+            # explicitly via ``StrategyBase.allocation_usd``; if it does,
+            # that value is the baseline. This is the only path that
+            # cleanly isolates PnL from a shared-wallet test setup —
+            # without it, a wallet that happens to hold $19 at bootstrap
+            # produces a $19 baseline even when the strategy declared $4
+            # of capital. (See the May 2 reproducer in §0 of
+            # AccountingPost1977.md: phantom −77% PnL.)
+            #
+            # Fallback (legacy strategies that haven't migrated):
+            # VIB-3614: total_value_usd is strategy-scoped (positive
+            # positions only). On the very first snapshot the strategy
+            # may have no open positions yet (capital still in wallet).
+            # Fall back to available_cash_usd so the baseline reflects
+            # the strategy's starting capital rather than zero — a zero
+            # baseline makes every future PnL computation return zero.
+            allocation = getattr(strategy, "allocation_usd", None) if strategy is not None else None
+            # Tolerant numeric guard: tests sometimes pass MagicMock strategies
+            # where ``MagicMock.allocation_usd`` is itself a Mock (comparing
+            # to 0 raises TypeError). Only honour the allocation when it
+            # parses to a positive finite Decimal.
+            initial = None
+            if allocation is not None:
+                try:
+                    allocation_dec = Decimal(str(allocation))
+                except (ArithmeticError, ValueError, TypeError):
+                    allocation_dec = None
+                if allocation_dec is not None and allocation_dec.is_finite() and allocation_dec > 0:
+                    initial = allocation_dec
+                    logger.info(
+                        "Portfolio baseline anchored to strategy.allocation_usd=$%.2f for %s "
+                        "(VIB-3882: explicit allocation contract)",
+                        initial,
+                        strategy_id,
+                    )
+            if initial is None:
+                initial = snapshot.total_value_usd or snapshot.available_cash_usd
             if initial == 0:
                 logger.warning(
                     "Portfolio baseline is zero for %s — both total_value_usd and available_cash_usd "
@@ -906,9 +954,13 @@ async def reconcile_post_execution_balances(
             return recon
 
         # Legacy post-only fallback (no pre-snapshot available).
+        # VIB-3888: stamp post_timestamp so the ledger writer's
+        # ``post_state.captured_at`` field stays symmetric with
+        # ``pre_state.captured_at`` even on this fallback path.
         recon = {
             "tokens_checked": list(post_balances.keys()),
             "post_balances": {k: str(v) for k, v in post_balances.items()},
+            "post_timestamp": post_timestamp.isoformat(),
             "warnings": [],
             "incident": False,
             "enforced": False,

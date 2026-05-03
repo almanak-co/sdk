@@ -7,6 +7,8 @@ Tests cover:
 - GetStrategyConfig RPC
 - GetStrategyState RPC
 - ExecuteAction RPC (pause/resume)
+- GetQuantHeader RPC (Senior-Quant header aggregation)
+- GetTradeTape RPC (joined ledger × accounting × position events)
 - Validation error handling
 """
 
@@ -1856,3 +1858,106 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         # Filesystem path does not carry wallet_address — proto default is empty string
         assert response.summary.wallet_address == ""
         assert response.summary.strategy_id == "test_strategy"
+
+
+class TestGetQuantHeader:
+    """Smoke tests for GetQuantHeader RPC.
+
+    The aggregation logic (cost stack, reconciliation, audit-trail,
+    Accountant-posture) lives in
+    ``almanak.framework.dashboard.quant_aggregations`` and is exhaustively
+    covered by ``tests/unit/dashboard/test_quant_aggregations.py``. The
+    tests here exercise the gateway-side surface only: request validation,
+    proto roundtripping, and the no-data degraded shape.
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+        """An invalid strategy_id sets INVALID_ARGUMENT and returns an empty proto."""
+        dashboard_service._initialized = True
+        request = gateway_pb2.GetQuantHeaderRequest(strategy_id="")
+        response = await dashboard_service.GetQuantHeader(request, mock_context)
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert isinstance(response, gateway_pb2.QuantHeaderInfo)
+
+    @pytest.mark.asyncio
+    async def test_no_state_manager_returns_degraded_response(self, dashboard_service, mock_context):
+        """No state_manager wired → proto returned, no crash, UNAVAILABLE-shaped."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = None
+        request = gateway_pb2.GetQuantHeaderRequest(strategy_id="test_strategy")
+        response = await dashboard_service.GetQuantHeader(request, mock_context)
+        assert isinstance(response, gateway_pb2.QuantHeaderInfo)
+        # Empty inputs collapse to UNAVAILABLE confidence rather than raising.
+        assert response.value_confidence in ("", "UNAVAILABLE")
+
+    @pytest.mark.asyncio
+    async def test_empty_backend_returns_zero_decimals_as_strings(self, dashboard_service, mock_context):
+        """A state_manager that returns no rows still produces a valid response."""
+        dashboard_service._initialized = True
+        sm = MagicMock()
+        sm.get_portfolio_metrics = AsyncMock(return_value=None)
+        sm.get_snapshots_since = AsyncMock(return_value=[])
+        sm.get_ledger_entries = AsyncMock(return_value=[])
+        sm.get_accounting_events_sync = MagicMock(return_value=[])
+        dashboard_service._state_manager = sm
+
+        request = gateway_pb2.GetQuantHeaderRequest(strategy_id="test_strategy")
+        response = await dashboard_service.GetQuantHeader(request, mock_context)
+        # Decimal fields are exposed on the wire as strings — empty/0 input
+        # must round-trip as parseable Decimal-looking strings, not raise.
+        assert isinstance(response, gateway_pb2.QuantHeaderInfo)
+        for field in ("deployed_usd", "nav_usd", "lifetime_pnl_usd"):
+            value = getattr(response, field)
+            assert value in ("", "0", "0.00") or Decimal(value) == Decimal("0")
+
+
+class TestGetTradeTape:
+    """Smoke tests for GetTradeTape RPC.
+
+    Joins ``transaction_ledger × accounting_events × position_events`` on
+    ``ledger_entry_id`` and ``cycle_id``. Aggregation/joining logic is
+    covered in ``tests/unit/dashboard/test_data_client.py`` and the
+    proto-roundtrip suite in ``tests/gateway/test_proto_compatibility.py``.
+    The tests here cover the servicer surface: validation + empty-input
+    safety + cursor pass-through.
+    """
+
+    @pytest.mark.asyncio
+    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+        """An invalid strategy_id sets INVALID_ARGUMENT and returns an empty proto."""
+        dashboard_service._initialized = True
+        request = gateway_pb2.GetTradeTapeRequest(strategy_id="")
+        response = await dashboard_service.GetTradeTape(request, mock_context)
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert isinstance(response, gateway_pb2.GetTradeTapeResponse)
+        assert len(response.rows) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_state_manager_returns_empty_tape(self, dashboard_service, mock_context):
+        """No state_manager → empty rows, has_more False, no crash."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = None
+        request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=10)
+        response = await dashboard_service.GetTradeTape(request, mock_context)
+        assert isinstance(response, gateway_pb2.GetTradeTapeResponse)
+        assert len(response.rows) == 0
+        assert response.has_more is False
+
+    @pytest.mark.asyncio
+    async def test_empty_backend_returns_empty_tape(self, dashboard_service, mock_context):
+        """All backend calls returning empty lists collapse to an empty tape."""
+        dashboard_service._initialized = True
+        sm = MagicMock()
+        sm.get_ledger_entries = AsyncMock(return_value=[])
+        sm.get_accounting_events_sync = MagicMock(return_value=[])
+        sm.get_position_events_sync = MagicMock(return_value=[])
+        dashboard_service._state_manager = sm
+
+        request = gateway_pb2.GetTradeTapeRequest(strategy_id="test_strategy", limit=50)
+        response = await dashboard_service.GetTradeTape(request, mock_context)
+        assert isinstance(response, gateway_pb2.GetTradeTapeResponse)
+        assert len(response.rows) == 0
+        assert response.has_more is False
+        # before_timestamp=0 means "no cursor" — the call still went through.
+        sm.get_ledger_entries.assert_awaited_once()

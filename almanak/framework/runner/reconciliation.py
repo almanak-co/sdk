@@ -87,6 +87,13 @@ class ReconciliationReport:
     warnings: list[str]
     incident: bool
     enforced: bool
+    # VIB-3888: post-balance capture timestamp. Surfaces into the ledger
+    # row's ``post_state.captured_at`` field so reconciliation rows are
+    # symmetric with ``pre_state.captured_at`` (which the runner already
+    # populates). Pre-VIB-3888 ``post_state.captured_at`` was always
+    # empty — Accountant Test G6 per-intent reconciliation needed it.
+    post_timestamp: datetime | None = None
+    pre_timestamp: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for storage (Decimal → str for JSON compatibility)."""
@@ -110,6 +117,8 @@ class ReconciliationReport:
             "warnings": list(self.warnings),
             "incident": self.incident,
             "enforced": self.enforced,
+            "pre_timestamp": self.pre_timestamp.isoformat() if self.pre_timestamp else "",
+            "post_timestamp": self.post_timestamp.isoformat() if self.post_timestamp else "",
         }
 
 
@@ -306,6 +315,11 @@ def build_reconciliation_report(
         warnings=warnings,
         incident=bool(mismatches),
         enforced=enforced,
+        # VIB-3888: propagate snapshot timestamps so the ledger writer
+        # can stamp ``post_state.captured_at`` symmetrically with
+        # ``pre_state.captured_at``.
+        pre_timestamp=getattr(pre, "timestamp", None),
+        post_timestamp=getattr(post, "timestamp", None),
     )
 
 

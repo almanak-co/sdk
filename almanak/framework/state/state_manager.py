@@ -1734,6 +1734,7 @@ class StateManager:
         since: "datetime | None" = None,
         intent_type: str | None = None,
         limit: int = 100,
+        before: "datetime | None" = None,
     ) -> list:
         """Query transaction ledger entries.
 
@@ -1742,6 +1743,11 @@ class StateManager:
             since: Only entries after this timestamp.
             intent_type: Filter by intent type.
             limit: Maximum entries to return.
+            before: Only entries strictly older than this timestamp
+                (paginated trade-tape cursor). When set, the SQL filter
+                runs at the backend rather than post-fetch in Python so
+                callers can never receive a "newest N rows that don't
+                match the cursor" empty page.
 
         Returns:
             List of LedgerEntry objects, newest first.
@@ -1757,7 +1763,39 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_ledger_entries(strategy_id, since, intent_type, limit)  # type: ignore[attr-defined]
+            # Backends may not yet accept the ``before`` kwarg. Detect support
+            # via signature inspection so a real TypeError from inside the
+            # backend (e.g., a bug raising TypeError post-execution) is NOT
+            # swallowed into a silently-uncursored read — that would produce
+            # duplicate/looping pages on the trade tape.
+            supports_before = True
+            if before is not None:
+                try:
+                    import inspect
+
+                    supports_before = (
+                        "before" in inspect.signature(self._warm.get_ledger_entries).parameters  # type: ignore[attr-defined]
+                    )
+                except (TypeError, ValueError):
+                    supports_before = False
+                # Fail closed when the caller asked for a strict-cursor
+                # read but the backend can't honour it. Falling through
+                # to an uncursored fetch silently breaks the
+                # "strictly older than ``before``" contract and produces
+                # duplicate / looping pages on the trade tape.
+                if not supports_before:
+                    raise RuntimeError(
+                        "Warm backend get_ledger_entries() does not support "
+                        "the 'before' pagination cursor; refusing to fall "
+                        "back to an uncursored read which would produce "
+                        "duplicate or looping trade-tape pages."
+                    )
+            if before is not None:
+                result = await self._warm.get_ledger_entries(  # type: ignore[attr-defined]
+                    strategy_id, since, intent_type, limit, before=before
+                )
+            else:
+                result = await self._warm.get_ledger_entries(strategy_id, since, intent_type, limit)  # type: ignore[attr-defined]
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, True)
             return result

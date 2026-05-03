@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.accounting.category_handlers._price_helpers import parse_price_inputs
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.lending_accounting import (
     _amount_to_usd,
@@ -52,17 +53,6 @@ def _parse_post_state(post_state_json: str) -> dict[str, Any] | None:
         return None
     try:
         d = json.loads(post_state_json)
-        return d if isinstance(d, dict) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-def _parse_price_oracle(price_inputs_json: str) -> dict | None:
-    """Parse price_inputs_json into a {symbol: price_str} dict."""
-    if not price_inputs_json:
-        return None
-    try:
-        d = json.loads(price_inputs_json)
         return d if isinstance(d, dict) else None
     except (json.JSONDecodeError, TypeError):
         return None
@@ -114,9 +104,12 @@ def handle_lending(
     except (ValueError, AttributeError):
         timestamp = datetime.now(UTC)
 
-    # Deserialize extracted_data and price_oracle from JSON fields.
+    # Deserialize extracted_data and price_oracle from JSON fields. The
+    # tolerant ``parse_price_inputs`` (VIB-3885) returns a flat
+    # ``{SYMBOL: Decimal}`` dict regardless of whether the ledger wrote the
+    # canonical nested shape or the legacy flat shape.
     extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
-    price_oracle = _parse_price_oracle(ledger_row.get("price_inputs_json") or "")
+    price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
     post_state = _parse_post_state(ledger_row.get("post_state_json") or "")
 
     # Resolve asset: extracted_data first, then ledger row token_in as fallback.

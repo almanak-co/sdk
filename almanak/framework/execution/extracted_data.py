@@ -178,6 +178,18 @@ class LPOpenData:
         liquidity: Amount of liquidity minted
         amount0: Actual amount of token0 deposited
         amount1: Actual amount of token1 deposited
+        current_tick: Pool's current tick at the moment of mint (VIB-3887).
+            Used to derive ``in_range`` on ``position_events``. Sourced
+            from the gateway-side receipt parser (which has authority to
+            call ``slot0().tick`` after the mint receipt). Framework code
+            consumes this field — it never populates it via direct RPC.
+            None when the gateway didn't (yet) carry the field.
+        pool_address: V3 pool address for the position (VIB-3893). Populated
+            by the receipt parser from the Pool Mint event. Used by the
+            framework to fall back to a ``slot0()`` lookup when the receipt
+            had no Swap event (pure NPM.mint LP_OPEN — the canonical
+            Almanak swap-then-mint-across-cycles path produces this).
+            Empty string when the parser couldn't identify the pool.
 
     Example:
         if result.position_id:  # Core field
@@ -193,6 +205,8 @@ class LPOpenData:
     liquidity: int | None = None
     amount0: int | None = None
     amount1: int | None = None
+    current_tick: int | None = None  # VIB-3887
+    pool_address: str = ""  # VIB-3893 — for framework slot0 fallback
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -203,6 +217,8 @@ class LPOpenData:
             "liquidity": str(self.liquidity) if self.liquidity else None,
             "amount0": str(self.amount0) if self.amount0 else None,
             "amount1": str(self.amount1) if self.amount1 else None,
+            "current_tick": self.current_tick,
+            "pool_address": self.pool_address,
         }
 
 

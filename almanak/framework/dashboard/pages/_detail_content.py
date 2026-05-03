@@ -146,10 +146,23 @@ def render_bridge_and_lifecycle(strategy: Strategy) -> None:
 
     st.divider()
 
-    # Timeline Events - wrapped for the same reason. ``limit=10`` matches the
-    # prior inline call.
-    _safe_render(
-        lambda s: render_timeline_events(s, limit=10),
-        strategy,
-        "timeline events",
-    )
+    # Trade tape (Senior-Quant primary) + Activity log (heartbeat-style
+    # operational events). The trade tape reads as a broker statement
+    # (one row per intent, joined with accounting + position events);
+    # the activity log keeps the existing event stream for telemetry
+    # (STRATEGY_STUCK, EXECUTION_FAILED, BRIDGE_*, etc).
+    from almanak.framework.dashboard.pages.trade_tape import render_trade_tape
+
+    tape_tab, activity_tab = st.tabs(["📒 Trade tape", "🔔 Activity log"])
+    with tape_tab:
+        _safe_render(
+            lambda s: render_trade_tape(s.id, limit=50),
+            strategy,
+            "trade tape",
+        )
+    with activity_tab:
+        _safe_render(
+            lambda s: render_timeline_events(s, limit=10),
+            strategy,
+            "timeline events",
+        )

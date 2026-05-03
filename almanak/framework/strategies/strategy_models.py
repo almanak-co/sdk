@@ -117,6 +117,13 @@ class PriceData:
         high_24h: 24-hour high
         low_24h: 24-hour low
         timestamp: When the price was fetched
+        source: Name of the price provider that produced this datum
+            (e.g. "coingecko", "chainlink", "binance", "thegraph"). VIB-3889:
+            propagated through ``MarketSnapshot.get_price_oracle_dict`` into
+            ``transaction_ledger.price_inputs_json`` so the dashboard
+            "Oracle quotes used" expander renders the actual source rather
+            than "unknown". Default ``""`` means "source not tracked";
+            the writer falls back to "unknown" downstream.
     """
 
     price: Decimal
@@ -125,6 +132,7 @@ class PriceData:
     high_24h: Decimal = Decimal("0")
     low_24h: Decimal = Decimal("0")
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    source: str = ""
 
 
 # Type for price oracle function. Runtime supports both legacy

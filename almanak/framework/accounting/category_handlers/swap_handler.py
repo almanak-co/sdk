@@ -15,12 +15,12 @@ swap reaches this handler to prevent double-counting.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.accounting.category_handlers._price_helpers import parse_price_inputs
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.models import (
     AccountingConfidence,
@@ -110,8 +110,11 @@ def handle_swap(
     if gas_usd_raw is not None and gas_usd_raw != "":
         gas_usd = _parse_decimal(gas_usd_raw)
 
-    # ── USD pricing from price_inputs_json ──────────────────────────────────
-    price_oracle = _parse_price_oracle(ledger_row.get("price_inputs_json") or "")
+    # ── USD pricing from price_inputs_json (VIB-3885) ───────────────────────
+    # ``parse_price_inputs`` accepts both the canonical nested shape
+    # ({symbol: {price_usd, oracle_source, ...}}) and the legacy flat
+    # shape ({symbol: price}); see ``_price_helpers.py`` for context.
+    price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
     amount_in_usd = _token_usd(token_in, amount_in, price_oracle)
     amount_out_usd = _token_usd(token_out, amount_out, price_oracle)
 
@@ -222,29 +225,20 @@ def _parse_decimal(value: Any) -> Decimal | None:
     return parsed if parsed.is_finite() else None
 
 
-def _parse_price_oracle(price_inputs_json: str) -> dict[str, Any]:
-    """Parse price_inputs_json → {symbol: price_str} dict.  Returns {} on failure."""
-    if not price_inputs_json:
-        return {}
-    try:
-        d = json.loads(price_inputs_json)
-        return d if isinstance(d, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
-def _token_usd(symbol: str, amount: Decimal | None, oracle: dict[str, Any]) -> Decimal | None:
+def _token_usd(symbol: str, amount: Decimal | None, oracle: dict[str, Decimal]) -> Decimal | None:
     """Compute USD value for a token amount using the price oracle.
 
-    Returns None when the price is missing or the amount is None.
-    Looks up symbol case-insensitively (tries upper then lower).
+    Returns None when the price is missing or the amount is None. The
+    ``oracle`` dict is the flat ``{SYMBOL_UPPER: Decimal}`` mapping
+    produced by :func:`parse_price_inputs` (VIB-3885) — symbol lookup is
+    therefore upper-case-only.
     """
     if not symbol or amount is None:
         return None
-    price_raw = oracle.get(symbol.upper()) or oracle.get(symbol.lower())
-    if price_raw is None:
+    price = oracle.get(symbol.upper())
+    if price is None:
         return None
     try:
-        return Decimal(str(price_raw)) * amount
-    except Exception:  # noqa: BLE001
+        return price * amount
+    except (ArithmeticError, TypeError):
         return None

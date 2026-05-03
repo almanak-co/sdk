@@ -215,6 +215,7 @@ def _configure_logging_and_validate(
     log_file: str | None,
     once: bool,
     teardown_after: bool,
+    max_iterations: int | None = None,
 ) -> None:
     """Configure structured logging and validate setup-stage flag combinations.
 
@@ -267,7 +268,12 @@ def _configure_logging_and_validate(
         logging.getLogger("web3").setLevel(logging.DEBUG)
         logging.getLogger("urllib3").setLevel(logging.DEBUG)
 
-    # Validate --teardown-after requires --once
+    # Validate --teardown-after requires --once.
+    # NOTE: ``--teardown-after`` only fires from ``_run_once`` today. The
+    # continuous loop (``_run_continuous`` for ``--max-iterations`` /
+    # interval-based runs) does not yet honour the flag; relaxing this
+    # validation without that wiring would silently drop the teardown
+    # request. Tracked for the post-ship "Accounting Foundation" epic.
     if teardown_after and not once:
         click.echo("Error: --teardown-after requires --once.", err=True)
         sys.exit(1)

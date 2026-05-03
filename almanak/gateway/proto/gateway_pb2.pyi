@@ -4696,6 +4696,398 @@ class LedgerEntryInfo(_message.Message):
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
 
 @_typing.final
+class GetQuantHeaderRequest(_message.Message):
+    """Senior-Quant header messages -----------------------------------------------"""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetQuantHeaderRequest: _TypeAlias = GetQuantHeaderRequest  # noqa: Y015
+
+@_typing.final
+class QuantHeaderInfo(_message.Message):
+    """Aggregated header card data: money trail, cost stack, position summary,
+    reconciliation (G6), audit-trail completeness, and Accountant posture.
+    All decimals serialized as strings to preserve precision.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYED_USD_FIELD_NUMBER: _builtins.int
+    NAV_USD_FIELD_NUMBER: _builtins.int
+    LIFETIME_PNL_USD_FIELD_NUMBER: _builtins.int
+    LIFETIME_PNL_PCT_FIELD_NUMBER: _builtins.int
+    NET_APR_PCT_FIELD_NUMBER: _builtins.int
+    MAX_DRAWDOWN_PCT_FIELD_NUMBER: _builtins.int
+    CURRENT_DRAWDOWN_PCT_FIELD_NUMBER: _builtins.int
+    VALUE_CONFIDENCE_FIELD_NUMBER: _builtins.int
+    AGE_DAYS_FIELD_NUMBER: _builtins.int
+    DEPLOYED_CAPITAL_USD_FIELD_NUMBER: _builtins.int
+    AVAILABLE_CASH_USD_FIELD_NUMBER: _builtins.int
+    OPEN_POSITION_COUNT_FIELD_NUMBER: _builtins.int
+    PRIMARY_RISK_LABEL_FIELD_NUMBER: _builtins.int
+    PRIMARY_RISK_VALUE_FIELD_NUMBER: _builtins.int
+    PRIMARY_RISK_COLOR_FIELD_NUMBER: _builtins.int
+    PRIMARY_RISK_KIND_FIELD_NUMBER: _builtins.int
+    COST_GAS_USD_FIELD_NUMBER: _builtins.int
+    COST_PROTOCOL_FEES_USD_FIELD_NUMBER: _builtins.int
+    COST_SLIPPAGE_USD_FIELD_NUMBER: _builtins.int
+    FEES_EARNED_USD_FIELD_NUMBER: _builtins.int
+    INTEREST_PAID_USD_FIELD_NUMBER: _builtins.int
+    INTEREST_EARNED_USD_FIELD_NUMBER: _builtins.int
+    FUNDING_PAID_USD_FIELD_NUMBER: _builtins.int
+    FUNDING_EARNED_USD_FIELD_NUMBER: _builtins.int
+    REALIZED_PNL_USD_FIELD_NUMBER: _builtins.int
+    IL_USD_FIELD_NUMBER: _builtins.int
+    G6_STATUS_FIELD_NUMBER: _builtins.int
+    G6_WALLET_PNL_USD_FIELD_NUMBER: _builtins.int
+    G6_COMPONENT_PNL_USD_FIELD_NUMBER: _builtins.int
+    G6_GAP_USD_FIELD_NUMBER: _builtins.int
+    G6_EPSILON_USD_FIELD_NUMBER: _builtins.int
+    G6_SUM_SWAP_FIELD_NUMBER: _builtins.int
+    G6_SUM_LP_FIELD_NUMBER: _builtins.int
+    G6_SUM_PERP_FIELD_NUMBER: _builtins.int
+    G6_SUM_FEES_FIELD_NUMBER: _builtins.int
+    G6_SUM_FUNDING_FIELD_NUMBER: _builtins.int
+    G6_SUM_INTEREST_FIELD_NUMBER: _builtins.int
+    G6_SUM_GAS_FIELD_NUMBER: _builtins.int
+    LEDGER_TOTAL_FIELD_NUMBER: _builtins.int
+    LEDGER_WITH_PRICE_INPUTS_FIELD_NUMBER: _builtins.int
+    LEDGER_WITH_PRE_POST_STATE_FIELD_NUMBER: _builtins.int
+    LEDGER_WITH_GAS_USD_FIELD_NUMBER: _builtins.int
+    EVENTS_TOTAL_FIELD_NUMBER: _builtins.int
+    EVENTS_WITH_VERSIONS_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CELLS_PASSED_FIELD_NUMBER: _builtins.int
+    CELLS_FAILED_FIELD_NUMBER: _builtins.int
+    CELLS_XFAIL_FIELD_NUMBER: _builtins.int
+    CELLS_TOTAL_FIELD_NUMBER: _builtins.int
+    FAILING_CELLS_FIELD_NUMBER: _builtins.int
+    XFAIL_CELLS_FIELD_NUMBER: _builtins.int
+    deployed_usd: _builtins.str
+    """Money trail (G1, G4, G5)
+    initial + deposits - withdrawals
+    """
+    nav_usd: _builtins.str
+    """current portfolio value"""
+    lifetime_pnl_usd: _builtins.str
+    """nav - deployed"""
+    lifetime_pnl_pct: _builtins.str
+    net_apr_pct: _builtins.str
+    max_drawdown_pct: _builtins.str
+    current_drawdown_pct: _builtins.str
+    value_confidence: _builtins.str
+    """HIGH | ESTIMATED | STALE | UNAVAILABLE"""
+    age_days: _builtins.int
+    deployed_capital_usd: _builtins.str
+    """Position + risk
+    open positions
+    """
+    available_cash_usd: _builtins.str
+    open_position_count: _builtins.int
+    primary_risk_label: _builtins.str
+    """"HF 1.78" | "in-range YES" | "Lev 1.7×" """
+    primary_risk_value: _builtins.str
+    primary_risk_color: _builtins.str
+    """"green" | "yellow" | "red" | "neutral" """
+    primary_risk_kind: _builtins.str
+    """"lp" | "lending" | "perp" | "none" """
+    cost_gas_usd: _builtins.str
+    """Cost stack (life-to-date) (G2, G3, P3, P5)"""
+    cost_protocol_fees_usd: _builtins.str
+    cost_slippage_usd: _builtins.str
+    fees_earned_usd: _builtins.str
+    interest_paid_usd: _builtins.str
+    interest_earned_usd: _builtins.str
+    funding_paid_usd: _builtins.str
+    funding_earned_usd: _builtins.str
+    realized_pnl_usd: _builtins.str
+    il_usd: _builtins.str
+    """diagnostic only"""
+    g6_status: _builtins.str
+    """Reconciliation (G6)
+    "PASS" | "FAIL" | "NA"
+    """
+    g6_wallet_pnl_usd: _builtins.str
+    g6_component_pnl_usd: _builtins.str
+    g6_gap_usd: _builtins.str
+    g6_epsilon_usd: _builtins.str
+    g6_sum_swap: _builtins.str
+    g6_sum_lp: _builtins.str
+    g6_sum_perp: _builtins.str
+    g6_sum_fees: _builtins.str
+    g6_sum_funding: _builtins.str
+    g6_sum_interest: _builtins.str
+    g6_sum_gas: _builtins.str
+    ledger_total: _builtins.int
+    """Audit-trail completeness (G9, G12, G13)"""
+    ledger_with_price_inputs: _builtins.int
+    ledger_with_pre_post_state: _builtins.int
+    ledger_with_gas_usd: _builtins.int
+    events_total: _builtins.int
+    events_with_versions: _builtins.int
+    primitive: _builtins.str
+    """Accountant Test posture
+    "lp" | "lending" | "perp" | "swap" | "mixed"
+    """
+    cells_passed: _builtins.int
+    cells_failed: _builtins.int
+    cells_xfail: _builtins.int
+    cells_total: _builtins.int
+    @_builtins.property
+    def failing_cells(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def xfail_cells(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    def __init__(
+        self,
+        *,
+        deployed_usd: _builtins.str = ...,
+        nav_usd: _builtins.str = ...,
+        lifetime_pnl_usd: _builtins.str = ...,
+        lifetime_pnl_pct: _builtins.str = ...,
+        net_apr_pct: _builtins.str = ...,
+        max_drawdown_pct: _builtins.str = ...,
+        current_drawdown_pct: _builtins.str = ...,
+        value_confidence: _builtins.str = ...,
+        age_days: _builtins.int = ...,
+        deployed_capital_usd: _builtins.str = ...,
+        available_cash_usd: _builtins.str = ...,
+        open_position_count: _builtins.int = ...,
+        primary_risk_label: _builtins.str = ...,
+        primary_risk_value: _builtins.str = ...,
+        primary_risk_color: _builtins.str = ...,
+        primary_risk_kind: _builtins.str = ...,
+        cost_gas_usd: _builtins.str = ...,
+        cost_protocol_fees_usd: _builtins.str = ...,
+        cost_slippage_usd: _builtins.str = ...,
+        fees_earned_usd: _builtins.str = ...,
+        interest_paid_usd: _builtins.str = ...,
+        interest_earned_usd: _builtins.str = ...,
+        funding_paid_usd: _builtins.str = ...,
+        funding_earned_usd: _builtins.str = ...,
+        realized_pnl_usd: _builtins.str = ...,
+        il_usd: _builtins.str = ...,
+        g6_status: _builtins.str = ...,
+        g6_wallet_pnl_usd: _builtins.str = ...,
+        g6_component_pnl_usd: _builtins.str = ...,
+        g6_gap_usd: _builtins.str = ...,
+        g6_epsilon_usd: _builtins.str = ...,
+        g6_sum_swap: _builtins.str = ...,
+        g6_sum_lp: _builtins.str = ...,
+        g6_sum_perp: _builtins.str = ...,
+        g6_sum_fees: _builtins.str = ...,
+        g6_sum_funding: _builtins.str = ...,
+        g6_sum_interest: _builtins.str = ...,
+        g6_sum_gas: _builtins.str = ...,
+        ledger_total: _builtins.int = ...,
+        ledger_with_price_inputs: _builtins.int = ...,
+        ledger_with_pre_post_state: _builtins.int = ...,
+        ledger_with_gas_usd: _builtins.int = ...,
+        events_total: _builtins.int = ...,
+        events_with_versions: _builtins.int = ...,
+        primitive: _builtins.str = ...,
+        cells_passed: _builtins.int = ...,
+        cells_failed: _builtins.int = ...,
+        cells_xfail: _builtins.int = ...,
+        cells_total: _builtins.int = ...,
+        failing_cells: _abc.Iterable[_builtins.str] | None = ...,
+        xfail_cells: _abc.Iterable[_builtins.str] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "cells_failed", b"cells_failed", "cells_passed", b"cells_passed", "cells_total", b"cells_total", "cells_xfail", b"cells_xfail", "cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "events_total", b"events_total", "events_with_versions", b"events_with_versions", "failing_cells", b"failing_cells", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "g6_component_pnl_usd", b"g6_component_pnl_usd", "g6_epsilon_usd", b"g6_epsilon_usd", "g6_gap_usd", b"g6_gap_usd", "g6_status", b"g6_status", "g6_sum_fees", b"g6_sum_fees", "g6_sum_funding", b"g6_sum_funding", "g6_sum_gas", b"g6_sum_gas", "g6_sum_interest", b"g6_sum_interest", "g6_sum_lp", b"g6_sum_lp", "g6_sum_perp", b"g6_sum_perp", "g6_sum_swap", b"g6_sum_swap", "g6_wallet_pnl_usd", b"g6_wallet_pnl_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "ledger_total", b"ledger_total", "ledger_with_gas_usd", b"ledger_with_gas_usd", "ledger_with_pre_post_state", b"ledger_with_pre_post_state", "ledger_with_price_inputs", b"ledger_with_price_inputs", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "primitive", b"primitive", "realized_pnl_usd", b"realized_pnl_usd", "value_confidence", b"value_confidence", "xfail_cells", b"xfail_cells"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___QuantHeaderInfo: _TypeAlias = QuantHeaderInfo  # noqa: Y015
+
+@_typing.final
+class GetTradeTapeRequest(_message.Message):
+    """Trade tape messages --------------------------------------------------------"""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    BEFORE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    limit: _builtins.int
+    before_timestamp: _builtins.int
+    """pagination (unix; 0 = newest first)"""
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        limit: _builtins.int = ...,
+        before_timestamp: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_timestamp", b"before_timestamp", "limit", b"limit", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetTradeTapeRequest: _TypeAlias = GetTradeTapeRequest  # noqa: Y015
+
+@_typing.final
+class GetTradeTapeResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ROWS_FIELD_NUMBER: _builtins.int
+    HAS_MORE_FIELD_NUMBER: _builtins.int
+    has_more: _builtins.bool
+    @_builtins.property
+    def rows(self) -> _containers.RepeatedCompositeFieldContainer[Global___TradeTapeRow]: ...
+    def __init__(
+        self,
+        *,
+        rows: _abc.Iterable[Global___TradeTapeRow] | None = ...,
+        has_more: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["has_more", b"has_more", "rows", b"rows"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetTradeTapeResponse: _TypeAlias = GetTradeTapeResponse  # noqa: Y015
+
+@_typing.final
+class TradeTapeRow(_message.Message):
+    """One row per intent (cycle_id), joining transaction_ledger,
+    accounting_events, and position_events. JSON pass-throughs are decoded
+    client-side for the expander cards.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    TOKEN_IN_FIELD_NUMBER: _builtins.int
+    AMOUNT_IN_FIELD_NUMBER: _builtins.int
+    TOKEN_OUT_FIELD_NUMBER: _builtins.int
+    AMOUNT_OUT_FIELD_NUMBER: _builtins.int
+    EFFECTIVE_PRICE_FIELD_NUMBER: _builtins.int
+    SLIPPAGE_BPS_FIELD_NUMBER: _builtins.int
+    GAS_USED_FIELD_NUMBER: _builtins.int
+    GAS_USD_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    AMOUNT_IN_USD_FIELD_NUMBER: _builtins.int
+    AMOUNT_OUT_USD_FIELD_NUMBER: _builtins.int
+    EXTRACTED_DATA_JSON_FIELD_NUMBER: _builtins.int
+    PRICE_INPUTS_JSON_FIELD_NUMBER: _builtins.int
+    PRE_STATE_JSON_FIELD_NUMBER: _builtins.int
+    POST_STATE_JSON_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    POSITION_KEY_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_FIELD_NUMBER: _builtins.int
+    UNAVAILABLE_REASON_FIELD_NUMBER: _builtins.int
+    SCHEMA_VERSION_FIELD_NUMBER: _builtins.int
+    FORMULA_VERSION_FIELD_NUMBER: _builtins.int
+    MATCHING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
+    POSITION_EVENT_JSON_FIELD_NUMBER: _builtins.int
+    POSITION_ID_FIELD_NUMBER: _builtins.int
+    POSITION_EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    ROW_WALLET_DELTA_USD_FIELD_NUMBER: _builtins.int
+    ROW_COMPONENT_USD_FIELD_NUMBER: _builtins.int
+    ROW_RESIDUAL_USD_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """Core ledger fields"""
+    cycle_id: _builtins.str
+    timestamp: _builtins.int
+    intent_type: _builtins.str
+    token_in: _builtins.str
+    amount_in: _builtins.str
+    token_out: _builtins.str
+    amount_out: _builtins.str
+    effective_price: _builtins.str
+    slippage_bps: _builtins.float
+    gas_used: _builtins.int
+    gas_usd: _builtins.str
+    tx_hash: _builtins.str
+    chain: _builtins.str
+    protocol: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    amount_in_usd: _builtins.str
+    """Derived USD values"""
+    amount_out_usd: _builtins.str
+    extracted_data_json: _builtins.str
+    """JSON pass-throughs (decoded client-side; opaque on the wire)"""
+    price_inputs_json: _builtins.str
+    pre_state_json: _builtins.str
+    post_state_json: _builtins.str
+    accounting_payload_json: _builtins.str
+    accounting_event_type: _builtins.str
+    """Quick-access derived from accounting_events"""
+    position_key: _builtins.str
+    confidence: _builtins.str
+    unavailable_reason: _builtins.str
+    schema_version: _builtins.int
+    formula_version: _builtins.int
+    matching_policy_version: _builtins.int
+    position_event_json: _builtins.str
+    """Linked position event (LP/PERP only; opaque JSON for v1)"""
+    position_id: _builtins.str
+    position_event_type: _builtins.str
+    row_wallet_delta_usd: _builtins.str
+    """Per-row reconciliation (best-effort)"""
+    row_component_usd: _builtins.str
+    row_residual_usd: _builtins.str
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        intent_type: _builtins.str = ...,
+        token_in: _builtins.str = ...,
+        amount_in: _builtins.str = ...,
+        token_out: _builtins.str = ...,
+        amount_out: _builtins.str = ...,
+        effective_price: _builtins.str = ...,
+        slippage_bps: _builtins.float = ...,
+        gas_used: _builtins.int = ...,
+        gas_usd: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        amount_in_usd: _builtins.str = ...,
+        amount_out_usd: _builtins.str = ...,
+        extracted_data_json: _builtins.str = ...,
+        price_inputs_json: _builtins.str = ...,
+        pre_state_json: _builtins.str = ...,
+        post_state_json: _builtins.str = ...,
+        accounting_payload_json: _builtins.str = ...,
+        accounting_event_type: _builtins.str = ...,
+        position_key: _builtins.str = ...,
+        confidence: _builtins.str = ...,
+        unavailable_reason: _builtins.str = ...,
+        schema_version: _builtins.int = ...,
+        formula_version: _builtins.int = ...,
+        matching_policy_version: _builtins.int = ...,
+        position_event_json: _builtins.str = ...,
+        position_id: _builtins.str = ...,
+        position_event_type: _builtins.str = ...,
+        row_wallet_delta_usd: _builtins.str = ...,
+        row_component_usd: _builtins.str = ...,
+        row_residual_usd: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_event_type", b"accounting_event_type", "accounting_payload_json", b"accounting_payload_json", "amount_in", b"amount_in", "amount_in_usd", b"amount_in_usd", "amount_out", b"amount_out", "amount_out_usd", b"amount_out_usd", "chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "effective_price", b"effective_price", "error", b"error", "extracted_data_json", b"extracted_data_json", "formula_version", b"formula_version", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "matching_policy_version", b"matching_policy_version", "position_event_json", b"position_event_json", "position_event_type", b"position_event_type", "position_id", b"position_id", "position_key", b"position_key", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "row_component_usd", b"row_component_usd", "row_residual_usd", b"row_residual_usd", "row_wallet_delta_usd", b"row_wallet_delta_usd", "schema_version", b"schema_version", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash", "unavailable_reason", b"unavailable_reason"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TradeTapeRow: _TypeAlias = TradeTapeRow  # noqa: Y015
+
+@_typing.final
 class PolymarketGetMarketRequest(_message.Message):
     """=============================================================================
     Polymarket Market Data Messages

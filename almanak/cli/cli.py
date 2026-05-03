@@ -696,7 +696,20 @@ def docs_agent_skill(dump):
     envvar="ALMANAK_GATEWAY_ALLOW_INSECURE",
     help="Disable auth token requirement for local development. Also set via ALMANAK_GATEWAY_ALLOW_INSECURE env var.",
 )
-def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
+@click.option(
+    "--standalone",
+    is_flag=True,
+    default=False,
+    envvar="ALMANAK_GATEWAY_STANDALONE",
+    help=(
+        "Run the gateway in standalone mode (utility DB, no strategy folder). "
+        "Required when starting the gateway outside any strategy folder for ad-hoc "
+        "use (e.g., `almanak ax`). Without this flag, the gateway refuses to start "
+        "outside a strategy folder so it cannot silently write to the per-user "
+        "utility DB instead of the strategy-anchored one (VIB-3761)."
+    ),
+)
+def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, standalone):
     """Start the Almanak Gateway gRPC server.
 
     The gateway is a sidecar service that mediates all external access for
@@ -728,9 +741,45 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
     """
     import asyncio
     import logging
+    import os
+    import sys
 
+    from almanak.framework.deployment import is_hosted
+    from almanak.framework.local_paths import auto_detect_strategy_folder
     from almanak.gateway.core.settings import GatewaySettings
     from almanak.gateway.server import serve
+
+    # VIB-3761/-3835: anchor the gateway to a strategy folder before any
+    # downstream code resolves a local DB path. Without this, an
+    # ``almanak gateway`` started from inside ``strategies/foo/`` would
+    # silently write to ``~/.local/share/almanak/utility/almanak_state.db``
+    # while the runner writes to ``strategies/foo/almanak_state.db`` —
+    # the two-DB split that produced the May 2 dashboard miscount
+    # (NAV $35.62 / Lifetime PnL +14238% / Cash 195% of NAV).
+    #
+    # Hosted mode (AGENT_ID set) uses Postgres, so the local-path branch
+    # is skipped entirely.
+    explicit_state_db = os.environ.get("ALMANAK_STATE_DB")
+    explicit_strategy_folder = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    detected_folder = None
+    if not is_hosted():
+        # Auto-detect cwd if neither env var is set; the helper is a no-op
+        # when a folder is already exported.
+        detected_folder = auto_detect_strategy_folder()
+        if not standalone and not explicit_state_db and detected_folder is None and not explicit_strategy_folder:
+            click.echo(
+                click.style(
+                    "Refusing to start gateway: no strategy folder resolved.\n"
+                    "  Run `almanak gateway` from a strategy folder (one with config.json),\n"
+                    "  or set ALMANAK_STRATEGY_FOLDER / ALMANAK_STATE_DB,\n"
+                    "  or pass --standalone for ad-hoc utility-DB use (e.g. `almanak ax`).\n"
+                    "  Background: 1 strategy = 1 folder = 1 DB = 1 gateway (VIB-3761).",
+                    fg="red",
+                    bold=True,
+                ),
+                err=True,
+            )
+            sys.exit(2)
 
     # Configure logging
     log_level_map = {
@@ -764,6 +813,7 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
         network=effective_network,
         chains=parsed_chains,
         allow_insecure=allow_insecure,
+        standalone=standalone,
     )
 
     # Security: for non-test networks, auto-generate a session auth token when
@@ -787,6 +837,19 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
             err=True,
         )
 
+    if explicit_state_db:
+        db_anchor = f"explicit (ALMANAK_STATE_DB={explicit_state_db})"
+    elif standalone:
+        db_anchor = "STANDALONE (utility DB)"
+    elif detected_folder is not None:
+        db_anchor = f"STRATEGY-PINNED ({detected_folder})"
+    elif explicit_strategy_folder:
+        db_anchor = f"STRATEGY-PINNED ({explicit_strategy_folder})"
+    elif is_hosted():
+        db_anchor = "HOSTED (Postgres)"
+    else:
+        db_anchor = "STRATEGY-PINNED (env)"
+
     info_pairs = {
         "gRPC Port": port,
         "Network": settings.network,
@@ -794,6 +857,7 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure):
         "Metrics": "enabled" if metrics else "disabled",
         "Metrics Port": metrics_port if metrics else "N/A",
         "Log Level": log_level,
+        "DB Anchor": db_anchor,
     }
     if session_auth_token:
         info_pairs["Auth"] = "auto-generated session token (see below)"

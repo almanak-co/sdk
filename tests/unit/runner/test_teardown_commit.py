@@ -383,7 +383,9 @@ async def test_cycle_id_set_during_helper_and_restored(
     # Capture cycle_id seen by ledger/outbox writers.
     seen_cycle_ids: list[str | None] = []
 
-    async def _capture_ledger(strategy, intent, *, result, success, error="", price_oracle=None):
+    async def _capture_ledger(strategy, intent, *, result, success, error="", price_oracle=None, **_kwargs):
+        # Absorb extra kwargs (pre_state / post_state added by VIB-3918) so
+        # the test signature stays aligned with the real writer.
         seen_cycle_ids.append(get_cycle_id())
         return "ledger-1"
 

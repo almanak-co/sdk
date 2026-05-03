@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 STRATEGY_CATEGORIES = ["demo", "production", "incubating", "poster_child", "tests"]
 PORTFOLIO_STALE_THRESHOLD_SECONDS = 300
 
+# Cap on rows pulled into GetQuantHeader's LTD aggregation. Sized to absorb a
+# busy strategy's full lifetime under the dashboard's expected refresh cadence.
+# A warning is logged when reached so the gap can be closed via SQL aggregation.
+_QUANT_HEADER_LEDGER_CAP = 100_000
+
 
 class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     """Implements DashboardService gRPC interface.
@@ -1446,3 +1451,355 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             entries=proto_entries,
             has_more=has_more,
         )
+
+    # ----------------------------------------------------------------------
+    # Senior-Quant header + trade tape (dashboard redesign)
+    # ----------------------------------------------------------------------
+
+    async def GetQuantHeader(
+        self,
+        request: gateway_pb2.GetQuantHeaderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.QuantHeaderInfo:
+        """Aggregate the Senior-Quant header card from the accounting tables.
+
+        Reads transaction_ledger, accounting_events, portfolio_metrics,
+        portfolio_snapshots through the StateManager. Pure read-side; no
+        new schema, no writes. Empty inputs collapse to an
+        ``UNAVAILABLE``-confidence header rather than raising.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetQuantHeader: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.QuantHeaderInfo()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        from almanak.framework.dashboard.quant_aggregations import build_quant_header
+
+        portfolio_metrics = None
+        snapshots: list[Any] = []
+        ledger_entries: list[Any] = []
+        accounting_events: list[dict[str, Any]] = []
+        position_summary = None
+
+        if self._state_manager is not None:
+            try:
+                portfolio_metrics = await self._state_manager.get_portfolio_metrics(strategy_id)
+            except Exception:
+                logger.debug("get_portfolio_metrics failed for %s", strategy_id, exc_info=True)
+            try:
+                snapshots = await self._state_manager.get_snapshots_since(
+                    strategy_id, since=datetime.now(tz=UTC) - timedelta(days=365)
+                )
+            except Exception:
+                logger.debug("get_snapshots_since failed for %s", strategy_id, exc_info=True)
+            # GetQuantHeader is the senior-quant LTD aggregation surface
+            # (cost stack, audit-trail counts, G6 reconciliation). A hard
+            # row cap silently understates lifetime totals and can mis-PASS
+            # G6 by undercounting gas. Lift the cap to a value that covers
+            # any realistic strategy in this PR's window; warn when hit so
+            # the operator knows aggregation may be partial. The proper fix
+            # — a SQL-side aggregation RPC that pushes SUM/COUNT into the
+            # backend — is tracked separately (see notes/audit-pr-*.md).
+            try:
+                ledger_entries = await self._state_manager.get_ledger_entries(
+                    strategy_id, limit=_QUANT_HEADER_LEDGER_CAP
+                )
+                if len(ledger_entries) >= _QUANT_HEADER_LEDGER_CAP:
+                    logger.warning(
+                        "GetQuantHeader: ledger row count hit cap (%d) for strategy=%s — "
+                        "LTD cost stack and audit-trail counts may be partial. "
+                        "Add SQL-side aggregation when this fires regularly.",
+                        _QUANT_HEADER_LEDGER_CAP,
+                        strategy_id,
+                    )
+            except Exception:
+                logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
+            try:
+                accounting_events = self._state_manager.get_accounting_events_sync(deployment_id=strategy_id)
+            except Exception:
+                logger.debug("get_accounting_events_sync failed for %s", strategy_id, exc_info=True)
+
+        # Pull a position summary off the latest snapshot for the primary-risk gauge.
+        latest_snapshot = await self._get_latest_snapshot(strategy_id)
+        if latest_snapshot is not None:
+
+            class _PosShim:
+                def __init__(self, snap: Any) -> None:
+                    self.lp_positions: list[Any] = []
+                    self.health_factor = None
+                    self.leverage = None
+                    pjson = getattr(snap, "positions_json", None) or "[]"
+                    try:
+                        positions = json.loads(pjson)
+                    except (json.JSONDecodeError, TypeError):
+                        positions = []
+                    if isinstance(positions, list):
+                        for p in positions:
+                            if not isinstance(p, dict):
+                                continue
+                            ptype = (p.get("position_type") or "").upper()
+                            if ptype == "LP":
+                                lp = type("LP", (), {})()
+                                # Tri-state: keep None when the writer never
+                                # determined in_range (the very case VIB-3893
+                                # exists for). Defaulting to False renders
+                                # "in-range NO" with red — a false negative
+                                # on a money-decision surface.
+                                raw = p.get("in_range")
+                                lp.in_range = None if raw is None else bool(raw)
+                                self.lp_positions.append(lp)
+                            elif ptype == "LENDING":
+                                hf = p.get("health_factor")
+                                if hf is not None:
+                                    try:
+                                        self.health_factor = Decimal(str(hf))
+                                    except Exception:
+                                        pass
+                            elif ptype == "PERP":
+                                lev = p.get("leverage")
+                                if lev is not None:
+                                    try:
+                                        self.leverage = Decimal(str(lev))
+                                    except Exception:
+                                        pass
+
+            position_summary = _PosShim(latest_snapshot)
+
+        header = build_quant_header(
+            portfolio_metrics=portfolio_metrics,
+            snapshots=snapshots,
+            ledger_entries=ledger_entries,
+            accounting_events=accounting_events,
+            position_summary=position_summary,
+        )
+
+        return gateway_pb2.QuantHeaderInfo(
+            deployed_usd=str(header.deployed_usd),
+            nav_usd=str(header.nav_usd),
+            lifetime_pnl_usd=str(header.lifetime_pnl_usd),
+            lifetime_pnl_pct=f"{header.lifetime_pnl_pct:.2f}",
+            net_apr_pct=f"{header.net_apr_pct:.2f}",
+            max_drawdown_pct=f"{header.max_drawdown_pct:.2f}",
+            current_drawdown_pct=f"{header.current_drawdown_pct:.2f}",
+            value_confidence=header.value_confidence,
+            age_days=header.age_days,
+            deployed_capital_usd=str(header.deployed_capital_usd),
+            available_cash_usd=str(header.available_cash_usd),
+            open_position_count=header.open_position_count,
+            primary_risk_label=header.primary_risk_label,
+            primary_risk_value=header.primary_risk_value,
+            primary_risk_color=header.primary_risk_color,
+            primary_risk_kind=header.primary_risk_kind,
+            cost_gas_usd=str(header.cost_stack.gas_usd),
+            cost_protocol_fees_usd=str(header.cost_stack.protocol_fees_usd),
+            cost_slippage_usd=str(header.cost_stack.slippage_usd),
+            fees_earned_usd=str(header.cost_stack.fees_earned_usd),
+            interest_paid_usd=str(header.cost_stack.interest_paid_usd),
+            interest_earned_usd=str(header.cost_stack.interest_earned_usd),
+            funding_paid_usd=str(header.cost_stack.funding_paid_usd),
+            funding_earned_usd=str(header.cost_stack.funding_earned_usd),
+            realized_pnl_usd=str(header.cost_stack.realized_pnl_usd),
+            il_usd=str(header.cost_stack.il_usd),
+            g6_status=("PASS" if header.reconciliation.passed else "FAIL") if header.reconciliation.has_data else "NA",
+            g6_wallet_pnl_usd=str(header.reconciliation.wallet_pnl_usd),
+            g6_component_pnl_usd=str(header.reconciliation.component_pnl_usd),
+            g6_gap_usd=str(header.reconciliation.gap_usd),
+            g6_epsilon_usd=str(header.reconciliation.epsilon_usd),
+            g6_sum_swap=str(header.reconciliation.sum_swap),
+            g6_sum_lp=str(header.reconciliation.sum_lp),
+            g6_sum_perp=str(header.reconciliation.sum_perp),
+            g6_sum_fees=str(header.reconciliation.sum_fees),
+            g6_sum_funding=str(header.reconciliation.sum_funding),
+            g6_sum_interest=str(header.reconciliation.sum_interest),
+            g6_sum_gas=str(header.reconciliation.sum_gas),
+            ledger_total=header.audit_trail.ledger_total,
+            ledger_with_price_inputs=header.audit_trail.ledger_with_price_inputs,
+            ledger_with_pre_post_state=header.audit_trail.ledger_with_pre_post_state,
+            ledger_with_gas_usd=header.audit_trail.ledger_with_gas_usd,
+            events_total=header.audit_trail.events_total,
+            events_with_versions=header.audit_trail.events_with_versions,
+            primitive=header.posture.primitive,
+            cells_passed=header.posture.cells_passed,
+            cells_failed=header.posture.cells_failed,
+            cells_xfail=header.posture.cells_xfail,
+            cells_total=header.posture.cells_total,
+            failing_cells=header.posture.failing,
+            xfail_cells=header.posture.xfail,
+        )
+
+    async def GetTradeTape(
+        self,
+        request: gateway_pb2.GetTradeTapeRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetTradeTapeResponse:
+        """One row per intent (cycle_id) with receipt-parsed payloads.
+
+        Joins ledger × accounting_events × position_events on
+        ``ledger_entry_id`` and ``cycle_id`` so the dashboard can render
+        a Quant-grade trade tape without re-reading the chain.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetTradeTape: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetTradeTapeResponse()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        limit = request.limit if request.limit > 0 else 50
+        before_ts = datetime.fromtimestamp(request.before_timestamp, tz=UTC) if request.before_timestamp > 0 else None
+
+        ledger_entries: list[Any] = []
+        accounting_events: list[dict[str, Any]] = []
+        position_events: list[Any] = []
+
+        if self._state_manager is not None:
+            try:
+                # over-fetch by 1 to set has_more; push before_timestamp
+                # cursor into SQL so we never return an empty page when
+                # `limit` newer-than-cursor rows exist
+                ledger_entries = await self._state_manager.get_ledger_entries(
+                    strategy_id, since=None, intent_type=None, limit=limit + 1, before=before_ts
+                )
+            except Exception:
+                logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
+            try:
+                accounting_events = self._state_manager.get_accounting_events_sync(deployment_id=strategy_id)
+            except Exception:
+                logger.debug("get_accounting_events_sync failed for %s", strategy_id, exc_info=True)
+            try:
+                position_events = self._state_manager.get_position_events_sync(deployment_id=strategy_id)
+            except Exception:
+                logger.debug("get_position_events_sync failed for %s", strategy_id, exc_info=True)
+
+        # Index accounting events by ledger_entry_id and cycle_id for fast join
+        events_by_ledger: dict[str, dict[str, Any]] = {}
+        events_by_cycle: dict[str, list[dict[str, Any]]] = {}
+        for ev in accounting_events:
+            if not isinstance(ev, dict):
+                continue
+            le = ev.get("ledger_entry_id")
+            if le:
+                events_by_ledger[le] = ev
+            cy = ev.get("cycle_id")
+            if cy:
+                events_by_cycle.setdefault(cy, []).append(ev)
+
+        # Index position events by ledger_entry_id
+        pos_by_ledger: dict[str, dict[str, Any]] = {}
+        for pe in position_events:
+            if not isinstance(pe, dict):
+                continue
+            le = pe.get("ledger_entry_id")
+            if le:
+                pos_by_ledger[le] = pe
+
+        rows: list[gateway_pb2.TradeTapeRow] = []
+        for entry in ledger_entries:
+            entry_id = getattr(entry, "id", "")
+            cycle_id = getattr(entry, "cycle_id", "")
+            ts = getattr(entry, "timestamp", None)
+            ts_unix = int(ts.timestamp()) if ts else 0
+            if before_ts is not None and ts and ts >= before_ts:
+                continue
+
+            row_event: dict[str, Any] | None = events_by_ledger.get(entry_id)
+            if row_event is None:
+                # Cycle-level fallback only when the join is unambiguous —
+                # i.e. the cycle has *exactly one* accounting event. A
+                # teardown cycle deliberately writes one event per intent
+                # (LP_CLOSE, REPAY, swap-back …), and grabbing
+                # ``cyc_events[0]`` could attach another intent's payload,
+                # confidence, position key, and version stamps to this row.
+                # The trade tape is an audit surface — wrong joins are
+                # worse than empty cells. (Codex audit on PR #2014.)
+                cyc_events = events_by_cycle.get(cycle_id, [])
+                if len(cyc_events) == 1:
+                    row_event = cyc_events[0]
+
+            payload_raw = row_event.get("payload_json") if row_event else ""
+            confidence = row_event.get("confidence", "") if row_event else ""
+            event_type = row_event.get("event_type", "") if row_event else ""
+            position_key = row_event.get("position_key", "") if row_event else ""
+
+            unavailable_reason = ""
+            schema_v = formula_v = matching_v = 0
+            if payload_raw:
+                try:
+                    p = json.loads(payload_raw)
+                    if isinstance(p, dict):
+                        unavailable_reason = p.get("unavailable_reason") or ""
+                        schema_v = int(p.get("schema_version") or 0)
+                        formula_v = int(p.get("formula_version") or 0)
+                        matching_v = int(p.get("matching_policy_version") or 0)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+
+            pe = pos_by_ledger.get(entry_id)
+            position_event_json = ""
+            position_id = ""
+            position_event_type = ""
+            if pe is not None:
+                # Convert datetime objects to ISO strings for JSON
+                pe_clean = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in pe.items()}
+                try:
+                    position_event_json = json.dumps(pe_clean, default=str)
+                except (TypeError, ValueError):
+                    position_event_json = ""
+                position_id = str(pe.get("position_id") or "")
+                position_event_type = str(pe.get("event_type") or "")
+
+            row = gateway_pb2.TradeTapeRow(
+                id=entry_id,
+                cycle_id=cycle_id,
+                timestamp=ts_unix,
+                intent_type=getattr(entry, "intent_type", ""),
+                token_in=getattr(entry, "token_in", "") or "",
+                amount_in=getattr(entry, "amount_in", "") or "",
+                token_out=getattr(entry, "token_out", "") or "",
+                amount_out=getattr(entry, "amount_out", "") or "",
+                effective_price=getattr(entry, "effective_price", "") or "",
+                slippage_bps=getattr(entry, "slippage_bps", None) or 0.0,
+                gas_used=getattr(entry, "gas_used", 0) or 0,
+                gas_usd=getattr(entry, "gas_usd", "") or "",
+                tx_hash=getattr(entry, "tx_hash", "") or "",
+                chain=getattr(entry, "chain", "") or "",
+                protocol=getattr(entry, "protocol", "") or "",
+                success=bool(getattr(entry, "success", True)),
+                error=getattr(entry, "error", "") or "",
+                amount_in_usd="",
+                amount_out_usd="",
+                extracted_data_json=getattr(entry, "extracted_data_json", "") or "",
+                price_inputs_json=getattr(entry, "price_inputs_json", "") or "",
+                pre_state_json=getattr(entry, "pre_state_json", "") or "",
+                post_state_json=getattr(entry, "post_state_json", "") or "",
+                accounting_payload_json=payload_raw or "",
+                accounting_event_type=event_type,
+                position_key=position_key,
+                confidence=confidence,
+                unavailable_reason=unavailable_reason,
+                schema_version=schema_v,
+                formula_version=formula_v,
+                matching_policy_version=matching_v,
+                position_event_json=position_event_json,
+                position_id=position_id,
+                position_event_type=position_event_type,
+                row_wallet_delta_usd="",
+                row_component_usd="",
+                row_residual_usd="",
+            )
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+
+        has_more = len(ledger_entries) > len(rows)
+        return gateway_pb2.GetTradeTapeResponse(rows=rows, has_more=has_more)

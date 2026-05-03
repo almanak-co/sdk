@@ -24,7 +24,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict
+    from pydantic import BaseModel, ConfigDict, model_validator
 except ImportError:  # pragma: no cover — pydantic is a hard dep
     raise
 
@@ -60,6 +60,29 @@ class _Versioned(_Base):
     schema_version: int = SCHEMA_VERSION
     formula_version: int = FORMULA_VERSION
     matching_policy_version: int = MATCHING_POLICY_VERSION
+
+    @model_validator(mode="after")
+    def _enforce_confidence_exclusivity(self) -> _Versioned:
+        """Reject ``confidence=HIGH`` with a non-empty ``unavailable_reason``.
+
+        VIB-3886 (CONF). The May 2 LP_OPEN payload reported
+        ``confidence=HIGH`` AND ``unavailable_reason="cost_basis_usd
+        unavailable: ..."`` simultaneously — a contradiction that hid the
+        upstream pricing failure under a misleading "data is fine" tag.
+        SWAP-handler already degraded to ESTIMATED in the same scenario,
+        so the fix is to make the contradiction unrepresentable. Models
+        whose subclasses don't declare ``confidence`` (none today, but
+        future v1 additions might) are silently ignored via ``getattr``.
+        """
+        confidence = getattr(self, "confidence", None)
+        reason = getattr(self, "unavailable_reason", None)
+        if confidence == "HIGH" and reason:
+            raise ValueError(
+                "confidence=HIGH is incompatible with a non-empty "
+                f"unavailable_reason ({reason!r}). Set confidence=ESTIMATED "
+                "(or STALE / UNAVAILABLE) when any USD field is missing."
+            )
+        return self
 
 
 # ─── Lending ──────────────────────────────────────────────────────────────
@@ -153,6 +176,11 @@ class LPOpenEventPayload(_Versioned):
     tick_lower: int | None = None
     tick_upper: int | None = None
     liquidity: int | None = None
+    # VIB-3893 — current_tick and in_range stamped at OPEN so the Trade Tape
+    # can render "in-range YES/NO" without re-querying the chain. Both nullable
+    # because non-Uniswap-V3 LP venues may not expose a tick-bracket model.
+    current_tick: int | None = None
+    in_range: bool | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
 

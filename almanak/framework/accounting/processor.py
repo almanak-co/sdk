@@ -215,7 +215,18 @@ class AccountingProcessor:
         if category == AccountingCategory.PENDLE_PT:
             return handle_pendle_pt(outbox_row, ledger_row, self._basis_store)
         if category == AccountingCategory.LP:
-            return handle_lp(outbox_row, ledger_row)
+            # LP_CLOSE / LP_COLLECT_FEES need the prior LP_OPEN's cost_basis
+            # and tick range to populate ``realized_pnl_usd`` and the position
+            # bracket on the close payload. Look up by ``position_key`` via
+            # the state manager (already used by ``PortfolioValuer`` cost-
+            # basis enrichment) and pass the most recent LP_OPEN payload
+            # into the handler. Read-side fail-quiet — if the lookup
+            # returns nothing the handler still emits a populated CLOSE
+            # payload, just without ``realized_pnl_usd``.
+            prior_open: dict[str, Any] | None = None
+            if (intent_type or "").upper() in {"LP_CLOSE", "LP_COLLECT_FEES"}:
+                prior_open = self._lookup_prior_lp_open(outbox_row.get("position_key") or "")
+            return handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
         if category == AccountingCategory.PERP:
             return handle_perp(outbox_row, ledger_row)
         if category == AccountingCategory.VAULT:
@@ -225,6 +236,42 @@ class AccountingProcessor:
         if category == AccountingCategory.PREDICTION:
             return handle_prediction(outbox_row, ledger_row, self._basis_store)
         # NO_ACCOUNTING — no event written
+        return None
+
+    def _lookup_prior_lp_open(self, position_key: str) -> dict[str, Any] | None:
+        """Return the most recent LP_OPEN payload for ``position_key``.
+
+        Used to compute ``realized_pnl_usd`` and backfill tick metadata on
+        LP_CLOSE / LP_COLLECT_FEES events. Returns the parsed
+        ``payload_json`` dict, or None if no prior open exists or the
+        state manager doesn't expose ``get_accounting_events_sync``.
+
+        Read-side fail-quiet: a state-manager error returns None and the
+        handler emits a CLOSE payload without ``realized_pnl_usd``. We
+        prefer "no PnL number" over "fabricated PnL number".
+        """
+        if not position_key or not self._deployment_id:
+            return None
+        if not hasattr(self._state_manager, "get_accounting_events_sync"):
+            return None
+        try:
+            events = self._state_manager.get_accounting_events_sync(self._deployment_id, position_key=position_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("prior LP_OPEN lookup failed for %s: %s", position_key, exc)
+            return None
+        # Sorted ascending by timestamp; pick the most recent OPEN.
+        for row in reversed(events or []):
+            if (row.get("event_type") or "").upper() == "LP_OPEN":
+                payload = row.get("payload_json")
+                if isinstance(payload, str):
+                    import json as _json
+
+                    try:
+                        return _json.loads(payload)
+                    except Exception:  # noqa: BLE001
+                        return None
+                if isinstance(payload, dict):
+                    return payload
         return None
 
     # ──────────────────────────────────────────────────────────────────────────

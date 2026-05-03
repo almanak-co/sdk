@@ -462,6 +462,14 @@ def create_sync_price_oracle_func(
 
         return result.price
 
+    # VIB-3895: stamp the underlying oracle on the sync wrapper so
+    # `_infer_oracle_source` can unwrap and reach the real provider's
+    # class identity (e.g. ``GatewayPriceOracle``). Without this,
+    # `_infer_oracle_source` only sees ``sync_price`` and returns ""
+    # → every ``transaction_ledger.price_inputs_json`` row carries
+    # ``oracle_source: "unknown"`` even when the gateway aggregator is
+    # correctly fanning out to the real providers.
+    sync_price.__wrapped__ = price_oracle  # type: ignore[attr-defined]
     return sync_price
 
 
@@ -1259,6 +1267,7 @@ def run(
         log_file=log_file,
         once=once,
         teardown_after=teardown_after,
+        max_iterations=max_iterations,
     )
 
     # VIB-3761: anchor every local artifact (DB, logs, lock) to the

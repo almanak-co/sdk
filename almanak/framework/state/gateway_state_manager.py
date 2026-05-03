@@ -14,6 +14,7 @@ SQLiteStore.
 import json
 import logging
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from almanak.framework.gateway_client import GatewayClient
@@ -214,13 +215,53 @@ class GatewayStateManager:
             Snapshot ID from the database
         """
         try:
-            # Pack positions, token_prices, and wallet_balances into the
-            # positions_json envelope. The state_service on the receiving end
-            # unpacks this and persists each field to its own column.
+            # VIB-3917 — writer-side raise: refuse to ship a snapshot that
+            # claims HIGH confidence while carrying a synthesised position
+            # whose cost_basis_usd is null. The May 3 production trace
+            # showed exactly this combination — a HIGH-confidence snapshot
+            # with a fabricated $0-cost-basis LP position because the
+            # accounting pipeline hadn't finished. CONF (VIB-3886) covers
+            # accounting_events; this covers snapshot_writes.
+            if getattr(snapshot, "value_confidence", None) and snapshot.value_confidence.value == "HIGH":
+                for pos in snapshot.positions or []:
+                    cb = getattr(pos, "cost_basis_usd", None)
+                    if cb is None or (isinstance(cb, Decimal) and cb == Decimal("0")):
+                        # cost_basis=0 by itself is legal (e.g. a freshly
+                        # tracked position whose handler hasn't priced yet).
+                        # But if value_usd is non-zero AND cost_basis is
+                        # zero/null while we claim HIGH confidence, the
+                        # books are lying. Degrade in-place.
+                        v = getattr(pos, "value_usd", None)
+                        if v is not None and v > Decimal("0"):
+                            from almanak.framework.portfolio.models import ValueConfidence
+
+                            logger.warning(
+                                "VIB-3917: snapshot for %s carries HIGH+synth position "
+                                "(value_usd=%s, cost_basis_usd=%s) — degrading to ESTIMATED",
+                                snapshot.strategy_id,
+                                v,
+                                cb,
+                            )
+                            snapshot.value_confidence = ValueConfidence.ESTIMATED
+                            break
+
+            # VIB-3923 — to_positions_payload() now ALWAYS emits envelope shape.
+            # The state_service on the receiving end unpacks it and persists
+            # each field to its own column. Token prices and wallet balances
+            # ride alongside as sibling envelope fields.
             payload = snapshot.to_positions_payload()
-            if isinstance(payload, list):
-                # Convert bare list to envelope so we can attach extra data
-                payload = {"positions": payload, "metadata": {}}
+            # VIB-3894 — SaveSnapshotRequest is missing deployed_capital_usd
+            # and wallet_total_value_usd on the proto wire. Pre-fix the
+            # gateway-side state_service constructed PortfolioSnapshot with
+            # those fields defaulted to ``Decimal("0")`` even when the
+            # framework valuer had computed them from open-position cost
+            # basis. Smuggle them through the envelope's ``metadata`` dict
+            # so the proto contract stays additive (backwards-compat with
+            # snapshots written before this change). state_service reads
+            # them back during unpack.
+            payload.setdefault("metadata", {})
+            payload["metadata"]["__deployed_capital_usd__"] = str(snapshot.deployed_capital_usd)
+            payload["metadata"]["__wallet_total_value_usd__"] = str(snapshot.wallet_total_value_usd)
             # Attach accounting data to the envelope
             if snapshot.token_prices:
                 payload["token_prices"] = snapshot.token_prices

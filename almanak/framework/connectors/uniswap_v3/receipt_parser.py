@@ -1618,9 +1618,31 @@ class UniswapV3ReceiptParser:
 
             tick_lower, tick_upper = self._ticks_from_mint(last_npm_mint)
 
+            # VIB-3887: derive current_tick from a Swap event emitted by
+            # the same pool in the same receipt. The Uniswap V3 Swap event
+            # carries ``tick`` (post-swap current tick). When the strategy
+            # batches swap-then-mint atomically — the canonical Almanak
+            # LP_OPEN pattern — the receipt contains exactly such a Swap
+            # event and we recover the live tick without an extra RPC.
+            # When no Swap is present (pure NPM.mint with pre-balanced
+            # amounts), ``current_tick`` stays None and the framework
+            # leaves ``in_range`` undecided — better than guessing.
+            pool_address = ""
+            if last_npm_mint is not None:
+                addr_attr = (
+                    last_npm_mint.get("address")
+                    if hasattr(last_npm_mint, "get")
+                    else getattr(last_npm_mint, "address", "")
+                )
+                if isinstance(addr_attr, bytes):
+                    addr_attr = "0x" + addr_attr.hex()
+                pool_address = str(addr_attr).lower()
+            current_tick = self._current_tick_from_swap_event(logs, pool_address)
+
             logger.info(
                 f"Extracted LP open data: tokenId={token_id} liquidity={liquidity} "
-                f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}]"
+                f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}] "
+                f"current_tick={current_tick}"
             )
             return LPOpenData(
                 position_id=token_id,
@@ -1629,6 +1651,8 @@ class UniswapV3ReceiptParser:
                 liquidity=liquidity,
                 amount0=amount0,
                 amount1=amount1,
+                current_tick=current_tick,
+                pool_address=pool_address,  # VIB-3893: framework slot0 fallback
             )
 
         return None
@@ -1673,6 +1697,64 @@ class UniswapV3ReceiptParser:
                 return None
 
         return (_decode(topics[2]), _decode(topics[3]))
+
+    @staticmethod
+    def _current_tick_from_swap_event(logs: list[Any], pool_address: str) -> int | None:
+        """Find a Swap event from ``pool_address`` in ``logs`` and decode its tick.
+
+        VIB-3887. The Uniswap V3 Pool Swap event signature is::
+
+            event Swap(address indexed sender, address indexed recipient,
+                       int256 amount0, int256 amount1, uint160 sqrtPriceX96,
+                       uint128 liquidity, int24 tick)
+
+        Layout: topics[0] = signature, topics[1] = sender, topics[2] =
+        recipient. The non-indexed payload in ``data`` is
+        ``amount0 (32) | amount1 (32) | sqrtPriceX96 (32) | liquidity (32)
+        | tick (32, int24 right-aligned)``. We grab the last 32-byte slot.
+
+        Returns ``None`` when no matching Swap is present (pure NPM mint
+        with pre-balanced inputs) — caller leaves ``current_tick=None``.
+        """
+        if not pool_address:
+            return None
+        swap_topic = SWAP_EVENT_TOPIC.lower()
+        latest_swap_log: Any = None
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            if str(address).lower() != pool_address:
+                continue
+            if not topics:
+                continue
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            if str(first_topic).lower() != swap_topic:
+                continue
+            latest_swap_log = log  # later swaps override (post-swap tick is the live one)
+
+        if latest_swap_log is None:
+            return None
+        data = (
+            latest_swap_log.get("data", "") if hasattr(latest_swap_log, "get") else getattr(latest_swap_log, "data", "")
+        )
+        if isinstance(data, bytes):
+            data = "0x" + data.hex()
+        try:
+            normalized = HexDecoder.normalize_hex(str(data))
+            if not normalized or normalized == "0x":
+                return None
+            # tick is the 5th 32-byte slot in the data payload (offset 128).
+            return HexDecoder.decode_int24(normalized, 128)
+        except Exception:
+            return None
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from transaction receipt.

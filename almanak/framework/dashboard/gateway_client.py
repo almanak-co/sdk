@@ -119,6 +119,214 @@ class LedgerTradeRecord:
     error: str
 
 
+@dataclass
+class QuantHeaderInfo:
+    """Senior-Quant header aggregations from the gateway (protobuf-free).
+
+    All decimals as strings on the wire; converted to Decimal here so
+    downstream code can format them consistently. Empty strings collapse
+    to ``Decimal("0")``.
+    """
+
+    deployed_usd: Decimal
+    nav_usd: Decimal
+    lifetime_pnl_usd: Decimal
+    lifetime_pnl_pct: Decimal
+    net_apr_pct: Decimal
+    max_drawdown_pct: Decimal
+    current_drawdown_pct: Decimal
+    value_confidence: str
+    age_days: int
+    deployed_capital_usd: Decimal
+    available_cash_usd: Decimal
+    open_position_count: int
+    primary_risk_label: str
+    primary_risk_value: str
+    primary_risk_color: str
+    primary_risk_kind: str
+    cost_gas_usd: Decimal
+    cost_protocol_fees_usd: Decimal
+    cost_slippage_usd: Decimal
+    fees_earned_usd: Decimal
+    interest_paid_usd: Decimal
+    interest_earned_usd: Decimal
+    funding_paid_usd: Decimal
+    funding_earned_usd: Decimal
+    realized_pnl_usd: Decimal
+    il_usd: Decimal
+    g6_status: str
+    g6_wallet_pnl_usd: Decimal
+    g6_component_pnl_usd: Decimal
+    g6_gap_usd: Decimal
+    g6_epsilon_usd: Decimal
+    g6_components: dict[str, Decimal]
+    ledger_total: int
+    ledger_with_price_inputs: int
+    ledger_with_pre_post_state: int
+    ledger_with_gas_usd: int
+    events_total: int
+    events_with_versions: int
+    primitive: str
+    cells_passed: int
+    cells_failed: int
+    cells_xfail: int
+    cells_total: int
+    failing_cells: list[str]
+    xfail_cells: list[str]
+
+
+@dataclass
+class TradeTapeRow:
+    """One row of the trade tape — ledger × accounting × position event."""
+
+    id: str
+    cycle_id: str
+    timestamp: datetime | None
+    intent_type: str
+    token_in: str
+    amount_in: str
+    token_out: str
+    amount_out: str
+    effective_price: str
+    slippage_bps: float
+    gas_used: int
+    gas_usd: str
+    tx_hash: str
+    chain: str
+    protocol: str
+    success: bool
+    error: str
+    amount_in_usd: str
+    amount_out_usd: str
+    extracted_data_json: str
+    price_inputs_json: str
+    pre_state_json: str
+    post_state_json: str
+    accounting_payload_json: str
+    accounting_event_type: str
+    position_key: str
+    confidence: str
+    unavailable_reason: str
+    schema_version: int
+    formula_version: int
+    matching_policy_version: int
+    position_event_json: str
+    position_id: str
+    position_event_type: str
+
+
+@dataclass
+class TradeTapeResponse:
+    rows: list[TradeTapeRow]
+    has_more: bool
+
+
+def _safe_decimal(s: str) -> Decimal:
+    if not s:
+        return Decimal("0")
+    try:
+        return Decimal(s)
+    except (ValueError, TypeError):
+        return Decimal("0")
+
+
+def _convert_quant_header(proto: gateway_pb2.QuantHeaderInfo) -> QuantHeaderInfo:
+    return QuantHeaderInfo(
+        deployed_usd=_safe_decimal(proto.deployed_usd),
+        nav_usd=_safe_decimal(proto.nav_usd),
+        lifetime_pnl_usd=_safe_decimal(proto.lifetime_pnl_usd),
+        lifetime_pnl_pct=_safe_decimal(proto.lifetime_pnl_pct),
+        net_apr_pct=_safe_decimal(proto.net_apr_pct),
+        max_drawdown_pct=_safe_decimal(proto.max_drawdown_pct),
+        current_drawdown_pct=_safe_decimal(proto.current_drawdown_pct),
+        value_confidence=proto.value_confidence or "UNAVAILABLE",
+        age_days=proto.age_days,
+        deployed_capital_usd=_safe_decimal(proto.deployed_capital_usd),
+        available_cash_usd=_safe_decimal(proto.available_cash_usd),
+        open_position_count=proto.open_position_count,
+        primary_risk_label=proto.primary_risk_label or "No active positions",  # VIB-3925
+        primary_risk_value=proto.primary_risk_value or "",
+        primary_risk_color=proto.primary_risk_color or "neutral",
+        primary_risk_kind=proto.primary_risk_kind or "none",
+        cost_gas_usd=_safe_decimal(proto.cost_gas_usd),
+        cost_protocol_fees_usd=_safe_decimal(proto.cost_protocol_fees_usd),
+        cost_slippage_usd=_safe_decimal(proto.cost_slippage_usd),
+        fees_earned_usd=_safe_decimal(proto.fees_earned_usd),
+        interest_paid_usd=_safe_decimal(proto.interest_paid_usd),
+        interest_earned_usd=_safe_decimal(proto.interest_earned_usd),
+        funding_paid_usd=_safe_decimal(proto.funding_paid_usd),
+        funding_earned_usd=_safe_decimal(proto.funding_earned_usd),
+        realized_pnl_usd=_safe_decimal(proto.realized_pnl_usd),
+        il_usd=_safe_decimal(proto.il_usd),
+        g6_status=proto.g6_status or "NA",
+        g6_wallet_pnl_usd=_safe_decimal(proto.g6_wallet_pnl_usd),
+        g6_component_pnl_usd=_safe_decimal(proto.g6_component_pnl_usd),
+        g6_gap_usd=_safe_decimal(proto.g6_gap_usd),
+        g6_epsilon_usd=_safe_decimal(proto.g6_epsilon_usd),
+        g6_components={
+            "swap": _safe_decimal(proto.g6_sum_swap),
+            "lp": _safe_decimal(proto.g6_sum_lp),
+            "perp": _safe_decimal(proto.g6_sum_perp),
+            "fees": _safe_decimal(proto.g6_sum_fees),
+            "funding": _safe_decimal(proto.g6_sum_funding),
+            "interest": _safe_decimal(proto.g6_sum_interest),
+            "gas": _safe_decimal(proto.g6_sum_gas),
+        },
+        ledger_total=proto.ledger_total,
+        ledger_with_price_inputs=proto.ledger_with_price_inputs,
+        ledger_with_pre_post_state=proto.ledger_with_pre_post_state,
+        ledger_with_gas_usd=proto.ledger_with_gas_usd,
+        events_total=proto.events_total,
+        events_with_versions=proto.events_with_versions,
+        primitive=proto.primitive or "mixed",
+        cells_passed=proto.cells_passed,
+        cells_failed=proto.cells_failed,
+        cells_xfail=proto.cells_xfail,
+        cells_total=proto.cells_total or 21,
+        failing_cells=list(proto.failing_cells),
+        xfail_cells=list(proto.xfail_cells),
+    )
+
+
+def _convert_trade_tape_row(proto: gateway_pb2.TradeTapeRow) -> TradeTapeRow:
+    return TradeTapeRow(
+        id=proto.id,
+        cycle_id=proto.cycle_id,
+        timestamp=datetime.fromtimestamp(proto.timestamp, tz=UTC) if proto.timestamp else None,
+        intent_type=proto.intent_type,
+        token_in=proto.token_in,
+        amount_in=proto.amount_in,
+        token_out=proto.token_out,
+        amount_out=proto.amount_out,
+        effective_price=proto.effective_price,
+        slippage_bps=proto.slippage_bps,
+        gas_used=proto.gas_used,
+        gas_usd=proto.gas_usd,
+        tx_hash=proto.tx_hash,
+        chain=proto.chain,
+        protocol=proto.protocol,
+        success=proto.success,
+        error=proto.error,
+        amount_in_usd=proto.amount_in_usd,
+        amount_out_usd=proto.amount_out_usd,
+        extracted_data_json=proto.extracted_data_json,
+        price_inputs_json=proto.price_inputs_json,
+        pre_state_json=proto.pre_state_json,
+        post_state_json=proto.post_state_json,
+        accounting_payload_json=proto.accounting_payload_json,
+        accounting_event_type=proto.accounting_event_type,
+        position_key=proto.position_key,
+        confidence=proto.confidence,
+        unavailable_reason=proto.unavailable_reason,
+        schema_version=proto.schema_version,
+        formula_version=proto.formula_version,
+        matching_policy_version=proto.matching_policy_version,
+        position_event_json=proto.position_event_json,
+        position_id=proto.position_id,
+        position_event_type=proto.position_event_type,
+    )
+
+
 class GatewayConnectionError(Exception):
     """Raised when gateway connection fails."""
 
@@ -539,6 +747,30 @@ class GatewayDashboardClient:
                 )
             )
         return records
+
+    def get_quant_header(self, strategy_id: str) -> "QuantHeaderInfo":
+        """Aggregate the Senior-Quant header card via gateway."""
+        client = self._ensure_connected()
+        request = gateway_pb2.GetQuantHeaderRequest(strategy_id=strategy_id)
+        response = client.dashboard.GetQuantHeader(request)
+        return _convert_quant_header(response)
+
+    def get_trade_tape(
+        self,
+        strategy_id: str,
+        limit: int = 50,
+        before: datetime | None = None,
+    ) -> "TradeTapeResponse":
+        """Get the joined trade-tape view (one row per intent)."""
+        client = self._ensure_connected()
+        request = gateway_pb2.GetTradeTapeRequest(
+            strategy_id=strategy_id,
+            limit=limit,
+            before_timestamp=int(before.timestamp()) if before else 0,
+        )
+        response = client.dashboard.GetTradeTape(request)
+        rows = [_convert_trade_tape_row(r) for r in response.rows]
+        return TradeTapeResponse(rows=rows, has_more=response.has_more)
 
     def _convert_summary(self, proto: gateway_pb2.StrategySummary) -> StrategySummary:
         """Convert protobuf StrategySummary to dataclass."""

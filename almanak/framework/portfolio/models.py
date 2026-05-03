@@ -231,18 +231,41 @@ class PortfolioSnapshot:
             data["snapshot_metadata"] = self.snapshot_metadata
         return data
 
-    def to_positions_payload(self) -> list[dict[str, Any]] | dict[str, Any]:
+    # VIB-3923 — schema version of the canonical envelope shape
+    # ``{schema_version, positions, metadata, reconciliation}``. Bumped when the
+    # envelope contract changes; readers tolerate both legacy bare lists and
+    # any prior envelope schema (forward compatibility on read, strict on
+    # write).
+    SNAPSHOT_ENVELOPE_SCHEMA_VERSION = 1
+
+    def to_positions_payload(self) -> dict[str, Any]:
         """Serialize positions_json payload for persistence.
 
-        Legacy rows store a bare positions list. New rows may store an envelope
-        with reconciliation metadata.
+        VIB-3923 — every NEW write emits the envelope shape
+        ``{schema_version, positions, metadata, reconciliation}``. The
+        bare-list legacy shape is kept as a *read*-tolerant fallback in
+        ``unpack_positions_payload`` but never written. This stops the
+        May 3 production class where snapshots silently went out the door
+        as legacy lists, dropping the metadata fields downstream readers
+        rely on (G6 reconciliation tile, deployed_capital traceability).
+
+        Pre-fix: a snapshot with empty ``snapshot_metadata`` returned a
+        bare list — indistinguishable from the legacy persistence shape.
+        Operators reading post-fix snapshots saw "envelope honest" cells
+        flap to FAIL whenever a tile happened to construct a snapshot
+        without populating metadata.
         """
         positions = [_position_to_dict(p) for p in self.positions]
-        if not self.snapshot_metadata:
-            return positions
+        # ``reconciliation`` is split out of ``metadata`` for the
+        # dashboard's G6 tile so it can be addressed at a stable key
+        # without parsing the variable-shape metadata bag.
+        metadata = dict(self.snapshot_metadata) if self.snapshot_metadata else {}
+        reconciliation = metadata.pop("reconciliation", {}) if isinstance(metadata, dict) else {}
         return {
+            "schema_version": self.SNAPSHOT_ENVELOPE_SCHEMA_VERSION,
             "positions": positions,
-            "metadata": self.snapshot_metadata,
+            "metadata": metadata,
+            "reconciliation": reconciliation,
         }
 
     @classmethod

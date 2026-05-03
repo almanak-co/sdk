@@ -390,6 +390,76 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
     return oracle or None
 
 
+async def _ensure_native_gas_in_teardown_oracle(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    oracle: dict | None,
+) -> dict | None:
+    """Top off the teardown price-oracle stash with the chain's native gas token.
+
+    PortfolioSnapshot.token_prices is keyed by the assets the strategy holds —
+    USDC + WETH for an LP, USDC + aUSDC for a lending loop, etc. The native
+    gas symbol (``ETH`` on Arbitrum, ``MATIC`` on Polygon, …) is rarely a
+    held asset, so it is absent from the snapshot. ``compute_gas_usd`` looks
+    up the native symbol exactly and returns ``None`` when it is missing,
+    leaving ``transaction_ledger.gas_usd`` empty for every teardown row.
+
+    The iteration lane closes the same hole at
+    :file:`strategy_runner.py:_build_single_chain_price_oracle` via
+    ``market.price(native_symbol)``. The teardown lane has no per-iteration
+    market, so we go through ``runner.price_oracle.get_aggregated_price``
+    instead — same source, same gateway boundary.
+
+    Best-effort: failure is logged at DEBUG and returns the oracle untouched
+    (mirrors the iteration lane's silent-skip on its native pre-fetch).
+    """
+    if not oracle:
+        return oracle
+    chain = getattr(strategy, "chain", None) or getattr(runner.config, "chain", "")
+    if not chain:
+        return oracle
+
+    from ..accounting.gas_pricing import native_token_for_chain
+
+    native_symbol = native_token_for_chain(chain)
+    if not native_symbol:
+        return oracle
+    if any(key in oracle for key in (native_symbol, native_symbol.upper(), native_symbol.lower())):
+        return oracle
+
+    price_oracle_obj = getattr(runner, "price_oracle", None)
+    if price_oracle_obj is None or not hasattr(price_oracle_obj, "get_aggregated_price"):
+        return oracle
+
+    try:
+        result = await price_oracle_obj.get_aggregated_price(native_symbol, "USD", chain=chain)
+    except Exception as exc:  # noqa: BLE001 — best-effort top-off
+        logger.debug(
+            "teardown native-gas top-off failed for chain=%s symbol=%s: %s",
+            chain,
+            native_symbol,
+            exc,
+        )
+        return oracle
+
+    price = getattr(result, "price", None)
+    if price is None:
+        return oracle
+    timestamp = getattr(result, "timestamp", None)
+    fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+    confidence_attr = getattr(result, "confidence", None)
+    confidence_str = str(confidence_attr or "ESTIMATED").upper()
+    if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
+        confidence_str = "ESTIMATED"
+    oracle[native_symbol] = {
+        "price_usd": str(price),
+        "oracle_source": getattr(result, "source", "") or "gateway",
+        "fetched_at": fetched_at,
+        "confidence": confidence_str,
+    }
+    return oracle
+
+
 @dataclass(frozen=True)
 class TeardownSnapshotOutcome:
     """Outcome of a single pre- or post-teardown snapshot bracket.
@@ -545,11 +615,17 @@ async def capture_teardown_snapshot_with_accounting(
             # stale teardown prices.
             if pre_teardown:
                 runner._teardown_price_oracle = _portfolio_snapshot_to_price_oracle(snapshot)
+                runner._teardown_price_oracle = await _ensure_native_gas_in_teardown_oracle(
+                    runner, strategy, runner._teardown_price_oracle
+                )
             elif not getattr(runner, "_teardown_price_oracle", None):
                 # Fallback: pre-snapshot failed but post produced prices.
                 # Better to record post-teardown prices than to leave the
                 # row's price_inputs_json empty.
                 runner._teardown_price_oracle = _portfolio_snapshot_to_price_oracle(snapshot)
+                runner._teardown_price_oracle = await _ensure_native_gas_in_teardown_oracle(
+                    runner, strategy, runner._teardown_price_oracle
+                )
         except AccountingPersistenceError as acc_err:
             accounting_degraded = True
             degraded_reason = (

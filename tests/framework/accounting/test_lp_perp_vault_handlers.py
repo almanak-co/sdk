@@ -513,6 +513,139 @@ class TestHandleLpOpen:
         assert result is not None
         assert result.pool_address == "0xstablepool"
 
+    def test_vib3893_lp_open_propagates_tick_metadata_and_in_range(self) -> None:
+        """VIB-3893 — tick_lower/upper/liquidity/current_tick from
+        ``lp_open_data`` and derived ``in_range`` end up on the
+        accounting payload. Pre-fix the LP_OPEN accounting_event omitted
+        these even though the receipt parser populated them on
+        ``lp_open_data`` — the dashboard's Trade Tape rendered "in_range
+        UNKNOWN" on every production LP open."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        # Receipt-parser shape: position_id, amounts, ticks, liquidity, and
+        # the slot0-derived current_tick. Bracket [-1000, +1000] with
+        # current_tick=0 should mark in_range=True.
+        extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "position_id": 5464864,
+                "amount0": "1000000",
+                "amount1": "1000000000000000000",
+                "tick_lower": -1000,
+                "tick_upper": 1000,
+                "liquidity": 12345678901234,
+                "current_tick": 0,
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.tick_lower == -1000
+        assert result.tick_upper == 1000
+        assert result.liquidity == 12345678901234
+        assert result.current_tick == 0
+        assert result.in_range is True
+
+        # The serialized payload (what the writer persists) carries them too.
+        payload = json.loads(result.to_payload_json())
+        assert payload["tick_lower"] == -1000
+        assert payload["tick_upper"] == 1000
+        assert payload["current_tick"] == 0
+        assert payload["liquidity"] == 12345678901234
+        assert payload["in_range"] is True
+
+    def test_vib3893_in_range_false_when_current_tick_outside_bracket(self) -> None:
+        """``in_range`` is half-open ``tick_lower <= current_tick <
+        tick_upper`` per VIB-3887. A current_tick equal to tick_upper
+        is OUT-of-range — locks the half-open convention."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "position_id": 5464864,
+                "amount0": "1000000",
+                "amount1": "1000000000000000000",
+                "tick_lower": -1000,
+                "tick_upper": 1000,
+                "liquidity": 12345,
+                "current_tick": 1000,  # equal to tick_upper -> OUT
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+        assert result is not None
+        assert result.in_range is False
+
+    def test_vib3893_in_range_none_when_current_tick_missing(self) -> None:
+        """When ``current_tick`` is unavailable (no slot0 fallback), the
+        handler emits ``in_range=None`` — distinct from ``False``. The
+        dashboard treats None as "unknown" and renders honest copy."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        extracted = json.dumps({
+            "lp_open_data": {
+                "_type": "LPOpenData",
+                "position_id": 5464864,
+                "amount0": "1000000",
+                "amount1": "1000000000000000000",
+                "tick_lower": -1000,
+                "tick_upper": 1000,
+                "liquidity": 12345,
+                "current_tick": None,
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+        assert result is not None
+        assert result.tick_lower == -1000
+        assert result.tick_upper == 1000
+        assert result.current_tick is None
+        assert result.in_range is None
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VIB-3756: cost_basis_usd computation from price_inputs_json
@@ -584,8 +717,11 @@ class TestHandleLpCostBasisUsd:
         assert result is not None
         assert result.cost_basis_usd is None, "Missing leg price must produce None, not 0"
         assert "WETH" in result.unavailable_reason
-        # Decimals are still known — confidence stays HIGH on the unit amounts.
-        assert result.confidence.value == "HIGH"
+        # VIB-3886: pricing failure degrades confidence to ESTIMATED so
+        # downstream consumers (Accountant Test G6, dashboard cells) can
+        # tell the USD field is incomplete. Pre-VIB-3886 the LP path
+        # contradicted itself with HIGH+unavailable_reason simultaneously.
+        assert result.confidence.value == "ESTIMATED"
 
     def test_lp_open_with_no_price_inputs_returns_none(self) -> None:
         """Empty price_inputs_json (older ledger rows / paper trading) → None."""
@@ -773,7 +909,10 @@ class TestHandleLpCostBasisUsd:
 
         assert result is not None
         assert result.cost_basis_usd is None
-        assert result.confidence.value == "HIGH"
+        # VIB-3886: invalid-price degrades confidence to ESTIMATED, same as
+        # the missing-price case. The HIGH+unavailable_reason contradiction
+        # was the regression that hid this bug class on the May 2 dashboard.
+        assert result.confidence.value == "ESTIMATED"
         assert result.unavailable_reason is not None
         assert "invalid prices" in result.unavailable_reason
         assert "USDC" in result.unavailable_reason

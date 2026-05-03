@@ -158,7 +158,19 @@ def _make_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None = None)
         or [TeardownCommitOutcome(ledger_entry_id="ledger-1", accounting_degraded=False, degraded_reason=None)]
     )
 
-    async def _commit(strategy, intent, *, execution_result, execution_context, bundle_metadata, teardown_cycle_id):
+    async def _commit(
+        strategy,
+        intent,
+        *,
+        execution_result,
+        execution_context,
+        bundle_metadata,
+        teardown_cycle_id,
+        **_kwargs,
+    ):
+        # Absorb pre_snapshot / recon kwargs added by VIB-3918 per-intent
+        # balance capture so this thin test stub stays signature-compatible
+        # with the real ``commit_teardown_intent``.
         commit_calls.append(
             {
                 "strategy_id": strategy.strategy_id,

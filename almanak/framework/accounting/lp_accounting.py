@@ -48,6 +48,23 @@ class LPAccountingEvent:
         fees1_collected: Decimal | None,
         confidence: AccountingConfidence,
         unavailable_reason: str = "",
+        # VIB-3933 — fees expressed in USD (sum of fees0×price0 +
+        # fees1×price1 at execution-block prices). Persisted separately
+        # from ``realized_pnl_usd`` so the G6 reconciliation and the
+        # dashboard cost stack can attribute fee income without
+        # double-counting against realized PnL. ``realized_pnl_usd``
+        # MUST be net-of-fees on this event for the G6 contract to
+        # hold (see lp_handler computation).
+        fees_total_usd: Decimal | None = None,
+        # VIB-3893: position-range metadata propagated from receipt-parser
+        # ``lp_open_data`` (and slot0 fallback). Populated on LP_OPEN; left
+        # ``None`` on LP_CLOSE / LP_COLLECT_FEES where the bracket is the
+        # one stamped at OPEN time and lives on ``position_events``.
+        tick_lower: int | None = None,
+        tick_upper: int | None = None,
+        liquidity: int | None = None,
+        current_tick: int | None = None,
+        in_range: bool | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -62,8 +79,14 @@ class LPAccountingEvent:
         self.realized_pnl_usd = realized_pnl_usd
         self.fees0_collected = fees0_collected
         self.fees1_collected = fees1_collected
+        self.fees_total_usd = fees_total_usd
         self.confidence = confidence
         self.unavailable_reason = unavailable_reason
+        self.tick_lower = tick_lower
+        self.tick_upper = tick_upper
+        self.liquidity = liquidity
+        self.current_tick = current_tick
+        self.in_range = in_range
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -85,8 +108,25 @@ class LPAccountingEvent:
                 "realized_pnl_usd": _enc(self.realized_pnl_usd),
                 "fees0_collected": _enc(self.fees0_collected),
                 "fees1_collected": _enc(self.fees1_collected),
+                # VIB-3933 — net USD value of LP fees collected, populated
+                # on LP_CLOSE / LP_COLLECT_FEES from token-level fees0/1
+                # priced at execution-block oracle prices. Dashboard's
+                # ``fees_earned_usd`` bucket and G6 ``sum_fees`` read this
+                # field; ``realized_pnl_usd`` on the same event is net of
+                # this amount so the two contribute additively (no
+                # double-count).
+                "fees_total_usd": _enc(self.fees_total_usd),
                 "confidence": str(self.confidence),
                 "unavailable_reason": self.unavailable_reason,
+                # VIB-3893 — position-range metadata. Pre-fix every LP_OPEN
+                # accounting_event omitted these even though receipt-parser
+                # populated them on ``lp_open_data``; downstream Trade Tape
+                # rendered "in_range UNKNOWN" on every production LP open.
+                "tick_lower": self.tick_lower,
+                "tick_upper": self.tick_upper,
+                "liquidity": self.liquidity,
+                "current_tick": self.current_tick,
+                "in_range": self.in_range,
                 "schema_version": self.schema_version,
             }
         )

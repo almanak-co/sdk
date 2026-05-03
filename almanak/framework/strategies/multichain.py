@@ -661,7 +661,12 @@ class MultiChainMarketSnapshot:
         if self._price_oracle:
             try:
                 price_value = self._price_oracle(token, quote, chain_lower)
-                self._price_cache[chain_lower][cache_key] = PriceData(price=price_value)
+                # VIB-3889: stamp inferred source on the cached entry.
+                from almanak.framework.strategies.intent_strategy import _infer_oracle_source
+
+                self._price_cache[chain_lower][cache_key] = PriceData(
+                    price=price_value, source=_infer_oracle_source(self._price_oracle)
+                )
                 self._critical_data_failures.pop(("price", f"{cache_key}@{chain_lower}"), None)
                 return price_value
             except Exception as e:

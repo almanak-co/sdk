@@ -75,6 +75,76 @@ def _strategy_folder() -> Path | None:
     return path
 
 
+def looks_like_strategy_folder(path: Path) -> bool:
+    """Return True if ``path`` contains a strategy entry point.
+
+    A strategy folder is identified by a ``config.json`` (primary signal —
+    every Almanak demo strategy ships one) or a ``config.yaml`` /
+    ``config.yml`` (some incubating strategies) or a ``strategy.py``
+    (decorator-driven strategies without an explicit config file).
+
+    Used by ``almanak gateway`` and ``almanak strat teardown`` to
+    auto-detect a strategy folder from cwd so the operator does not have
+    to remember to set ``ALMANAK_STRATEGY_FOLDER`` for every invocation.
+    """
+    if not path.is_dir():
+        return False
+    if (path / "config.json").is_file():
+        return True
+    if (path / "config.yaml").is_file() or (path / "config.yml").is_file():
+        return True
+    return (path / "strategy.py").is_file()
+
+
+def auto_detect_strategy_folder(*, export_env: bool = True) -> Path | None:
+    """Auto-detect a strategy folder from cwd and (optionally) export
+    ``ALMANAK_STRATEGY_FOLDER``.
+
+    Mirrors the cwd-detection block in ``almanak strat run`` (cli/run.py)
+    and ``almanak strat teardown`` (cli/teardown.py) so a gateway started
+    from inside a strategy folder pins to that folder's DB instead of
+    silently falling through to ``~/.local/share/almanak/utility``.
+
+    Resolution order:
+        1. If ``ALMANAK_STRATEGY_FOLDER`` is already set to a real
+           directory, return it (operator override wins).
+        2. If cwd looks like a strategy folder
+           (:func:`looks_like_strategy_folder`), export it (when
+           ``export_env`` is True) and return.
+        3. Otherwise return ``None`` — the caller must decide whether
+           to hard-fail or accept standalone-mode operation.
+
+    The ``export_env`` knob lets internal callers query "is this cwd a
+    strategy folder?" without mutating process-global env. CLI helpers
+    that intentionally pin downstream lookups (``almanak gateway``,
+    ``almanak strat teardown``) keep the default ``True``; the strict
+    DB-path resolver passes ``False`` so a single ``local_strategy_db_path()``
+    probe does not permanently re-anchor later resolution in the same
+    process.
+
+    Idempotent: callers can invoke it multiple times safely; the env var
+    is only written when a folder is actually resolved AND ``export_env``
+    is True.
+    """
+    existing = _strategy_folder()
+    if existing is not None:
+        return existing
+
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        # cwd was deleted or is otherwise inaccessible. Fall through to
+        # ``None`` so callers can decide between hard-fail and standalone
+        # mode rather than letting the OSError bubble up.
+        return None
+    if looks_like_strategy_folder(cwd):
+        if export_env:
+            os.environ["ALMANAK_STRATEGY_FOLDER"] = str(cwd)
+        return cwd
+
+    return None
+
+
 def _ensure_local() -> None:
     """Refuse to be used in hosted mode.
 
@@ -110,11 +180,24 @@ def _resolve_db_path(*, strict: bool = False) -> Path:
     if folder is not None:
         return folder / LOCAL_DB_FILENAME
 
+    # Strict-mode fallback: try the cwd-detection path before raising so
+    # entry points that don't run a CLI helper first (e.g. the gateway's
+    # ``_server_start_helpers.resolve_gateway_local_db_path``) still
+    # auto-pin to a strategy folder when launched from inside one.
+    # ``export_env=False`` so a strict probe does not permanently
+    # re-anchor later path resolution in the same process — explicit
+    # CLI entry points (``almanak gateway``, ``almanak strat teardown``)
+    # call ``auto_detect_strategy_folder()`` directly and keep the
+    # env-export side effect.
     if strict:
+        cwd_folder = auto_detect_strategy_folder(export_env=False)
+        if cwd_folder is not None:
+            return cwd_folder / LOCAL_DB_FILENAME
         raise LocalPathError(
             "no strategy folder resolved.\n"
             "  Pass --working-dir / -d <path>, or run from a strategy folder.\n"
-            "  A strategy folder must contain config.json (and strategy.py)."
+            "  A strategy folder must contain config.json, config.yaml, "
+            "config.yml, or strategy.py."
         )
 
     explicit_gw = os.environ.get("ALMANAK_GATEWAY_DB_PATH")

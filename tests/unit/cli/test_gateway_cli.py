@@ -19,7 +19,10 @@ class TestGatewayCliAuth:
         env.pop("ALMANAK_GATEWAY_AUTH_TOKEN", None)
         env.pop("ALMANAK_GATEWAY_ALLOW_INSECURE", None)
 
-        result = runner.invoke(cli, ["gateway", "--network", "mainnet"], env=env)
+        # VIB-3761/-3835: gateway CLI is strict-by-default. These auth tests
+        # exercise the network/auth dimension only — pass --standalone so the
+        # DB resolver doesn't refuse outside a strategy folder.
+        result = runner.invoke(cli, ["gateway", "--network", "mainnet", "--standalone"], env=env)
 
         assert result.exit_code == 0, f"Unexpected exit: {result.output}"
         # serve() should have been called with settings that have an auth_token
@@ -39,7 +42,7 @@ class TestGatewayCliAuth:
         env.pop("ALMANAK_GATEWAY_AUTH_TOKEN", None)
         env.pop("ALMANAK_GATEWAY_ALLOW_INSECURE", None)
 
-        result = runner.invoke(cli, ["gateway", "--network", "anvil"], env=env)
+        result = runner.invoke(cli, ["gateway", "--network", "anvil", "--standalone"], env=env)
 
         assert result.exit_code == 0, f"Unexpected exit: {result.output}"
         mock_serve.assert_called_once()
@@ -56,7 +59,9 @@ class TestGatewayCliAuth:
         env.pop("ALMANAK_GATEWAY_AUTH_TOKEN", None)
         env.pop("ALMANAK_GATEWAY_ALLOW_INSECURE", None)
 
-        result = runner.invoke(cli, ["gateway", "--network", "mainnet", "--chains", "arbitrum"], env=env)
+        result = runner.invoke(
+            cli, ["gateway", "--network", "mainnet", "--chains", "arbitrum", "--standalone"], env=env
+        )
 
         assert result.exit_code == 0, f"Unexpected exit: {result.output}"
         mock_serve.assert_called_once()
@@ -72,7 +77,10 @@ class TestGatewayCliAuth:
         env["ALMANAK_GATEWAY_AUTH_TOKEN"] = "my-explicit-token"
         env.pop("ALMANAK_GATEWAY_ALLOW_INSECURE", None)
 
-        result = runner.invoke(cli, ["gateway", "--network", "mainnet"], env=env)
+        # VIB-3761/-3835: gateway CLI is strict-by-default. These auth tests
+        # exercise the network/auth dimension only — pass --standalone so the
+        # DB resolver doesn't refuse outside a strategy folder.
+        result = runner.invoke(cli, ["gateway", "--network", "mainnet", "--standalone"], env=env)
 
         assert result.exit_code == 0, f"Unexpected exit: {result.output}"
         mock_serve.assert_called_once()

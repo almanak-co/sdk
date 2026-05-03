@@ -245,6 +245,14 @@ def _build_post_state_for_ledger(
     ``debt_value_after_usd``, ``health_factor_after``, and
     ``liquidation_threshold``.
 
+    VIB-3888: ``post_timestamp`` is now propagated from the
+    reconciliation step (both structured-report and legacy-fallback
+    paths). When recon predates VIB-3888 and lacks the field, we stamp
+    ``datetime.now(UTC)`` rather than emit an empty string — the
+    reconciliation's existence implies the post-balance read just
+    happened, so an immediate-now timestamp is a closer approximation
+    than NULL.
+
     Returns ``None`` only when both reconciliation and lending post-state are
     missing.
     """
@@ -252,9 +260,19 @@ def _build_post_state_for_ledger(
     if recon:
         post_balances = recon.get("post_balances")
         if post_balances:
+            captured_at = recon.get("post_timestamp", "") or ""
+            if not captured_at:
+                # VIB-3888 — defensive fallback for legacy callers that
+                # don't propagate ``post_timestamp``. ``datetime.now(UTC)``
+                # is bounded above by the actual capture time (recon
+                # balance reads happened a few ms before this builder runs).
+                from datetime import UTC
+                from datetime import datetime as _dt
+
+                captured_at = _dt.now(UTC).isoformat()
             base = {
                 "wallet_balances": dict(post_balances),
-                "captured_at": recon.get("post_timestamp", "") or "",
+                "captured_at": captured_at,
                 "source": "balance_provider",
                 "incident": bool(recon.get("incident", False)),
             }
@@ -515,6 +533,17 @@ class StrategyRunner:
         # sees stale teardown prices. ``None`` = no stash; the writer falls
         # back to the unpriced path (price_inputs_json="").
         self._teardown_price_oracle: dict | None = None
+
+        # VIB-3894 — recent OPEN events cache for same-iteration snapshot
+        # cost-basis enrichment. Populated when ``save_position_event``
+        # succeeds for an OPEN event; consumed by
+        # ``_enrich_from_open_event`` in PortfolioValuer. Necessary because
+        # ``GatewayStateManager`` does not expose ``get_position_events_sync``,
+        # which would otherwise back-fill ``cost_basis_usd`` from disk.
+        # Keyed by ``(str(position_id), position_type)``. CLOSE events
+        # delete the matching entry so subsequent snapshots correctly
+        # report zero deployed capital after a teardown.
+        self._recent_open_events: dict[tuple[str, str], dict] = {}
 
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
@@ -1956,6 +1985,76 @@ class StrategyRunner:
         """
         return derive_execution_mode_from_config(self.config)
 
+    def _update_recent_open_events_cache(self, pos_event: Any) -> None:
+        """VIB-3894 — keep ``_recent_open_events`` in sync with disk writes.
+
+        Populated when ``save_position_event`` returns truthy for an OPEN
+        event so the same-iteration ``portfolio_snapshots`` row can read
+        ``cost_basis_usd`` and surface ``deployed_capital_usd`` correctly.
+        Removed on CLOSE so a post-teardown snapshot correctly reports
+        zero deployed capital.
+        """
+        try:
+            position_id = str(getattr(pos_event, "position_id", "") or "")
+            position_type = str(getattr(pos_event, "position_type", "") or "")
+            event_type = str(getattr(pos_event, "event_type", "") or "")
+            if not (position_id and position_type and event_type):
+                return
+            key = (position_id, position_type)
+            if event_type == "OPEN":
+                # VIB-3919 — also stamp the immutable LP bracket so the
+                # CLOSE-event writer can backfill ``tick_lower /
+                # tick_upper / liquidity`` from this cache. The bracket
+                # never changes over a position's lifetime; carrying it
+                # here saves a state-manager round-trip at CLOSE time
+                # and keeps the fields populated even when the close
+                # receipt parser doesn't re-emit them.
+                self._recent_open_events[key] = {
+                    "value_usd": str(getattr(pos_event, "value_usd", "") or ""),
+                    "ledger_entry_id": str(getattr(pos_event, "ledger_entry_id", "") or ""),
+                    "timestamp": str(getattr(pos_event, "timestamp", "") or ""),
+                    "tick_lower": getattr(pos_event, "tick_lower", None),
+                    "tick_upper": getattr(pos_event, "tick_upper", None),
+                    "liquidity": str(getattr(pos_event, "liquidity", "") or ""),
+                }
+            elif event_type == "CLOSE":
+                self._recent_open_events.pop(key, None)
+        except Exception:  # noqa: BLE001 — never raise from a cache update
+            logger.debug("recent-open cache update failed", exc_info=True)
+
+    def _maybe_enrich_lp_open_with_slot0(self, result: Any, chain: str) -> None:
+        """VIB-3893 — fill ``LPOpenData.current_tick`` from a slot0 RPC.
+
+        The receipt parser populates ``current_tick`` from a Swap event
+        in the same receipt (atomic swap-then-mint). When the strategy
+        splits the swap and the mint into separate cycles (the canonical
+        AccountingQuant-LP path), the LP_OPEN receipt is a pure NPM.mint
+        and ``current_tick`` stays None — making ``position_events.in_range``
+        unrecoverable. This fallback issues one extra ``slot0()`` eth_call
+        through the gateway and patches the field in place.
+
+        No-ops when ``extracted_data`` lacks an ``LPOpenData``, when
+        ``current_tick`` is already populated, or when the gateway client
+        / pool address are missing. Never raises.
+        """
+        try:
+            extracted = getattr(result, "extracted_data", None)
+            if not isinstance(extracted, dict):
+                return
+            lp_open = extracted.get("lp_open_data")
+            if lp_open is None:
+                return
+            from ..connectors.uniswap_v3.slot0_fallback import enrich_lp_open_with_slot0
+
+            gateway = self._get_gateway_client()
+            if gateway is None:
+                return
+            enriched = enrich_lp_open_with_slot0(lp_open, gateway_client=gateway, chain=chain)
+            if enriched is not lp_open:
+                extracted["lp_open_data"] = enriched
+        except Exception:  # noqa: BLE001 — fail-open
+            logger.debug("slot0 enrichment failed", exc_info=True)
+
     async def _write_ledger_entry(
         self,
         strategy: StrategyProtocol,
@@ -1989,6 +2088,18 @@ class StrategyRunner:
 
             cycle_id = get_cycle_id() or ""
             chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+
+            # VIB-3893 v2 — slot0 enrichment must run BEFORE
+            # ``build_ledger_entry`` serializes ``result.extracted_data``
+            # into ``transaction_ledger.extracted_data_json``. Pre-fix the
+            # enrichment ran post-save (further down this method) and the
+            # ledger row carried ``current_tick=None`` even though the
+            # post-save position_event captured the slot0-derived value.
+            # Net effect: the LP accounting payload (built later from the
+            # ledger row) showed ``in_range=None`` on every production
+            # swap-then-mint-across-cycles run.
+            self._maybe_enrich_lp_open_with_slot0(result, chain)
+
             entry = build_ledger_entry(
                 strategy_id=strategy.strategy_id,
                 cycle_id=cycle_id,
@@ -2041,12 +2152,28 @@ class StrategyRunner:
                 try:
                     from ..observability.position_events import build_position_event_from_intent
 
+                    # VIB-3893: slot0 enrichment now runs before
+                    # ``build_ledger_entry`` (see top of this method) so
+                    # the ledger row's extracted_data_json carries
+                    # current_tick at write time. ``result.extracted_data``
+                    # is already enriched in-place by the time we reach
+                    # build_position_event_from_intent — no second call
+                    # needed here.
                     pos_event = build_position_event_from_intent(
                         deployment_id=deployment_id,
                         intent=intent,
                         result=result,
                         ledger_entry_id=entry.id,
                         chain=chain,
+                        price_oracle=price_oracle,
+                        # VIB-3919 — thread the recent-open cache so
+                        # LP_CLOSE events can backfill the immutable
+                        # bracket (tick_lower/upper/liquidity) from the
+                        # matching OPEN event without a state-manager
+                        # round-trip. Cache is updated below; pop on
+                        # CLOSE happens AFTER the close event is built,
+                        # so the lookup here still finds the OPEN row.
+                        recent_open_events=self._recent_open_events,
                     )
                     if pos_event is not None:
                         # Phase 4: stamp cycle_id and execution_mode (VIB-2835/2837)
@@ -2086,6 +2213,15 @@ class StrategyRunner:
                                 pos_event.position_type,
                                 pos_event.position_id,
                             )
+                            # VIB-3894 — keep the runner-side recent-open cache
+                            # in sync with the on-disk position_events table so
+                            # the same-iteration snapshot can read cost basis
+                            # without a get_position_events_sync round-trip.
+                            # ONLY update on save success: a cache entry without
+                            # a backing row would surface cost_basis_usd for a
+                            # position the books don't know about.
+                            if pos_event.position_id:
+                                self._update_recent_open_events_cache(pos_event)
                         # VIB-3205: stamp entry_state on OPEN events so subsequent
                         # CLOSE-time IL attribution can evaluate HODL value.
                         if pos_event.event_type == "OPEN" and pos_event.position_id:
@@ -2836,15 +2972,53 @@ class StrategyRunner:
         The merge is additive: cached values win on key collision so we
         don't trample a HIGH-confidence price with a STALE refresh, but
         any key the cache lacked gets filled from the refresh.
+
+        VIB-3889: when the market exposes ``get_price_oracle_dict(with_sources=True)``
+        (the canonical AttemptNo17 §1.2 G12 nested shape), the merge pulls
+        the nested dict so ``transaction_ledger.price_inputs_json`` carries
+        the actual provider name (coingecko / chainlink / binance / thegraph).
+        Pre-VIB-3889 the dashboard's "Oracle quotes used" expander rendered
+        every source as "unknown" because the cached flat dict had no
+        provenance, and the ledger writer's normaliser defaulted to "unknown".
+        Markets without ``with_sources`` support fall back to the legacy
+        flat path (cleanly).
         """
         cached = getattr(state, "price_oracle", None) or {}
         refreshed = self._refresh_price_oracle_for_ledger(getattr(state, "market", None), intent) or {}
+
+        # VIB-3889: prefer the nested shape with sources when the market
+        # supports it. The ledger writer at observability/ledger.py:529-545
+        # propagates the nested shape verbatim; readers (handlers via
+        # parse_price_inputs, dashboard) tolerate either shape.
+        market = getattr(state, "market", None)
+        nested_with_sources: dict | None = None
+        if market is not None and hasattr(market, "get_price_oracle_dict"):
+            try:
+                nested_with_sources = market.get_price_oracle_dict(with_sources=True)
+            except TypeError:
+                # Older market snapshots without the with_sources kwarg.
+                nested_with_sources = None
+            except Exception:
+                logger.debug("VIB-3889: get_price_oracle_dict(with_sources=True) raised", exc_info=True)
+                nested_with_sources = None
+
+        if nested_with_sources:
+            # Overlay the source-aware nested entries on top of the flat
+            # cached/refreshed dict so the ledger writer's normaliser
+            # passes the provenance through. Cached/refreshed entries
+            # without a nested counterpart stay as Decimals (writer wraps
+            # them with oracle_source="unknown").
+            merged: dict = {**refreshed, **cached}
+            for sym, payload in nested_with_sources.items():
+                merged[sym] = payload
+            return merged or None
+
         if not cached and not refreshed:
             return None
-        # ``refreshed`` first, ``cached`` overrides — preserves cached
-        # provenance / confidence on overlap, fills gaps from refresh.
-        merged: dict = {**refreshed, **cached}
-        return merged or None
+        # Legacy path: ``refreshed`` first, ``cached`` overrides — preserves
+        # cached provenance / confidence on overlap, fills gaps from refresh.
+        merged_flat: dict = {**refreshed, **cached}
+        return merged_flat or None
 
     @staticmethod
     def _build_single_chain_price_oracle(market: Any | None, intent: AnyIntent) -> dict | None:

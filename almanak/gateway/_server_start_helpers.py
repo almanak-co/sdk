@@ -284,15 +284,39 @@ def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
 
     from almanak.framework.local_paths import (
         acquire_local_db_lock,
-        local_db_path,
         warn_if_legacy_cwd_db_exists,
     )
 
     warn_if_legacy_cwd_db_exists(logger)
-    db_path = local_db_path()
+    db_path = resolve_gateway_local_db_path(settings)
     handle = acquire_local_db_lock(db_path)
-    logger.info("Local DB flock acquired on %s (single-writer guard)", db_path)
+    mode = "STANDALONE" if settings.standalone else "STRATEGY-PINNED"
+    logger.info("Local DB flock acquired on %s (%s, single-writer guard)", db_path, mode)
     return handle
+
+
+def resolve_gateway_local_db_path(settings: GatewaySettings):
+    """Resolve the gateway's local SQLite DB path with mode-aware strictness.
+
+    VIB-3761/-3835: in default (non-standalone) local mode the gateway uses
+    :func:`local_strategy_db_path` — strict resolution that raises
+    :class:`LocalPathError` rather than silently writing to the per-user
+    utility DB. ``almanak gateway --standalone`` (or
+    ``ALMANAK_GATEWAY_STANDALONE=true``) opts in to the lenient resolver
+    for ad-hoc, non-strategy sessions (``almanak ax``, intent tests).
+
+    The strict path is the single line that closes the May 2 dashboard
+    miscount class: a gateway started inside a strategy folder physically
+    cannot end up writing to ``~/.local/share/almanak/utility``.
+
+    Hosted mode is handled by callers — this helper assumes a local-mode
+    settings object.
+    """
+    from almanak.framework.local_paths import local_db_path, local_strategy_db_path
+
+    if settings.standalone:
+        return local_db_path()
+    return local_strategy_db_path()
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +358,13 @@ async def validate_state_schema_at_boot(settings: GatewaySettings) -> None:
         return
 
     # Local SQLite: ensure migrations have run on the same DB the runner
-    # will write to before we introspect. Resolve via the canonical helper
-    # (VIB-3761) so this matches state_service.py's resolution exactly.
-    from almanak.framework.local_paths import local_db_path
+    # will write to before we introspect. Resolve via the mode-aware
+    # helper (VIB-3761/-3835) so this matches state_service.py's
+    # resolution exactly — strict-by-default, lenient only with
+    # --standalone — closing the May 2 silent-write-to-utility class.
     from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
-    db_path = str(local_db_path())
+    db_path = str(resolve_gateway_local_db_path(settings))
     store = SQLiteStore(SQLiteConfig(db_path=db_path))
     try:
         await store.initialize()

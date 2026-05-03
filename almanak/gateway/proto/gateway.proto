@@ -1165,6 +1165,14 @@ service DashboardService {
 
   // Get structured trade records from the transaction ledger (VIB-2402).
   rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse);
+
+  // Senior-Quant header aggregations: money trail, cost stack,
+  // reconciliation, audit-trail completeness, Accountant posture.
+  rpc GetQuantHeader(GetQuantHeaderRequest) returns (QuantHeaderInfo);
+
+  // Trade tape: ledger × accounting × position-event joined view, one
+  // row per intent, with receipt-parsed and oracle-quote payloads.
+  rpc GetTradeTape(GetTradeTapeRequest) returns (GetTradeTapeResponse);
 }
 
 // =============================================================================
@@ -1444,6 +1452,147 @@ message LedgerEntryInfo {
   string protocol = 16;
   bool success = 17;
   string error = 18;
+}
+
+// Senior-Quant header messages -----------------------------------------------
+
+message GetQuantHeaderRequest {
+  string strategy_id = 1;
+}
+
+// Aggregated header card data: money trail, cost stack, position summary,
+// reconciliation (G6), audit-trail completeness, and Accountant posture.
+// All decimals serialized as strings to preserve precision.
+message QuantHeaderInfo {
+  // Money trail (G1, G4, G5)
+  string deployed_usd = 1;          // initial + deposits - withdrawals
+  string nav_usd = 2;               // current portfolio value
+  string lifetime_pnl_usd = 3;      // nav - deployed
+  string lifetime_pnl_pct = 4;
+  string net_apr_pct = 5;
+  string max_drawdown_pct = 6;
+  string current_drawdown_pct = 7;
+  string value_confidence = 8;      // HIGH | ESTIMATED | STALE | UNAVAILABLE
+  int64  age_days = 9;
+
+  // Position + risk
+  string deployed_capital_usd = 20; // open positions
+  string available_cash_usd = 21;
+  int32  open_position_count = 22;
+  string primary_risk_label = 23;   // "HF 1.78" | "in-range YES" | "Lev 1.7×"
+  string primary_risk_value = 24;
+  string primary_risk_color = 25;   // "green" | "yellow" | "red" | "neutral"
+  string primary_risk_kind = 26;    // "lp" | "lending" | "perp" | "none"
+
+  // Cost stack (life-to-date) (G2, G3, P3, P5)
+  string cost_gas_usd = 30;
+  string cost_protocol_fees_usd = 31;
+  string cost_slippage_usd = 32;
+  string fees_earned_usd = 33;
+  string interest_paid_usd = 34;
+  string interest_earned_usd = 35;
+  string funding_paid_usd = 36;
+  string funding_earned_usd = 37;
+  string realized_pnl_usd = 38;
+  string il_usd = 39;               // diagnostic only
+
+  // Reconciliation (G6)
+  string g6_status = 50;            // "PASS" | "FAIL" | "NA"
+  string g6_wallet_pnl_usd = 51;
+  string g6_component_pnl_usd = 52;
+  string g6_gap_usd = 53;
+  string g6_epsilon_usd = 54;
+  string g6_sum_swap = 55;
+  string g6_sum_lp = 56;
+  string g6_sum_perp = 57;
+  string g6_sum_fees = 58;
+  string g6_sum_funding = 59;
+  string g6_sum_interest = 60;
+  string g6_sum_gas = 61;
+
+  // Audit-trail completeness (G9, G12, G13)
+  int32 ledger_total = 70;
+  int32 ledger_with_price_inputs = 71;
+  int32 ledger_with_pre_post_state = 72;
+  int32 ledger_with_gas_usd = 73;
+  int32 events_total = 74;
+  int32 events_with_versions = 75;
+
+  // Accountant Test posture
+  string primitive = 80;            // "lp" | "lending" | "perp" | "swap" | "mixed"
+  int32 cells_passed = 81;
+  int32 cells_failed = 82;
+  int32 cells_xfail = 83;
+  int32 cells_total = 84;
+  repeated string failing_cells = 85;
+  repeated string xfail_cells = 86;
+}
+
+// Trade tape messages --------------------------------------------------------
+
+message GetTradeTapeRequest {
+  string strategy_id = 1;
+  int32 limit = 2;
+  int64 before_timestamp = 3;       // pagination (unix; 0 = newest first)
+}
+
+message GetTradeTapeResponse {
+  repeated TradeTapeRow rows = 1;
+  bool has_more = 2;
+}
+
+// One row per intent (cycle_id), joining transaction_ledger,
+// accounting_events, and position_events. JSON pass-throughs are decoded
+// client-side for the expander cards.
+message TradeTapeRow {
+  // Core ledger fields
+  string id = 1;
+  string cycle_id = 2;
+  int64  timestamp = 3;
+  string intent_type = 4;
+  string token_in = 5;
+  string amount_in = 6;
+  string token_out = 7;
+  string amount_out = 8;
+  string effective_price = 9;
+  float  slippage_bps = 10;
+  int64  gas_used = 11;
+  string gas_usd = 12;
+  string tx_hash = 13;
+  string chain = 14;
+  string protocol = 15;
+  bool   success = 16;
+  string error = 17;
+
+  // Derived USD values
+  string amount_in_usd = 20;
+  string amount_out_usd = 21;
+
+  // JSON pass-throughs (decoded client-side; opaque on the wire)
+  string extracted_data_json = 30;
+  string price_inputs_json = 31;
+  string pre_state_json = 32;
+  string post_state_json = 33;
+  string accounting_payload_json = 34;
+
+  // Quick-access derived from accounting_events
+  string accounting_event_type = 40;
+  string position_key = 41;
+  string confidence = 42;
+  string unavailable_reason = 43;
+  int32  schema_version = 44;
+  int32  formula_version = 45;
+  int32  matching_policy_version = 46;
+
+  // Linked position event (LP/PERP only; opaque JSON for v1)
+  string position_event_json = 50;
+  string position_id = 51;
+  string position_event_type = 52;
+
+  // Per-row reconciliation (best-effort)
+  string row_wallet_delta_usd = 60;
+  string row_component_usd = 61;
+  string row_residual_usd = 62;
 }
 
 // =============================================================================

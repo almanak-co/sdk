@@ -2763,6 +2763,7 @@ class SQLiteStore:
         since: datetime | None = None,
         intent_type: str | None = None,
         limit: int = 100,
+        before: datetime | None = None,
     ) -> list["LedgerEntry"]:
         """Query transaction ledger entries.
 
@@ -2771,6 +2772,7 @@ class SQLiteStore:
             since: Only entries after this timestamp.
             intent_type: Filter by intent type.
             limit: Maximum entries to return.
+            before: Only entries strictly older than this timestamp.
 
         Returns:
             List of LedgerEntry objects, newest first.
@@ -2787,6 +2789,9 @@ class SQLiteStore:
             if since is not None:
                 conditions.append("timestamp > ?")
                 params.append(since.isoformat())
+            if before is not None:
+                conditions.append("timestamp < ?")
+                params.append(before.isoformat())
             if intent_type is not None:
                 conditions.append("intent_type = ?")
                 params.append(intent_type)

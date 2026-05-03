@@ -310,8 +310,16 @@ def main() -> None:
                 selected_strategy = strategies[selected_strategy_display - 1]
                 if selected_strategy.id != current_strategy_id:
                     st.query_params["strategy_id"] = selected_strategy.id
-                    # If on overview, switch to detail page
-                    if st.query_params.get("page") == "overview":
+                    # Picking a strategy from the sidebar means "show me this
+                    # one" — route to detail unless the operator is on a
+                    # page that already accepts a strategy_id (timeline,
+                    # config, teardown, custom_dashboard). Previously this
+                    # only fired when ``page == "overview"``, which missed
+                    # the no-page-set case (default overview render with no
+                    # ``page`` key in query params) and left the user stuck
+                    # on the strategy list.
+                    strategy_aware_pages = {"detail", "timeline", "config", "teardown", "custom_dashboard"}
+                    if st.query_params.get("page") not in strategy_aware_pages:
                         st.query_params["page"] = "detail"
                     st.rerun()
             elif current_strategy_id and selected_strategy_display == 0:

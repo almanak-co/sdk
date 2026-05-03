@@ -40,7 +40,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -86,24 +86,21 @@ from ..teardown import (
 
 _STRATEGY_FOLDER_HINT = (
     "Pass --working-dir / -d <path>, or run from a strategy folder.\n"
-    "  A strategy folder must contain config.json (and strategy.py)."
+    "  A strategy folder must contain config.json, config.yaml, "
+    "config.yml, or strategy.py."
 )
 
 
 def _looks_like_strategy_folder(path: Path) -> bool:
-    """Return True if ``path`` contains a config.json (or strategy.py).
+    """Compatibility shim — delegates to the canonical helper in ``local_paths``.
 
-    config.json is the primary signal — every Almanak strategy folder has one.
-    strategy.py is accepted as a fallback because some incubating strategies
-    rely on the decorator-driven config and ship without a config.json.
+    Kept as a private name to avoid touching every call site in this module
+    while sharing one implementation across ``almanak strat run``,
+    ``almanak strat teardown`` and ``almanak gateway`` (VIB-3761/-3835).
     """
-    if not path.is_dir():
-        return False
-    if (path / "config.json").exists():
-        return True
-    if (path / "config.yaml").exists() or (path / "config.yml").exists():
-        return True
-    return (path / "strategy.py").exists()
+    from almanak.framework.local_paths import looks_like_strategy_folder
+
+    return looks_like_strategy_folder(path)
 
 
 def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
@@ -610,6 +607,21 @@ def teardown():
     type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
     help="Network type: 'mainnet' (default) or 'anvil' to connect to an already-running Anvil fork.",
 )
+@click.option(
+    "--no-accounting",
+    "no_accounting",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip wiring the augmentation pipeline. None of "
+        "transaction_ledger / accounting_events / position_events / "
+        "portfolio_snapshots / portfolio_metrics will be updated, and the "
+        "VIB-3839 pre/post snapshot brackets are skipped. Use only for "
+        "known-broken environments — the books and on-chain reality will "
+        "diverge. Default is to hard-fail when wiring fails so the operator "
+        "never moves real funds without books."
+    ),
+)
 def execute_teardown(
     working_dir: str,
     config_file: str | None,
@@ -622,6 +634,7 @@ def execute_teardown(
     discover: bool,
     include_empty: bool,
     network: str | None,
+    no_accounting: bool,
 ):
     """Execute teardown directly from a strategy working directory.
 
@@ -1246,6 +1259,21 @@ def execute_teardown(
         cli_teardown_id = f"td_{_uuid.uuid4().hex[:12]}"
         teardown_cycle_id = f"teardown-{cli_teardown_id}"
 
+        # ``--no-accounting`` is the operator's explicit opt-in to skip the
+        # augmentation pipeline (for known-broken environments only). It
+        # short-circuits the StrategyRunner construction and the pre/post
+        # bracket snapshots in ``run_teardown`` below.
+        if no_accounting:
+            click.echo(
+                click.style(
+                    "  --no-accounting: augmentation pipeline DISABLED — "
+                    "transaction_ledger / accounting_events / position_events / "
+                    "portfolio_snapshots / portfolio_metrics will NOT be updated, "
+                    "and the pre/post-teardown snapshot brackets are skipped",
+                    fg="yellow",
+                )
+            )
+
         # Execute with progress callback. When --discover is active the
         # strategy has no knowledge of the on-chain-discovered positions, so
         # pass the already-built summary and intents straight through;
@@ -1254,23 +1282,43 @@ def execute_teardown(
             async def on_progress(pct: int, msg: str):
                 click.echo(f"  [{pct}%] {msg}")
 
-            # VIB-3839: build the minimal StrategyRunner inside the async
-            # context (state_manager.initialize() is async). The runner
+            # VIB-3839 + VIB-3892: build the minimal StrategyRunner inside the
+            # async context (state_manager.initialize() is async). The runner
             # exists only to host the runner_helpers callables — it is
-            # never started as an iteration loop.
-            runner = await _build_cli_teardown_runner(
-                gateway_client=gateway_client,
-                price_oracle=price_oracle,
-                orchestrator=orchestrator,
-                chain=chain,
-                wallet_address=wallet_address,
-            )
+            # never started as an iteration loop. Failures here propagate as
+            # ClickException via the outer ``run_teardown`` handler — never
+            # silently fall back to a runner_helpers=None bypass (audit B2:
+            # books and on-chain reality must not diverge silently).
+            runner = None
+            runner_helpers_for_manager = None
+            if not no_accounting:
+                try:
+                    runner = await _build_cli_teardown_runner(
+                        gateway_client=gateway_client,
+                        price_oracle=price_oracle,
+                        orchestrator=orchestrator,
+                        chain=chain,
+                        wallet_address=wallet_address,
+                    )
+                    runner_helpers_for_manager = build_runner_helpers(runner)
+                except Exception as exc:
+                    logger.error(
+                        "Could not wire accounting pipeline for teardown: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    raise click.ClickException(
+                        f"Accounting pipeline wiring failed: {exc}. "
+                        "Teardown aborted to prevent silent books/on-chain divergence. "
+                        "Pass --no-accounting to proceed without writing accounting tables "
+                        "(operator opt-in for known-broken environments only)."
+                    ) from exc
 
             teardown_manager = TeardownManager(
                 orchestrator=orchestrator,  # type: ignore[arg-type]  # duck-typed orchestrator
                 compiler=compiler,
                 state_manager=teardown_state_adapter,
-                runner_helpers=build_runner_helpers(runner),
+                runner_helpers=runner_helpers_for_manager,
             )
 
             kwargs = {
@@ -1283,6 +1331,13 @@ def execute_teardown(
             if discover:
                 kwargs["precomputed_positions"] = positions
                 kwargs["precomputed_intents"] = intents
+
+            # When --no-accounting is set, skip the cycle-id swap and pre/post
+            # brackets entirely; the pipeline is intentionally bypassed so
+            # there are no accounting writers to align cycle ids for.
+            if no_accounting or runner is None:
+                result = await teardown_manager.execute(**kwargs)
+                return result
 
             # VIB-3839: cycle-id swap on BOTH surfaces (P1-4 — runner_state.py
             # reads ``runner._last_cycle_id`` first, then falls back to the
@@ -1376,6 +1431,60 @@ def execute_teardown(
         click.echo(f"  Final value: ${result.final_value_usd:,.2f}")
         click.echo(f"  Total costs: ${result.total_costs_usd:,.2f}")
         click.echo("=" * 60)
+
+        # VIB-3920 — record the lifecycle in ``teardown_requests`` so the
+        # dashboard's Teardown tab and §1.2 G5 ship gate can read a
+        # consistent post-execute state. Pre-fix the ``execute`` lane
+        # bypassed the request table entirely (the table was only
+        # populated by the request-lane CLI / dashboard), making
+        # ``teardown_requests.status`` and ``positions_closed`` always
+        # NULL/0 for direct-execute runs even when the on-chain teardown
+        # closed real positions.
+        try:
+            # Local alias-imports to avoid shadowing the outer-scope
+            # ``TeardownMode`` reference earlier in this function.
+            from almanak.framework.teardown.models import (
+                TeardownAssetPolicy as _TAP,
+            )
+            from almanak.framework.teardown.models import (
+                TeardownMode as _TM,
+            )
+            from almanak.framework.teardown.models import (
+                TeardownRequest as _TR,
+            )
+            from almanak.framework.teardown.models import (
+                TeardownStatus as _TS,
+            )
+
+            tsm = _get_teardown_state_manager_or_die()
+            existing = tsm.get_active_request(strategy_id_for_log)
+            if existing is None:
+                # Create-then-mark to keep the lifecycle queryable. Use the
+                # asset_policy default; the execute lane doesn't surface
+                # asset-routing knobs at the CLI level (those live on the
+                # request lane), so the safe default mirrors the request-
+                # lane DEFAULTS.
+                existing = _TR(
+                    strategy_id=strategy_id_for_log,
+                    mode=_TM(mode),
+                    asset_policy=_TAP.TARGET_TOKEN,
+                    target_token="USDC",
+                    requested_by="cli-execute",
+                    reason="execute_teardown CLI invocation",
+                    positions_total=result.intents_total,
+                )
+                tsm.create_request(existing)
+            existing.positions_total = max(existing.positions_total, result.intents_total)
+            existing.positions_closed = result.intents_succeeded
+            existing.positions_failed = result.intents_failed
+            existing.completed_at = datetime.now(UTC)
+            existing.status = _TS.COMPLETED if result.success else _TS.FAILED
+            tsm.update_request(existing)
+        except Exception:  # noqa: BLE001 — never block CLI exit on bookkeeping
+            logger.debug(
+                "VIB-3920: failed to update teardown_requests post-execute",
+                exc_info=True,
+            )
 
         if not result.success:
             sys.exit(1)

@@ -153,6 +153,96 @@ def _price_oracle_supports_chain_arg(price_oracle: PriceOracle) -> bool:
     return len(positional_params) >= 3
 
 
+# Provider-name keywords matched against the oracle's qualified name to
+# infer ``PriceData.source`` (VIB-3889). Order matters — first match wins.
+# Keywords were taken from the four production providers named in
+# AccountingPost1977.md §2.3 ORACLE.
+#
+# VIB-3895: ``gateway_oracle`` / ``gateway`` / ``marketservice`` keywords
+# were added to recognise the production wiring where the strategy's
+# ``price_oracle`` is a :class:`GatewayPriceOracle` instance whose class
+# module is ``almanak.framework.data.price.gateway_oracle``. Without these
+# hints, ``_infer_oracle_source`` returned ``""`` and every token in
+# ``transaction_ledger.price_inputs_json`` rendered as
+# ``oracle_source: "unknown"`` even though the gateway aggregator was
+# correctly fanning out to coingecko + chainlink + binance + thegraph.
+_PROVIDER_NAME_HINTS: tuple[tuple[str, str], ...] = (
+    ("coingecko", "coingecko"),
+    ("chainlink", "chainlink"),
+    ("binance", "binance"),
+    ("thegraph", "thegraph"),
+    ("graph", "thegraph"),
+    ("uniswap", "uniswap"),
+    ("aggregat", "aggregator"),  # PriceAggregator and friends
+    ("dex_twap", "dex_twap"),
+    ("twap", "dex_twap"),
+    # VIB-3895 — production gateway oracle path
+    ("gateway_oracle", "aggregator"),
+    ("gatewaypriceoracle", "aggregator"),
+    ("marketservice", "aggregator"),
+    ("gateway", "aggregator"),
+)
+
+
+def _infer_oracle_source(price_oracle: PriceOracle) -> str:
+    """Best-effort source-name extraction from a price-oracle callable.
+
+    Inspects ``__qualname__`` / ``__module__`` and matches against a
+    short hint list so the cached ``PriceData.source`` carries a
+    meaningful provider name (e.g. "coingecko") instead of "unknown".
+    Returns ``""`` when no hint matches; callers default to "unknown"
+    downstream — strictly better than the pre-VIB-3889 always-"unknown"
+    behaviour because at least the matched cases now identify the real
+    provider.
+
+    VIB-3895: when ``price_oracle`` is a class instance (not a function /
+    bound method), the introspection also walks ``type(instance)`` so the
+    class's ``__qualname__`` and ``__module__`` participate in the match.
+    Without this the production ``GatewayPriceOracle`` instance returned
+    ``""`` and every ledger row carried ``oracle_source: "unknown"``.
+    """
+    candidates: list[str] = []
+
+    def _harvest(obj: Any) -> None:
+        for attr in ("__qualname__", "__module__", "__name__"):
+            value = getattr(obj, attr, None)
+            if isinstance(value, str):
+                candidates.append(value)
+        cls = type(obj)
+        for attr in ("__qualname__", "__module__", "__name__"):
+            value = getattr(cls, attr, None)
+            if isinstance(value, str):
+                candidates.append(value)
+
+    _harvest(price_oracle)
+    # ``functools.partial`` wraps the real callable on ``.func``.
+    func = getattr(price_oracle, "func", None)
+    if func is not None:
+        _harvest(func)
+    # VIB-3895 — the CLI's ``create_sync_price_oracle_func`` stamps the
+    # underlying oracle on ``__wrapped__`` (functools.wraps convention).
+    # Walk that chain so the real provider's class (e.g.
+    # ``GatewayPriceOracle``) participates in the hint match. Without
+    # this, every production ledger row carried
+    # ``oracle_source: "unknown"`` because the strategy only ever sees
+    # the local ``sync_price`` wrapper, not the real oracle.
+    seen: set[int] = {id(price_oracle)}
+    cursor: Any = price_oracle
+    while True:
+        wrapped = getattr(cursor, "__wrapped__", None)
+        if wrapped is None or id(wrapped) in seen:
+            break
+        seen.add(id(wrapped))
+        _harvest(wrapped)
+        cursor = wrapped
+
+    haystack = " ".join(candidates).lower()
+    for needle, source_name in _PROVIDER_NAME_HINTS:
+        if needle in haystack:
+            return source_name
+    return ""
+
+
 # =============================================================================
 # Market Snapshot Helper
 # =============================================================================
@@ -378,7 +468,13 @@ class MarketSnapshot:
                     if _price_oracle_supports_chain_arg(self._price_oracle)
                     else self._price_oracle(token, quote)
                 )
-                self._price_cache[cache_key] = PriceData(price=price_value)
+                # VIB-3889: stamp the inferred source on the cached entry
+                # so ``get_price_oracle_dict(with_sources=True)`` carries
+                # the actual provider name into ``price_inputs_json``.
+                self._price_cache[cache_key] = PriceData(
+                    price=price_value,
+                    source=_infer_oracle_source(self._price_oracle),
+                )
                 self._critical_data_failures.pop(("price", cache_key), None)
                 return price_value
             except Exception as e:
@@ -1908,7 +2004,7 @@ class MarketSnapshot:
             logger.debug(f"Failed to get prediction price for {market_id}/{outcome}")
             return None
 
-    def get_price_oracle_dict(self) -> dict[str, Decimal]:
+    def get_price_oracle_dict(self, with_sources: bool = False) -> dict[str, Any]:
         """Get all prices as a dict suitable for IntentCompiler.
 
         Combines pre-populated prices and cached prices from oracle calls.
@@ -1917,23 +2013,54 @@ class MarketSnapshot:
         case-mismatch lookup failures for mixed-case tokens like cbETH,
         wstETH, crvUSD, sUSDe, etc.
 
+        Args:
+            with_sources: When ``True`` (VIB-3889), return the canonical
+                nested shape ``{symbol: {price_usd, oracle_source,
+                fetched_at, confidence}}`` so downstream writers
+                (transaction_ledger.price_inputs_json) carry the actual
+                provider name rather than "unknown". Default ``False``
+                preserves the legacy flat ``{symbol: price}`` return.
+
         Returns:
-            Dict mapping uppercase token symbols to USD prices
+            Flat ``dict[str, Decimal]`` (default) or nested
+            ``dict[str, dict]`` when ``with_sources=True``.
         """
-        prices: dict[str, Decimal] = {}
+        if not with_sources:
+            prices: dict[str, Decimal] = {}
+            # Add pre-populated prices (normalize keys to uppercase)
+            for key, val in self._prices.items():
+                prices[key.upper()] = val
+            # Add cached prices from oracle calls (key format: "TOKEN/USD")
+            for cache_key, price_data in self._price_cache.items():
+                if "/" in cache_key:
+                    token = cache_key.split("/")[0].upper()
+                    prices[token] = price_data.price
+            return prices
 
-        # Add pre-populated prices (normalize keys to uppercase)
+        # VIB-3889 nested shape: {symbol: {price_usd, oracle_source, ...}}
+        # — the canonical AttemptNo17 §1.2 G12 shape that ledger.py:529-544
+        # propagates verbatim into transaction_ledger.price_inputs_json.
+        nested: dict[str, dict[str, Any]] = {}
         for key, val in self._prices.items():
-            prices[key.upper()] = val
-
-        # Add cached prices from oracle calls (key format: "TOKEN/USD")
+            nested[key.upper()] = {
+                "price_usd": str(val),
+                "oracle_source": "preloaded",
+                "fetched_at": "",
+                "confidence": "HIGH",
+            }
         for cache_key, price_data in self._price_cache.items():
-            # Extract token symbol from cache key (e.g., "ETH/USD" -> "ETH")
-            if "/" in cache_key:
-                token = cache_key.split("/")[0].upper()
-                prices[token] = price_data.price
-
-        return prices
+            if "/" not in cache_key:
+                continue
+            token = cache_key.split("/")[0].upper()
+            source = getattr(price_data, "source", "") or "unknown"
+            ts = getattr(price_data, "timestamp", None)
+            nested[token] = {
+                "price_usd": str(price_data.price),
+                "oracle_source": source,
+                "fetched_at": ts.isoformat() if ts is not None else "",
+                "confidence": "HIGH",
+            }
+        return nested
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to dictionary."""

@@ -44,23 +44,41 @@ CommitTeardownIntent = Callable[..., Awaitable["TeardownCommitOutcome"]]
 CaptureTeardownSnapshot = Callable[..., Awaitable["TeardownSnapshotOutcome"]]
 """Type alias for the runner-bound snapshot-bracket callable."""
 
+SnapshotIntentBalances = Callable[..., Awaitable[Any | None]]
+"""Async ``(strategy, intent) -> BalanceSnapshot | None``. Captures wallet
+balances for the tokens this intent will move, BEFORE it executes — the
+teardown counterpart of the iteration lane's
+``_snapshot_balances_for_intent``. Used to seed
+``transaction_ledger.pre_state_json`` with per-intent (not pre-bracket-only)
+wallet snapshots so the second teardown intent's pre-state correctly
+follows the first's post-state."""
+
+ReconcilePostBalances = Callable[..., Awaitable[dict[str, Any] | None]]
+"""Async ``(strategy, intent, execution_result, pre_snapshot) -> recon dict``.
+Mirrors the iteration lane's ``_reconcile_post_execution_balances`` so
+``transaction_ledger.post_state_json`` lands populated on every teardown
+row."""
+
 
 @dataclass(frozen=True)
 class TeardownRunnerHelpers:
     """Callable bag supplied to :class:`TeardownManager` by Phase 3 wiring.
 
-    Both callables are async. They are pre-bound to a specific
-    :class:`StrategyRunner` instance via :func:`functools.partial`; the
-    teardown manager does not need to know about the runner directly.
+    All callables are async and pre-bound to a :class:`StrategyRunner`
+    instance via :func:`functools.partial`; the teardown manager does not
+    need to know about the runner directly.
 
-    Set both fields to ``None`` (the dataclass default) to retain
-    pre-VIB-3773 behaviour (no accounting writes from the teardown lane).
-    Tests that don't care about the accounting lane construct
-    ``TeardownRunnerHelpers()`` and pass it straight through.
+    Set fields to ``None`` (the dataclass default) to retain pre-VIB-3773
+    / pre-VIB-3918 behaviour (no accounting writes from the teardown lane,
+    or no per-intent pre/post state). Tests that don't care about the
+    accounting lane construct ``TeardownRunnerHelpers()`` and pass it
+    straight through.
     """
 
     commit: CommitTeardownIntent | None = None
     capture_snapshot: CaptureTeardownSnapshot | None = None
+    snapshot_intent_balances: SnapshotIntentBalances | None = None
+    reconcile_post_balances: ReconcilePostBalances | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -69,6 +87,14 @@ class TeardownRunnerHelpers:
     @property
     def has_snapshot(self) -> bool:
         return self.capture_snapshot is not None
+
+    @property
+    def has_per_intent_balances(self) -> bool:
+        """True iff both pre- and post-execution balance helpers are wired.
+        Either-only is useless: pre without post can't produce post_state,
+        post without pre can't produce pre_state. Treat as all-or-nothing.
+        """
+        return self.snapshot_intent_balances is not None and self.reconcile_post_balances is not None
 
 
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
@@ -81,11 +107,24 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
     from functools import partial
 
     from ..runner._run_loop_helpers import capture_teardown_snapshot_with_accounting
+    from ..runner.runner_state import (
+        reconcile_post_execution_balances,
+        snapshot_balances_for_intent,
+    )
     from ..runner.teardown_commit import commit_teardown_intent
+
+    async def _snapshot_intent_balances(strategy: Any, intent: Any) -> Any | None:
+        # ``snapshot_balances_for_intent`` only needs the runner + intent
+        # — strategy is unused but kept on the helper signature for
+        # symmetry with reconcile and future protocol-aware variants.
+        del strategy
+        return await snapshot_balances_for_intent(runner, intent)
 
     return TeardownRunnerHelpers(
         commit=partial(commit_teardown_intent, runner),
         capture_snapshot=partial(capture_teardown_snapshot_with_accounting, runner),
+        snapshot_intent_balances=_snapshot_intent_balances,
+        reconcile_post_balances=partial(reconcile_post_execution_balances, runner),
     )
 
 
