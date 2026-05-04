@@ -76,6 +76,85 @@ _ZODIAC_WRAPPER_GAS = 1_500_000
 # kwargs. The harness pops these before unpacking the rest into the intent.
 _LP_FUNDING_KEYS = ("token0", "token1")
 
+# Default collateral token to use when the harness must pick one for a
+# stablecoin BORROW/REPAY seed (i.e. ``_seed_supply_then_borrow``). The choice
+# must be a token the host lending pool currently accepts as collateral with a
+# non-zero LTV: an ``isFrozen=true`` reserve reverts ``supply()`` with
+# ``ReserveFrozen()`` (selector ``0x6d305815``) and an ``ltv=0`` reserve accepts
+# the supply but yields zero borrowing power, so the subsequent borrow reverts
+# for ``CollateralCannotCoverNewBorrow``.
+#
+# Per-chain Aave V3 reserve probe (cast getReserveConfigurationData against
+# AaveProtocolDataProvider, snapshotted 2026-05-04, see PR description for the
+# raw data) — chain ↦ best-available ETH-correlated collateral on the lending
+# protocols the harness drives:
+#
+#   - arbitrum: WETH ``isFrozen=true``  → use ``wstETH`` (ltv=7500, unfrozen).
+#   - base:     WETH ``isFrozen=true``  → use ``wstETH`` (ltv=7500, unfrozen).
+#   - ethereum: WETH ``ltv=0``           → use ``wstETH`` (ltv=7850, unfrozen).
+#                                          (Aave migrated WETH to "supply-only";
+#                                          a fresh supply succeeds but yields
+#                                          zero borrowing power.)
+#   - optimism: WETH ``ltv=8000``        → keep WETH.
+#   - polygon:  WETH ``ltv=8000``        → keep WETH.
+#
+# Tracking issue #1845. Pinned by ``test_borrow_seed_collateral_pins`` under
+# ``tests/unit/intents/`` so a future contributor can't silently regress this
+# back to "default WETH everywhere" — the unit test asserts the chain ↦ token
+# mapping below matches the chain's reserve state in
+# ``almanak/core/contracts.py`` (no on-chain RPC at unit-test time).
+_BORROW_SEED_DEFAULT_COLLATERAL_BY_CHAIN: dict[str, str] = {
+    "arbitrum": "wstETH",
+    "base": "wstETH",
+    "ethereum": "wstETH",
+    "optimism": "WETH",
+    "polygon": "WETH",
+}
+
+# Fallback collateral used when neither the case nor the per-chain map has an
+# answer. WETH is the safest default for chains we haven't probed: most Aave V3
+# deployments still treat WETH as collateral. If a future chain freezes WETH,
+# add the chain to ``_BORROW_SEED_DEFAULT_COLLATERAL_BY_CHAIN`` rather than
+# changing this fallback — the per-chain map is the single source of truth for
+# "we have actually verified this works on this chain".
+_BORROW_SEED_FALLBACK_COLLATERAL = "WETH"
+
+# Borrow symbols the seeder treats as stablecoins for the purpose of picking an
+# ETH-correlated collateral. Kept narrow on purpose — adding a symbol here
+# routes it through the per-chain ETH-collateral map and the sub-unit rounding
+# guard, so only add tokens that genuinely behave as USD-denominated debt.
+_STABLECOIN_BORROW_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
+
+# Collateral symbols that share an 18-decimal ETH unit scale and price band.
+# Used in two places: (1) the sub-unit rounding guard that bumps a tiny dust
+# collateral up to 1 unit (~$ETH headroom for a small stablecoin debt at 20%
+# LTV), and (2) the legacy unit-based fallback when the price oracle has no
+# entry for the pair. Centralised here so the two branches can't drift.
+_ETH_CORRELATED_COLLATERALS: frozenset[str] = frozenset(
+    {"WETH", "wstETH", "cbETH", "rETH", "weETH"}
+)
+
+
+def _resolve_borrow_seed_collateral(chain: str, borrow_symbol: str) -> str:
+    """Pick the collateral symbol the BORROW/REPAY seeder should use.
+
+    Pure helper extracted from ``_seed_supply_then_borrow`` so the choice can
+    be pinned by a unit test without spinning up Anvil + Safe + Roles. Centralises
+    the per-chain freeze/ltv-zero workaround for Aave V3 (issue #1845).
+
+    - For stablecoin borrows (USDC/USDT/DAI) we want an ETH-correlated
+      collateral; the chain map names the verified-working symbol.
+    - For non-stablecoin borrows (e.g. WETH against a stablecoin), we pair
+      against USDC — the same default that's worked since the harness was
+      written. Stablecoin reserves are very rarely frozen on the lend
+      protocols the harness drives.
+    """
+    if borrow_symbol in _STABLECOIN_BORROW_SYMBOLS:
+        return _BORROW_SEED_DEFAULT_COLLATERAL_BY_CHAIN.get(
+            chain, _BORROW_SEED_FALLBACK_COLLATERAL
+        )
+    return "USDC"
+
 
 class SeedingFailed(RuntimeError):
     """Raised when on-chain state setup fails — distinct from authz failure.
@@ -1717,9 +1796,13 @@ def _seed_supply_then_borrow(
     tokens the compiled REPAY intent will touch, so the manifest (applied
     later) authorises the actual REPAY tx, not the setup.
 
-    ``collateral_token_symbol`` defaults to the first candidate from the
-    case's ``collateral_token`` / ``config["collateral_token"]`` if present,
-    else a sensible default (``WETH``) to pair against a stablecoin borrow.
+    ``collateral_token_symbol`` overrides the chain-aware default chosen by
+    ``_resolve_borrow_seed_collateral`` (see issue #1845 — Aave's WETH reserve
+    was frozen on Arbitrum and Base and dropped to ``ltv=0`` on Ethereum, so a
+    hardcoded "WETH for stable debt" picks a collateral the host pool no
+    longer accepts). When omitted, the helper picks the chain-appropriate
+    ETH-correlated collateral for stablecoin borrows and ``USDC`` for
+    everything else.
     """
     cfg = case.config
     borrow_symbol = cfg["token"]
@@ -1730,11 +1813,16 @@ def _seed_supply_then_borrow(
     repay_amount = Decimal(str(cfg.get("amount", "0")))
     borrow_amount_dec = repay_amount * Decimal(2) if repay_amount > 0 else Decimal("100")
 
-    # Pick the collateral token. For stablecoin REPAYs (USDC), borrow
-    # against WETH. morpho_blue carries market_id that fixes the
-    # collateral/loan pair — use it.
+    # Pick the collateral token. The chain-aware default lives in
+    # ``_resolve_borrow_seed_collateral`` (issue #1845) — Aave governance has
+    # frozen the WETH reserve on Arbitrum and Base and dropped its LTV to zero
+    # on Ethereum, so a hardcoded "WETH for stable debt" picks a collateral the
+    # host pool no longer accepts. morpho_blue carries ``market_id`` that fixes
+    # the collateral/loan pair downstream of the compiler — keep the symbol
+    # pick consistent with the other lend protocols anyway so the SUPPLY seed
+    # still funds correctly.
     if collateral_token_symbol is None:
-        collateral_token_symbol = "WETH" if borrow_symbol in {"USDC", "USDT", "DAI"} else "USDC"
+        collateral_token_symbol = _resolve_borrow_seed_collateral(case.chain, borrow_symbol)
 
     # Size collateral by USD value so mixed-token pairs (e.g. WETH borrow
     # against USDC collateral) don't trip the connector LTV cap. Target
@@ -1752,8 +1840,12 @@ def _seed_supply_then_borrow(
     if borrow_price is not None and collateral_price is not None and borrow_price > 0 and collateral_price > 0:
         collateral_value_usd = borrow_amount_dec * Decimal(str(borrow_price)) / _TARGET_LTV
         collateral_amount_dec = collateral_value_usd / Decimal(str(collateral_price))
-        # Guard against sub-unit WETH rounding — 1 WETH is always safe headroom.
-        if collateral_token_symbol == "WETH" and collateral_amount_dec < Decimal("1"):
+        # Guard against sub-unit ETH-collateral rounding — 1 unit (~ETH price) is
+        # always safe headroom for an ~$20-USD-equivalent stablecoin debt at 20%
+        # LTV. Applies to any 18-decimal ETH-correlated symbol in
+        # ``_ETH_CORRELATED_COLLATERALS``; a stablecoin collateral
+        # (e.g. against an ETH borrow) never trips this branch.
+        if collateral_token_symbol in _ETH_CORRELATED_COLLATERALS and collateral_amount_dec < Decimal("1"):
             collateral_amount_dec = Decimal("1")
     else:
         print(
@@ -1761,9 +1853,14 @@ def _seed_supply_then_borrow(
             f"{borrow_symbol}={borrow_price!r} or {collateral_token_symbol}="
             f"{collateral_price!r} — falling back to unit-based sizing."
         )
-        # Legacy heuristic: 1 WETH against any stablecoin debt, else 10x units.
-        # Correct only when borrow and collateral share a unit scale.
-        collateral_amount_dec = Decimal("1") if collateral_token_symbol == "WETH" else borrow_amount_dec * Decimal(10)
+        # Legacy heuristic: 1 unit of any 18-decimal ETH-correlated collateral
+        # against a stablecoin debt, else 10x units. Correct only when borrow
+        # and collateral share a unit scale; the price-based branch above is
+        # the preferred path.
+        if collateral_token_symbol in _ETH_CORRELATED_COLLATERALS:
+            collateral_amount_dec = Decimal("1")
+        else:
+            collateral_amount_dec = borrow_amount_dec * Decimal(10)
 
     # 1. SUPPLY collateral.
     supply_cfg: dict[str, Any] = {
