@@ -1,23 +1,18 @@
 """Tests for Radiant V2 lending connector integration.
 
-Verifies that:
-1. Radiant V2 is registered in PROTOCOL_CAPABILITIES with correct operations
-2. AaveV3Adapter uses deposit() selector for Radiant V2 (Aave V2 fork)
-3. AaveV3Adapter uses supply() selector for Aave V3 (unchanged behavior)
-4. Radiant V2 pool addresses are configured for Ethereum and Arbitrum
-5. AAVE_COMPATIBLE_PROTOCOLS includes both aave_v3 and radiant_v2
+Pins the protocol's capabilities, selector mapping, pool-address registry,
+and absence on arbitrum (regression guard for #1842 / #1847 / #1889).
 """
-
-import pytest
 
 from almanak.framework.intents.compiler import (
     AAVE_COMPATIBLE_PROTOCOLS,
     AAVE_SUPPLY_SELECTOR,
     AAVE_V2_DEPOSIT_SELECTOR,
     AAVE_WITHDRAW_SELECTOR,
-    AaveV3Adapter,
     LENDING_POOL_ADDRESSES,
+    AaveV3Adapter,
 )
+from almanak.framework.intents.compiler_constants import LENDING_POOL_DATA_PROVIDERS
 from almanak.framework.intents.vocabulary import PROTOCOL_CAPABILITIES
 
 
@@ -54,23 +49,48 @@ class TestRadiantV2ProtocolCapabilities:
 
 
 class TestRadiantV2PoolAddresses:
-    """Radiant V2 pool addresses are configured for supported chains."""
+    """Radiant V2 pool addresses are configured only for supported chains."""
 
     def test_ethereum_pool_address(self):
         """Radiant V2 LendingPool on Ethereum."""
         assert "radiant_v2" in LENDING_POOL_ADDRESSES["ethereum"]
         assert LENDING_POOL_ADDRESSES["ethereum"]["radiant_v2"] == "0xA950974f64aA33f27F6C5e017eEE93BF7588ED07"
 
-    def test_arbitrum_pool_address(self):
-        """Radiant V2 LendingPool on Arbitrum."""
-        assert "radiant_v2" in LENDING_POOL_ADDRESSES["arbitrum"]
-        assert LENDING_POOL_ADDRESSES["arbitrum"]["radiant_v2"] == "0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1"
+    def test_arbitrum_radiant_v2_not_registered(self):
+        """Regression guard for issues #1842 / #1847 / #1889.
+
+        The Radiant V2 LendingPool proxy on Arbitrum
+        (``0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1``) was reduced to a stub
+        implementation after the October 2024 attack. Every non-admin call
+        reverts on-chain, so routing user funds through it is unsafe. This
+        test fails fast if a future contributor silently re-introduces the
+        entry without acknowledging that the pool is permanently dead.
+        """
+        chain_pools = LENDING_POOL_ADDRESSES.get("arbitrum", {})
+        assert "radiant_v2" not in chain_pools, (
+            "radiant_v2 must not be registered on arbitrum — the LendingPool "
+            "implementation is a stub post-Oct-2024 attack. See #1842."
+        )
+
+    def test_arbitrum_radiant_v2_data_provider_not_registered(self):
+        """Mirror of the pool-address regression guard for the data provider.
+
+        Removing only the pool address but leaving the data-provider entry
+        would let the strategy-side ``assert_lending_reserve_active``
+        pre-flight succeed against a stale provider — masking the upstream
+        compile-time "not available on chain" error. Both must be absent.
+        """
+        chain_providers = LENDING_POOL_DATA_PROVIDERS.get("arbitrum", {})
+        assert "radiant_v2" not in chain_providers, (
+            "radiant_v2 must not be registered in LENDING_POOL_DATA_PROVIDERS "
+            "on arbitrum — the pool implementation is a stub. See #1842."
+        )
 
     def test_unsupported_chain_returns_zero_address(self):
         """Chains without Radiant V2 should not have entries."""
-        for chain in ["base", "optimism", "avalanche", "bsc"]:
+        for chain in ["arbitrum", "base", "optimism", "avalanche", "bsc"]:
             chain_pools = LENDING_POOL_ADDRESSES.get(chain, {})
-            assert "radiant_v2" not in chain_pools, f"Radiant V2 should not be on {chain} yet"
+            assert "radiant_v2" not in chain_pools, f"Radiant V2 should not be on {chain}"
 
 
 class TestAaveCompatibleProtocols:

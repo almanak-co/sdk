@@ -430,7 +430,8 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "arbitrum": {
         "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
-        "radiant_v2": "0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1",
+        # radiant_v2 intentionally absent — pool is a stub on arbitrum.
+        # See #1842 / #1847 / #1889 and tests/unit/connectors/test_radiant_v2.py.
     },
     "optimism": {
         "aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
@@ -470,15 +471,14 @@ LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = {
 #
 # Aave V2 and Aave V3 share the `getReserveConfigurationData(address)` selector
 # and ABI-encoded return layout, so the same pre-flight code works for both.
-# Radiant V2 is an Aave V2 fork — verified addresses below come from the
-# Radiant Capital docs (https://docs.radiant.capital/) and on-chain:
-#   - Arbitrum Pool 0xF4B1...59E1, AaveProtocolDataProvider 0x596B...A2cC.
-#     Pool was frozen by governance after the October 2024 attack — this
-#     pre-flight surfaces that as `PoolReserveFrozenError` instead of letting
-#     the on-chain SUPPLY tx revert opaquely.
+# Radiant V2 is an Aave V2 fork — only Ethereum has a working deployment:
 #   - Ethereum Pool 0xA950...ED07, AaveProtocolDataProvider 0x362f...3813.
-#     Pool is active as of 2026-04-30; this still gives us a fast fail when
-#     the operator picks an asset whose reserve has been retired.
+#     Pool is active; the pre-flight gives us a fast fail when the operator
+#     picks an asset whose reserve has been retired.
+#   - Arbitrum: deliberately absent. The Radiant V2 LendingPool proxy on
+#     Arbitrum was reduced to a stub implementation after the Oct 2024 attack
+#     and the framework excludes radiant_v2/arbitrum at every layer. See
+#     ``LENDING_POOL_ADDRESSES`` above and issues #1842 / #1847 / #1889.
 LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]] = {
     "ethereum": {
         "aave_v3": "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
@@ -486,7 +486,8 @@ LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]] = {
     },
     "arbitrum": {
         "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-        "radiant_v2": "0x596B0cc4c5094507C50b579a662FE7e7b094A2cC",
+        # radiant_v2 intentionally absent — see comment above and
+        # LENDING_POOL_ADDRESSES.
     },
     "optimism": {
         "aave_v3": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",

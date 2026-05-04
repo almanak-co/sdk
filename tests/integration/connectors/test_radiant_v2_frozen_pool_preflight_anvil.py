@@ -1,23 +1,25 @@
 """VIB-3749 Anvil-fork repro: Radiant V2 reserve-active pre-flight.
 
 Exercises the production `_fetch_reserve_config` / `assert_lending_reserve_active`
-helpers against forked mainnet state on both supported chains. NO MOCKING of
-the data-provider; we hit the real bytecode on Anvil so any address-table
-regression surfaces here.
+helpers against forked mainnet state on Ethereum (the only chain where the
+framework still routes Radiant V2 traffic). NO MOCKING of the data-provider;
+we hit the real bytecode on Anvil so any address-table regression surfaces here.
 
-Expected on-chain truth as of 2026-04-30 (verified by the implementer):
-
-- Arbitrum Radiant V2 (post-Oct-2024 attack):
-    Pool 0xF4B1...59E1 is permanently frozen (proxy returns 0x for every
-    selector). PoolDataProvider 0x596B...A2cC reverts on
-    `getReserveConfigurationData`. Pre-flight must raise
-    `PoolReserveFrozenError` and the strategy must HOLD on iteration 1
-    without submitting a SUPPLY.
+Expected on-chain truth (verified by the implementer):
 
 - Ethereum Radiant V2:
     Pool 0xA950...ED07 is active. WETH reserve is unfrozen
     (isActive=1, isFrozen=0). Pre-flight must NOT raise; strategy compiles
     and emits SUPPLY normally.
+
+The Arbitrum Radiant V2 deployment is no longer exercised: its LendingPool
+proxy at ``0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1`` was reduced to a stub
+implementation after the October 2024 attack and the framework now excludes
+``radiant_v2`` from arbitrum entirely. The compile-time supply path returns
+"not available on chain" before any reserve-active RPC happens.
+See issues #1842 / #1847 / #1889 and the unit-test regression guards in
+``tests/unit/connectors/test_radiant_v2.py`` and
+``tests/unit/permissions/test_synthetic_intents.py``.
 
 This module exercises **helper-only** Anvil-fork checks (it only invokes
 ``_fetch_reserve_config`` / ``assert_lending_reserve_active`` against a
@@ -26,10 +28,10 @@ rather than ``tests/intents/`` — which is reserved for canonical
 intent-test coverage that implements all four verification layers
 (compile / fixture / execution / receipt).
 
-Skipped when ``ANVIL_ARBITRUM_PORT`` / ``ANVIL_ETHEREUM_PORT`` aren't set.
+Skipped when ``ANVIL_ETHEREUM_PORT`` isn't set.
 Run with::
 
-    ANVIL_ETHEREUM_PORT=8545 ANVIL_ARBITRUM_PORT=18545 \
+    ANVIL_ETHEREUM_PORT=8545 \
         uv run pytest tests/integration/connectors/test_radiant_v2_frozen_pool_preflight_anvil.py -v -s
 """
 
@@ -43,15 +45,11 @@ from typing import Any
 import pytest
 from web3 import Web3
 
-from almanak.framework.intents import (
-    PoolReserveFrozenError,
-    assert_lending_reserve_active,
-)
+from almanak.framework.intents import assert_lending_reserve_active
 from almanak.framework.intents import compiler_lending as cl
 
 # Token addresses (mainnet — same on the Anvil forks).
 WETH_ETHEREUM = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-WETH_ARBITRUM = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 
 
 @dataclass
@@ -116,60 +114,6 @@ def _build_compiler_against_anvil(chain: str) -> Any:
     shim.chain = chain
     shim._gateway_client = _AnvilGatewayShim(web3)
     return shim
-
-
-# =============================================================================
-# Arbitrum: pool is permanently frozen — pre-flight must raise.
-# =============================================================================
-
-
-@pytest.mark.arbitrum
-@pytest.mark.lending
-def test_radiant_v2_arbitrum_preflight_raises_on_frozen_pool():
-    """Pool reverts on every call → pre-flight surfaces it as frozen.
-
-    This is the headline VIB-3749 test: without this guard, the strategy
-    submits a SUPPLY tx that wastes gas reverting on-chain.
-    """
-    compiler = _build_compiler_against_anvil("arbitrum")
-    with pytest.raises(PoolReserveFrozenError) as exc_info:
-        assert_lending_reserve_active(
-            compiler,
-            asset_address=WETH_ARBITRUM,
-            asset_symbol="WETH",
-            protocol="radiant_v2",
-        )
-    msg = str(exc_info.value)
-    assert "radiant_v2" in msg
-    assert "arbitrum" in msg
-    assert "isFrozen" in msg or "isActive" in msg
-
-
-@pytest.mark.arbitrum
-@pytest.mark.lending
-def test_radiant_v2_arbitrum_preflight_caches_result():
-    """A multi-iteration strategy run must pay the RPC tax exactly once."""
-    compiler = _build_compiler_against_anvil("arbitrum")
-    # Wrap the gateway shim's Call to count invocations.
-    shim = compiler._gateway_client
-    original_call = shim.Call
-    call_count = {"n": 0}
-
-    def counted_call(request: Any, timeout: float = 5.0):
-        call_count["n"] += 1
-        return original_call(request, timeout=timeout)
-
-    shim.Call = counted_call
-
-    for _ in range(5):
-        with pytest.raises(PoolReserveFrozenError):
-            assert_lending_reserve_active(
-                compiler,
-                asset_address=WETH_ARBITRUM,
-                asset_symbol="WETH",
-                protocol="radiant_v2",
-            )
-    assert call_count["n"] == 1, "Cache must short-circuit subsequent calls"
 
 
 # =============================================================================

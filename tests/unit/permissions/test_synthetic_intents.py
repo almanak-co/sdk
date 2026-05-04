@@ -246,6 +246,49 @@ class TestSparkLendingRegistration:
         assert intents == []
 
 
+class TestRadiantV2LendingRegistration:
+    """Regression tests for radiant_v2 pool registration in
+    ``LENDING_POOL_ADDRESSES``.
+
+    Radiant V2 is an Aave V2 fork that was deployed on both Ethereum and
+    Arbitrum. After the October 2024 attack, the Arbitrum LendingPool proxy
+    was reduced to a stub implementation and the framework dropped the
+    Arbitrum entry from ``LENDING_POOL_ADDRESSES`` (issues #1842 / #1847 /
+    #1889). These tests pin the resulting contract: synthetic intent
+    discovery must yield ``[]`` for every lending intent type on Arbitrum,
+    while Ethereum (the protocol's only supported chain) keeps producing
+    valid intents.
+    """
+
+    @pytest.mark.parametrize("intent_type", ["SUPPLY", "WITHDRAW", "BORROW", "REPAY"])
+    def test_radiant_v2_off_arbitrum_returns_empty(self, intent_type):
+        """Regression guard for issues #1842 / #1847 / #1889.
+
+        The Radiant V2 LendingPool proxy on Arbitrum was reduced to a stub
+        implementation after the October 2024 attack. ``LENDING_POOL_ADDRESSES``
+        no longer registers ``radiant_v2`` under ``arbitrum``, so synthetic
+        intent discovery must short-circuit for every lending intent type. If
+        a future contributor silently re-adds the entry without acknowledging
+        that the pool is permanently dead, the manifest generator would emit
+        targets pointing at a stub — Zodiac would authorise the selectors and
+        the on-chain call would still revert mid-bundle.
+        """
+        intents = build_synthetic_intents("radiant_v2", intent_type, "arbitrum")
+        assert intents == []
+
+    def test_radiant_v2_ethereum_supply_still_works(self):
+        """Sister guard to ``test_radiant_v2_off_arbitrum_returns_empty`` —
+        confirm we did not accidentally delete the *Ethereum* registration
+        when scoping out Arbitrum. Radiant V2 on Ethereum is the protocol's
+        only supported chain.
+        """
+        intents = build_synthetic_intents("radiant_v2", "SUPPLY", "ethereum")
+        assert len(intents) == 1
+        assert isinstance(intents[0], SupplyIntent)
+        assert intents[0].protocol == "radiant_v2"
+        assert intents[0].chain == "ethereum"
+
+
 class TestFlashLoanIntents:
     """Test synthetic flash loan intent creation."""
 

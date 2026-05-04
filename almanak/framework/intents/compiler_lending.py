@@ -3653,10 +3653,12 @@ def _compile_supply_aave_compatible(
     # Pre-flight: confirm the reserve for this asset is active and unfrozen on
     # the target pool. Surfaces a typed `PoolReserveFrozenError` (relayed as a
     # FAILED compilation result) instead of submitting a SUPPLY TX that will
-    # revert opaquely on-chain — Radiant V2 Arbitrum has been frozen since the
-    # October 2024 attack and would otherwise eat one failed iteration before
-    # the strategy's post-revert state machine catches up. Reusable for any
-    # Aave V2 fork or Aave V3 market whose governance has paused a reserve.
+    # revert opaquely on-chain — covering any Aave V2 fork or Aave V3 market
+    # whose governance has paused a reserve. The Radiant V2 Arbitrum
+    # deployment is *not* exercised here: its LendingPool proxy was reduced
+    # to a stub post-Oct-2024 attack, so the chain entry is removed from
+    # ``LENDING_POOL_ADDRESSES`` and the supply path fails earlier on the
+    # zero-address guard above (issues #1842 / #1847 / #1889).
     # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when no
     # gateway is attached so offline / placeholder-mode compiles still produce
     # calldata; the on-chain revert remains the final guard.
