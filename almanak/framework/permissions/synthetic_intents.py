@@ -39,7 +39,7 @@ from ..intents.vocabulary import (
     WithdrawIntent,
 )
 from .constants import VAULT_PROTOCOL_REPRESENTATIVE
-from .hints import get_permission_hints
+from .hints import PermissionHints, get_permission_hints
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,31 @@ def _get_token_pair(chain: str) -> tuple[str, str]:
     return usdc, weth
 
 
+def _resolve_lp_pair(hints: PermissionHints, chain: str) -> tuple[str, str]:
+    """Return the (tokenA, tokenB) pair to seed synthetic LP discovery on
+    ``chain`` given the protocol's already-resolved ``hints``.
+
+    Per-protocol override via ``PermissionHints.synthetic_lp_pair`` takes
+    precedence over the chain-default pair from ``_get_token_pair``.
+
+    Required for chains where the framework's chain-default pair (e.g. bsc's
+    ``(USDC, ETH-bridged)``) does not match the canonical liquid LP pair
+    actually used by the protocol on that chain (e.g. sushiswap_v3 on bsc
+    uses ``(USDT, WBNB)``). Without an override, the synthetic discovery
+    emits approves on the wrong tokens and any test that LP-opens on the
+    real pair fails Zodiac authorisation. Surfaced by #1902.
+
+    Takes ``hints`` directly (instead of looking it up by protocol) because
+    every caller already resolves ``PermissionHints`` for its own purposes
+    in the same function — passing the object in avoids a redundant
+    ``importlib`` lookup per LP-helper invocation.
+    """
+    override = hints.synthetic_lp_pair.get(chain)
+    if override:
+        return override
+    return _get_token_pair(chain)
+
+
 def build_synthetic_intents(
     protocol: str,
     intent_type: str,
@@ -148,7 +173,7 @@ def build_synthetic_intents(
     if it == IntentType.SWAP:
         return _build_swap_intents(protocol_lower, chain, usdc, weth)
     elif it == IntentType.LP_OPEN:
-        return _build_lp_open_intents(protocol_lower, chain, usdc, weth)
+        return _build_lp_open_intents(protocol_lower, chain)
     elif it == IntentType.LP_CLOSE:
         return _build_lp_close_intents(protocol_lower, chain)
     elif it == IntentType.LP_COLLECT_FEES:
@@ -270,22 +295,27 @@ def _build_curve_swap_intents(chain: str) -> list[AnyIntent]:
     return intents
 
 
-def _build_lp_open_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
+def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
     if protocol not in _LP_PROTOCOLS:
         return []
     managers = LP_POSITION_MANAGERS.get(chain, {})
     if protocol not in managers:
         return []
+    hints = get_permission_hints(protocol)
+    # Resolve the LP pair via the per-protocol override registry — the chain
+    # default (USDC, WETH-equivalent) is wrong on chains where the framework's
+    # ``_get_token_pair`` resolves to a non-liquid pair for the protocol on
+    # that chain (e.g. sushiswap_v3 on bsc → (USDT, WBNB), not (USDC, ETH-bsc)).
+    token0, token1 = _resolve_lp_pair(hints, chain)
     # Include fee tier in pool string for protocols that use Uniswap V3-style
     # fee tiers (parsed by _parse_pool_info which defaults to 3000).
     # Protocols with their own pool format (TraderJoe V2 bins, Aerodrome
     # volatile/stable) omit the fee tier so their parsers use the correct default.
-    hints = get_permission_hints(protocol)
     if protocol in SWAP_FEE_TIERS or hints.synthetic_fee_tier.get(chain):
         fee_tier = hints.synthetic_fee_tier.get(chain) or DEFAULT_SWAP_FEE_TIER.get(protocol, 3000)
-        pool = f"{usdc}/{weth}/{fee_tier}"
+        pool = f"{token0}/{token1}/{fee_tier}"
     else:
-        pool = f"{usdc}/{weth}"
+        pool = f"{token0}/{token1}"
     return [
         LPOpenIntent(
             pool=pool,
@@ -306,8 +336,8 @@ def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
     if protocol not in managers:
         return []
     hints = get_permission_hints(protocol)
-    usdc, weth = _get_token_pair(chain)
-    position_id = hints.synthetic_position_id.format(token0=usdc, token1=weth)
+    token0, token1 = _resolve_lp_pair(hints, chain)
+    position_id = hints.synthetic_position_id.format(token0=token0, token1=token1)
     return [
         LPCloseIntent(
             position_id=position_id,
@@ -324,10 +354,10 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     managers = LP_POSITION_MANAGERS.get(chain, {})
     if protocol not in managers:
         return []
-    usdc, weth = _get_token_pair(chain)
+    token0, token1 = _resolve_lp_pair(hints, chain)
     return [
         CollectFeesIntent(
-            pool=f"{usdc}/{weth}",
+            pool=f"{token0}/{token1}",
             protocol=protocol,
             chain=chain,
         )

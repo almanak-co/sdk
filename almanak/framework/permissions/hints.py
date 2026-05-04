@@ -68,6 +68,14 @@ class PermissionHints:
             synthetic SWAP intents.  Dict mapping chain -> (from_token, to_token).
             Useful for protocols that only support specific token pairs
             (e.g., Curve stablecoin pools, Pendle PT tokens).
+        synthetic_lp_pair: Override the default (USDC, WETH-equivalent) token
+            pair for synthetic LP intents (LP_OPEN / LP_CLOSE / LP_COLLECT_FEES).
+            Dict mapping chain -> (token0, token1).  Required when the framework's
+            chain-default pair (e.g. bsc's ``(USDC, ETH-bridged)``) does not match
+            the canonical liquid LP pair the protocol actually uses on that chain
+            (e.g. sushiswap_v3 on bsc uses ``(USDT, WBNB)``).  Without an override
+            the synthetic discovery seeds approves on the wrong tokens and any
+            real LP test on the canonical pair fails Zodiac authorisation.
         synthetic_fee_tier: Override the default fee tier for synthetic intents
             on specific chains.  Dict mapping chain -> fee_tier.  Used when
             the protocol's default fee tier doesn't exist on a given chain
@@ -89,6 +97,7 @@ class PermissionHints:
     selector_labels: dict[str, str] = field(default_factory=dict)
     synthetic_market_id: str | None = None
     synthetic_swap_pair: dict[str, tuple[str, str]] = field(default_factory=dict)
+    synthetic_lp_pair: dict[str, tuple[str, str]] = field(default_factory=dict)
     synthetic_fee_tier: dict[str, int] = field(default_factory=dict)
     static_permissions: dict[str, list[StaticPermissionEntry]] = field(default_factory=dict)
     needs_rpc_discovery: bool = False
