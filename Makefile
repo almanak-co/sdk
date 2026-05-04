@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap crap-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene
 
 # Load .env file if it exists
 -include .env
@@ -107,10 +107,26 @@ test-coverage:
 	uv run pytest tests/intents/ -v -s -n0 --import-mode=importlib \
 		--cov=almanak --cov-append --cov-report=xml:coverage.xml --cov-report=term
 
-# Compute CRAP (Change Risk Anti-Patterns) score per function. Requires a .coverage
-# file from a prior `make test-coverage` run. Flags high-risk functions (CRAP > 30).
+# Compute CRAP (Change Risk Anti-Patterns) score per function. Reads the
+# existing .coverage file (produced by `make test-coverage`). The CRAP script
+# warns loudly if .coverage is stale or measured a narrow test scope — those
+# warnings indicate phantom hotspots will appear in the report (see
+# docs/internal/coverage-improvement-plan.md §7 "investigate first" lesson).
+# Use `make crap-fresh` to regenerate coverage from scratch first.
 crap:
 	uv run scripts/crap_score.py --top 30
+
+# Regenerate coverage from the full `make test-coverage` scope, then run the
+# CRAP analysis. Use this when the .coverage file is missing, stale (>24h), or
+# came from a narrow `pytest --cov` invocation. ~8 min total wall-clock.
+#
+# Recipe-level sub-makes (not prerequisites) so the ordering survives
+# `make -j` — sibling prerequisites can run in parallel, and `crap` reading
+# `.coverage` while `test-coverage` is still writing it would re-introduce
+# the exact stale-data bug this script exists to prevent.
+crap-fresh:
+	$(MAKE) test-coverage
+	$(MAKE) crap
 
 # Cyclomatic-complexity / maintainability-index report on production code.
 # `make complexity`              → full almanak/ tree report.
