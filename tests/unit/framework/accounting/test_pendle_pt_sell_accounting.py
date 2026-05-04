@@ -18,8 +18,36 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+import pytest
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
+
+# Stable, test-owned PT registry. Decoupled from production PT_TOKEN_INFO so
+# unrelated connector data refreshes (new chains, renamed aliases, address
+# rotations) cannot regress these unit tests. Two aliases on the same address
+# exercise the dict-iteration-order ambiguity in _resolve_pt_token_sym.
+_FAKE_PT_ADDR = "0xbE45F6F17b81571fC30253BDaE0A2A6f7b04D60F"
+_FAKE_PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
+    "plasma": {
+        "PT-FAKEUSD": (_FAKE_PT_ADDR, 6),
+        "PT-fakeUSD": (_FAKE_PT_ADDR, 6),
+    },
+}
+
+
+@pytest.fixture
+def fake_pt_token_info(monkeypatch):
+    """Patch PT_TOKEN_INFO on its source module with a stable test fixture.
+
+    The SUT imports PT_TOKEN_INFO inside the helper functions
+    (``from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO``),
+    so patching the attribute on the source module is sufficient — no need to
+    reach into the SUT module.
+    """
+    import almanak.framework.connectors.pendle.sdk as _pendle_sdk
+    monkeypatch.setattr(_pendle_sdk, "PT_TOKEN_INFO", _FAKE_PT_TOKEN_INFO)
+    return _FAKE_PT_TOKEN_INFO
+
 
 def _make_basis_store():
     from almanak.framework.accounting.basis import FIFOBasisStore
@@ -307,3 +335,218 @@ class TestPtSellGuards:
         assert ev.identity.chain == "arbitrum"
         assert ev.identity.ledger_entry_id == "led-001"
         assert ev.identity.protocol == "pendle"
+
+
+# ─── Helper detection / resolution (Phase 6b-2) ──────────────────────────────
+
+
+class TestIsPtSell:
+    """Direct coverage of the ``_is_pt_sell`` predicate.
+
+    The end-to-end builder tests above only exercise the simple
+    ``from_token.upper().startswith("PT-")`` branch. These tests cover the
+    address-lookup + swap_amounts fallback paths.
+    """
+
+    def test_pt_dash_prefix_returns_true(self):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token="PT-wstETH-25JUN2026")
+        assert _is_pt_sell(intent, _make_sell_result()) is True
+
+    def test_pt_dash_prefix_case_insensitive(self):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token="pt-wstETH-25JUN2026")
+        assert _is_pt_sell(intent, _make_sell_result()) is True
+
+    def test_apt_optimism_prefix_does_not_match(self):
+        """Guard rail: 'APT' or 'OPT' must not be classified as PT.
+
+        The predicate requires the dash explicitly to avoid false positives.
+        """
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        for sym in ("APT", "OPT", "PTX", "PTABC"):
+            intent = _make_sell_intent(from_token=sym)
+            result = MagicMock()
+            result.extracted_data = {}
+            assert _is_pt_sell(intent, result) is False, sym
+
+    def test_pt_address_match_with_chain(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        # Address comes from the test-owned fixture (decoupled from production registry).
+        intent = _make_sell_intent(from_token=_FAKE_PT_ADDR)
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _is_pt_sell(intent, result) is True
+
+    def test_pt_address_match_case_insensitive(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        # Lower-cased address still matches.
+        intent = _make_sell_intent(from_token=_FAKE_PT_ADDR.lower())
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _is_pt_sell(intent, result) is True
+
+    def test_pt_address_match_without_chain_searches_all(self, fake_pt_token_info):
+        """When intent.chain is empty/missing, the predicate falls back to a
+        cross-chain scan of PT_TOKEN_INFO.
+        """
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token=_FAKE_PT_ADDR)
+        intent.chain = ""  # force the all-chains branch
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _is_pt_sell(intent, result) is True
+
+    def test_unknown_pt_address_returns_false(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token="0xdeadbeef" + "0" * 32)
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _is_pt_sell(intent, result) is False
+
+    def test_unknown_pt_address_no_chain_returns_false(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token="0x" + "1" * 40)
+        intent.chain = ""
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _is_pt_sell(intent, result) is False
+
+    def test_swap_amounts_token_in_pt_dash_fallback(self):
+        """When intent.from_token is non-PT but the enriched receipt's
+        swap_amounts.token_in is a PT- symbol, the predicate still detects it.
+        """
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token="someothertoken")
+        result = MagicMock()
+        swap_amounts = MagicMock()
+        swap_amounts.token_in = "PT-wstETH-25JUN2026"
+        result.extracted_data = {"swap_amounts": swap_amounts}
+        assert _is_pt_sell(intent, result) is True
+
+    def test_pt_token_info_import_exception_swallowed(self, monkeypatch):
+        """If PT_TOKEN_INFO import fails, the address branch must not raise."""
+        import sys
+
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        # Setting sys.modules[name] = None makes a subsequent
+        # ``from name import attr`` raise ImportError without poisoning
+        # builtins.__import__. Idiomatic pytest pattern.
+        monkeypatch.setitem(sys.modules, "almanak.framework.connectors.pendle.sdk", None)
+
+        intent = _make_sell_intent(from_token="0x" + "a" * 40)
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        # Should not raise; falls through to swap_amounts check then returns False.
+        assert _is_pt_sell(intent, result) is False
+
+    def test_empty_from_token_with_no_swap_amounts_returns_false(self):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _is_pt_sell
+
+        intent = _make_sell_intent(from_token="")
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _is_pt_sell(intent, result) is False
+
+
+class TestResolvePtTokenSym:
+    """Direct coverage of the ``_resolve_pt_token_sym`` symbol resolver."""
+
+    def test_pt_dash_prefix_returned_as_is(self):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        intent = _make_sell_intent(from_token="PT-wstETH-25JUN2026")
+        assert _resolve_pt_token_sym(intent, _make_sell_result()) == "PT-wstETH-25JUN2026"
+
+    def test_address_resolves_to_canonical_symbol_with_chain(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        intent = _make_sell_intent(from_token=_FAKE_PT_ADDR)
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        sym = _resolve_pt_token_sym(intent, result)
+        # Either alias is acceptable: the test fixture registers both PT-FAKEUSD and
+        # PT-fakeUSD on the same address; dict-iteration order picks one.
+        assert sym in {"PT-FAKEUSD", "PT-fakeUSD"}
+
+    def test_address_resolves_without_chain_searches_all(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        intent = _make_sell_intent(from_token=_FAKE_PT_ADDR)
+        intent.chain = ""
+        result = MagicMock()
+        result.extracted_data = {}
+        sym = _resolve_pt_token_sym(intent, result)
+        assert sym in {"PT-FAKEUSD", "PT-fakeUSD"}
+
+    def test_unknown_address_falls_through_to_from_token(self, fake_pt_token_info):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        addr = "0x" + "9" * 40
+        intent = _make_sell_intent(from_token=addr)
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        # Falls through past the address lookup, no swap_amounts → returns from_token verbatim.
+        assert _resolve_pt_token_sym(intent, result) == addr
+
+    def test_swap_amounts_token_in_pt_dash_fallback(self):
+        """Non-PT from_token + non-address path → use swap_amounts.token_in if PT-prefixed."""
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        intent = _make_sell_intent(from_token="someotherstring")
+        result = MagicMock()
+        swap_amounts = MagicMock()
+        swap_amounts.token_in = "PT-wstETH-25JUN2026"
+        result.extracted_data = {"swap_amounts": swap_amounts}
+        assert _resolve_pt_token_sym(intent, result) == "PT-wstETH-25JUN2026"
+
+    def test_empty_from_token_and_no_swap_amounts_returns_pt(self):
+        """Last-resort sentinel — never returns empty string."""
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        intent = _make_sell_intent(from_token="")
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _resolve_pt_token_sym(intent, result) == "PT"
+
+    def test_non_pt_from_token_with_no_swap_amounts_returns_from_token(self):
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        intent = _make_sell_intent(from_token="WETH")
+        result = MagicMock()
+        result.extracted_data = {}
+        assert _resolve_pt_token_sym(intent, result) == "WETH"
+
+    def test_pt_token_info_import_exception_swallowed(self, monkeypatch):
+        """If PT_TOKEN_INFO import fails, resolution falls through gracefully."""
+        import sys
+
+        from almanak.framework.accounting.pendle_pt_sell_accounting import _resolve_pt_token_sym
+
+        # Idiomatic pytest pattern for simulating a missing module — does not
+        # touch builtins.__import__.
+        monkeypatch.setitem(sys.modules, "almanak.framework.connectors.pendle.sdk", None)
+
+        addr = "0x" + "a" * 40
+        intent = _make_sell_intent(from_token=addr)
+        intent.chain = "plasma"
+        result = MagicMock()
+        result.extracted_data = {}
+        # Falls through past the address lookup, no swap_amounts → returns from_token.
+        assert _resolve_pt_token_sym(intent, result) == addr
