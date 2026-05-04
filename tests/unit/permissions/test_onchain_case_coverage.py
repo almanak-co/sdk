@@ -48,8 +48,6 @@ _SENTINEL_SUFFIX = ".permissions_onchain_exempt"
 # should prefer "write the intent test" or "exempt the whole protocol via
 # a sentinel" over "add a deferral here."
 _DEFERRED_PAIRS: dict[tuple[str, str], str] = {
-    ("aerodrome", "LP_OPEN"): "Solidly fungible-LP semantics need a bespoke intent test (issue #2028).",
-    ("aerodrome", "LP_CLOSE"): "Solidly fungible-LP close mirrors the open shape (issue #2028).",
     ("traderjoe_v2", "LP_COLLECT_FEES"): "Requires a ``CollectFeesIntent`` harness branch; see plan doc Phase F P1.",
 }
 
