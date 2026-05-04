@@ -171,7 +171,13 @@ def call_config_update_api(
         # API not running - return error, don't simulate success
         return {
             "success": False,
-            "error": "API server is not running. Start the API with `python -m src.api.main` to apply config changes.",
+            "error": (
+                "Gateway HTTP API is not reachable.\n"
+                "Start the gateway with `almanak gateway` "
+                "(or `almanak strat run ...`, which auto-starts one) "
+                "to apply config changes.\n"
+                "Docs: https://sdk.docs.almanak.co/cli/almanak-dashboard/"
+            ),
             "api_unavailable": True,
         }
     except requests.exceptions.Timeout:
