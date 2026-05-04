@@ -391,13 +391,8 @@ class TestAaveV3BorrowIntent:
     - Balance changes and account data match expected amounts
     """
 
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(
-        reason="#1696: USDC reserve is frozen for borrowing on the Aave V3 mainnet fork (ReserveFrozen)",
-        strict=True,
-    )
     @pytest.mark.asyncio
-    async def test_borrow_usdc_with_weth_collateral_using_intent(
+    async def test_borrow_usdc_with_wsteth_collateral_using_intent(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -405,34 +400,40 @@ class TestAaveV3BorrowIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test borrowing USDC with WETH collateral using BorrowIntent.
+        """Test borrowing USDC with wstETH collateral using BorrowIntent.
+
+        Uses wstETH as the collateral asset because Aave governance has frozen
+        the Arbitrum WETH reserve (no new supplies allowed); wstETH still
+        carries an active LTV (~75%) and is unfrozen, so it's the canonical
+        ETH-correlated collateral that works across ethereum / arbitrum / base.
+        See #1696 for the freeze details.
 
         Flow:
-        1. Create BorrowIntent with WETH as collateral, borrowing USDC
+        1. Create BorrowIntent with wstETH as collateral, borrowing USDC
         2. Compile to ActionBundle using IntentCompiler
         3. Execute via ExecutionOrchestrator
         4. Verify USDC balance increased and debt was created
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
+        wsteth = tokens["wstETH"]
         usdc = tokens["USDC"]
 
-        weth_decimals = get_token_decimals(web3, weth)
+        wsteth_decimals = get_token_decimals(web3, wsteth)
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # Supply 1 WETH as collateral, borrow 500 USDC (~30% LTV)
+        # Supply 1 wstETH as collateral (~$3500), borrow 500 USDC (~14% LTV)
         collateral_amount = Decimal("1")
         borrow_amount = Decimal("500")
 
         print(f"\n{'='*80}")
-        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} WETH collateral using BorrowIntent")
+        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} wstETH collateral using BorrowIntent")
         print(f"{'='*80}")
 
         # Record balances BEFORE
-        weth_before = get_token_balance(web3, weth, funded_wallet)
+        wsteth_before = get_token_balance(web3, wsteth, funded_wallet)
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
 
-        print(f"WETH before: {format_token_amount(weth_before, weth_decimals)}")
+        print(f"wstETH before: {format_token_amount(wsteth_before, wsteth_decimals)}")
         print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
 
         account_data_before = get_user_account_data(web3, funded_wallet)
@@ -441,7 +442,7 @@ class TestAaveV3BorrowIntent:
         # Create BorrowIntent
         intent = BorrowIntent(
             protocol="aave_v3",
-            collateral_token="WETH",
+            collateral_token="wstETH",
             collateral_amount=collateral_amount,
             borrow_token="USDC",
             borrow_amount=borrow_amount,
@@ -497,21 +498,21 @@ class TestAaveV3BorrowIntent:
                             print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
 
         # Verify balance changes
-        weth_after = get_token_balance(web3, weth, funded_wallet)
+        wsteth_after = get_token_balance(web3, wsteth, funded_wallet)
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
 
-        weth_spent = weth_before - weth_after
+        wsteth_spent = wsteth_before - wsteth_after
         usdc_received = usdc_after - usdc_before
 
         print("\n--- Results ---")
-        print(f"WETH spent (collateral): {format_token_amount(weth_spent, weth_decimals)}")
+        print(f"wstETH spent (collateral): {format_token_amount(wsteth_spent, wsteth_decimals)}")
         print(f"USDC received (borrowed): {format_token_amount(usdc_received, usdc_decimals)}")
 
-        # Verify WETH was spent as collateral
-        expected_weth_spent = int(collateral_amount * Decimal(10**weth_decimals))
-        assert weth_spent == expected_weth_spent, (
-            f"WETH spent must EXACTLY equal collateral amount. "
-            f"Expected: {expected_weth_spent}, Got: {weth_spent}"
+        # Verify wstETH was spent as collateral
+        expected_wsteth_spent = int(collateral_amount * Decimal(10**wsteth_decimals))
+        assert wsteth_spent == expected_wsteth_spent, (
+            f"wstETH spent must EXACTLY equal collateral amount. "
+            f"Expected: {expected_wsteth_spent}, Got: {wsteth_spent}"
         )
 
         # Verify USDC was received (allow small tolerance for Aave origination fees/rounding)
@@ -537,11 +538,6 @@ class TestAaveV3BorrowIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(
-        reason="#1696: cascade of frozen USDC borrow — repay has no debt to settle (NoDebtOfSelectedType)",
-        strict=True,
-    )
     @pytest.mark.asyncio
     async def test_repay_usdc_using_intent(
         self,
@@ -554,7 +550,9 @@ class TestAaveV3BorrowIntent:
         """Test repaying USDC debt using RepayIntent.
 
         Flow:
-        1. Setup: Borrow USDC with WETH collateral first
+        1. Setup: Borrow USDC with wstETH collateral first
+           (wstETH chosen for collateral because Aave froze the WETH reserve
+            on Arbitrum — see #1696.)
         2. Create RepayIntent to repay partial debt
         3. Compile and execute
         4. Verify USDC balance decreased and debt was reduced
@@ -572,7 +570,7 @@ class TestAaveV3BorrowIntent:
 
         borrow_intent = BorrowIntent(
             protocol="aave_v3",
-            collateral_token="WETH",
+            collateral_token="wstETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
             borrow_amount=Decimal("500"),
