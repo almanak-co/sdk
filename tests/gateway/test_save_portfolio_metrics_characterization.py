@@ -23,7 +23,7 @@ matrix so that the refactor must preserve every branch byte-for-byte:
   exact ``grpc.StatusCode`` + ``set_details`` wording downstream observability
   may grep).
 
-All tests use the shared harness in ``tests/gateway/_gateway_rpc_harness.py``
+All tests use the shared harness in ``tests/gateway/grpc_harness.py``
 (merged in PR #1807); do NOT duplicate the mock-context builder or error
 assertion helper here.
 """
@@ -41,7 +41,7 @@ from almanak.framework.portfolio.models import PortfolioMetrics
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.state_service import StateServiceServicer
-from tests.gateway._gateway_rpc_harness import (
+from tests.gateway.grpc_harness import (
     assert_grpc_error,
     assert_set_code_not_called,
     make_grpc_context,

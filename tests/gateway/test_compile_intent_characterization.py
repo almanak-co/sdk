@@ -17,7 +17,7 @@ Focus areas (complementing the existing ``test_compile_intent_*.py`` suites):
 - Compiler state restoration when no ``price_map`` is supplied on non-mainnet
   networks (placeholder oracle preserved).
 
-All tests use the shared harness in ``_gateway_rpc_harness``.
+All tests use the shared harness in ``grpc_harness``.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
-from tests.gateway._gateway_rpc_harness import (
+from tests.gateway.grpc_harness import (
     assert_grpc_error,
     assert_set_code_not_called,
     make_grpc_context,

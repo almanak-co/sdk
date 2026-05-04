@@ -30,7 +30,7 @@ wallet-resolution happy paths):
   with populated fields.
 - Success response shape.
 
-All tests use the shared harness in ``_gateway_rpc_harness``. These are pure
+All tests use the shared harness in ``grpc_harness``. These are pure
 unit tests - no network, no DB, no subprocess.
 """
 
@@ -43,7 +43,7 @@ import pytest
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.server import _RegisterChainsServicer
-from tests.gateway._gateway_rpc_harness import make_grpc_context
+from tests.gateway.grpc_harness import make_grpc_context
 
 # A well-known test private key (anvil default #0) and its derived address.
 TEST_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
