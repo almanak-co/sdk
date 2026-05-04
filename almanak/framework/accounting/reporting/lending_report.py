@@ -59,7 +59,7 @@ class LendingSection:
         return not self.positions
 
 
-def build_lending_report(data: AccountingData) -> LendingSection:
+def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
     """Build a per-position lending carry summary from accounting events."""
     if not data.lending_events:
         return LendingSection()

@@ -352,7 +352,7 @@ def format_bridge_progress(from_chain: str, to_chain: str, status: str, progress
     )
 
 
-def format_timeline_summary(event_type: TimelineEventType, description: str, details: dict[str, object]) -> str:
+def format_timeline_summary(event_type: TimelineEventType, description: str, details: dict[str, object]) -> str:  # noqa: C901
     """Render a concise human-readable timeline summary."""
 
     def _to_text(value: object) -> str:

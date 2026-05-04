@@ -1098,7 +1098,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             resolved_at=datetime.now(UTC),
         )
 
-    async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:
+    async def _try_evm_symbol_lookup(self, symbol: str, chain: str) -> gateway_pb2.TokenMetadataResponse | None:  # noqa: C901
         """Try to resolve an EVM token by symbol via Pendle, Aave, Compound, Beefy, Yearn, Morpho, CoinGecko, then DexScreener.
 
         Resolution tiers:
@@ -1388,7 +1388,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             logger.debug("CoinGecko platform address lookup failed for %s/%s: %s", coin_id, platform, exc)
             return None
 
-    async def ResolveToken(
+    async def ResolveToken(  # noqa: C901
         self,
         request: gateway_pb2.ResolveTokenRequest,
         context: grpc.aio.ServicerContext,

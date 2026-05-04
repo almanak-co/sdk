@@ -58,7 +58,7 @@ class FIFOBasisStore:
     def __init__(self) -> None:
         self._lots: dict[str, list[dict[str, Any]]] = {}
 
-    def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:
+    def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:  # noqa: C901
         """Replay durable accounting events to rebuild open FIFO lots.
 
         Call once on runner startup with get_accounting_events_sync() results for

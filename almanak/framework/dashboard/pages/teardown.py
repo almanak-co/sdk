@@ -206,7 +206,7 @@ def _render_mode_selection(strategy: Strategy) -> None:
             del st.session_state.teardown_mode
 
 
-def _render_confirmation(strategy: Strategy) -> None:
+def _render_confirmation(strategy: Strategy) -> None:  # noqa: C901
     """Render the confirmation screen with preview from real API."""
     mode = st.session_state.get("teardown_mode", "graceful")
     asset_policy = st.session_state.get("teardown_asset_policy", "target_token")
@@ -832,7 +832,7 @@ def _render_asset_policy_selection(strategy: Strategy) -> None:
         st.rerun()
 
 
-def page(strategies: list[Strategy]) -> None:
+def page(strategies: list[Strategy]) -> None:  # noqa: C901
     """Main teardown page router."""
     strategy_id = st.query_params.get("strategy_id")
 

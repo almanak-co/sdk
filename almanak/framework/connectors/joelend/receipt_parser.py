@@ -265,7 +265,7 @@ class JoeLendReceiptParser:
 
         return events
 
-    def _decode_event_data(
+    def _decode_event_data(  # noqa: C901
         self,
         event_name: str,
         topics: list[str],

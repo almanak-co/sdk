@@ -387,7 +387,7 @@ class OHLCVRouter:
         self._providers[provider.name] = provider
         logger.debug("ohlcv_router_registered provider=%s", provider.name)
 
-    def get_ohlcv(
+    def get_ohlcv(  # noqa: C901
         self,
         token: str | Instrument,
         chain: str | None = None,

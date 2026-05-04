@@ -1057,7 +1057,7 @@ class PnLBacktester:
 
         return capabilities, warnings
 
-    async def run_preflight_validation(
+    async def run_preflight_validation(  # noqa: C901
         self,
         config: PnLBacktestConfig,
     ) -> PreflightReport:
@@ -1637,7 +1637,7 @@ class PnLBacktester:
         """
         return self.slippage_models.get(protocol, self.slippage_models["default"])
 
-    async def _execute_intent(
+    async def _execute_intent(  # noqa: C901
         self,
         intent: Any,
         portfolio: SimulatedPortfolio,
@@ -2105,7 +2105,7 @@ class PnLBacktester:
             market_state=market_state,
         )
 
-    def _create_position_delta(
+    def _create_position_delta(  # noqa: C901
         self,
         intent: Any,
         intent_type: IntentType,

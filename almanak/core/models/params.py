@@ -25,7 +25,7 @@ class Params(BaseModel, ABC):
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Params":
+    def from_dict(cls, data: dict[str, Any]) -> "Params":  # noqa: C901
         param_type = ActionType(data.pop("type"))
         if param_type == ActionType.TRANSFER:
             return TransferParams(**data)

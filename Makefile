@@ -82,21 +82,48 @@ test-integration:
 test-all:
 	uv run pytest tests/ --ignore=tests/intents -m "not integration" -v --import-mode=importlib
 
-# Run all tests for CI (with JUnit XML report, no coverage)
+# COVERAGE_CORE=sysmon switches coverage.py to the PEP 669 sys.monitoring backend
+# (Python 3.12+, coverage 7.7+). 5-10× faster than the default sys.settrace tracer —
+# brings the CI runtime cost of `--cov` from ~doubling the test wall-clock down to
+# single-digit %. Falls back to the default tracer on older Pythons. Line coverage
+# only (sysmon does not yet support branch coverage; we don't use branch coverage).
+export COVERAGE_CORE := sysmon
+
+# Run all tests for CI (with JUnit XML + coverage report; coverage gate via fail_under).
+# Phase 0 (2026-05-04): coverage now runs on every CI invocation. See
+# docs/internal/coverage-improvement-plan.md §8 Phase 0 for the ratchet policy.
 test-ci:
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
+		--cov=almanak --cov-report=xml:coverage.xml --cov-report=term \
 		--junitxml=test-results.xml
 
-# Run all tests with coverage report
+# Full coverage pass used by `make crap` for the CRAP-score baseline.
+# Runs the CI subset first (unit + non-intent), then APPENDS intent-test coverage
+# (those tests cover most of the connector and execution code paths). Requires
+# the intent-test environment (Anvil + gateway managed via tests/intents/conftest).
 test-coverage:
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
-		--cov=almanak --cov-report=xml:coverage.xml \
-		--junitxml=test-results.xml
+		--cov=almanak --cov-report=term
+	uv run pytest tests/intents/ -v -s -n0 --import-mode=importlib \
+		--cov=almanak --cov-append --cov-report=xml:coverage.xml --cov-report=term
 
 # Compute CRAP (Change Risk Anti-Patterns) score per function. Requires a .coverage
 # file from a prior `make test-coverage` run. Flags high-risk functions (CRAP > 30).
 crap:
 	uv run scripts/crap_score.py --top 30
+
+# Cyclomatic-complexity / maintainability-index report on production code.
+# `make complexity`              → full almanak/ tree report.
+# `make complexity FILE=path/x`  → narrow to one path (relative or absolute).
+# CI gating of NEW high-complexity functions is done via `ruff check --select C901`
+# (max-complexity = 15) using the in-line noqa baseline produced in Phase 0.
+COMPLEXITY_PATH ?= $(if $(FILE),$(FILE),almanak/)
+complexity:
+	@echo "== Cyclomatic complexity (rank C+ only) =="
+	uv run radon cc $(COMPLEXITY_PATH) -s -a -nc --exclude 'almanak/gateway/proto/*,almanak/demo_strategies/*'
+	@echo
+	@echo "== Maintainability Index (rank B and below) =="
+	uv run radon mi $(COMPLEXITY_PATH) -s -nb --exclude 'almanak/gateway/proto/*,almanak/demo_strategies/*'
 
 # Run nightly-only visual Market Data API contract tests
 test-nightly-visual:

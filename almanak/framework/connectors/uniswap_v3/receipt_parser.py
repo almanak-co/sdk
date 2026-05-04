@@ -780,7 +780,7 @@ class UniswapV3ReceiptParser:
             logger.warning(f"Failed to parse TransferEventData: {e}")
             return None
 
-    def _resolve_tokens_from_transfers(
+    def _resolve_tokens_from_transfers(  # noqa: C901
         self,
         transfer_events: list[TransferEventData],
         swap_event: SwapEventData,
@@ -1109,7 +1109,7 @@ class UniswapV3ReceiptParser:
             return ExtractMissing(reason="no Mint event in receipt")
         return ExtractOk(value=value)
 
-    def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
+    def extract_position_id(self, receipt: dict[str, Any]) -> int | None:  # noqa: C901
         """Extract LP position ID (NFT tokenId) from a transaction receipt.
 
         Looks for ERC-721 Transfer events from the NonfungiblePositionManager
@@ -1466,7 +1466,7 @@ class UniswapV3ReceiptParser:
             logger.warning(f"Failed to extract liquidity: {e}")
             return None
 
-    def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> LPOpenData | None:  # noqa: C901
         """Extract LP open data from a transaction receipt.
 
         Looks for ``IncreaseLiquidity`` events emitted by the Uniswap V3

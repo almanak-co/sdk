@@ -368,7 +368,7 @@ class TraderJoeV2ReceiptParser:
 
         return events
 
-    def _parse_event_data(
+    def _parse_event_data(  # noqa: C901
         self,
         event_type: TraderJoeV2EventType,
         log: dict[str, Any],

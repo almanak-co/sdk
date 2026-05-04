@@ -396,7 +396,7 @@ def print_crisis_backtest_results(result: CrisisBacktestResult) -> None:
     "--dry-run", is_flag=True, default=False, help="Show configuration without running walk-forward optimization"
 )
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show progress bar and detailed logging")
-def walk_forward_backtest(
+def walk_forward_backtest(  # noqa: C901
     strategy: str,
     start: datetime,
     end: datetime,
@@ -729,7 +729,7 @@ def walk_forward_backtest(
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Show configuration without running simulation")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show progress during simulation")
-def monte_carlo_backtest(
+def monte_carlo_backtest(  # noqa: C901
     strategy: str,
     start: datetime,
     end: datetime,
@@ -1065,7 +1065,7 @@ def monte_carlo_backtest(
 @click.option("--dry-run", is_flag=True, default=False, help="Show configuration without running backtest")
 @click.option("--list-scenarios", is_flag=True, default=False, help="List all available predefined scenarios")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress during backtest")
-def scenario_backtest(
+def scenario_backtest(  # noqa: C901
     strategy: str | None,
     scenario: str | None,
     start: datetime | None,

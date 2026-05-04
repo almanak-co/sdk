@@ -745,7 +745,7 @@ class AaveV3ReceiptParser:
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
         self._chain = kwargs.get("chain", "ethereum")
 
-    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
+    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
         """Parse a transaction receipt.
 
         Args:

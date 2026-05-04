@@ -1221,7 +1221,7 @@ class IntentStateMachine:
                 error=self._last_error,
             )
 
-    def _handle_sadflow(self) -> StepResult:
+    def _handle_sadflow(self) -> StepResult:  # noqa: C901
         """Handle SADFLOW state - retry logic with lifecycle hooks.
 
         Calls on_sadflow_enter hook when first entering sadflow, then

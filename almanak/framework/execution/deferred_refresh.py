@@ -40,7 +40,7 @@ def _is_local_rpc(rpc_url: str | None) -> bool:
 _ANVIL_MIN_SLIPPAGE_BPS = 500  # 5%
 
 
-def refresh_deferred_bundle(
+def refresh_deferred_bundle(  # noqa: C901
     action_bundle: ActionBundle,
     wallet_address: str,
     rpc_url: str | None = None,

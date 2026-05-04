@@ -182,7 +182,7 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         err_msg = "No simulation backend configured. Set TENDERLY_* or ALCHEMY_API_KEY environment variables."
         raise ValueError(err_msg)
 
-    async def _simulate_tenderly(
+    async def _simulate_tenderly(  # noqa: C901
         self,
         chain: str,
         transactions: list[gateway_pb2.SimulateTransaction],
@@ -302,7 +302,7 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
             simulator_used="tenderly",
         )
 
-    async def _simulate_alchemy(
+    async def _simulate_alchemy(  # noqa: C901
         self,
         chain: str,
         transactions: list[gateway_pb2.SimulateTransaction],

@@ -597,7 +597,7 @@ class LocalRuntimeConfig:
         return masked
 
     @classmethod
-    def from_env(
+    def from_env(  # noqa: C901
         cls,
         chain: str | None = None,
         network: str = "mainnet",
@@ -1632,7 +1632,7 @@ class MultiChainRuntimeConfig:
         )
 
     @classmethod
-    def from_env(
+    def from_env(  # noqa: C901
         cls,
         chains: list[str],
         protocols: dict[str, list[str]],

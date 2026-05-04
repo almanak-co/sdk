@@ -216,7 +216,7 @@ class SparkReceiptParser:
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
         self._pool_addresses = pool_addresses if pool_addresses is not None else SPARK_POOL_ADDRESSES
 
-    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
+    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
         """Parse a transaction receipt.
 
         Args:

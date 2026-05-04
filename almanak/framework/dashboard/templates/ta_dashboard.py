@@ -177,7 +177,7 @@ def _render_indicator_section(
         st.progress(normalized, text=f"{config.indicator_name}: {config.value_format.format(indicator_value)}")
 
 
-def _render_charts_section(
+def _render_charts_section(  # noqa: C901
     session_state: dict[str, Any],
     strategy_config: dict[str, Any],
     config: TADashboardConfig,

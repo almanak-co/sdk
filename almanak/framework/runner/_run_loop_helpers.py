@@ -114,7 +114,7 @@ def reconstruct_lending_basis_store(
 # =============================================================================
 
 
-async def initialize_run_loop(
+async def initialize_run_loop(  # noqa: C901
     runner: StrategyRunner,
     strategy: StrategyProtocol,
     strategy_id: str,

@@ -224,7 +224,7 @@ class CopyTradingConfigV2(AlmanakImmutableModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_legacy_shape(cls, raw: Any) -> Any:
+    def normalize_legacy_shape(cls, raw: Any) -> Any:  # noqa: C901
         if not isinstance(raw, dict):
             raise ValueError("copy_trading config must be a dictionary")
 

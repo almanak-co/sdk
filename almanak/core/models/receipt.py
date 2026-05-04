@@ -37,7 +37,7 @@ class Receipt(BaseModel, ABC):
         pass
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Receipt":
+    def from_dict(cls, data: dict[str, Any]) -> "Receipt":  # noqa: C901
         receipt_type = ActionType(data.pop("type"))
         if receipt_type == ActionType.WRAP:
             return WrapReceipt(**data)

@@ -135,7 +135,7 @@ def paper() -> None:
         "'yield-validation': persistent fork with time advancement for lending yield measurement."
     ),
 )
-def paper_start(
+def paper_start(  # noqa: C901
     strategy: str,
     chain: str,
     initial_eth: float,
@@ -715,7 +715,7 @@ def paper_stop(strategy: str, force: bool) -> None:
     default=None,
     help="New max tick count (absolute, not additional). Mutually exclusive with --duration.",
 )
-def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> None:
+def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> None:  # noqa: C901
     """
     Resume a stopped paper trading session.
 
@@ -875,7 +875,7 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
 @click.option("--strategy", "-s", required=False, default=None, help="Name of the strategy to check")
 @click.option("--all", "-a", "show_all", is_flag=True, default=False, help="Show all paper trading sessions")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed session information")
-def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:
+def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:  # noqa: C901
     """
     Check the status of paper trading sessions.
 

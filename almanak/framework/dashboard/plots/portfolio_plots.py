@@ -64,7 +64,7 @@ class TradeRecord:
     fees: float | None = None
 
 
-def plot_portfolio_value_over_time(
+def plot_portfolio_value_over_time(  # noqa: C901
     value_data: pd.DataFrame | list[dict],
     benchmark_data: pd.DataFrame | list[dict] | None = None,
     time_column: str = "timestamp",

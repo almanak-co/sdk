@@ -487,7 +487,7 @@ class AerodromeReceiptParser:
         except Exception:
             return None
 
-    def parse_receipt(
+    def parse_receipt(  # noqa: C901
         self,
         receipt: dict[str, Any],
         quoted_amount_out: int | None = None,

@@ -171,7 +171,7 @@ class GatewaySettings(BaseSettings):
         return normalized
 
     @model_validator(mode="after")
-    def _fallback_env_vars(self) -> "GatewaySettings":
+    def _fallback_env_vars(self) -> "GatewaySettings":  # noqa: C901
         """Fall back to ALMANAK_* env vars if ALMANAK_GATEWAY_* variants are not set."""
         from dotenv import load_dotenv
 

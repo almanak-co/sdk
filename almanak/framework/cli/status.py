@@ -336,7 +336,7 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
 @_add_gateway_options
-def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, gateway_port):
+def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, gateway_port):  # noqa: C901
     """Show timeline events for a strategy.
 
     Displays the event log (trades, errors, state changes) from the

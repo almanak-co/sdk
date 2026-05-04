@@ -1164,7 +1164,7 @@ def format_iteration_result(result: IterationResult) -> str:
     help="After --once iteration, automatically teardown (close all positions). "
     "Useful for CI/testing to avoid accumulating stale positions on-chain.",
 )
-def run(
+def run(  # noqa: C901
     working_dir: str,
     config_file: str | None,
     once: bool,

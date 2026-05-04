@@ -509,7 +509,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         # Fall back to hardcoded symbol-based mappings.
         return GLOBAL_TOKEN_IDS.get(token)
 
-    async def get_price(
+    async def get_price(  # noqa: C901
         self,
         token: str,
         quote: str = "USD",

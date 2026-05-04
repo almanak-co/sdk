@@ -1006,7 +1006,7 @@ class MultiChainMarketSnapshot:
     # Protocol Metrics - Parallel Fetching
     # =========================================================================
 
-    def fetch_all_protocol_metrics_parallel(
+    def fetch_all_protocol_metrics_parallel(  # noqa: C901
         self,
         aave_chains: list[str] | None = None,
         aave_borrow_tokens: list[str] | None = None,

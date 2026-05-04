@@ -138,7 +138,7 @@ def handle_pendle_lp(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def handle_pendle_pt(
+def handle_pendle_pt(  # noqa: C901
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
     basis_store: FIFOBasisStore | None = None,

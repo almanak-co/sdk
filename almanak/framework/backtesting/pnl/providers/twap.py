@@ -1519,7 +1519,7 @@ class TWAPDataProvider:
 
         return ohlcv_list
 
-    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:  # noqa: C901
         """Iterate through historical market states using actual historical TWAP prices.
 
         When archive node access is available, this method fetches actual historical

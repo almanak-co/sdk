@@ -1194,7 +1194,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                 total += value
         return total
 
-    def update_position(
+    def update_position(  # noqa: C901
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",

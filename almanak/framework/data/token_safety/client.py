@@ -386,7 +386,7 @@ class TokenSafetyClient:
     # Result aggregation
     # -----------------------------------------------------------------------
 
-    def _aggregate_results(
+    def _aggregate_results(  # noqa: C901
         self,
         mint_address: str,
         rugcheck: RugCheckResult | None,

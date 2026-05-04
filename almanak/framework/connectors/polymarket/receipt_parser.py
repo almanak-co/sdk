@@ -717,7 +717,7 @@ class PolymarketReceiptParser:
     # CTF Receipt Parsing
     # =========================================================================
 
-    def parse_ctf_receipt(
+    def parse_ctf_receipt(  # noqa: C901
         self,
         receipt: dict[str, Any],
         filter_by_contract: bool = True,

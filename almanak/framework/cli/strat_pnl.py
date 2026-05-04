@@ -320,7 +320,7 @@ class PnLBreakdown:
         }
 
 
-def compute_pnl_breakdown(
+def compute_pnl_breakdown(  # noqa: C901
     deployment_id: str,
     metrics: Any,
     ledger_entries: list,
@@ -612,7 +612,7 @@ def render_text(breakdown: PnLBreakdown) -> str:
     ),
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Emit JSON instead of text.")
-def strat_pnl(
+def strat_pnl(  # noqa: C901
     strategy_id: str,
     db_path: str | None,
     ledger_limit: int,

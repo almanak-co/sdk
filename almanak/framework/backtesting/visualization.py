@@ -420,7 +420,7 @@ def calculate_distribution_stats(pnl_values: list[float]) -> DistributionStats |
     )
 
 
-def plot_equity_curve(
+def plot_equity_curve(  # noqa: C901
     result: "BacktestResult",
     output_path: Path | str | None = None,
     config: ChartConfig | None = None,
@@ -699,7 +699,7 @@ def plot_equity_curve(
         )
 
 
-def plot_equity_curve_interactive(
+def plot_equity_curve_interactive(  # noqa: C901
     result: "BacktestResult",
     output_path: Path | str | None = None,
     title: str | None = None,
@@ -1155,7 +1155,7 @@ def plot_pnl_histogram(
         )
 
 
-def plot_pnl_histogram_interactive(
+def plot_pnl_histogram_interactive(  # noqa: C901
     result: "BacktestResult",
     output_path: Path | str | None = None,
     title: str | None = None,

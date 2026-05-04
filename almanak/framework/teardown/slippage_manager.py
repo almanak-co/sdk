@@ -136,7 +136,7 @@ class EscalatingSlippageManager:
 
         return EscalationConfig.default_levels()
 
-    async def execute_with_escalation(
+    async def execute_with_escalation(  # noqa: C901
         self,
         intent: Any,
         position_value: Decimal,

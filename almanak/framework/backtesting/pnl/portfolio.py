@@ -1186,7 +1186,7 @@ class SimulatedPortfolio:
             unrealized_pnl=self._unrealized_pnl,
         )
 
-    def calculate_data_coverage_metrics(self) -> DataCoverageMetrics:
+    def calculate_data_coverage_metrics(self) -> DataCoverageMetrics:  # noqa: C901
         """Calculate data coverage metrics across all position types.
 
         Aggregates confidence levels and data sources from all positions

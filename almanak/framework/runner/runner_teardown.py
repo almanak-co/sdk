@@ -343,7 +343,7 @@ def _safe_mark(state_manager: Any, method_name: str, strategy_id: str, **kwargs:
 # -------------------------------------------------------------------------
 
 
-async def execute_teardown(
+async def execute_teardown(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,
     teardown_mode: TeardownMode,
@@ -875,7 +875,7 @@ async def execute_teardown_inline(
             set_cycle_id(saved_ctx_cycle_id)
 
 
-async def _execute_teardown_inline_body(
+async def _execute_teardown_inline_body(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,
     teardown_intents: list,

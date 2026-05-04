@@ -81,7 +81,7 @@ def is_hold_intent(intent: Any) -> bool:
     return False
 
 
-def get_intent_type(intent: Any) -> IntentType:
+def get_intent_type(intent: Any) -> IntentType:  # noqa: C901
     """Extract the IntentType from an intent object.
 
     Args:
@@ -213,7 +213,7 @@ def get_intent_tokens(intent: Any) -> list[str]:
     return tokens if tokens else ["UNKNOWN"]
 
 
-def get_intent_amount_usd(
+def get_intent_amount_usd(  # noqa: C901
     intent: Any,
     market_state: MarketState,
     strict_reproducibility: bool = False,

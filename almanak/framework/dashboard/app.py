@@ -123,7 +123,7 @@ def render_custom_dashboard_page(
         st.warning("Custom dashboard rendering not available")
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     """Main dashboard application."""
     st.set_page_config(
         page_title=PAGE_TITLE,

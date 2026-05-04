@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
-def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult:
+def compile_flash_loan(compiler, intent: FlashLoanIntent) -> CompilationResult:  # noqa: C901
     """Compile a FLASH_LOAN intent into an ActionBundle.
 
     This method:

@@ -105,7 +105,7 @@ def _resolve_rpc_url(explicit_url: str | None, chain: str) -> str | None:
     help="RPC URL for on-chain discovery (e.g. Aerodrome pool addresses). "
     "Auto-resolved from ALCHEMY_API_KEY env if not provided.",
 )
-def permissions(
+def permissions(  # noqa: C901
     working_dir: str, chain: str | None, output: str | None, output_format: str, rpc_url: str | None
 ) -> None:
     """Generate a Zodiac Roles permission manifest for a strategy.

@@ -587,7 +587,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             self._slippage_model_initialized = True
             return self._slippage_model
 
-    def _get_historical_liquidity(
+    def _get_historical_liquidity(  # noqa: C901
         self,
         pool_address: str | None,
         timestamp: datetime,
@@ -876,7 +876,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             self._volume_provider = None
             return None
 
-    def _get_historical_volume(
+    def _get_historical_volume(  # noqa: C901
         self,
         pool_address: str | None,
         timestamp: datetime,
@@ -1280,7 +1280,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             },
         )
 
-    def _execute_lp_close(
+    def _execute_lp_close(  # noqa: C901
         self,
         intent: "Intent",
         portfolio: "SimulatedPortfolio",
@@ -1548,7 +1548,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         except (ValueError, OverflowError):
             return MIN_TICK if float(price) < 1 else MAX_TICK
 
-    def update_position(
+    def update_position(  # noqa: C901
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
-def compile_swap_curve(compiler, intent: SwapIntent) -> CompilationResult:
+def compile_swap_curve(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
     """Compile SWAP intent for Curve Finance.
 
     Curve uses pool-specific AMMs (StableSwap, CryptoSwap, Tricrypto).
@@ -383,7 +383,7 @@ def compile_lp_open_curve(compiler, intent: LPOpenIntent) -> CompilationResult:
     return result
 
 
-def compile_lp_close_curve(compiler, intent: LPCloseIntent) -> CompilationResult:
+def compile_lp_close_curve(compiler, intent: LPCloseIntent) -> CompilationResult:  # noqa: C901
     """Compile LP_CLOSE intent for Curve Finance.
 
     Burns LP tokens in exchange for underlying tokens (proportional removal).

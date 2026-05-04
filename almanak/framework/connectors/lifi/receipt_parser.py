@@ -280,7 +280,7 @@ class LiFiReceiptParser:
             token_out=token_out_addr,
         )
 
-    def extract_bridge_data(
+    def extract_bridge_data(  # noqa: C901
         self,
         receipt: dict[str, Any],
         *,

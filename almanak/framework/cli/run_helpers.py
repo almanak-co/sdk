@@ -804,7 +804,7 @@ def _resolve_identity(
     )
 
 
-def _setup_gateway(
+def _setup_gateway(  # noqa: C901
     *,
     working_dir: str,
     config_file: str | None,
@@ -1278,7 +1278,7 @@ def _build_cleanup_fn(
 # ---------------------------------------------------------------------------
 
 
-def _instantiate_strategy(
+def _instantiate_strategy(  # noqa: C901
     *,
     strategy_class: type,
     strategy_config: dict[str, Any],
@@ -1456,7 +1456,7 @@ def _intent_strategy_runtime() -> type:
 # ---------------------------------------------------------------------------
 
 
-def _build_runtime_config(
+def _build_runtime_config(  # noqa: C901
     *,
     no_gateway: bool,
     multi_chain: bool,
@@ -1753,7 +1753,7 @@ def _get_data_requirements(strategy_instance: Any) -> StrategyDataRequirements:
     return dr
 
 
-def _build_orchestrator_and_providers(
+def _build_orchestrator_and_providers(  # noqa: C901
     *,
     multi_chain: bool,
     runtime_config: Any,
@@ -2050,7 +2050,7 @@ def _build_orchestrator_and_providers(
     components.ohlcv_provider = ohlcv_provider
 
 
-def _init_copy_trading(
+def _init_copy_trading(  # noqa: C901
     *,
     strategy_instance: Any,
     strategy_config: dict[str, Any],
@@ -2725,7 +2725,7 @@ def _handle_standalone_dashboard(
 # ---------------------------------------------------------------------------
 
 
-def _run_once(
+def _run_once(  # noqa: C901
     *,
     runner: Any,
     strategy_instance: Any,
@@ -2928,7 +2928,7 @@ def _run_once(
 # ---------------------------------------------------------------------------
 
 
-def _run_test_lifecycle(
+def _run_test_lifecycle(  # noqa: C901
     *,
     runner: Any,
     strategy_instance: Any,
@@ -2999,7 +2999,7 @@ def _run_test_lifecycle(
     action_results: list[dict] = []
     teardown_result_dict: dict | None = None
 
-    async def run_lifecycle_with_cleanup() -> tuple[list[dict], dict | None]:
+    async def run_lifecycle_with_cleanup() -> tuple[list[dict], dict | None]:  # noqa: C901
         nonlocal action_results, teardown_result_dict
         gateway_integration_ready = False
         try:

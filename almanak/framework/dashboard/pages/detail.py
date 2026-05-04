@@ -954,7 +954,7 @@ def render_multi_chain_position_summary(strategy: Strategy) -> None:
                         st.metric("Leverage", f"{chain_position.leverage:.1f}x")
 
 
-def page(strategies: list[Strategy]) -> None:
+def page(strategies: list[Strategy]) -> None:  # noqa: C901
     """Render the strategy detail page.
 
     Args:

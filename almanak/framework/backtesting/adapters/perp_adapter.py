@@ -1051,7 +1051,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             confidence,
         )
 
-    def _get_historical_funding_rate_v2(
+    def _get_historical_funding_rate_v2(  # noqa: C901
         self,
         position: "SimulatedPosition",
         timestamp: datetime | None = None,

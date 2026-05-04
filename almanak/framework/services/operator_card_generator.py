@@ -244,7 +244,7 @@ class OperatorCardGenerator:
             auto_remediation=auto_remediation,
         )
 
-    def _detect_reason(
+    def _detect_reason(  # noqa: C901
         self,
         strategy_state: StrategyState,
         error_context: ErrorContext | None,

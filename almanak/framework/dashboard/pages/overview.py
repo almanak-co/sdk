@@ -350,7 +350,7 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
 
 
 @st.fragment
-def render_strategy_grid(strategies: list[Strategy]) -> None:
+def render_strategy_grid(strategies: list[Strategy]) -> None:  # noqa: C901
     """Render the strategy cards in a grid layout."""
     st.markdown("## Your Strategies")
 

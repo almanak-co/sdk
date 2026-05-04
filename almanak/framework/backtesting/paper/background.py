@@ -1081,7 +1081,7 @@ class BackgroundPaperTrader:
 # =============================================================================
 
 
-def _run_background_paper_trader(
+def _run_background_paper_trader(  # noqa: C901
     config_dict: dict[str, Any],
     strategy_module: str,
     strategy_class: str,
@@ -1250,7 +1250,7 @@ def _run_background_paper_trader(
     # Save initial/resumed state
     state.save(state_file)
 
-    async def run_paper_trader() -> None:
+    async def run_paper_trader() -> None:  # noqa: C901
         """Run the paper trading loop."""
         nonlocal shutdown_requested
 

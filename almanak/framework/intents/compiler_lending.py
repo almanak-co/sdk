@@ -559,7 +559,7 @@ def _validate_curvance_market_tokens(
     return None
 
 
-def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:
+def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:  # noqa: C901
     """Compile a BORROW intent into an ActionBundle.
 
     This method:
@@ -2185,7 +2185,7 @@ def _compile_borrow_silo_v2(
     return result
 
 
-def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:
+def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:  # noqa: C901
     """Compile a REPAY intent into an ActionBundle.
 
     This method:
@@ -3565,7 +3565,7 @@ def _compile_repay_silo_v2(
     return result
 
 
-def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:
+def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:  # noqa: C901
     """Compile a SUPPLY intent into an ActionBundle.
 
     This method:
@@ -4864,7 +4864,7 @@ def _compile_supply_silo_v2(
     return result
 
 
-def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:
+def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:  # noqa: C901
     """Compile a WITHDRAW intent into an ActionBundle.
 
     Thin dispatcher: resolves shared EVM state (withdraw token, amount, initial

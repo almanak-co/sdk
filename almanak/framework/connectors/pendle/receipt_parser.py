@@ -416,7 +416,7 @@ class PendleReceiptParser:
         # Initialize event registry
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
-    def parse_receipt(
+    def parse_receipt(  # noqa: C901
         self,
         receipt: dict[str, Any],
         quoted_amount_out: int | None = None,

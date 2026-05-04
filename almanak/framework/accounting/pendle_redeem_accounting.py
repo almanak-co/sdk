@@ -86,7 +86,7 @@ def _is_pendle_redeem(intent: Any, result: Any) -> bool:
     return False
 
 
-def build_pendle_pt_redeem_accounting_event(
+def build_pendle_pt_redeem_accounting_event(  # noqa: C901
     *,
     intent: Any,
     result: Any,

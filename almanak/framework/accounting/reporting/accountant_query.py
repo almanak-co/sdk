@@ -210,7 +210,7 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in cur.fetchall()}
 
 
-def _filtered_rows(
+def _filtered_rows(  # noqa: C901
     conn: sqlite3.Connection,
     table: str,
     filt: AccountingReportFilter,

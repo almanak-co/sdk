@@ -224,7 +224,7 @@ class ResultEnricher:
         # monitoring / paper engines can surface the total.
         self.extract_error_count: int = 0
 
-    def enrich(
+    def enrich(  # noqa: C901
         self,
         result: ExecutionResult,
         intent: Any,
@@ -954,7 +954,7 @@ class ResultEnricher:
         return any(name in klass.__dict__ for klass in type(obj).__mro__)
 
     @staticmethod
-    def _build_extract_kwargs(
+    def _build_extract_kwargs(  # noqa: C901
         field: str,
         bundle_metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:

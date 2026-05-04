@@ -246,7 +246,7 @@ class PaperTraderConfig:
     Will be removed in a future version.
     """
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901
         """Validate configuration after initialization."""
         # Chain validation
         chain_lower = self.chain.lower()

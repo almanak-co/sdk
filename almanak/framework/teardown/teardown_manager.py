@@ -326,7 +326,7 @@ class TeardownManager:
             warnings=warnings,
         )
 
-    async def execute(
+    async def execute(  # noqa: C901
         self,
         strategy: IntentStrategy,
         mode: str,
@@ -670,7 +670,7 @@ class TeardownManager:
             market=market,
         )
 
-    async def _execute_intents(
+    async def _execute_intents(  # noqa: C901
         self,
         teardown_id: str,
         strategy: IntentStrategy,
@@ -761,7 +761,7 @@ class TeardownManager:
                 continue
 
             # Execute with escalating slippage
-            async def execute_at_slippage(
+            async def execute_at_slippage(  # noqa: C901
                 intent_to_exec: Any, slippage: Decimal, *, intent_index: int = i
             ) -> ExecutionAttempt:
                 """Execute a single intent at given slippage.

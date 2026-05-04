@@ -1012,7 +1012,7 @@ class PlanExecutor:
 
         return result
 
-    async def _rehydrate_step(self, step: PlanStep) -> "StepRehydrationResult":
+    async def _rehydrate_step(self, step: PlanStep) -> "StepRehydrationResult":  # noqa: C901
         """Rehydrate a single step by checking artifacts against on-chain state.
 
         Args:

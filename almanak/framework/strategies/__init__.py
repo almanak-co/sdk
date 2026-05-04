@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 STRATEGY_REGISTRY: dict[str, type[Any]] = {}
 
 
-def _try_import_strategy(module_name: str, file_path: Path | None = None) -> None:
+def _try_import_strategy(module_name: str, file_path: Path | None = None) -> None:  # noqa: C901
     """Import a strategy module, retrying once on circular import errors.
 
     Uses spec_from_file_location when a file_path is provided, which allows
@@ -205,7 +205,7 @@ def _auto_discover_cwd_strategy() -> None:
     _try_import_strategy(module_name, cwd_strategy)
 
 
-def _auto_discover_strategies() -> None:
+def _auto_discover_strategies() -> None:  # noqa: C901
     """Auto-discover and import strategies from the strategies/ directory.
 
     This function finds all strategy.py files in the strategies/ directory

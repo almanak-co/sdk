@@ -548,7 +548,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 )
             return await conn.fetch(query, *args)
 
-    async def SavePortfolioSnapshot(
+    async def SavePortfolioSnapshot(  # noqa: C901
         self,
         request: gateway_pb2.SaveSnapshotRequest,
         context: grpc.aio.ServicerContext,
@@ -1070,7 +1070,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     # Transaction Ledger RPC (VIB-3201)
     # =========================================================================
 
-    async def SaveLedgerEntry(
+    async def SaveLedgerEntry(  # noqa: C901
         self,
         request: gateway_pb2.SaveLedgerEntryRequest,
         context: grpc.aio.ServicerContext,
@@ -1339,7 +1339,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     # Accounting Events RPC (VIB-3449)
     # =========================================================================
 
-    async def SaveAccountingEvent(
+    async def SaveAccountingEvent(  # noqa: C901
         self,
         request: gateway_pb2.SaveAccountingEventRequest,
         context: grpc.aio.ServicerContext,

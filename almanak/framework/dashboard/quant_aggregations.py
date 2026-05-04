@@ -581,7 +581,7 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
     return "mixed"
 
 
-def evaluate_posture(
+def evaluate_posture(  # noqa: C901
     primitive: str,
     ledger_entries: list[Any],
     accounting_events: list[dict[str, Any]],
@@ -827,7 +827,7 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def build_quant_header(
+def build_quant_header(  # noqa: C901
     *,
     portfolio_metrics: Any,
     snapshots: list[Any],

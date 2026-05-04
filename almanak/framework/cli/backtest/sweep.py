@@ -1821,7 +1821,7 @@ def sweep_backtest(
     default=False,
     help="Show progress bar and detailed logging",
 )
-def optimize_backtest(
+def optimize_backtest(  # noqa: C901
     strategy: str,
     start: datetime | None,
     end: datetime | None,

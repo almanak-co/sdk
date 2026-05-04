@@ -627,7 +627,7 @@ class TokenResolver:
         with cls._instance_lock:
             cls._instance = None
 
-    def resolve(
+    def resolve(  # noqa: C901
         self, token: str, chain: str | Chain, *, log_errors: bool = True, skip_gateway: bool = False
     ) -> ResolvedToken:
         """Resolve a token by symbol or address on a specific chain.

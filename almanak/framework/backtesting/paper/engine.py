@@ -1595,7 +1595,7 @@ class PaperTrader:
         self._valuer_available = False
         self._last_market_snapshot = None
 
-    async def _execute_tick(self, strategy: PaperTradeableStrategy) -> PaperTrade | None:
+    async def _execute_tick(self, strategy: PaperTradeableStrategy) -> PaperTrade | None:  # noqa: C901
         """Execute a single trading tick.
 
         This method:
@@ -1784,7 +1784,7 @@ class PaperTrader:
 
         return trade_result
 
-    async def _execute_intent(
+    async def _execute_intent(  # noqa: C901
         self,
         intent: Any,
         strategy: PaperTradeableStrategy,
@@ -2723,7 +2723,7 @@ class PaperTrader:
 
         return tokens_in, tokens_out
 
-    async def _extract_token_flows(
+    async def _extract_token_flows(  # noqa: C901
         self,
         intent: Any,
         receipt: TransactionReceipt | None = None,
@@ -3224,7 +3224,7 @@ class PaperTrader:
 
             return BinanceOHLCVProvider(cache_ttl=120)
 
-    async def _get_token_price(self, token: str) -> Decimal:
+    async def _get_token_price(self, token: str) -> Decimal:  # noqa: C901
         """Get token price in USD using the configured fallback chain.
 
         Implements a fallback chain for price sourcing. When price_source='auto',

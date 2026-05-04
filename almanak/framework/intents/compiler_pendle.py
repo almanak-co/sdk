@@ -48,7 +48,7 @@ def _resolve_pt_from_yt(adapter: Any, yt_address: str) -> str | None:
         return None
 
 
-def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
+def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
     """Compile SWAP intent for Pendle Protocol (yield tokenization).
 
     Pendle enables swapping tokens to PT (Principal Tokens) and YT (Yield Tokens).

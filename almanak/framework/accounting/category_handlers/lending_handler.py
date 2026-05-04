@@ -58,7 +58,7 @@ def _parse_post_state(post_state_json: str) -> dict[str, Any] | None:
         return None
 
 
-def handle_lending(
+def handle_lending(  # noqa: C901
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
     basis_store: FIFOBasisStore,

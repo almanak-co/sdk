@@ -92,7 +92,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
     # ChainExecutionStrategy interface
     # =========================================================================
 
-    async def execute_actions(
+    async def execute_actions(  # noqa: C901
         self,
         actions: list[Any],
         context: dict[str, Any] | None = None,

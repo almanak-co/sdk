@@ -100,7 +100,7 @@ class KaminoReceiptParser:
         """
         return self._extract_balance_delta(receipt, action="withdraw", direction="inflow", token_mint=token_mint)
 
-    def _extract_balance_delta(
+    def _extract_balance_delta(  # noqa: C901
         self,
         receipt: dict[str, Any],
         action: str = "",

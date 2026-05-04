@@ -1090,7 +1090,7 @@ class PortfolioValuer:
             logger.debug("Lending enriched re-pricing failed for %s", position.position_id, exc_info=True)
             return None
 
-    def _reprice_perps_on_chain_enriched(
+    def _reprice_perps_on_chain_enriched(  # noqa: C901
         self,
         position: "PositionInfo",
         chain: str,
@@ -1416,7 +1416,7 @@ class PortfolioValuer:
             )
             return None
 
-    def _reprice_perps_on_chain(
+    def _reprice_perps_on_chain(  # noqa: C901
         self,
         position: "PositionInfo",
         chain: str,

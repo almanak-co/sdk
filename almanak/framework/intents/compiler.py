@@ -701,7 +701,7 @@ class IntentCompiler:
         """
         return self._polymarket_adapter
 
-    def compile(self, intent: AnyIntent) -> CompilationResult:
+    def compile(self, intent: AnyIntent) -> CompilationResult:  # noqa: C901
         """Compile an intent into an ActionBundle.
 
         This is the main entry point for compiling intents. It dispatches
@@ -849,7 +849,7 @@ class IntentCompiler:
         self._bridge_selector = BridgeSelector(bridges=bridges)
         return self._bridge_selector
 
-    def _compile_bridge(self, intent: "BridgeIntent") -> CompilationResult:
+    def _compile_bridge(self, intent: "BridgeIntent") -> CompilationResult:  # noqa: C901
         """Compile a BRIDGE intent into an ActionBundle."""
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -5635,7 +5635,7 @@ class IntentCompiler:
             intent_id=intent.intent_id,
         )
 
-    def _compile_perp_open(self, intent: PerpOpenIntent) -> CompilationResult:
+    def _compile_perp_open(self, intent: PerpOpenIntent) -> CompilationResult:  # noqa: C901
         """Compile a PERP_OPEN intent into an ActionBundle.
 
         Routes to protocol-specific adapter based on intent.protocol:
@@ -5957,7 +5957,7 @@ class IntentCompiler:
 
         return result
 
-    def _compile_perp_close(self, intent: PerpCloseIntent) -> CompilationResult:
+    def _compile_perp_close(self, intent: PerpCloseIntent) -> CompilationResult:  # noqa: C901
         """Compile a PERP_CLOSE intent into an ActionBundle.
 
         Routes to protocol-specific adapter based on intent.protocol:

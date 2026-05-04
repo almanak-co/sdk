@@ -237,7 +237,7 @@ def compute_lp_cost_basis(
 _compute_cost_basis = compute_lp_cost_basis
 
 
-def build_lp_accounting_event(
+def build_lp_accounting_event(  # noqa: C901
     *,
     intent: Any,
     result: Any,

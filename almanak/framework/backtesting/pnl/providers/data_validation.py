@@ -219,7 +219,7 @@ class DataQualityResult:
         }
 
 
-def validate_price_data(
+def validate_price_data(  # noqa: C901
     price_data: list[tuple[datetime, Decimal]],
     expected_interval_seconds: int,
     token: str | None = None,
@@ -397,7 +397,7 @@ def validate_price_data(
     return result
 
 
-def detect_outliers(
+def detect_outliers(  # noqa: C901
     price_data: list[tuple[datetime, Decimal]],
     rapid_change_threshold_pct: float = 50.0,
     std_dev_threshold: float = 3.0,

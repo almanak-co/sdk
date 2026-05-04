@@ -721,7 +721,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
 
         return False
 
-    def calculate_unified_risk(
+    def calculate_unified_risk(  # noqa: C901
         self,
         portfolio: "SimulatedPortfolio",
         market_state: "MarketState",

@@ -171,7 +171,7 @@ def _resolve_lp_amounts(
     return amount0, amount1, None, None, False
 
 
-def handle_lp(
+def handle_lp(  # noqa: C901
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
     prior_open_payload: dict[str, Any] | None = None,

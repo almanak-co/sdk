@@ -189,7 +189,7 @@ class CompoundV3ReceiptParser:
         self.base_decimals = base_decimals
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
-    def parse_receipt(
+    def parse_receipt(  # noqa: C901
         self,
         receipt: dict[str, Any],
         comet_address: str | None = None,

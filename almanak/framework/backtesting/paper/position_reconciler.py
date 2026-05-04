@@ -1035,7 +1035,7 @@ class PositionReconciler:
 # =============================================================================
 
 
-def compare_positions(
+def compare_positions(  # noqa: C901
     tracked: list["SimulatedPosition"],
     actual: list["SimulatedPosition"],
     tolerance_pct: Decimal = Decimal("0.01"),

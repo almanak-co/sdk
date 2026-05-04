@@ -525,7 +525,7 @@ class ToolExecutor:
 
     # -- Internal dispatch --------------------------------------------------
 
-    async def _execute_inner(self, tool_name: str, arguments: dict) -> tuple[ToolResponse, dict | None]:
+    async def _execute_inner(self, tool_name: str, arguments: dict) -> tuple[ToolResponse, dict | None]:  # noqa: C901
         """Execute the tool and return (response, policy_result_dict).
 
         Returns a tuple to avoid storing policy result on the instance
@@ -630,7 +630,7 @@ class ToolExecutor:
 
     # ── DATA TOOLS ──────────────────────────────────────────────────────
 
-    async def _dispatch_data(self, tool_name: str, args: dict) -> ToolResponse:
+    async def _dispatch_data(self, tool_name: str, args: dict) -> ToolResponse:  # noqa: C901
         from almanak.gateway.proto import gateway_pb2
 
         if tool_name == "get_price":
@@ -929,7 +929,7 @@ class ToolExecutor:
 
     # ── ACTION TOOLS ────────────────────────────────────────────────────
 
-    async def _dispatch_action(self, tool_name: str, args: dict) -> ToolResponse:
+    async def _dispatch_action(self, tool_name: str, args: dict) -> ToolResponse:  # noqa: C901
         # Handle execute_compiled_bundle separately -- it already has a compiled bundle
         if tool_name == "execute_compiled_bundle":
             return await self._execute_compiled_bundle(args)
@@ -1043,7 +1043,7 @@ class ToolExecutor:
 
         return ToolResponse(status=status, data=data)
 
-    async def _execute_compiled_bundle(self, args: dict) -> ToolResponse:
+    async def _execute_compiled_bundle(self, args: dict) -> ToolResponse:  # noqa: C901
         """Execute a previously compiled ActionBundle from the bundle cache."""
         from almanak.gateway.proto import gateway_pb2
 
@@ -1188,7 +1188,7 @@ class ToolExecutor:
             },
         )
 
-    def _action_to_intent(self, tool_name: str, args: dict) -> tuple[str, dict]:
+    def _action_to_intent(self, tool_name: str, args: dict) -> tuple[str, dict]:  # noqa: C901
         """Map action tool arguments to intent type + params."""
         if tool_name == "swap_tokens":
             params: dict = {
@@ -1983,7 +1983,7 @@ class ToolExecutor:
             },
         )
 
-    async def _execute_get_lp_position(self, args: dict) -> ToolResponse:
+    async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901
         """Read Uniswap V3 LP position via NonfungiblePositionManager.positions()."""
         from almanak.framework.connectors.uniswap_v3.receipt_parser import POSITION_MANAGER_ADDRESSES
         from almanak.gateway.proto import gateway_pb2
@@ -2456,7 +2456,7 @@ class ToolExecutor:
             },
         )
 
-    async def _execute_get_portfolio(self, args: dict) -> ToolResponse:
+    async def _execute_get_portfolio(self, args: dict) -> ToolResponse:  # noqa: C901
         """One-shot portfolio summary: native + ERC20 balances + LP + lending.
 
         Read-only aggregate. Every section is queried independently and any
@@ -3140,7 +3140,7 @@ class ToolExecutor:
         return warnings
 
     @staticmethod
-    def _infer_check_name(violation_text: str) -> str:
+    def _infer_check_name(violation_text: str) -> str:  # noqa: C901
         """Infer a machine-readable check name from a policy violation message."""
         text_lower = violation_text.lower()
         if "tool" in text_lower and "not in the allowed set" in text_lower:
@@ -3343,7 +3343,7 @@ class ToolExecutor:
             },
         )
 
-    async def _compute_vault_nav(self, vault_address: str, safe_address: str, chain: str) -> int:
+    async def _compute_vault_nav(self, vault_address: str, safe_address: str, chain: str) -> int:  # noqa: C901
         """Compute deterministic NAV for a vault by summing Safe's assets.
 
         Sums:

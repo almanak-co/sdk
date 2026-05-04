@@ -23,7 +23,7 @@ from almanak.framework.dashboard.utils import (
 # from almanak.framework.dashboard.mock_data import generate_extended_timeline_events
 
 
-def page(strategies: list[Strategy]) -> None:
+def page(strategies: list[Strategy]) -> None:  # noqa: C901
     """Render the timeline page.
 
     Args:

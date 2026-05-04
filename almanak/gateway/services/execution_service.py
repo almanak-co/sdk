@@ -414,7 +414,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         logger.info(f"Created SolanaExecutionPlanner for chain={chain}, wallet={wallet_address[:8]}...")
         return planner
 
-    async def CompileIntent(
+    async def CompileIntent(  # noqa: C901
         self,
         request: gateway_pb2.CompileIntentRequest,
         context: grpc.aio.ServicerContext,

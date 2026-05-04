@@ -938,7 +938,7 @@ class ChainlinkDataProvider:
         self._round_bounds_cache[feed_address] = (min_round_id, max_round_id)
         return (min_round_id, max_round_id)
 
-    async def _binary_search_round_for_timestamp(
+    async def _binary_search_round_for_timestamp(  # noqa: C901
         self,
         feed_address: str,
         target_timestamp: int,
@@ -1861,7 +1861,7 @@ class ChainlinkDataProvider:
             self._cache.ttl_seconds = ttl_seconds
         logger.debug(f"Updated cache TTL to {ttl_seconds}s")
 
-    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:  # noqa: C901
         """Iterate through historical market states using native round traversal.
 
         When an archive node is available, this method fetches historical prices

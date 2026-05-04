@@ -737,7 +737,7 @@ class PortfolioAggregator:
                 total += position.notional_usd
         return total
 
-    def calculate_unified_risk_score(
+    def calculate_unified_risk_score(  # noqa: C901
         self,
         prices: dict[str, Decimal] | None = None,
         health_factor_warning_threshold: Decimal = Decimal("1.5"),

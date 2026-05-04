@@ -565,7 +565,7 @@ def create_market_snapshot_from_scenario(
     return market
 
 
-def trace_strategy(
+def trace_strategy(  # noqa: C901
     file_path: Path,
     scenario: dict[str, Any],
     scenario_file: str | None = None,
@@ -838,7 +838,7 @@ def trace_strategy(
 # =============================================================================
 
 
-def print_inspection_result(result: IntentInspectionResult, verbose: bool = False) -> None:
+def print_inspection_result(result: IntentInspectionResult, verbose: bool = False) -> None:  # noqa: C901
     """Print inspection result to console."""
     click.echo()
     click.echo("=" * 70)

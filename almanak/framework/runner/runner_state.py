@@ -289,7 +289,7 @@ def _make_unavailable_snapshot(
     )
 
 
-async def _persist_position_state_snapshots(
+async def _persist_position_state_snapshots(  # noqa: C901
     runner: Any,
     snapshot: PortfolioSnapshot,
     snapshot_id: int,
@@ -1207,7 +1207,7 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
 # -------------------------------------------------------------------------
 
 
-def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | None = None) -> None:
+def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | None = None) -> None:  # noqa: C901
     """Emit a structured iteration_summary log record for JSONL analysis.
 
     This provides a single, machine-readable record per iteration containing

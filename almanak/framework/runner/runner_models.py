@@ -50,7 +50,7 @@ def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
     return extract_token_symbols(intent)
 
 
-def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:
+def _format_intent_for_log(intent: "AnyIntent", chain: str = "") -> str:  # noqa: C901
     """Format an intent for user-friendly logging.
 
     Args:

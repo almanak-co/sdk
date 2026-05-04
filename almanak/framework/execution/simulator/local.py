@@ -345,7 +345,7 @@ class LocalSimulator(Simulator):
         except Exception as e:
             return False, str(e)
 
-    async def simulate(
+    async def simulate(  # noqa: C901
         self,
         txs: list[UnsignedTransaction],
         chain: str,

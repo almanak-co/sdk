@@ -41,7 +41,7 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = (
 )
 
 
-def _build_matrix() -> dict:
+def _build_matrix() -> dict:  # noqa: C901
     """Build the chains x protocols support matrix from SDK data structures.
 
     Returns a dict with:

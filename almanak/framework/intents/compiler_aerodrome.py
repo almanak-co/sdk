@@ -205,7 +205,7 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
     return result
 
 
-def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationResult:
+def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationResult:  # noqa: C901
     """Compile LP_CLOSE intent for Aerodrome Finance.
 
     Aerodrome LP close:
@@ -461,7 +461,7 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
     return result
 
 
-def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:
+def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
     """Compile SWAP intent for Aerodrome/Velodrome (Solidly forks).
 
     On Base (Aerodrome): defaults to Slipstream CL pools; classic via swap_params={"classic": True}.

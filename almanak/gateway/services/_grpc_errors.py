@@ -61,7 +61,7 @@ def set_error_from_upstream(
     )
 
 
-def _classify(
+def _classify(  # noqa: C901
     exc: BaseException,
     *,
     upstream: str,

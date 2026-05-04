@@ -845,7 +845,7 @@ class RollingForkManager:
             logger.exception(f"Error funding wallet: {e}")
             return False
 
-    async def fund_tokens(
+    async def fund_tokens(  # noqa: C901
         self,
         address: str,
         tokens: dict[str, Decimal],

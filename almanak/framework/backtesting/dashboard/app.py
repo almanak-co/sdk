@@ -668,7 +668,7 @@ def render_position_breakdown(result: BacktestResult) -> None:
     st.dataframe(summary_data, use_container_width=True)
 
 
-def render_enhanced_metrics_comparison(
+def render_enhanced_metrics_comparison(  # noqa: C901
     results: dict[str, BacktestResult],
     selected_results: list[str],
 ) -> None:
@@ -831,7 +831,7 @@ def render_enhanced_metrics_comparison(
     st.plotly_chart(fig, use_container_width=True)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     """Main dashboard application entry point."""
     st.set_page_config(
         page_title=PAGE_TITLE,

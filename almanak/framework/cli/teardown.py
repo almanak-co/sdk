@@ -622,7 +622,7 @@ def teardown():
         "never moves real funds without books."
     ),
 )
-def execute_teardown(
+def execute_teardown(  # noqa: C901
     working_dir: str,
     config_file: str | None,
     mode: str,

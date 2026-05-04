@@ -207,7 +207,7 @@ class ValidationResult:
         return len(self.errors) == 0
 
 
-def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:
+def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:  # noqa: C901
     """Validate a loaded configuration dictionary.
 
     This function checks that the config data contains all required fields

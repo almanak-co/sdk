@@ -34,7 +34,7 @@ DEFAULT_CONFIG_VALUES = {
 }
 
 
-def load_strategy_config(strategy: Strategy) -> StrategyConfig:
+def load_strategy_config(strategy: Strategy) -> StrategyConfig:  # noqa: C901
     """Load config from strategy's config.json file.
 
     Args:
@@ -308,7 +308,7 @@ def render_config_history(config: StrategyConfig) -> None:
         )
 
 
-def page(strategies: list[Strategy]) -> None:
+def page(strategies: list[Strategy]) -> None:  # noqa: C901
     """Render the config editor page.
 
     Args:

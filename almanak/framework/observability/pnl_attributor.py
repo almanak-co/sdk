@@ -347,7 +347,7 @@ def compute_impermanent_loss(open_event: dict, close_event: dict) -> Decimal | N
     return v_lp - hodl
 
 
-def compute_fee_apy(
+def compute_fee_apy(  # noqa: C901
     open_event: dict,
     collect_events: list[dict],
     close_event: dict | None = None,

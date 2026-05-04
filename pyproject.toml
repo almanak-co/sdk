@@ -86,6 +86,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.3.1",
     "asgi-lifespan>=2.1.0",
+    # CRAP/complexity tooling (Phase 0, see docs/internal/coverage-improvement-plan.md §8)
+    "radon>=6.0.1",
+    "xenon>=0.9.1",
 ]
 
 [tool.poetry]
@@ -121,23 +124,33 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.3.1",
     "asgi-lifespan>=2.1.0",
+    "radon>=6.0.1",
+    "xenon>=0.9.1",
 ]
 
 [tool.ruff.lint]
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings 
-    "F",  # pyflakes
-    "I",  # isort
-    "B",  # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "UP", # pyupgrade
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "C901", # mccabe complexity (Phase 0; max-complexity below)
 ]
 ignore = [
     "E501",  # line too long - formatter handles code; long strings are intentional (logs, errors)
     "E402",  # module level import not at top of file - required for sys.path manipulation
     "B008",  # function call in defaults - required for FastAPI Depends()
 ]
+
+[tool.ruff.lint.mccabe]
+# Phase 0 baseline (2026-05-04). 509 existing functions exceed this threshold; they are
+# silenced via in-line `# noqa: C901` (sweep produced by `ruff check --select C901 --add-noqa`).
+# The gate now blocks NEW functions with CC > 15. Each refactored hot function should drop
+# its noqa; the inventory shrinks as the CRAP work progresses.
+max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Re-exports are intentional in __init__.py
@@ -156,10 +169,24 @@ omit = [
     "almanak/gateway/proto/*_pb2*.py",
     "almanak/**/tests/*",
     "almanak/**/test_*.py",
+    # Phase 0 (2026-05-04): exclude non-production surfaces from the coverage denominator.
+    # Rationale lives in docs/internal/coverage-improvement-plan.md §8 Phase 0.
+    "almanak/demo_strategies/*",                    # user-facing tutorial templates, not framework
+    "almanak/framework/dashboard/pages/*",          # Streamlit page bodies — not unit-testable (§5)
+    "almanak/framework/backtesting/dashboard/*",    # Streamlit — same
+    "almanak/framework/accounting/accountant_test.py",  # 21-cell test harness, runs against live DBs
 ]
 
 [tool.coverage.report]
-fail_under = 0
+# Phase 0 floor (2026-05-04): pre-omit measured 55.26% on the unit-test scope; post-omit
+# computation projects 58.66% (verified by re-processing the JSON, but the local .coverage
+# file is stale so pytest-cov hasn't re-confirmed). Floor set just below the verified
+# pre-omit number to guarantee the first CI run is green; ratchet to ~57-58 in the next
+# phase merge once CI reports the real post-omit number.
+# fail_under is a no-regress gate, NOT the goal — the 80% target lives in
+# docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
+# fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
+fail_under = 55
 show_missing = true
 skip_empty = true
 

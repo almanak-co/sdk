@@ -565,7 +565,7 @@ def is_parser_available(protocol: str) -> bool:
     return _default_registry.is_registered(protocol)
 
 
-def extract_position_id(
+def extract_position_id(  # noqa: C901
     result: Any,
     protocol: str,
     chain: str | None = None,

@@ -328,7 +328,7 @@ class CompoundV3AccountState:
     health_factor: Decimal | None
 
 
-def read_compound_v3_account_state(
+def read_compound_v3_account_state(  # noqa: C901
     gateway_client: Any,
     chain: str,
     wallet_address: str,
@@ -558,7 +558,7 @@ def read_compound_v3_account_state(
         return None
 
 
-def capture_lending_pre_state(
+def capture_lending_pre_state(  # noqa: C901
     *,
     intent: Any,
     chain: str,
@@ -926,7 +926,7 @@ def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asse
         return None
 
 
-def build_lending_accounting_event(
+def build_lending_accounting_event(  # noqa: C901
     *,
     intent: Any,
     result: Any,

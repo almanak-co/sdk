@@ -203,7 +203,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return strategies
 
-    def _discover_paper_sessions(self) -> list[dict]:
+    def _discover_paper_sessions(self) -> list[dict]:  # noqa: C901
         """Discover paper trading sessions from ~/.almanak/paper/.
 
         Reads state files produced by the BackgroundPaperTrader to surface
@@ -387,7 +387,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return sessions
 
-    def _derive_protocol_from_config(self, config: dict, strategy_id: str) -> str:
+    def _derive_protocol_from_config(self, config: dict, strategy_id: str) -> str:  # noqa: C901
         """Derive protocol string from config or strategy ID."""
         if "protocol" in config:
             return config["protocol"]
@@ -1456,7 +1456,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # Senior-Quant header + trade tape (dashboard redesign)
     # ----------------------------------------------------------------------
 
-    async def GetQuantHeader(
+    async def GetQuantHeader(  # noqa: C901
         self,
         request: gateway_pb2.GetQuantHeaderRequest,
         context: grpc.aio.ServicerContext,
@@ -1638,7 +1638,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             xfail_cells=header.posture.xfail,
         )
 
-    async def GetTradeTape(
+    async def GetTradeTape(  # noqa: C901
         self,
         request: gateway_pb2.GetTradeTapeRequest,
         context: grpc.aio.ServicerContext,

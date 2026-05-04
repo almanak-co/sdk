@@ -323,7 +323,7 @@ def get_reader_for_protocol(protocol: str) -> ProtocolBalanceReader | None:
 # ---------------------------------------------------------------------------
 
 
-def resolve_amount_all(
+def resolve_amount_all(  # noqa: C901
     intent: Any,
     *,
     chain: str,

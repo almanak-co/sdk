@@ -368,7 +368,7 @@ class UniswapV4Adapter:
             metadata=metadata,
         )
 
-    def compile_lp_open_intent(
+    def compile_lp_open_intent(  # noqa: C901
         self,
         intent: LPOpenIntent,
         price_oracle: dict[str, Decimal] | None = None,

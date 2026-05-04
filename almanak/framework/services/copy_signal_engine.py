@@ -125,7 +125,7 @@ class CopySignalEngine:
         self._emit_skip_event(event, "decode_failed")
         return []
 
-    def _extract_signals(
+    def _extract_signals(  # noqa: C901
         self,
         parser: Any,
         info: ContractInfo,
@@ -266,7 +266,7 @@ class CopySignalEngine:
             current_block=current_block,
         )
 
-    def _extract_lp_open(
+    def _extract_lp_open(  # noqa: C901
         self,
         parser: Any,
         info: ContractInfo,
@@ -464,7 +464,7 @@ class CopySignalEngine:
             current_block=current_block,
         )
 
-    def _extract_perp(
+    def _extract_perp(  # noqa: C901
         self,
         parser: Any,
         info: ContractInfo,

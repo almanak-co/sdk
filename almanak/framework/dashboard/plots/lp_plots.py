@@ -260,7 +260,7 @@ def plot_liquidity_distribution(
     return apply_theme(fig, config)
 
 
-def plot_positions_over_time(
+def plot_positions_over_time(  # noqa: C901
     positions: list[PositionData] | list[dict],
     price_data: pd.DataFrame,
     price_column: str = "price",

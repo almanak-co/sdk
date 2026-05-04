@@ -79,7 +79,7 @@ def call_operator_action(
         return {"success": False, "error": str(e)}
 
 
-def render_operator_card(card: OperatorCard, strategy_name: str) -> None:
+def render_operator_card(card: OperatorCard, strategy_name: str) -> None:  # noqa: C901
     """Render the operator card for a stuck strategy."""
     severity_color = get_severity_color(card.severity)
     severity_icon = get_severity_icon(card.severity)

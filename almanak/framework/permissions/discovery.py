@@ -80,7 +80,7 @@ def _build_selector_labels(protocols: list[str]) -> dict[str, str]:
     return labels
 
 
-def discover_permissions(
+def discover_permissions(  # noqa: C901
     chain: str,
     protocols: list[str],
     intent_types: list[str],

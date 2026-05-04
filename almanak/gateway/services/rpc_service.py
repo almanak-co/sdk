@@ -546,7 +546,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             id=request.id,
         )
 
-    async def BatchCall(
+    async def BatchCall(  # noqa: C901
         self,
         request: gateway_pb2.RpcBatchRequest,
         context: grpc.aio.ServicerContext,

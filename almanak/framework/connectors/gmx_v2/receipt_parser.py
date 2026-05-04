@@ -585,7 +585,7 @@ class GMXv2ReceiptParser:
         _ = kwargs  # Explicitly unused for forward compatibility
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
-    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
+    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
         """Parse a transaction receipt.
 
         Args:

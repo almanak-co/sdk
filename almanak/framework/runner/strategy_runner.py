@@ -1360,7 +1360,7 @@ class StrategyRunner:
             )
         return await self._run_single_chain_intents(state)
 
-    async def _run_single_chain_intents(self, state: RunIterationState) -> IterationResult:
+    async def _run_single_chain_intents(self, state: RunIterationState) -> IterationResult:  # noqa: C901
         """Sequentially execute intents through the single-chain orchestrator.
 
         Handles amount='all' resolution (from previous step output or wallet
@@ -2087,7 +2087,7 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 — fail-open
             logger.debug("slot0 close-enrichment failed", exc_info=True)
 
-    async def _write_ledger_entry(
+    async def _write_ledger_entry(  # noqa: C901
         self,
         strategy: StrategyProtocol,
         intent: AnyIntent,
@@ -4204,7 +4204,7 @@ class StrategyRunner:
         logger.info(f"Teardown requested for {strategy_id} (mode={mode.value})")
         return mode
 
-    async def _execute_multi_chain(
+    async def _execute_multi_chain(  # noqa: C901
         self,
         strategy: StrategyProtocol,
         intents: list[AnyIntent],
@@ -4509,7 +4509,7 @@ class StrategyRunner:
         # steps.
         state.successful_count = state.start_step_index
 
-    async def _bridge_wait_process_intent(self, state: BridgeWaitState, i: int) -> bool:
+    async def _bridge_wait_process_intent(self, state: BridgeWaitState, i: int) -> bool:  # noqa: C901
         """Execute one intent + optional bridge wait. Returns True to break.
 
         Mirrors the per-iteration body of the original for-loop: skip already-

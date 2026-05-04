@@ -185,7 +185,7 @@ def gateway_heartbeat(runner: Any, strategy_id: str, positions: list | None = No
         logger.debug(f"Failed to send heartbeat to gateway (non-fatal): {e}")
 
 
-def collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> list | None:
+def collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> list | None:  # noqa: C901
     """Call strategy.get_open_positions() and convert to proto messages.
 
     Non-fatal: returns None on any error so heartbeat still fires.

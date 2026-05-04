@@ -237,7 +237,7 @@ class LidoReceiptParser:
         self.wsteth_address = chain_addresses.get("wsteth", "").lower()
         self.withdrawal_queue_address = chain_addresses.get("withdrawal_queue", "").lower()
 
-    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
+    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
         """Parse a transaction receipt.
 
         Args:

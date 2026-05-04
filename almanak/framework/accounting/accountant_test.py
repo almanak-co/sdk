@@ -639,7 +639,7 @@ def _cell_g5_initial_vs_current(metrics: list[dict[str, Any]], snapshots: list[d
     )
 
 
-def _cell_g6_reconciliation(
+def _cell_g6_reconciliation(  # noqa: C901
     snapshots: list[dict[str, Any]],
     ledger: list[dict[str, Any]],
     pos_events: list[dict[str, Any]],
@@ -1567,7 +1567,7 @@ def _cells_lp(
     return out
 
 
-def _cells_lending(
+def _cells_lending(  # noqa: C901
     acct_events: list[dict[str, Any]],
     snapshots: list[dict[str, Any]],
     acct_payloads: dict[Any, dict[str, Any]],

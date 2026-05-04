@@ -152,7 +152,7 @@ def _lookup_price(price_oracle: dict | None, *symbols: str) -> Decimal | None:
     return None
 
 
-def build_pendle_lp_accounting_event(
+def build_pendle_lp_accounting_event(  # noqa: C901
     *,
     intent: Any,
     result: Any,

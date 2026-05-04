@@ -191,7 +191,7 @@ class StuckDetector:
 
         return result
 
-    def _classify_stuck_reason(
+    def _classify_stuck_reason(  # noqa: C901
         self,
         snapshot: StrategySnapshot,
     ) -> tuple[StuckReason, dict[str, Any]]:

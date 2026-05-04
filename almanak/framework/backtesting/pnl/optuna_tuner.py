@@ -1026,7 +1026,7 @@ class OptunaTuner:
 
         return PnLBacktestConfig.from_dict(config_dict), strategy_overrides
 
-    def _create_objective(
+    def _create_objective(  # noqa: C901
         self,
         strategy_factory: Callable[..., Any],
         data_provider_factory: Callable[[], Any],
