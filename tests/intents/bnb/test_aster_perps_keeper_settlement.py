@@ -41,18 +41,28 @@ from almanak.framework.connectors.aster_perps import (
     encode_get_pending_trade_calldata,
     encode_get_position_by_hash_calldata,
 )
-from almanak.framework.connectors.aster_perps.sdk import (
-    OpenTradeStruct,
-    encode_open_market_trade_calldata,
-    slippage_to_limit_price,
-    usd_size_to_qty,
-)
+from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from tests.intents.bnb.conftest import (
+    open_aster_perps_position_via_intent,
     pcs_perps_extract_price_request_id,
     pcs_perps_keeper_fulfill,
 )
+from tests.intents.conftest import TEST_WALLET as _EOA_ADDR
 
 CHAIN_NAME = "bsc"
+
+
+@pytest.fixture(scope="session")
+def perps_price_oracle() -> dict[str, Decimal]:
+    """Static prices (matches sibling open/close tests)."""
+    return {
+        "BTC": Decimal("95000"),
+        "ETH": Decimal("3500"),
+        "BNB": Decimal("600"),
+        "WBNB": Decimal("600"),
+        "USDT": Decimal("1"),
+        "USDC": Decimal("1"),
+    }
 
 
 @pytest.mark.bsc
@@ -64,7 +74,9 @@ class TestAsterPerpsKeeperSettlement:
         self,
         web3: Web3,
         funded_wallet: str,
-        test_private_key: str,
+        anvil_rpc_url: str,
+        orchestrator: ExecutionOrchestrator,
+        perps_price_oracle: dict[str, Decimal],
     ):
         """Open with broker=0, keeper settles, assert OpenMarketTrade carries broker=0."""
         router = ASTER_PERPS[CHAIN_NAME]["router"]
@@ -72,7 +84,6 @@ class TestAsterPerpsKeeperSettlement:
         margin_bnb = Decimal("0.3")
         margin_wei = int(margin_bnb * Decimal(10**18))
         size_usd = Decimal("500")
-        mark_price = Decimal("95000")
 
         print(f"\n{'=' * 80}")
         print("Test: Aster keeper settlement — broker=0 round-trip on OpenMarketTrade")
@@ -81,37 +92,35 @@ class TestAsterPerpsKeeperSettlement:
         bnb_before_wei = web3.eth.get_balance(funded_wallet)
 
         # -----------------------------------------------------------------
-        # Layer 1/2 — User-signed open (broker=0)
+        # Layer 1/2 — Open through Intent + orchestrator.
+        #
+        # Routing through the orchestrator (instead of a raw
+        # ``send_raw_transaction``) keeps the setup compatible with both
+        # default-on Zodiac (``funded_wallet`` is the Safe) and the
+        # ``no_zodiac`` opt-out (direct EOA submission). Under Zodiac the
+        # outer Safe TX is paid for by the EOA member, so balance-delta
+        # accounting only debits the Safe by the margin value.
         # -----------------------------------------------------------------
-        qty = usd_size_to_qty(size_usd, mark_price)
-        limit_price = slippage_to_limit_price(mark_price, Decimal("0.01"), is_long=True)
-        open_struct = OpenTradeStruct(
-            pair_base=btc_pair_base,
-            is_long=True,
-            token_in="0x0000000000000000000000000000000000000000",
-            amount_in=margin_wei,
-            qty=qty,
-            price=limit_price,
-            broker=ASTER_BROKER_RAW,
+        open_receipt = await open_aster_perps_position_via_intent(
+            orchestrator=orchestrator,
+            web3=web3,
+            funded_wallet=funded_wallet,
+            anvil_rpc_url=anvil_rpc_url,
+            perps_price_oracle=perps_price_oracle,
+            protocol="aster_perps",
+            market="BTC/USD",
+            collateral_amount=margin_bnb,
+            size_usd=size_usd,
         )
-        open_calldata = encode_open_market_trade_calldata(open_struct, native=True)
-        nonce = web3.eth.get_transaction_count(funded_wallet)
-        open_tx = {
-            "from": funded_wallet,
-            "to": router,
-            "value": margin_wei,
-            "data": "0x" + open_calldata.hex(),
-            "gas": 900_000,
-            "gasPrice": web3.eth.gas_price,
-            "nonce": nonce,
-            "chainId": web3.eth.chain_id,
-        }
-        signed = web3.eth.account.sign_transaction(open_tx, test_private_key)
-        open_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
-        open_receipt = dict(web3.eth.wait_for_transaction_receipt(open_hash, timeout=60))
-        assert open_receipt["status"] == 1, f"Open TX reverted: {open_hash.hex()}"
-        open_gas_cost = open_receipt["gasUsed"] * int(open_tx["gasPrice"])
-        print(f"Open OK: tx={open_hash.hex()[:18]} gasUsed={open_receipt['gasUsed']}")
+        assert open_receipt["status"] == 1
+        # Gas cost for the outer open TX. Used below for the no_zodiac balance
+        # check; under Zodiac the Safe doesn't pay this gas (the member EOA
+        # pays it on the outer ``execTransactionWithRole`` call).
+        # ``TransactionReceipt.to_dict()`` (interfaces.py:638) uses snake_case
+        # keys and stringifies effective_gas_price.
+        open_gas_used = int(open_receipt["gas_used"])
+        open_gas_cost = open_gas_used * int(open_receipt["effective_gas_price"])
+        print(f"Open OK: gasUsed={open_gas_used}")
 
         parser = AsterPerpsReceiptParser(chain=CHAIN_NAME)
         parsed_open = parser.parse_receipt(open_receipt)
@@ -196,12 +205,19 @@ class TestAsterPerpsKeeperSettlement:
         bnb_after_wei = web3.eth.get_balance(funded_wallet)
         bnb_spent_wei = bnb_before_wei - bnb_after_wei
         # The trader only paid for the open; the keeper's settle is gas-free for
-        # the trader because it's impersonated.
-        expected_spent = margin_wei + open_gas_cost
+        # the trader because it's impersonated. Under Zodiac the Safe is
+        # ``funded_wallet`` and gas is paid by the member EOA on the outer
+        # ``execTransactionWithRole`` — so the Safe balance is only debited
+        # by ``margin_wei``. Under no_zodiac the EOA is ``funded_wallet`` and
+        # pays both margin and gas.
+        is_zodiac_mode = funded_wallet.lower() != _EOA_ADDR.lower()
+        expected_spent = margin_wei if is_zodiac_mode else margin_wei + open_gas_cost
         assert bnb_spent_wei == expected_spent, (
-            f"BNB delta mismatch: expected {expected_spent / 1e18} "
-            f"(margin {margin_wei / 1e18} + open gas {open_gas_cost / 1e18}), "
-            f"got {bnb_spent_wei / 1e18}"
+            f"BNB delta mismatch (zodiac={is_zodiac_mode}): "
+            f"expected {expected_spent / 1e18} "
+            f"(margin {margin_wei / 1e18}"
+            + (f" + open gas {open_gas_cost / 1e18}" if not is_zodiac_mode else "")
+            + f"), got {bnb_spent_wei / 1e18}"
         )
 
         # Pending trade must be cleared.

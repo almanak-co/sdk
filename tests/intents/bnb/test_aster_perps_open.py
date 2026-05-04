@@ -35,6 +35,7 @@ from almanak.framework.connectors.aster_perps import (
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpOpenIntent
+from tests.intents.conftest import TEST_WALLET as _EOA_ADDR
 
 CHAIN_NAME = "bsc"
 
@@ -204,12 +205,20 @@ class TestAsterPerpsOpenIntent:
         bnb_spent_wei = bnb_before_wei - bnb_after_wei
         margin_wei = int(collateral_amount * Decimal(10**18))
         gas_cost_wei = tx_result.gas_cost_wei
-        expected_spent = margin_wei + gas_cost_wei
+        # Mode-aware: under Zodiac the Safe is ``funded_wallet`` and only loses
+        # the margin (gas is paid by the member EOA on the outer
+        # ``execTransactionWithRole``). Under no_zodiac the EOA is
+        # ``funded_wallet`` and pays both.
+        is_zodiac_mode = funded_wallet.lower() != _EOA_ADDR.lower()
+        expected_spent = margin_wei if is_zodiac_mode else margin_wei + gas_cost_wei
         assert bnb_spent_wei == expected_spent, (
-            f"BNB delta mismatch: expected {expected_spent / 1e18} (margin {margin_wei / 1e18} "
-            f"+ gas {gas_cost_wei / 1e18}), got {bnb_spent_wei / 1e18}"
+            f"BNB delta mismatch (zodiac={is_zodiac_mode}): "
+            f"expected {expected_spent / 1e18} (margin {margin_wei / 1e18}"
+            + (f" + gas {gas_cost_wei / 1e18}" if not is_zodiac_mode else "")
+            + f"), got {bnb_spent_wei / 1e18}"
         )
-        print(f"BNB spent: {bnb_spent_wei / 1e18:.6f} (margin {margin_wei / 1e18} + gas)")
+        print(f"BNB spent: {bnb_spent_wei / 1e18:.6f} (margin {margin_wei / 1e18}"
+              + ("" if is_zodiac_mode else " + gas") + ")")
 
         # On-chain state: pending trade MUST exist for the returned tradeHash.
         pending_trade_data = _call_get_pending_trade(web3, router, ev.trade_hash)

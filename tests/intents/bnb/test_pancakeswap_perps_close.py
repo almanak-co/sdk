@@ -33,6 +33,23 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+# Direct-SDK lifecycle test: every TX is raw-signed by ``test_private_key``
+# with ``tx['from'] = funded_wallet``. Under default-on Zodiac
+# ``funded_wallet`` is the Safe — the EOA can't sign for it. The
+# Intent-routed close path (``PerpCloseIntent`` through the orchestrator) is
+# covered under default-on Zodiac in
+# ``test_pancakeswap_perps_close_intent.py``; this file tests the SDK
+# directly, so it correctly opts out per
+# ``.claude/rules/intent-tests.md`` — "EOA-specific failure paths /
+# raw send_raw_transaction / signature recovery edge cases".
+pytestmark = pytest.mark.no_zodiac(
+    reason=(
+        "SDK direct-call lifecycle harness — opens and closes via raw-signed TX "
+        "to exercise build_close_transaction(). Intent path covered in "
+        "test_pancakeswap_perps_close_intent.py."
+    )
+)
+
 from almanak.core.contracts import PANCAKESWAP_PERPS
 from almanak.framework.connectors.pancakeswap_perps import (
     PancakeSwapPerpsReceiptParser,
@@ -91,8 +108,6 @@ class TestPancakeSwapPerpsCloseIntent:
         print(f"\n{'=' * 80}")
         print("Test: PancakeSwap Perps OPEN -> FILL -> CLOSE cycle (BTC/USD long, native BNB)")
         print(f"{'=' * 80}")
-
-        bnb_before_wei = web3.eth.get_balance(funded_wallet)
 
         # -----------------------------------------------------------------
         # Step 1 — Open (signed directly; we want to exercise the open event path)
@@ -177,13 +192,11 @@ class TestPancakeSwapPerpsCloseIntent:
                 "data": "0x" + encode_get_position_by_hash_calldata(trade_hash).hex(),
             }
         )
-        # getPositionByHashV2 returns a complex tuple; the raw bytes must not be all zeros
-        # past the initial position_hash word. If qty (word[7]) is nonzero the position is live.
-        # Words: [0]offset [1]positionHash [2]pair_offset [3]pairBase [4]marginToken [5]isLong
-        #         [6]margin [7]qty ...
-        qty_word = int.from_bytes(pos_data[7 * 32 : 8 * 32], "big") if len(pos_data) >= 8 * 32 else 0
-        # Note: the exact word layout depends on the dynamic-string `pair` field; this is a
-        # permissive check — look for any nonzero word in the qty/margin region.
+        # getPositionByHashV2 returns a complex tuple; the raw bytes must not
+        # be all zeros past the initial position_hash word. The exact word
+        # layout depends on the dynamic-string ``pair`` field, so use a
+        # permissive check — look for any nonzero word in the qty/margin
+        # region (≥ 3 of the first 16 words).
         nonzero_words = sum(
             1
             for i in range(1, min(16, len(pos_data) // 32))

@@ -28,6 +28,9 @@ from tests.intents.conftest import (
     get_token_balance,
     get_token_decimals,
 )
+from tests.intents.conftest import (
+    TEST_WALLET as _EOA_ADDR,
+)
 from tests.intents.pool_helpers import fail_if_v3_pool_missing
 
 # =============================================================================
@@ -303,8 +306,8 @@ class TestUniswapV3SwapIntent:
         # compiler's price-impact guard doesn't reject the swap when the
         # forked pool quote diverges from a hardcoded estimate.
         try:
-            import urllib.request
             import json as _json
+            import urllib.request
 
             req = urllib.request.Request(
                 "https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd",
@@ -391,10 +394,19 @@ class TestUniswapV3SwapIntent:
         # Exact balance conservation: native spent == swap value + gas fee.
         # The receipt-derived gas figure removes the previous range-based
         # tolerance and turns this into a strict 4-layer-verification check.
-        assert matic_spent == swap_amount_wei + gas_fee, (
-            f"MATIC delta mismatch. "
-            f"Expected {swap_amount_wei + gas_fee} (swap {swap_amount_wei} + gas {gas_fee}), "
-            f"got {matic_spent}."
+        #
+        # Mode-aware: under default-on Zodiac the Safe is ``funded_wallet`` and
+        # only loses ``swap_amount_wei`` (gas is paid by the member EOA on the
+        # outer ``execTransactionWithRole``). Under ``no_zodiac`` the EOA is
+        # ``funded_wallet`` and pays both swap value and gas.
+        is_zodiac_mode = funded_wallet.lower() != _EOA_ADDR.lower()
+        expected_spent = swap_amount_wei if is_zodiac_mode else swap_amount_wei + gas_fee
+        assert matic_spent == expected_spent, (
+            f"MATIC delta mismatch (zodiac={is_zodiac_mode}). "
+            f"Expected {expected_spent} "
+            f"(swap {swap_amount_wei}"
+            + (f" + gas {gas_fee}" if not is_zodiac_mode else "")
+            + f"), got {matic_spent}."
         )
         # Receiver must get exactly what the parsed Swap event reports.
         assert usdc_received == parse_result.swap_result.amount_out, (

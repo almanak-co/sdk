@@ -9,6 +9,8 @@ body runs unchanged through Safe + Roles + ``execTransactionWithRole``.
 Unmarked tests see the original EOA behaviour.
 """
 
+from decimal import Decimal
+
 import pytest
 from web3 import Web3
 
@@ -337,3 +339,88 @@ def pcs_perps_keeper_fulfill(web3, price_request_id: str, price_1e8: int) -> dic
     receipt = web3.eth.wait_for_transaction_receipt(tx_hash_hex, timeout=30)
     assert receipt["status"] == 1, f"Keeper fulfill TX {tx_hash_hex} reverted post-mining"
     return dict(receipt)
+
+
+# =============================================================================
+# Aster/PCS Perps setup helper — open a position via Intent through the
+# orchestrator. Used by close-side tests that need a tradeHash to exist on
+# chain before they can exercise PERP_CLOSE.
+# =============================================================================
+
+
+async def open_aster_perps_position_via_intent(
+    *,
+    orchestrator: ExecutionOrchestrator,
+    web3: Web3,
+    funded_wallet: str,
+    anvil_rpc_url: str,
+    perps_price_oracle: dict,
+    protocol: str,  # "aster_perps" or "pancakeswap_perps"
+    market: str,
+    collateral_amount,  # Decimal
+    size_usd,  # Decimal
+    is_long: bool = True,
+) -> dict:
+    """Open a native-BNB-margin perp position through the orchestrator.
+
+    Replaces the legacy ``web3.eth.account.sign_transaction`` setup pattern
+    that 4 close-side tests previously used. That pattern signed an
+    ``openMarketTradeBNB`` calldata with ``test_private_key`` and
+    ``tx['from'] = funded_wallet`` — fine while ``funded_wallet`` was the EOA,
+    but broken under default-on Zodiac (where ``funded_wallet`` becomes the
+    Safe and the EOA can't sign for it).
+
+    Routing through the orchestrator works the same regardless of fixture
+    mode: under Zodiac it wraps the call into ``execTransactionWithRole``;
+    under ``no_zodiac`` it submits directly. Returns the open receipt dict
+    so callers can extract the tradeHash via ``AsterPerpsReceiptParser``.
+
+    Args:
+        orchestrator: function-scoped orchestrator from the test fixture.
+        web3: Web3 instance bound to the Anvil fork (used to size gas).
+        funded_wallet: wallet that owns the position (Safe under Zodiac, EOA
+            under ``no_zodiac``).
+        anvil_rpc_url: RPC URL the IntentCompiler reads from.
+        perps_price_oracle: in-memory price map (BTC, BNB, USDT, …).
+        protocol: ``aster_perps`` (broker_id=0) or ``pancakeswap_perps``
+            (broker_id=2). Routes to the same Diamond router with different
+            broker attribution in calldata.
+        market: e.g. ``"BTC/USD"``.
+        collateral_amount: native BNB amount as Decimal.
+        size_usd: notional size in USD as Decimal.
+        is_long: long/short flag.
+
+    Returns:
+        Receipt dict from the open TX, suitable for
+        ``AsterPerpsReceiptParser.parse_receipt(...)``.
+    """
+    from almanak.framework.intents.compiler import IntentCompiler
+    from almanak.framework.intents.perp_intents import PerpOpenIntent
+
+    intent = PerpOpenIntent(
+        market=market,
+        collateral_token="BNB",
+        collateral_amount=collateral_amount,
+        size_usd=size_usd,
+        is_long=is_long,
+        max_slippage=Decimal("0.01"),
+        protocol=protocol,
+        leverage=Decimal("1"),
+    )
+    compiler = IntentCompiler(
+        chain="bsc",
+        wallet_address=funded_wallet,
+        price_oracle=perps_price_oracle,
+        rpc_url=anvil_rpc_url,
+    )
+    compilation = compiler.compile(intent)
+    assert compilation.status.value == "SUCCESS", (
+        f"Setup PerpOpenIntent failed to compile: {compilation.error}"
+    )
+    assert compilation.action_bundle is not None
+    execution = await orchestrator.execute(compilation.action_bundle)
+    assert execution.success, f"Setup PerpOpen execution failed: {execution.error}"
+    assert len(execution.transaction_results) == 1
+    tx_result = execution.transaction_results[0]
+    assert tx_result.receipt is not None, "Setup PerpOpen TX produced no receipt"
+    return tx_result.receipt.to_dict()

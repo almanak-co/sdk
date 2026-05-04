@@ -34,16 +34,11 @@ from almanak.framework.connectors.aster_perps import (
     encode_get_pending_trade_calldata,
     encode_get_position_by_hash_calldata,
 )
-from almanak.framework.connectors.aster_perps.sdk import (
-    OpenTradeStruct,
-    encode_open_market_trade_calldata,
-    slippage_to_limit_price,
-    usd_size_to_qty,
-)
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpCloseIntent
 from tests.intents.bnb.conftest import (
+    open_aster_perps_position_via_intent,
     pcs_perps_extract_price_request_id,
     pcs_perps_keeper_fulfill,
 )
@@ -73,7 +68,6 @@ class TestAsterPerpsCloseIntent:
         self,
         web3: Web3,
         funded_wallet: str,
-        test_private_key: str,
         anvil_rpc_url: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
@@ -82,44 +76,34 @@ class TestAsterPerpsCloseIntent:
         router = ASTER_PERPS[CHAIN_NAME]["router"]
         btc_pair_base = "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c"  # BTCB on BSC
         margin_bnb = Decimal("0.3")
-        margin_wei = int(margin_bnb * Decimal(10**18))
         size_usd = Decimal("500")
-        mark_price = Decimal("95000")
 
         print(f"\n{'=' * 80}")
         print("Test: Aster Perps OPEN(broker=0) -> CLOSE-VIA-INTENT cycle")
         print(f"{'=' * 80}")
 
         # =============================================================
-        # Setup — open a broker=0 position via direct-SDK
+        # Setup — open a broker=0 position via Intent + orchestrator.
+        #
+        # Routing the open through the orchestrator (instead of a raw
+        # ``send_raw_transaction``) keeps the setup compatible with both
+        # default-on Zodiac (``funded_wallet`` is the Safe; the harness
+        # wraps the call into ``execTransactionWithRole``) and the
+        # ``no_zodiac`` opt-out (direct EOA submission). The legacy
+        # raw-sign path failed under Zodiac because the EOA private key
+        # cannot sign for the Safe address.
         # =============================================================
-        qty = usd_size_to_qty(size_usd, mark_price)
-        limit_price = slippage_to_limit_price(mark_price, Decimal("0.01"), is_long=True)
-        open_struct = OpenTradeStruct(
-            pair_base=btc_pair_base,
-            is_long=True,
-            token_in="0x0000000000000000000000000000000000000000",
-            amount_in=margin_wei,
-            qty=qty,
-            price=limit_price,
-            broker=ASTER_BROKER_RAW,  # broker=0 — raw Aster attribution
+        open_receipt = await open_aster_perps_position_via_intent(
+            orchestrator=orchestrator,
+            web3=web3,
+            funded_wallet=funded_wallet,
+            anvil_rpc_url=anvil_rpc_url,
+            perps_price_oracle=perps_price_oracle,
+            protocol="aster_perps",
+            market="BTC/USD",
+            collateral_amount=margin_bnb,
+            size_usd=size_usd,
         )
-        open_calldata = encode_open_market_trade_calldata(open_struct, native=True)
-        nonce = web3.eth.get_transaction_count(funded_wallet)
-        open_tx = {
-            "from": funded_wallet,
-            "to": router,
-            "value": margin_wei,
-            "data": "0x" + open_calldata.hex(),
-            "gas": 900_000,
-            "gasPrice": web3.eth.gas_price,
-            "nonce": nonce,
-            "chainId": web3.eth.chain_id,
-        }
-        signed = web3.eth.account.sign_transaction(open_tx, test_private_key)
-        open_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
-        open_receipt = dict(web3.eth.wait_for_transaction_receipt(open_hash, timeout=60))
-        assert open_receipt["status"] == 1
 
         parser = AsterPerpsReceiptParser(chain=CHAIN_NAME)
         parsed_open = parser.parse_receipt(open_receipt)

@@ -4,8 +4,6 @@ import pytest
 
 from almanak.framework.intents.compiler import (
     LENDING_POOL_ADDRESSES,
-    LP_POSITION_MANAGERS,
-    PROTOCOL_ROUTERS,
     IntentCompiler,
     IntentCompilerConfig,
 )
@@ -15,8 +13,6 @@ from almanak.framework.intents.vocabulary import (
     FlashLoanIntent,
     LPCloseIntent,
     LPOpenIntent,
-    PerpCloseIntent,
-    PerpOpenIntent,
     RepayIntent,
     SupplyIntent,
     SwapIntent,
@@ -24,7 +20,7 @@ from almanak.framework.intents.vocabulary import (
     VaultRedeemIntent,
     WithdrawIntent,
 )
-from almanak.framework.permissions.hints import PermissionHints, get_permission_hints
+from almanak.framework.permissions.hints import get_permission_hints
 from almanak.framework.permissions.synthetic_intents import build_synthetic_intents
 
 
@@ -32,15 +28,30 @@ class TestSwapIntents:
     """Test synthetic SWAP intent creation."""
 
     def test_uniswap_v3_arbitrum(self):
-        """uniswap_v3 on arbitrum should produce a SwapIntent."""
+        """uniswap_v3 on arbitrum produces ERC20 + native-input SwapIntents.
+
+        V3-style SwapRouter02 wraps the chain native via msg.value (no approve,
+        single value-bearing tx). The second synthetic flips ``send_allowed=True``
+        on the router target so Zodiac authorises native-in swaps under
+        execTransactionWithRole.
+        """
         intents = build_synthetic_intents("uniswap_v3", "SWAP", "arbitrum")
-        assert len(intents) == 1
-        assert isinstance(intents[0], SwapIntent)
-        assert intents[0].protocol == "uniswap_v3"
-        assert intents[0].chain == "arbitrum"
+        assert len(intents) == 2
+        assert all(isinstance(i, SwapIntent) for i in intents)
+        assert all(i.protocol == "uniswap_v3" for i in intents)
+        assert all(i.chain == "arbitrum" for i in intents)
+        # First synthetic: ERC20-in (USDC → WETH)
+        assert intents[0].from_token.startswith("0x")
+        # Second synthetic: native-in (ETH → USDC). The compiler sets value > 0
+        # for native-from, which the discovery loop translates to send_allowed.
+        assert intents[1].from_token == "ETH"
 
     def test_aerodrome_base(self):
-        """aerodrome on base should produce a SwapIntent."""
+        """aerodrome on base should produce a SwapIntent.
+
+        Aerodrome is a Solidly fork (not in ``_NATIVE_IN_SWAP_PROTOCOLS``) so
+        only the ERC20 synthetic is emitted.
+        """
         intents = build_synthetic_intents("aerodrome", "SWAP", "base")
         assert len(intents) == 1
         assert isinstance(intents[0], SwapIntent)
@@ -298,9 +309,14 @@ class TestEdgeCases:
         assert intents == []
 
     def test_case_insensitive_protocol(self):
-        """Protocol name is lowercased internally."""
+        """Protocol name is lowercased internally.
+
+        uniswap_v3 emits two SWAP synthetics (ERC20 + native-in); the case-
+        insensitive lookup must produce the same shape as the canonical key.
+        """
         intents = build_synthetic_intents("Uniswap_V3", "SWAP", "arbitrum")
-        assert len(intents) == 1
+        assert len(intents) == 2
+        assert all(isinstance(i, SwapIntent) for i in intents)
 
 
 class TestCompilationSuccess:
@@ -323,10 +339,19 @@ class TestCompilationSuccess:
 
     def test_swap_compiles(self, compiler):
         intents = build_synthetic_intents("uniswap_v3", "SWAP", "arbitrum")
-        assert len(intents) == 1
-        result = compiler.compile(intents[0])
-        assert result.status.value == "SUCCESS"
-        assert len(result.transactions) > 0
+        # Two synthetics for V3-style routers: ERC20-in and native-in.
+        # Both must compile so the manifest discovers both code paths.
+        assert len(intents) == 2
+        for intent in intents:
+            result = compiler.compile(intent)
+            assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"
+            assert len(result.transactions) > 0
+        # The native-in synthetic must produce a value-bearing tx so the
+        # discovery loop sets ``send_allowed=True`` on the router target.
+        native_result = compiler.compile(intents[1])
+        assert any(tx.value > 0 for tx in native_result.transactions), (
+            "Native-in synthetic must produce at least one value-bearing tx"
+        )
 
     def test_lp_open_compiles(self, compiler):
         intents = build_synthetic_intents("uniswap_v3", "LP_OPEN", "arbitrum")
