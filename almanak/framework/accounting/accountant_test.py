@@ -1806,16 +1806,90 @@ def _cells_lending(
                 "no LENDING rows in position_state_snapshots",
             )
         )
-    # L6: loop-leg attribution (skip when payload validation blocked above).
+    # L6: loop-leg attribution (VIB-3964).
+    # The basis store now mints swap-key acquisition lots on BORROW / WITHDRAW
+    # and consumes them on SUPPLY / REPAY, so a SWAP that disposes the borrowed
+    # token reports a non-null ``realized_pnl_usd``. The cell PASSes when the
+    # accounting events tell a coherent loop story:
+    #   1. At least one BORROW and one REPAY (loop is structurally complete).
+    #   2. At least one SWAP whose ``token_in`` matches a borrowed asset
+    #      (the borrow→swap leg actually executed).
+    #   3. Every SWAP carries a non-null ``realized_pnl_usd`` (basis was
+    #      attributed end-to-end — same invariant G6 enforces, repeated here
+    #      because L6 should fail loudly for the loop primitive even if a
+    #      future G6 tolerance change masks it).
     if not payload_blocked:
-        out.append(
-            CellResult(
-                "L6",
-                "Loop-leg attribution",
-                "XFAIL",
-                "loop-leg attribution not in v1 of typed-column writer",
+        # CodeRabbit 2026-05-04: L6 also reads ``BORROW.asset`` and
+        # ``SWAP.token_in`` / ``SWAP.realized_pnl_usd`` — so a payload
+        # validation error on a BORROW or SWAP row would otherwise hand L6
+        # an empty dict and the cell would misclassify as "loop incomplete"
+        # or "null PnL" instead of surfacing the schema mismatch. The
+        # earlier ``payload_blocked`` check covers WITHDRAW/REPAY/DELEVERAGE
+        # only (it gates L1); BORROW+SWAP need their own block here.
+        l6_borrow_swap_rows = [r for r in acct_events if r.get("event_type") in ("BORROW", "SWAP")]
+        l6_blocked = _payload_block_cell("L6", "Loop-leg attribution", l6_borrow_swap_rows, payload_errors)
+        if l6_blocked is not None:
+            out.append(l6_blocked)
+            return out
+
+        borrow_assets: set[str] = set()
+        repay_count = 0
+        for r in acct_events:
+            et = r.get("event_type")
+            p = acct_payloads.get(r.get("id"), {}) or {}
+            asset = (p.get("asset") or "").upper()
+            if et == "BORROW" and asset:
+                borrow_assets.add(asset)
+            elif et in ("REPAY", "DELEVERAGE") and asset:
+                repay_count += 1
+
+        swap_payloads = [acct_payloads.get(r.get("id"), {}) or {} for r in acct_events if r.get("event_type") == "SWAP"]
+        # CodeRabbit 2026-05-04: L6 is "loop-leg attribution" — a non-loop
+        # SWAP (e.g. a side spot trade in the same strategy) carrying a null
+        # realized_pnl_usd shouldn't FAIL the loop-leg cell. Filter to swaps
+        # whose token_in matches a borrowed asset before checking nulls.
+        loop_leg_payloads = [p for p in swap_payloads if (p.get("token_in") or "").upper() in borrow_assets]
+        null_loop_leg_pnl = sum(1 for p in loop_leg_payloads if p.get("realized_pnl_usd") is None)
+
+        if not borrow_assets or repay_count == 0:
+            out.append(
+                CellResult(
+                    "L6",
+                    "Loop-leg attribution",
+                    "XFAIL",
+                    f"loop incomplete (borrows={len(borrow_assets)}, repays={repay_count}) — "
+                    "cell only applies when both legs executed",
+                )
             )
-        )
+        elif not loop_leg_payloads:
+            out.append(
+                CellResult(
+                    "L6",
+                    "Loop-leg attribution",
+                    "FAIL",
+                    f"borrow asset(s) {sorted(borrow_assets)} never appeared as SWAP.token_in — no observable loop leg",
+                )
+            )
+        elif null_loop_leg_pnl:
+            out.append(
+                CellResult(
+                    "L6",
+                    "Loop-leg attribution",
+                    "FAIL",
+                    f"{null_loop_leg_pnl}/{len(loop_leg_payloads)} loop-leg SWAPs have realized_pnl_usd=null — "
+                    "wallet basis store missed a BORROW/WITHDRAW credit (VIB-3964 regression)",
+                )
+            )
+        else:
+            out.append(
+                CellResult(
+                    "L6",
+                    "Loop-leg attribution",
+                    "PASS",
+                    f"{len(loop_leg_payloads)} loop-leg SWAP(s) dispose borrow asset(s) "
+                    f"{sorted(borrow_assets)}; all carry realized_pnl_usd",
+                )
+            )
     return out
 
 

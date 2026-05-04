@@ -34,7 +34,15 @@ ConfidenceLiteral = Literal["HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"]
 # running the Accountant Test against the new version triple.
 SCHEMA_VERSION = 1
 FORMULA_VERSION = 1
-MATCHING_POLICY_VERSION = 1  # 1 = FIFO hardcoded
+# v3 (VIB-3964): wallet-basis store also mints swap-key acquisition lots on
+# BORROW / WITHDRAW (and consumes them on SUPPLY / REPAY) so the wallet basis
+# pool mirrors actual on-chain wallet flow. Pre-v3 events left swap-of-borrow
+# disposals with realized_pnl_usd=null, breaking G6 looping reconciliation.
+# Kept in lock-step with ``almanak.framework.accounting.basis.MATCHING_POLICY_VERSION``
+# (CodeRabbit 2026-05-04): the live writer stamps this onto persisted payloads
+# and the basis store stamps the same value onto MatchResult, so a payload-vs-
+# MatchResult version mismatch would silently misroute Accountant Test scoring.
+MATCHING_POLICY_VERSION = 3
 
 
 class _Base(BaseModel):

@@ -146,6 +146,15 @@ def handle_lending(
     principal_delta_usd: Decimal | None = None
     interest_delta_usd: Decimal | None = None
 
+    # VIB-3964: a single chain+wallet wallet-basis pool is shared across the
+    # SWAP handler and the lending handler — BORROW / WITHDRAW credit it,
+    # SUPPLY / REPAY drain it. Mirroring on-chain wallet flow into the FIFO
+    # store is what lets a SWAP that disposes a borrowed (or withdrawn) token
+    # report a non-null ``realized_pnl_usd`` and unblocks looping G6.
+    _chain_norm = (chain or "").lower().strip()
+    _wallet_norm = (wallet_address or "").lower().strip()
+    swap_wallet_key = f"swap:{_chain_norm}:{_wallet_norm}" if _chain_norm and _wallet_norm else ""
+
     if amount_human is not None and basis_store is not None:
         if intent_type_str == "BORROW":
             principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
@@ -160,6 +169,21 @@ def handle_lending(
                 lot_id=make_accounting_event_id(deployment_id, cycle_id, "BORROW_LOT", _borrow_id_seed, position_key),
                 source_ledger_entry_id=ledger_entry_id,
             )
+            # VIB-3964: borrowed tokens land in the wallet — credit the wallet
+            # basis pool so a follow-up SWAP that disposes them gets a basis.
+            if swap_wallet_key:
+                basis_store.record_swap_acquisition(
+                    deployment_id=deployment_id,
+                    position_key=swap_wallet_key,
+                    token=asset,
+                    amount=amount_human,
+                    cost_usd=principal_delta_usd,
+                    timestamp=timestamp,
+                    lot_id=make_accounting_event_id(
+                        deployment_id, cycle_id, "BORROW_WALLET_LOT", _borrow_id_seed, asset
+                    ),
+                    source="BORROW",
+                )
             interest_delta_usd = None
 
         elif intent_type_str in ("REPAY", "DELEVERAGE"):
@@ -175,9 +199,116 @@ def handle_lending(
                 if match_result.unmatched_amount > 0
                 else _amount_to_usd(match_result.interest_or_yield, price_oracle, asset)
             )
+            # VIB-3964: REPAY drains wallet inventory of the repaid token.
+            # Discarded return: lending realized-PnL routes through match_repay
+            # above; the disposal here exists purely to mirror wallet flow.
+            if swap_wallet_key:
+                basis_store.match_swap_disposal(
+                    deployment_id=deployment_id,
+                    position_key=swap_wallet_key,
+                    token=asset,
+                    amount=amount_human,
+                )
 
-        elif intent_type_str in ("SUPPLY", "WITHDRAW"):
+        elif intent_type_str == "SUPPLY":
             principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
+            # VIB-3964: SUPPLY drains wallet inventory.
+            if swap_wallet_key:
+                basis_store.match_swap_disposal(
+                    deployment_id=deployment_id,
+                    position_key=swap_wallet_key,
+                    token=asset,
+                    amount=amount_human,
+                )
+            # VIB-3964 (G6 closer): also record the supplied principal as a
+            # BORROW-style lot keyed under ``supply:<lending_pk>`` so a later
+            # WITHDRAW can FIFO-match and surface ``interest_accrued_usd``.
+            # The math is identical to BORROW/REPAY (record principal, match
+            # repay → excess = interest). Without this, every WITHDRAW carries
+            # a null ``interest_delta_usd`` and G6 fails on
+            # ``Σ_interest_supply_null_count > 0``.
+            _supply_position_key = f"supply:{position_key}"
+            _supply_id_seed = tx_hash or ledger_entry_id or position_key
+            basis_store.record_borrow(
+                deployment_id=deployment_id,
+                position_key=_supply_position_key,
+                token=asset,
+                principal_amount=amount_human,
+                principal_usd=principal_delta_usd,
+                timestamp=timestamp,
+                lot_id=make_accounting_event_id(
+                    deployment_id, cycle_id, "SUPPLY_LOT", _supply_id_seed, _supply_position_key
+                ),
+                source_ledger_entry_id=ledger_entry_id,
+            )
+
+        elif intent_type_str == "WITHDRAW":
+            # Total withdraw value in USD — used as the wallet-basis lot cost
+            # (the entire withdrawn balance lands in the wallet) but NOT as
+            # the event's ``principal_delta_usd``. The event split mirrors
+            # REPAY (pr-auditor 2026-05-04 item 2): principal_delta_usd is
+            # the matched supply principal only; the residual is interest.
+            # Pre-fix WITHDRAW emitted principal_delta_usd=total AND
+            # interest_delta_usd=excess, so principal+interest summed to
+            # total + interest — broke double-entry reconciliation.
+            _withdraw_total_usd = _amount_to_usd(amount_human, price_oracle, asset)
+            # VIB-3964: WITHDRAW credits the wallet (principal + accrued
+            # interest). Mint a swap-key lot for the FULL withdraw amount
+            # so the next SWAP that disposes the withdrawn token can
+            # compute realized PnL.
+            if swap_wallet_key:
+                _withdraw_id_seed = tx_hash or ledger_entry_id or position_key
+                basis_store.record_swap_acquisition(
+                    deployment_id=deployment_id,
+                    position_key=swap_wallet_key,
+                    token=asset,
+                    amount=amount_human,
+                    cost_usd=_withdraw_total_usd,
+                    timestamp=timestamp,
+                    lot_id=make_accounting_event_id(
+                        deployment_id, cycle_id, "WITHDRAW_WALLET_LOT", _withdraw_id_seed, asset
+                    ),
+                    source="WITHDRAW",
+                )
+            # VIB-3964 (G6 closer): FIFO-match the SUPPLY lots to split
+            # principal vs interest the same way REPAY does. The writer
+            # alias projects ``interest_delta_usd`` onto
+            # ``interest_accrued_usd`` for L1 / L4 / G6.
+            #
+            # Codex 2026-05-04 P2: ``match_repay`` returns ``unmatched=0``
+            # whenever it consumed at least one lot, even if the lot pool
+            # didn't fully cover ``amount_human``. The residual then surfaces
+            # as fabricated ``interest_or_yield``. Trust the figure only when
+            # either:
+            #   (a) lots fully covered the withdraw (excess is true interest), or
+            #   (b) implied interest is bounded by consumed principal — a
+            #       1-year hold at >100% APR would be DeFi outlier territory,
+            #       past that the residual is almost certainly untracked
+            #       supply (e.g. SDK deployed with a pre-existing position).
+            # Otherwise leave it as None (Empty ≠ zero per CLAUDE.md) and
+            # default principal back to the total withdraw — same fallback
+            # REPAY uses when match is unreliable.
+            _supply_position_key = f"supply:{position_key}"
+            _supply_match = basis_store.match_repay(
+                deployment_id=deployment_id,
+                position_key=_supply_position_key,
+                token=asset,
+                repay_amount=amount_human,
+            )
+            if _supply_match.unmatched_amount > 0:
+                principal_delta_usd = _withdraw_total_usd
+                interest_delta_usd = None
+            elif (
+                _supply_match.repaid_principal >= amount_human
+                or _supply_match.interest_or_yield <= _supply_match.repaid_principal
+            ):
+                # Trustworthy split — principal/interest mirror REPAY exactly
+                # so principal + interest = total cash flow.
+                principal_delta_usd = _amount_to_usd(_supply_match.repaid_principal, price_oracle, asset)
+                interest_delta_usd = _amount_to_usd(_supply_match.interest_or_yield, price_oracle, asset)
+            else:
+                principal_delta_usd = _withdraw_total_usd
+                interest_delta_usd = None
 
     # ── Post-state from post_state_json (VIB-3474: populated by the runner) ─────
     collateral_after: Decimal | None = None

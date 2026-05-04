@@ -166,23 +166,41 @@ class TestHandleLendingSupply:
         assert event.identity.chain == "arbitrum"
         assert event.identity.protocol == "aave_v3"
 
-    def test_supply_does_not_record_fifo_lot(self) -> None:
-        """SUPPLY must not add any lots to the FIFO store — only BORROW does."""
+    def test_supply_records_supply_principal_lot(self) -> None:
+        """VIB-3964: SUPPLY records a principal lot under ``supply:<lending_pk>``.
+
+        Symmetric to BORROW/REPAY — the lot is consumed by a later WITHDRAW so
+        ``interest_accrued_usd`` (withdraw - principal) becomes computable. Without
+        this, every WITHDRAW carries a null ``interest_delta_usd`` and G6 fails on
+        ``Σ_interest_supply_null_count > 0``.
+        """
         led_id = str(uuid.uuid4())
         extracted = json.dumps({"supply_amount": 100_000_000})
-        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="SUPPLY",
+            position_key="lending:arbitrum:aave_v3:0xwallet:usdc",
+        )
         ledger = _make_ledger_row(
             led_id,
             intent_type="SUPPLY",
             extracted_data_json=extracted,
             price_inputs_json=_usdc_price_json(),
+            chain="arbitrum",
+            protocol="aave_v3",
         )
         basis = FIFOBasisStore()
 
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
             handle_lending(outbox, ledger, basis)
 
-        assert basis._lots == {}
+        # SUPPLY principal lot is keyed under the supply: prefix so it doesn't
+        # collide with BORROW lots on the same lending position.
+        supply_key = "dep-1:supply:lending:arbitrum:aave_v3:0xwallet:usdc:usdc"
+        assert supply_key in basis._lots
+        lots = basis._lots[supply_key]
+        assert len(lots) == 1
+        assert lots[0]["remaining"] == Decimal("100")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -398,23 +416,164 @@ class TestHandleLendingWithdraw:
         assert event.amount_token == Decimal("200")
         assert event.principal_delta_usd == Decimal("200")
 
-    def test_withdraw_does_not_record_fifo_lot(self) -> None:
-        """WITHDRAW must not record FIFO lots — no REPAY matching needed."""
+    def test_withdraw_credits_wallet_basis_lot(self) -> None:
+        """VIB-3964: WITHDRAW credits a swap-key acquisition lot for the
+        withdrawn token so a follow-up SWAP that disposes it gets a non-null
+        realized_pnl_usd. (It also drains the supply-key lot that a prior
+        SUPPLY would have minted; with no SUPPLY in this test, the match
+        leaves ``interest_delta_usd=None`` — honest absence.)
+        """
         led_id = str(uuid.uuid4())
         extracted = json.dumps({"withdraw_amount": 100_000_000})
-        outbox = _make_outbox_row(led_id, intent_type="WITHDRAW")
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="WITHDRAW",
+            position_key="lending:arbitrum:aave_v3:0xwallet:usdc",
+        )
         ledger = _make_ledger_row(
             led_id,
             intent_type="WITHDRAW",
             extracted_data_json=extracted,
             price_inputs_json=_usdc_price_json(),
+            chain="arbitrum",
+            protocol="aave_v3",
         )
         basis = FIFOBasisStore()
 
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
             handle_lending(outbox, ledger, basis)
 
-        assert basis._lots == {}
+        # Wallet-basis pool now holds the withdrawn USDC at its USD basis.
+        wallet_key = "dep-1:swap:arbitrum:0xwallet:usdc"
+        assert wallet_key in basis._lots
+        lots = basis._lots[wallet_key]
+        assert len(lots) == 1
+        assert lots[0]["remaining"] == Decimal("100")
+        assert lots[0]["source"] == "WITHDRAW"
+
+    def test_withdraw_does_not_fabricate_interest_when_supply_lots_partial(self) -> None:
+        """VIB-3964 / Codex 2026-05-04 P2.
+
+        ``match_repay`` returns ``unmatched=0`` whenever it consumed at least
+        one lot. If a strategy was deployed with a pre-existing on-chain
+        supplied position (or earlier SUPPLYs were not tracked), the residual
+        of ``withdraw - matched_principal`` would otherwise be persisted as
+        ``interest_accrued_usd`` even though it's untracked principal.
+
+        Repro: SUPPLY 10 USDC tracked, then WITHDRAW 110 USDC. The matcher
+        returns ``repaid_principal=10, interest_or_yield=100``. Interest
+        ratio (100 / 10 = 1000% of principal) is well past any plausible
+        rate — must surface as None, not 100.
+        """
+        # SUPPLY 10 USDC under the lending position key.
+        supply_id = str(uuid.uuid4())
+        supply_extracted = json.dumps({"supply_amount": 10_000_000})  # 10 USDC raw (6 decimals)
+        supply_outbox = _make_outbox_row(
+            supply_id,
+            intent_type="SUPPLY",
+            position_key="lending:arbitrum:aave_v3:0xwallet:usdc",
+        )
+        supply_ledger = _make_ledger_row(
+            supply_id,
+            intent_type="SUPPLY",
+            extracted_data_json=supply_extracted,
+            price_inputs_json=_usdc_price_json(),
+            chain="arbitrum",
+            protocol="aave_v3",
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            handle_lending(supply_outbox, supply_ledger, basis)
+
+        # WITHDRAW 110 USDC — way more than the tracked 10 USDC supply.
+        withdraw_id = str(uuid.uuid4())
+        withdraw_extracted = json.dumps({"withdraw_amount": 110_000_000})  # 110 USDC raw
+        withdraw_outbox = _make_outbox_row(
+            withdraw_id,
+            intent_type="WITHDRAW",
+            position_key="lending:arbitrum:aave_v3:0xwallet:usdc",
+        )
+        withdraw_ledger = _make_ledger_row(
+            withdraw_id,
+            intent_type="WITHDRAW",
+            extracted_data_json=withdraw_extracted,
+            price_inputs_json=_usdc_price_json(),
+            chain="arbitrum",
+            protocol="aave_v3",
+        )
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(withdraw_outbox, withdraw_ledger, basis)
+
+        assert event is not None
+        assert event.event_type == LendingEventType.WITHDRAW
+        # Implied "interest" of 100 USDC against 10 USDC principal is unrealistic
+        # — the guard must mark this as unmeasured rather than persist it.
+        assert event.interest_delta_usd is None
+
+    def test_withdraw_principal_plus_interest_equals_total_amount(self) -> None:
+        """VIB-3964 / pr-auditor 2026-05-04 item 2.
+
+        WITHDRAW must split into ``principal_delta_usd`` + ``interest_delta_usd``
+        such that the two sum to the actual cash flow. Pre-fix, WITHDRAW emitted
+        ``principal_delta_usd = total_withdraw`` AND
+        ``interest_delta_usd = excess`` — the sum was over by the interest
+        amount and broke double-entry reconciliation.
+
+        Repro: SUPPLY 100 USDC, WITHDRAW 100.5 USDC (principal 100 + 0.50
+        accrued). Expected: principal_delta_usd ≈ 100, interest_delta_usd
+        ≈ 0.50, sum = 100.50 = total.
+        """
+        supply_id = str(uuid.uuid4())
+        supply_extracted = json.dumps({"supply_amount": 100_000_000})  # 100 USDC raw
+        supply_outbox = _make_outbox_row(
+            supply_id,
+            intent_type="SUPPLY",
+            position_key="lending:arbitrum:aave_v3:0xwallet:usdc",
+        )
+        supply_ledger = _make_ledger_row(
+            supply_id,
+            intent_type="SUPPLY",
+            extracted_data_json=supply_extracted,
+            price_inputs_json=_usdc_price_json(),
+            chain="arbitrum",
+            protocol="aave_v3",
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            handle_lending(supply_outbox, supply_ledger, basis)
+
+        # WITHDRAW 100.5 USDC — small interest accrued vs. a 100 USDC supply.
+        withdraw_id = str(uuid.uuid4())
+        withdraw_extracted = json.dumps({"withdraw_amount": 100_500_000})
+        withdraw_outbox = _make_outbox_row(
+            withdraw_id,
+            intent_type="WITHDRAW",
+            position_key="lending:arbitrum:aave_v3:0xwallet:usdc",
+        )
+        withdraw_ledger = _make_ledger_row(
+            withdraw_id,
+            intent_type="WITHDRAW",
+            extracted_data_json=withdraw_extracted,
+            price_inputs_json=_usdc_price_json(),
+            chain="arbitrum",
+            protocol="aave_v3",
+        )
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(withdraw_outbox, withdraw_ledger, basis)
+
+        assert event is not None
+        assert event.principal_delta_usd is not None
+        assert event.interest_delta_usd is not None
+        # principal = matched supply principal in USD (100 USDC at $1 = $100)
+        assert event.principal_delta_usd == Decimal("100")
+        # interest = excess (0.50 USDC at $1 = $0.50)
+        assert event.interest_delta_usd == Decimal("0.50")
+        # Double-entry sanity: principal + interest = total cash flow
+        assert event.principal_delta_usd + event.interest_delta_usd == Decimal("100.50")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

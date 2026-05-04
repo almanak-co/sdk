@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-MATCHING_POLICY_VERSION = 2
+MATCHING_POLICY_VERSION = 3
 
 
 @dataclass
@@ -97,6 +97,21 @@ class FIFOBasisStore:
             # InvalidOperation for NaN and produce wrong results for infinities.
             return parsed if parsed.is_finite() else None
 
+        def _first_parsed_decimal(payload_dict: dict[str, Any], *keys: str) -> Decimal | None:
+            """Return the first key whose payload value parses to a Decimal.
+
+            Replaces ``_parse_decimal(...) or _parse_decimal(...) or ...`` chains
+            that wrongly treat a parsed ``Decimal('0')`` as falsy and fall through
+            to the next candidate (CodeRabbit 2026-05-04). Distinguishes "key
+            absent / unparseable" (try next) from "key present and parsed to 0"
+            (use it — measured zero is a valid USD basis).
+            """
+            for k in keys:
+                parsed = _parse_decimal(payload_dict.get(k))
+                if parsed is not None:
+                    return parsed
+            return None
+
         for row in events:
             event_type = row.get("event_type", "")
             position_key = row.get("position_key", "")
@@ -121,6 +136,14 @@ class FIFOBasisStore:
             except (ValueError, TypeError):
                 ts = None
 
+            # VIB-3964: derive the swap-key the BORROW / WITHDRAW credit was minted
+            # under. The accounting_events row carries `chain` and `wallet_address`
+            # at the top level, so the key is reconstructible without re-encoding it
+            # in the payload.
+            _chain_norm = (row.get("chain") or "").lower().strip()
+            _wallet_norm = (row.get("wallet_address") or "").lower().strip()
+            swap_wallet_key = f"swap:{_chain_norm}:{_wallet_norm}" if _chain_norm and _wallet_norm else ""
+
             if event_type == "BORROW":
                 raw_amount_token = payload.get("amount_token")
                 amount_token = _parse_decimal(raw_amount_token)
@@ -139,11 +162,111 @@ class FIFOBasisStore:
                     continue
                 if not asset:
                     continue
+                # Derive principal_usd from payload so the swap-key replay lot has
+                # the same cost basis as the live-write path. Falls back to None
+                # when the payload predates VIB-3964 — the lot still mints, just
+                # without basis (downstream disposals will return cost_basis=None).
+                _borrowed_amount_usd = _first_parsed_decimal(
+                    payload, "borrowed_amount_usd", "amount_usd", "principal_delta_usd"
+                )
                 self.record_borrow(
                     deployment_id=deployment_id,
                     position_key=position_key,
                     token=asset,
                     principal_amount=amount_token,
+                    principal_usd=_borrowed_amount_usd,
+                    timestamp=ts,
+                    source_ledger_entry_id=ledger_entry_id,
+                )
+                # VIB-3964: the borrowed token also lands in the wallet — mint a
+                # swap-key acquisition lot so a SWAP that disposes the borrowed
+                # token can compute realized PnL instead of returning null.
+                if swap_wallet_key:
+                    self.record_swap_acquisition(
+                        deployment_id=deployment_id,
+                        position_key=swap_wallet_key,
+                        token=asset,
+                        amount=amount_token,
+                        cost_usd=_borrowed_amount_usd,
+                        timestamp=ts,
+                        source="BORROW",
+                    )
+                replayed += 1
+
+            elif event_type == "WITHDRAW":
+                # VIB-3964: WITHDRAW credits the wallet with collateral (principal +
+                # accrued supply interest). Two basis-store effects:
+                #   1. Mirror it as a swap-key acquisition lot so a follow-up SWAP
+                #      that disposes the withdrawn token (e.g. the USDC→USDT
+                #      swap-back leg of a teardown) gets a non-null basis.
+                #   2. Match against the supply-key principal lots so interest
+                #      accrued (withdraw - principal) is reconstructable on restart.
+                raw_amount_token = payload.get("amount_token") or payload.get("amount")
+                amount_token = _parse_decimal(raw_amount_token)
+                asset = payload.get("asset", "")
+                if amount_token is None or amount_token <= 0 or not asset:
+                    continue
+                # CodeRabbit 2026-05-04: the live writer (lending_handler.py)
+                # mints the wallet-basis lot at the FULL withdraw USD value,
+                # not just the matched-principal portion (which becomes
+                # ``principal_delta_usd`` after the split fix above). Replay
+                # must use the same total or a SWAP that disposes the
+                # withdrawn token after a runner restart computes a different
+                # ``realized_pnl_usd`` than the live path. Read ``amount_usd``
+                # if present (preferred); otherwise reconstruct the total as
+                # ``principal_delta_usd + interest_delta_usd`` so post-split
+                # payloads still replay correctly.
+                _withdraw_amount_usd = _parse_decimal(payload.get("amount_usd"))
+                if _withdraw_amount_usd is None:
+                    _principal_usd = _parse_decimal(payload.get("principal_delta_usd"))
+                    _interest_usd = _parse_decimal(payload.get("interest_delta_usd"))
+                    if _principal_usd is not None:
+                        _withdraw_amount_usd = _principal_usd + (_interest_usd or Decimal("0"))
+                if swap_wallet_key:
+                    self.record_swap_acquisition(
+                        deployment_id=deployment_id,
+                        position_key=swap_wallet_key,
+                        token=asset,
+                        amount=amount_token,
+                        cost_usd=_withdraw_amount_usd,
+                        timestamp=ts,
+                        source="WITHDRAW",
+                    )
+                # Symmetric to BORROW/REPAY: drain the supply-key principal lots.
+                self.match_repay(
+                    deployment_id=deployment_id,
+                    position_key=f"supply:{position_key}",
+                    token=asset,
+                    repay_amount=amount_token,
+                )
+                replayed += 1
+
+            elif event_type == "SUPPLY":
+                # VIB-3964: SUPPLY removes wallet inventory (the supplied token
+                # leaves the wallet for the lending pool). Two basis-store effects:
+                #   1. Dispose the swap-key acquisition lot so phantom inventory
+                #      doesn't bleed into a later WITHDRAW-then-SWAP.
+                #   2. Record a principal lot under supply:<position_key> so a
+                #      future WITHDRAW can FIFO-match and surface accrued interest.
+                raw_amount_token = payload.get("amount_token") or payload.get("amount")
+                amount_token = _parse_decimal(raw_amount_token)
+                asset = payload.get("asset", "")
+                if amount_token is None or amount_token <= 0 or not asset:
+                    continue
+                if swap_wallet_key:
+                    self.match_swap_disposal(
+                        deployment_id=deployment_id,
+                        position_key=swap_wallet_key,
+                        token=asset,
+                        amount=amount_token,
+                    )
+                _supply_amount_usd = _first_parsed_decimal(payload, "amount_usd", "principal_delta_usd")
+                self.record_borrow(
+                    deployment_id=deployment_id,
+                    position_key=f"supply:{position_key}",
+                    token=asset,
+                    principal_amount=amount_token,
+                    principal_usd=_supply_amount_usd,
                     timestamp=ts,
                     source_ledger_entry_id=ledger_entry_id,
                 )
@@ -173,6 +296,16 @@ class FIFOBasisStore:
                     token=asset,
                     repay_amount=amount_token,
                 )
+                # VIB-3964: REPAY also drains wallet inventory of the repaid
+                # token. Dispose the swap-key acquisition lot so the wallet basis
+                # pool stays consistent with actual on-chain wallet balance.
+                if swap_wallet_key:
+                    self.match_swap_disposal(
+                        deployment_id=deployment_id,
+                        position_key=swap_wallet_key,
+                        token=asset,
+                        amount=amount_token,
+                    )
                 replayed += 1
 
             elif event_type == "PT_BUY":
@@ -519,15 +652,23 @@ class FIFOBasisStore:
         cost_usd: Decimal | None = None,
         timestamp: datetime | None = None,
         lot_id: str = "",
+        source: str = "SWAP",
     ) -> str:
-        """Record a swap acquisition lot (token_out from a SWAP intent).
+        """Record a wallet-basis acquisition lot for an inbound token.
 
-        Called after a SWAP executes to record the cost basis of the acquired token.
-        The lot is stored in the FIFO store keyed by (deployment_id, position_key, token)
-        so that future SWAPs spending this token can compute realized PnL.
+        Called after a SWAP credits ``token_out`` (default ``source="SWAP"``) AND
+        — since VIB-3964 — after a BORROW or WITHDRAW deposits a borrowed/withdrawn
+        token into the wallet (``source="BORROW"`` / ``source="WITHDRAW"``).
 
-        lot_id defaults to a deterministic seed from the caller when provided, or a
-        new UUID when empty.  Returns the lot_id used.
+        The wallet pool is fungible across SWAP and lending lanes: a USDT BORROW
+        and a USDT acquired from SWAP both land in the same wallet inventory and
+        either can be spent by a later SWAP / SUPPLY / REPAY. Mirroring that here
+        keeps ``match_swap_disposal`` from returning ``None`` when the disposed
+        token came from a BORROW or WITHDRAW (the case that left looping
+        reconciliation G6 RED with ``Σ_swaps_usd_null_count >= 1``).
+
+        ``source`` is stamped on the lot for forensic / L6 attribution; the
+        matching path itself is source-agnostic.
         """
         effective_lot_id = lot_id or str(uuid.uuid4())
         key = self._key(deployment_id, position_key, token)
@@ -539,6 +680,7 @@ class FIFOBasisStore:
                 "amount": amount,
                 "remaining": amount,
                 "cost_usd": cost_usd,
+                "source": source,
                 "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
             }
         )

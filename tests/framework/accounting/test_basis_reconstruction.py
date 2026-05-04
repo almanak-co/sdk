@@ -598,3 +598,191 @@ class TestPolicyV1Warning:
         # Lot still has full principal since REPAY was skipped
         result = store.match_repay(dep, pk, "DAI", Decimal("502"))
         assert result.repaid_principal == pytest.approx(Decimal("500"), abs=Decimal("0.001"))
+
+
+# ---------------------------------------------------------------------------
+# VIB-3964 — wallet basis pool: BORROW credits, REPAY debits, the swap-key
+# pool. Without this, a SWAP that disposes a borrowed token returns a
+# null realized PnL and breaks G6 looping reconciliation.
+# ---------------------------------------------------------------------------
+
+
+def _lending_row_v2(
+    event_type: str,
+    deployment_id: str,
+    position_key: str,
+    asset: str,
+    amount_token: Decimal,
+    amount_usd: Decimal | None = None,
+    chain: str = "arbitrum",
+    wallet: str = "0xwallet",
+    timestamp: str = "2026-04-27T10:00:00+00:00",
+) -> dict:
+    """Lending row that includes chain + wallet_address top-level fields.
+
+    These two columns are what reconstruct_from_events reads to derive the
+    swap-key the BORROW / WITHDRAW credit was minted under (VIB-3964).
+    """
+    payload: dict = {
+        "event_type": event_type,
+        "position_key": position_key,
+        "market_id": "test-market",
+        "asset": asset,
+        "amount_token": str(amount_token),
+        "amount": str(amount_token),
+        "confidence": "HIGH",
+        "unavailable_reason": "",
+        "schema_version": 1,
+    }
+    if amount_usd is not None:
+        payload["borrowed_amount_usd"] = str(amount_usd)
+        payload["amount_usd"] = str(amount_usd)
+        payload["principal_delta_usd"] = str(amount_usd)
+    return {
+        "event_type": event_type,
+        "deployment_id": deployment_id,
+        "position_key": position_key,
+        "chain": chain,
+        "wallet_address": wallet,
+        "timestamp": timestamp,
+        "payload_json": json.dumps(payload),
+    }
+
+
+class TestWalletBasisRoundTrip:
+    """VIB-3964 — BORROW → SWAP → REPAY closes the wallet basis pool cleanly.
+
+    A constant-price round-trip should produce realized PnL of zero (within a
+    slippage epsilon). Pre-VIB-3964 this returned None because the SWAP
+    disposing the borrowed token had no swap-key acquisition lot to consume.
+    """
+
+    def test_borrow_swap_repay_round_trip_basis_closes_to_zero(self):
+        dep = "dep-loop-1"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        lending_pk = f"lending:{chain}:aave_v3:{wallet}:USDT"
+        swap_pk = f"swap:{chain}:{wallet}"
+
+        # 1. BORROW 2 USDT @ $1.00 = $2.00 obligation
+        borrow_row = _lending_row_v2(
+            "BORROW",
+            dep,
+            lending_pk,
+            "USDT",
+            Decimal("2"),
+            amount_usd=Decimal("2.00"),
+            chain=chain,
+            wallet=wallet,
+        )
+        store = FIFOBasisStore()
+        store.reconstruct_from_events([borrow_row])
+
+        # The wallet pool now holds the borrowed USDT.
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="USDT",
+            amount=Decimal("2"),
+        )
+        assert unmatched == Decimal("0")
+        assert cost_consumed == pytest.approx(Decimal("2.00"), abs=Decimal("0.001"))
+
+        # 2. The lending-key BORROW lot is independent: REPAY of 2 USDT
+        # consumes the principal from the lending key (no interest accrued
+        # in this constant-price test).
+        repay_result = store.match_repay(dep, lending_pk, "USDT", Decimal("2"))
+        assert repay_result.unmatched_amount == Decimal("0")
+        assert repay_result.repaid_principal == pytest.approx(Decimal("2"), abs=Decimal("0.001"))
+        assert repay_result.interest_or_yield == Decimal("0")
+
+    def test_borrow_credits_swap_key_with_basis_for_disposal(self):
+        """The minimum unit-level reproduction of the G6 RED path.
+
+        Pre-VIB-3964: match_swap_disposal returned (None, amount) for a
+        borrowed token because no swap-key lot existed.
+        """
+        dep = "dep-min"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        lending_pk = f"lending:{chain}:aave_v3:{wallet}:USDT"
+        swap_pk = f"swap:{chain}:{wallet}"
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events(
+            [_lending_row_v2("BORROW", dep, lending_pk, "USDT", Decimal("2"), Decimal("2.00"), chain, wallet)]
+        )
+
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="USDT",
+            amount=Decimal("2"),
+        )
+        assert cost_consumed is not None, "BORROW must credit a swap-key basis lot for disposal"
+        assert unmatched == Decimal("0")
+
+    def test_withdraw_credits_swap_key_with_basis(self):
+        """A WITHDRAW returns collateral to the wallet — also needs a basis lot."""
+        dep = "dep-w"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        lending_pk = f"lending:{chain}:aave_v3:{wallet}:USDC"
+        swap_pk = f"swap:{chain}:{wallet}"
+
+        store = FIFOBasisStore()
+        store.reconstruct_from_events(
+            [_lending_row_v2("WITHDRAW", dep, lending_pk, "USDC", Decimal("4"), Decimal("4.00"), chain, wallet)]
+        )
+
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="USDC",
+            amount=Decimal("4"),
+        )
+        assert cost_consumed is not None
+        assert unmatched == Decimal("0")
+        assert cost_consumed == pytest.approx(Decimal("4.00"), abs=Decimal("0.001"))
+
+    def test_supply_drains_swap_key_to_keep_pool_consistent(self):
+        """SUPPLY moves a token from the wallet to the lending pool.
+
+        Without disposal, a phantom acquisition lot would survive the SUPPLY
+        and poison a later WITHDRAW-then-SWAP attribution.
+        """
+        dep = "dep-s"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        lending_pk = f"lending:{chain}:aave_v3:{wallet}:USDC"
+        swap_pk = f"swap:{chain}:{wallet}"
+
+        store = FIFOBasisStore()
+        # Mint a wallet USDC lot via WITHDRAW, then SUPPLY it back; the pool
+        # must end empty.
+        store.reconstruct_from_events(
+            [
+                _lending_row_v2(
+                    "WITHDRAW", dep, lending_pk, "USDC", Decimal("4"), Decimal("4.00"),
+                    chain, wallet, timestamp="2026-04-27T10:00:00+00:00",
+                ),
+                _lending_row_v2(
+                    "SUPPLY", dep, lending_pk, "USDC", Decimal("4"), Decimal("4.00"),
+                    chain, wallet, timestamp="2026-04-27T10:01:00+00:00",
+                ),
+            ]
+        )
+
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep,
+            position_key=swap_pk,
+            token="USDC",
+            amount=Decimal("1"),
+        )
+        # Pool drained by SUPPLY → only the empty lot remains → all 1 USDC
+        # disposal is unmatched. The matcher returns ``Decimal("0")`` (not
+        # None) for cost_consumed because the lot existed and had a
+        # ``cost_usd`` field (just remaining=0); ``_unmatched > 0`` is the
+        # signal swap_handler.py uses to leave realized_pnl_usd null.
+        assert unmatched == Decimal("1")
+        assert cost_consumed == Decimal("0")
