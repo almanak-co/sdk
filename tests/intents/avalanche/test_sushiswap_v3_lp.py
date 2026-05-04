@@ -42,6 +42,7 @@ from tests.intents.conftest import (
 )
 
 # SushiSwap V3 removed from Avalanche routing: ~54% price impact on $100, on-chain reverts on $10 (VIB-2069)
+# xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
 pytestmark = pytest.mark.xfail(reason="SushiSwap V3 removed from Avalanche routing - zero usable liquidity (VIB-2069)")
 
 # =============================================================================
@@ -491,6 +492,7 @@ class TestSushiSwapV3LPCloseIntent:
         print(f"WAVAX delta: {wavax_delta}")
         print("\nALL CHECKS PASSED")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="flaky: receipt timeout on Anvil fork under load; previously quarantined in #606",
         strict=False,

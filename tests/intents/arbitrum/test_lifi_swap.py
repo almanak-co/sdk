@@ -58,6 +58,7 @@ class TestLiFiSwap:
     - Higher slippage tolerance (5%) due to API-sourced routes
     """
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="LiFi KyberSwap routing reverts with TRANSFER_FROM_FAILED on Anvil fork", strict=False)
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
@@ -191,6 +192,7 @@ class TestLiFiSwap:
 
         print("\nALL CHECKS PASSED")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="Reverse direction (WETH -> USDC) may have different routing and slippage, needs separate test",strict=False)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(

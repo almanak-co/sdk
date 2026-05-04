@@ -80,6 +80,7 @@ class TestPendlePTRedeemIntent:
     Flow: buy PT -> warp past maturity -> redeem -> verify.
     """
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         strict=False,
         reason="PT approval (ERC20: insufficient allowance) is flaky in CI due to Anvil "

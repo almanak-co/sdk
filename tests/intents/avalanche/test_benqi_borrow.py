@@ -478,6 +478,7 @@ class TestBenqiBorrowIntent:
 
         print("\nALL CHECKS PASSED — borrow-only path verified")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="BENQI Comptroller on Anvil fork does not reliably enforce borrow limits. "
         "The oracle price feed on the fork may return values that allow excessive borrows.",

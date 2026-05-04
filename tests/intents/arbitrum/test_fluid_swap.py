@@ -58,6 +58,7 @@ class TestFluidSwapIntent:
     Uses USDC/USDT pair (Pool 2) — known working pair on Fluid DEX Arbitrum.
     """
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="VIB-2822: Fluid connector disabled at compile time — all Arbitrum T1 pools reject swaps",
         strict=False,
@@ -201,6 +202,7 @@ class TestFluidSwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="VIB-2822: Fluid connector disabled at compile time — all Arbitrum T1 pools reject swaps",
         strict=False,

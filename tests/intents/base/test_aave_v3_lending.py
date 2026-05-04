@@ -391,6 +391,7 @@ class TestAaveV3BorrowIntent:
     - Balance changes and account data match expected amounts
     """
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="#1696: USDC reserve is frozen for borrowing on the Aave V3 mainnet fork (ReserveFrozen)",
         strict=True,
@@ -530,6 +531,7 @@ class TestAaveV3BorrowIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="#1696: cascade of frozen USDC borrow — repay has no debt to settle (NoDebtOfSelectedType)",
         strict=True,

@@ -109,6 +109,7 @@ class TestTraderJoeV2SwapExecution:
     """
 
     @pytest.mark.asyncio
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="WAVAX->USDC direction can revert on Anvil fork due to bin liquidity state", strict=False)
     async def test_wavax_to_usdc_full_lifecycle(
         self,
@@ -233,6 +234,7 @@ class TestTraderJoeV2SwapExecution:
         )
 
     @pytest.mark.asyncio
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="USDC->WAVAX can revert on Anvil fork due to allowance simulation race or bin liquidity state", strict=False)
     async def test_usdc_to_wavax_reverse_direction(
         self,

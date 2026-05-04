@@ -61,6 +61,7 @@ class TestJoeLendSupplyIntent:
     """
 
     @pytest.mark.asyncio
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="VIB-3960: JoeLend protocol wound down on-chain (Avalanche). "
         "Reverts with `Error: wind down` for every supply/borrow/repay/withdraw call. "
@@ -171,6 +172,7 @@ class TestJoeLendSupplyIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="VIB-3960: JoeLend protocol wound down on-chain (Avalanche). "
         "Reverts with `Error: wind down` for every supply/borrow/repay/withdraw call. "

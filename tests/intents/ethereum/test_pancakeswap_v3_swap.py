@@ -55,6 +55,7 @@ class TestPancakeSwapV3SwapIntent:
     - Balance changes match expected amounts
     """
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 USDT->WETH swap reverts with STF intermittently on Ethereum", strict=False)
     @pytest.mark.asyncio
     async def test_swap_usdt_to_weth_using_intent(
@@ -182,6 +183,7 @@ class TestPancakeSwapV3SwapIntent:
 
         print("\nALL CHECKS PASSED ✓")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 WETH->USDT swap reverts with STF intermittently on Ethereum", strict=False)
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdt_using_intent(

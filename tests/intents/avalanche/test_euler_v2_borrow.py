@@ -85,6 +85,7 @@ class TestEulerV2BorrowIntent:
     """
 
     @pytest.mark.asyncio
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="eWAVAX-2 vault has maxDeposit=0 (supply cap reached). "
         "Euler V2 borrow requires a valid collateral vault not yet in adapter. "
@@ -205,6 +206,7 @@ class TestEulerV2BorrowIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="eWAVAX-2 vault has maxDeposit=0 (supply cap reached). "
         "Euler V2 borrow requires a valid collateral vault not yet in adapter. "

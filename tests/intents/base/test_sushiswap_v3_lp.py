@@ -485,6 +485,7 @@ class TestSushiSwapV3LPCloseIntent:
         print(f"USDC delta: {usdc_delta}")
         print("\nALL CHECKS PASSED")
 
+    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="flaky: receipt timeout on Anvil fork under load; previously quarantined in #606",
         strict=False,

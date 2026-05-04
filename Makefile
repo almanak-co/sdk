@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene
 
 # Load .env file if it exists
 -include .env
@@ -39,6 +39,11 @@ typecheck-report:
 # Fails when the filter is missing a reachable import or contains a stale entry.
 audit-intent-paths:
 	uv run python scripts/ci/audit_intent_test_paths.py
+
+# Enforce xfail hygiene: every @pytest.mark.xfail under tests/intents/ must
+# carry a ticket ref, a dated reason, and an explicit strict=. See issue #1694.
+check-xfail-hygiene:
+	uv run python scripts/ci/check_xfail_hygiene.py --check --verbose
 
 # Run security checks (bandit for Python security issues)
 security:
