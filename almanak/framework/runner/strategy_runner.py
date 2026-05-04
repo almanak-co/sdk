@@ -2055,6 +2055,38 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 — fail-open
             logger.debug("slot0 enrichment failed", exc_info=True)
 
+    def _maybe_enrich_lp_close_with_slot0(self, result: Any, chain: str) -> None:
+        """VIB-3940 — fill ``LPCloseData.current_tick`` from a slot0 RPC.
+
+        Mirror of :meth:`_maybe_enrich_lp_open_with_slot0`. The canonical
+        pure-burn close has no Swap event in the receipt, so the receipt
+        parser leaves ``current_tick=None``. Without this fallback the
+        LP_CLOSE accounting event inherits null and ``in_range`` cannot be
+        derived at close-time — breaking lane symmetry vs. LP_OPEN
+        (VIB-3893).
+
+        No-ops when ``extracted_data`` lacks an ``LPCloseData``, when
+        ``current_tick`` is already populated, or when the gateway client
+        / pool address are missing. Never raises.
+        """
+        try:
+            extracted = getattr(result, "extracted_data", None)
+            if not isinstance(extracted, dict):
+                return
+            lp_close = extracted.get("lp_close_data")
+            if lp_close is None:
+                return
+            from ..connectors.uniswap_v3.slot0_fallback import enrich_lp_close_with_slot0
+
+            gateway = self._get_gateway_client()
+            if gateway is None:
+                return
+            enriched = enrich_lp_close_with_slot0(lp_close, gateway_client=gateway, chain=chain)
+            if enriched is not lp_close:
+                extracted["lp_close_data"] = enriched
+        except Exception:  # noqa: BLE001 — fail-open
+            logger.debug("slot0 close-enrichment failed", exc_info=True)
+
     async def _write_ledger_entry(
         self,
         strategy: StrategyProtocol,
@@ -2099,6 +2131,10 @@ class StrategyRunner:
             # ledger row) showed ``in_range=None`` on every production
             # swap-then-mint-across-cycles run.
             self._maybe_enrich_lp_open_with_slot0(result, chain)
+            # VIB-3940 — same enrichment for LP_CLOSE so the LP_CLOSE
+            # accounting event can derive ``in_range`` at close-time. Same
+            # pre-serialize ordering rationale as the LP_OPEN sibling.
+            self._maybe_enrich_lp_close_with_slot0(result, chain)
 
             entry = build_ledger_entry(
                 strategy_id=strategy.strategy_id,
@@ -2392,6 +2428,9 @@ class StrategyRunner:
         execution_context: Any,
         bundle_metadata: dict[str, Any] | None = None,
         teardown_cycle_id: str,
+        pre_snapshot: Any | None = None,
+        recon: dict[str, Any] | None = None,
+        lending_pre_state: Any | None = None,
     ) -> "TeardownCommitOutcome":
         """Run the per-intent teardown commit pipeline (VIB-3773 Phase 0).
 
@@ -2413,6 +2452,9 @@ class StrategyRunner:
             execution_context=execution_context,
             bundle_metadata=bundle_metadata,
             teardown_cycle_id=teardown_cycle_id,
+            pre_snapshot=pre_snapshot,
+            recon=recon,
+            lending_pre_state=lending_pre_state,
         )
 
     def _compute_outbox_position_key(

@@ -278,19 +278,11 @@ def read_morpho_blue_account_state(
         borrow_amount = Decimal(borrow_assets) / Decimal(10**loan_decimals)
 
         # ── USD values via price oracle ───────────────────────────────────────
-        collateral_price = None
-        loan_price = None
-        if price_oracle is not None:
-            collateral_price = price_oracle.get(collateral_token)
-            if collateral_price is None:
-                collateral_price = price_oracle.get(collateral_token.upper())
-            if collateral_price is None:
-                collateral_price = price_oracle.get(collateral_token.lower())
-            loan_price = price_oracle.get(loan_token)
-            if loan_price is None:
-                loan_price = price_oracle.get(loan_token.upper())
-            if loan_price is None:
-                loan_price = price_oracle.get(loan_token.lower())
+        # Use the shape-tolerant resolver so the teardown lane's nested
+        # ``{symbol: {price_usd, …}}`` oracle works alongside the iteration
+        # lane's flat ``{symbol: price}`` shape (Codex 2026-05-04 review).
+        collateral_price = _resolve_oracle_price(price_oracle, collateral_token)
+        loan_price = _resolve_oracle_price(price_oracle, loan_token)
 
         if collateral_price is None or loan_price is None:
             logger.debug(
@@ -300,8 +292,8 @@ def read_morpho_blue_account_state(
             )
             return None
 
-        collateral_value_usd = collateral_amount * Decimal(str(collateral_price))
-        debt_value_usd = borrow_amount * Decimal(str(loan_price))
+        collateral_value_usd = collateral_amount * collateral_price
+        debt_value_usd = borrow_amount * loan_price
 
         # ── LLTV and health factor ─────────────────────────────────────────────
         lltv = Decimal(lltv_raw) / _MORPHO_LLTV_SCALE
@@ -432,18 +424,11 @@ def read_compound_v3_account_state(
         borrow_decimals = borrow_info.decimals
 
         # ── Prices ─────────────────────────────────────────────────────────
-        if not price_oracle:
-            return None
-        collateral_price = price_oracle.get(collateral_token)
-        if collateral_price is None:
-            collateral_price = price_oracle.get(collateral_token.upper())
-        if collateral_price is None:
-            collateral_price = price_oracle.get(collateral_token.lower())
-        borrow_price = price_oracle.get(effective_borrow_token)
-        if borrow_price is None:
-            borrow_price = price_oracle.get(effective_borrow_token.upper())
-        if borrow_price is None:
-            borrow_price = price_oracle.get(effective_borrow_token.lower())
+        # Use the shape-tolerant resolver so the teardown lane's nested
+        # ``{symbol: {price_usd, …}}`` oracle works alongside the iteration
+        # lane's flat ``{symbol: price}`` shape (Codex 2026-05-04 review).
+        collateral_price = _resolve_oracle_price(price_oracle, collateral_token)
+        borrow_price = _resolve_oracle_price(price_oracle, effective_borrow_token)
         if collateral_price is None or borrow_price is None:
             logger.debug(
                 "read_compound_v3_account_state: price missing for collateral=%s borrow=%s",
@@ -496,8 +481,8 @@ def read_compound_v3_account_state(
             # collateral == base asset, so both use borrow_decimals / borrow_price
             supplied_amount = Decimal(collateral_balance_raw) / Decimal(10**borrow_decimals)
             borrow_amount = Decimal(borrow_balance_raw) / Decimal(10**borrow_decimals)
-            collateral_usd = supplied_amount * Decimal(str(borrow_price))
-            debt_usd = borrow_amount * Decimal(str(borrow_price))
+            collateral_usd = supplied_amount * borrow_price
+            debt_usd = borrow_amount * borrow_price
 
             # Pure base-asset supply has no liquidation risk — sentinel HF.
             health_factor: Decimal | None = Decimal("999999")
@@ -532,8 +517,8 @@ def read_compound_v3_account_state(
             # ── USD values ──────────────────────────────────────────────────
             collateral_amount = Decimal(collateral_balance_raw) / Decimal(10**collateral_decimals)
             borrow_amount = Decimal(borrow_balance_raw) / Decimal(10**borrow_decimals)
-            collateral_usd = collateral_amount * Decimal(str(collateral_price))
-            debt_usd = borrow_amount * Decimal(str(borrow_price))
+            collateral_usd = collateral_amount * collateral_price
+            debt_usd = borrow_amount * borrow_price
 
             # ── Health factor via per-asset liquidation_collateral_factor ────
             # HF = (collateral_usd * LCF) / debt_usd where LCF < 1.
@@ -881,20 +866,63 @@ def _ray_to_bps(ray_value: int | float | Decimal | str | None) -> int | None:
         return None
 
 
-def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asset: str) -> Decimal | None:
-    """Convert a human-readable token amount to USD using the price_oracle dict."""
-    if amount_human is None or price_oracle is None:
+def _resolve_oracle_price(price_oracle: dict | None, asset: str) -> Decimal | None:
+    """Look up a token's USD price from the price_oracle dict, tolerant of both shapes.
+
+    Accepts both the legacy flat ``{symbol: price}`` shape (returned by
+    ``MarketSnapshot.get_price_oracle_dict()``) AND the AttemptNo17 G12
+    nested shape ``{symbol: {"price_usd": ..., "oracle_source": ..., ...}}``
+    that ``_portfolio_snapshot_to_price_oracle`` produces for the teardown
+    lane (VIB-3934 + Codex 2026-05-04 review). Without the nested branch,
+    teardown ledger rows on Morpho Blue / Compound V3 silently lost
+    collateral/debt/HF because the readers passed the dict to
+    ``Decimal(str(...))`` and got None back.
+
+    Symbol lookup is case-insensitive — tries exact match first (cheap fast
+    path), then falls back to a normalized-key map so mixed-case oracle keys
+    like ``"wstETH"`` resolve regardless of the asset's casing
+    (CodeRabbit 2026-05-04 review).
+    """
+    if price_oracle is None:
         return None
-    price = price_oracle.get(asset)
-    if price is None:
-        price = price_oracle.get(asset.upper())
-    if price is None:
-        price = price_oracle.get(asset.lower())
+    candidate = price_oracle.get(asset)
+    if candidate is None:
+        # Mixed-case fallback: build a one-shot lower-keyed lookup so any
+        # oracle entry whose key normalizes to the same lower form matches.
+        # ``next(iter(...), None)`` returns the first colliding value when
+        # multiple oracle keys share a normalized form (rare); the asset's
+        # canonical symbol from ``Intent`` is always single-cased so
+        # collisions in real callers don't happen.
+        asset_lower = asset.lower()
+        candidate = next(
+            (v for k, v in price_oracle.items() if isinstance(k, str) and k.lower() == asset_lower),
+            None,
+        )
+    if candidate is None:
+        return None
+    if isinstance(candidate, dict):
+        candidate = candidate.get("price_usd")
+        if candidate is None:
+            return None
+    try:
+        return Decimal(str(candidate))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asset: str) -> Decimal | None:
+    """Convert a human-readable token amount to USD using the price_oracle dict.
+
+    Tolerant of both flat and nested oracle shapes via :func:`_resolve_oracle_price`.
+    """
+    if amount_human is None:
+        return None
+    price = _resolve_oracle_price(price_oracle, asset)
     if price is None:
         return None
     try:
-        return Decimal(str(price)) * amount_human
-    except Exception:
+        return price * amount_human
+    except (InvalidOperation, ValueError, ArithmeticError):
         return None
 
 

@@ -962,6 +962,25 @@ class TeardownManager:
                                 exc,
                             )
 
+                    # VIB-3934 — capture lending pre-state on the same boundary
+                    # as the wallet snapshot so REPAY/WITHDRAW/DELEVERAGE
+                    # teardown rows carry collateral/debt/HF in
+                    # ``pre_state_json`` lane-symmetric with iteration. Returns
+                    # ``None`` for non-lending intents and unsupported
+                    # protocols — the wrapper never raises.
+                    lending_pre_state_for_intent: Any = None
+                    if self.runner_helpers.has_lending_pre_state:
+                        try:
+                            lending_pre_state_for_intent = await self.runner_helpers.snapshot_intent_lending_state(  # type: ignore[misc]
+                                strategy, intent_to_exec
+                            )
+                        except Exception as exc:  # noqa: BLE001 — best-effort
+                            logger.debug(
+                                "teardown lending pre-state snapshot failed for %s: %s",
+                                strategy.strategy_id,
+                                exc,
+                            )
+
                     # Execute via orchestrator
                     exec_result = await self.orchestrator.execute(
                         compilation_result.action_bundle,
@@ -1019,6 +1038,7 @@ class TeardownManager:
                                 teardown_cycle_id=teardown_cycle_id,
                                 pre_snapshot=pre_intent_snapshot,
                                 recon=post_intent_recon,
+                                lending_pre_state=lending_pre_state_for_intent,
                             )
                             if commit_outcome.accounting_degraded:
                                 accounting_degraded_records.extend(commit_outcome.degraded_writes)

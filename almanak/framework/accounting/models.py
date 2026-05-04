@@ -219,7 +219,8 @@ class LendingAccountingEvent:
             "gas_usd": _enc(self.gas_usd),
             "amount_token": _enc(self.amount_token),
             "confidence": self.confidence.value,
-            "unavailable_reason": self.unavailable_reason,
+            # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
+            "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
         }
         return json.dumps(d)
@@ -251,7 +252,7 @@ class LendingAccountingEvent:
             gas_usd=_dec(d.get("gas_usd")),
             amount_token=_dec(d.get("amount_token")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
-            unavailable_reason=d.get("unavailable_reason", ""),
+            unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
         )
 
@@ -307,7 +308,8 @@ class PendleAccountingEvent:
             "realized_yield_usd": _enc(self.realized_yield_usd),
             "basis_lot_id": self.basis_lot_id,
             "confidence": self.confidence.value,
-            "unavailable_reason": self.unavailable_reason,
+            # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
+            "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
         }
         return json.dumps(d)
@@ -336,7 +338,7 @@ class PendleAccountingEvent:
             realized_yield_usd=_dec(d.get("realized_yield_usd")),
             basis_lot_id=d.get("basis_lot_id"),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH)),
-            unavailable_reason=d.get("unavailable_reason", ""),
+            unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
         )
 
@@ -402,7 +404,8 @@ class SwapAccountingEvent:
             "cost_basis_recorded": self.cost_basis_recorded,
             "gas_usd": _enc(self.gas_usd),
             "confidence": self.confidence.value,
-            "unavailable_reason": self.unavailable_reason,
+            # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
+            "unavailable_reason": self.unavailable_reason or None,
             "swap_position_key": self.swap_position_key,
             "schema_version": self.schema_version,
         }
@@ -428,7 +431,7 @@ class SwapAccountingEvent:
             cost_basis_recorded=bool(d.get("cost_basis_recorded", False)),
             gas_usd=_dec(d.get("gas_usd")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
-            unavailable_reason=d.get("unavailable_reason", ""),
+            unavailable_reason=d.get("unavailable_reason") or "",
             swap_position_key=d.get("swap_position_key", ""),
             schema_version=schema_version,
         )
@@ -499,7 +502,8 @@ class PredictionAccountingEvent:
             "position_basis_after": _enc(self.position_basis_after),
             "gas_usd": _enc(self.gas_usd),
             "confidence": self.confidence.value,
-            "unavailable_reason": self.unavailable_reason,
+            # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
+            "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
         }
         return json.dumps(d)
@@ -526,7 +530,7 @@ class PredictionAccountingEvent:
             ),
             gas_usd=_dec(d.get("gas_usd")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
-            unavailable_reason=d.get("unavailable_reason", ""),
+            unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
         )
 

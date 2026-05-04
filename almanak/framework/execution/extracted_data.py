@@ -113,6 +113,16 @@ class LPCloseData:
             Maps coin index to raw amount: {2: 50000000, 3: 91000000000000000000}.
         additional_fees: Fees for coins beyond token0/token1.
             Maps coin index to fee amount: {2: 100000, 3: 0}.
+        current_tick: Pool's current tick at the moment of close (VIB-3940).
+            Mirrors ``LPOpenData.current_tick`` so the framework can derive
+            ``in_range`` at close-time and stamp it on the LP_CLOSE event,
+            closing the lane-symmetry gap with LP_OPEN. Sourced from a Swap
+            event in the close receipt when present, with a slot0() RPC
+            fallback in the runner. None when no Swap event is in the
+            receipt and the slot0 fallback could not run.
+        pool_address: V3 pool address that emitted the Burn event (VIB-3940).
+            Required input for the framework's slot0 fallback. Empty when the
+            parser couldn't identify the pool. Mirrors ``LPOpenData.pool_address``.
 
     Example:
         if result.lp_close_data:
@@ -129,6 +139,8 @@ class LPCloseData:
     liquidity_removed: int | None = None
     additional_amounts: dict[int, int] | None = None
     additional_fees: dict[int, int] | None = None
+    current_tick: int | None = None  # VIB-3940
+    pool_address: str = ""  # VIB-3940 — for framework slot0 fallback
 
     @property
     def all_amounts(self) -> list[int]:
@@ -156,6 +168,8 @@ class LPCloseData:
             "fees0": str(self.fees0),
             "fees1": str(self.fees1),
             "liquidity_removed": str(self.liquidity_removed) if self.liquidity_removed else None,
+            "current_tick": self.current_tick,  # VIB-3940
+            "pool_address": self.pool_address,  # VIB-3940
         }
         if self.additional_amounts:
             d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}

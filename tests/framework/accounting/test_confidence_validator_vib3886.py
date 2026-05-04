@@ -206,3 +206,175 @@ def test_lp_handler_degrades_to_estimated_when_one_token_unpriceable():
     assert result.cost_basis_usd is None
     assert result.confidence.value == "ESTIMATED"
     assert "USDC" in result.unavailable_reason
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-3938 — every model's to_payload_json must serialize the in-memory
+# empty-string ``unavailable_reason`` as JSON ``null`` (not ``""``).
+#
+# Why: SQLite's ``json_extract($.unavailable_reason)`` returns SQL NULL for
+# JSON ``null`` and an empty string for JSON ``""``. The 4b CONF-invariant
+# query in ``docs/internal/qa/lp-uniswap-v3-checklist.md`` filters with
+# ``IS NOT NULL``, which matches ``""`` and false-positives every HIGH
+# event. The fix is at the serialization edge: in-memory the field stays
+# ``str = ""`` (no model-signature breakage; existing call sites unchanged),
+# but the DB JSON gets the clean ``null``. ESTIMATED rows with a real
+# reason string still serialize as themselves.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _identity(intent_type: str = "SWAP"):
+    """Build a minimal AccountingIdentity for serialization tests."""
+    from datetime import UTC, datetime
+
+    from almanak.framework.accounting.models import AccountingIdentity
+
+    return AccountingIdentity(
+        id=str(uuid.uuid4()),
+        deployment_id="dep:test",
+        strategy_id="StratTest:vib3938",
+        cycle_id="cycle-test",
+        execution_mode="live",
+        timestamp=datetime(2026, 5, 4, tzinfo=UTC),
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        wallet_address="0x" + "0" * 40,
+        tx_hash="0x" + "1" * 64,
+        ledger_entry_id=None,
+    )
+
+
+def test_vib3938_lp_event_high_serializes_unavailable_reason_as_null():
+    from almanak.framework.accounting.lp_accounting import LPAccountingEvent
+    from almanak.framework.accounting.models import AccountingConfidence, LPEventType
+
+    ev = LPAccountingEvent(
+        identity=_identity(),
+        event_type=LPEventType.LP_OPEN,
+        position_key="lp:uniswap_v3:arbitrum:0xw:0xpool",
+        pool_address="0xpool",
+        token0="WETH",
+        token1="USDC",
+        amount0=Decimal("0.001"),
+        amount1=Decimal("2.3"),
+        lp_token_amount=None,
+        cost_basis_usd=Decimal("4.6"),
+        realized_pnl_usd=None,
+        fees0_collected=None,
+        fees1_collected=None,
+        confidence=AccountingConfidence.HIGH,
+        unavailable_reason="",
+    )
+    payload = json.loads(ev.to_payload_json())
+    assert payload["confidence"] == "HIGH"
+    assert payload["unavailable_reason"] is None, (
+        "VIB-3938: HIGH events must serialize empty unavailable_reason as JSON null, "
+        f"got {payload['unavailable_reason']!r}"
+    )
+
+
+def test_vib3938_lp_event_estimated_keeps_real_reason():
+    from almanak.framework.accounting.lp_accounting import LPAccountingEvent
+    from almanak.framework.accounting.models import AccountingConfidence, LPEventType
+
+    ev = LPAccountingEvent(
+        identity=_identity(),
+        event_type=LPEventType.LP_OPEN,
+        position_key="lp:uniswap_v3:arbitrum:0xw:0xpool",
+        pool_address="0xpool",
+        token0="WETH",
+        token1="USDC",
+        amount0=Decimal("0.001"),
+        amount1=Decimal("2.3"),
+        lp_token_amount=None,
+        cost_basis_usd=None,
+        realized_pnl_usd=None,
+        fees0_collected=None,
+        fees1_collected=None,
+        confidence=AccountingConfidence.ESTIMATED,
+        unavailable_reason="USDC price unavailable",
+    )
+    payload = json.loads(ev.to_payload_json())
+    assert payload["confidence"] == "ESTIMATED"
+    assert payload["unavailable_reason"] == "USDC price unavailable"
+
+
+@pytest.mark.parametrize(
+    "model_module,model_class,event_type_module,event_type_attr,extra_kwargs",
+    [
+        (
+            "almanak.framework.accounting.models",
+            "LendingAccountingEvent",
+            "almanak.framework.accounting.models",
+            "LendingEventType.SUPPLY",
+            {
+                "position_key": "lending:arbitrum:aave_v3:0xw:usdc",
+                "market_id": "",
+                "asset": "USDC",
+                "collateral_value_before_usd": None,
+                "collateral_value_after_usd": Decimal("4.0"),
+                "debt_value_before_usd": None,
+                "debt_value_after_usd": Decimal("0"),
+                "net_equity_before_usd": None,
+                "net_equity_after_usd": Decimal("4.0"),
+                "health_factor_before": None,
+                "health_factor_after": Decimal("999999"),
+                "liquidation_threshold": Decimal("0.78"),
+                "lltv": None,
+                "supply_apr_bps": 437,
+                "borrow_apr_bps": None,
+                "principal_delta_usd": Decimal("4.0"),
+                "interest_delta_usd": None,
+                "gas_usd": Decimal("0.5"),
+            },
+        ),
+        (
+            "almanak.framework.accounting.models",
+            "SwapAccountingEvent",
+            "almanak.framework.accounting.models",
+            "SwapEventType.SWAP",
+            {
+                "protocol": "uniswap_v3",
+                "token_in": "USDC",
+                "token_out": "WETH",
+                "amount_in": Decimal("2"),
+                "amount_out": Decimal("0.000860"),
+                "amount_in_usd": Decimal("2.0"),
+                "amount_out_usd": Decimal("1.999"),
+                "effective_price": Decimal("0.00043"),
+                "slippage_bps": 0,
+                "realized_pnl_usd": None,
+                "cost_basis_recorded": True,
+                "gas_usd": Decimal("0.5"),
+            },
+        ),
+    ],
+)
+def test_vib3938_other_event_models_serialize_high_reason_as_null(
+    model_module, model_class, event_type_module, event_type_attr, extra_kwargs
+):
+    """Sibling fences for the non-LP event models. Parametrized so a new
+    model added without the VIB-3938 ``or None`` fix breaks here."""
+    import importlib
+
+    from almanak.framework.accounting.models import AccountingConfidence
+
+    mod = importlib.import_module(model_module)
+    cls = getattr(mod, model_class)
+    et_mod = importlib.import_module(event_type_module)
+    et_root, et_name = event_type_attr.split(".")
+    event_type = getattr(getattr(et_mod, et_root), et_name)
+
+    ev = cls(
+        identity=_identity(),
+        event_type=event_type,
+        confidence=AccountingConfidence.HIGH,
+        unavailable_reason="",
+        **extra_kwargs,
+    )
+    payload = json.loads(ev.to_payload_json())
+    assert payload["confidence"] == "HIGH"
+    assert payload["unavailable_reason"] is None, (
+        f"VIB-3938: {model_class} HIGH event must serialize empty unavailable_reason "
+        f"as JSON null, got {payload['unavailable_reason']!r}"
+    )

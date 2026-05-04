@@ -126,6 +126,7 @@ async def commit_teardown_intent(
     teardown_cycle_id: str,
     pre_snapshot: Any | None = None,
     recon: dict[str, Any] | None = None,
+    lending_pre_state: Any | None = None,
 ) -> TeardownCommitOutcome:
     """Run the full success-path commit pipeline for one teardown intent.
 
@@ -242,10 +243,47 @@ async def commit_teardown_intent(
             )
 
             intent_protocol = (getattr(intent, "protocol", "") or "").lower()
-            if pre_snapshot is not None:
-                pre_state_dict = _build_pre_state_for_ledger(pre_snapshot, protocol=intent_protocol)
-            if recon is not None:
-                post_state_dict = _build_post_state_for_ledger(recon, protocol=intent_protocol)
+
+            # VIB-3934 — capture lending POST-state on the teardown lane so
+            # ``transaction_ledger.post_state_json`` carries
+            # collateral/debt/HF for REPAY/WITHDRAW/DELEVERAGE intents,
+            # lane-symmetric with iteration. Without this the lending handler
+            # falls back to ESTIMATED confidence on every teardown row even
+            # though the protocol state is readable on-chain. ``pre_state``
+            # is supplied by the teardown manager (captured BEFORE
+            # submission); attempting to read it here would return
+            # post-state values because the TX has already landed.
+            lending_post_state = None
+            try:
+                gateway_client = runner._get_gateway_client()
+                teardown_price_oracle_for_state = getattr(runner, "_teardown_price_oracle", None)
+                lending_post_state = runner._capture_lending_state_safe(
+                    intent=intent,
+                    chain=getattr(strategy, "chain", "") or "",
+                    wallet_address=getattr(strategy, "wallet_address", "") or "",
+                    gateway_client=gateway_client,
+                    price_oracle=teardown_price_oracle_for_state,
+                    phase="post",
+                )
+            except Exception as exc:  # noqa: BLE001 — never propagate
+                logger.debug(
+                    "commit_teardown_intent: lending post-state capture failed for %s: %s",
+                    strategy_id,
+                    exc,
+                )
+
+            if pre_snapshot is not None or lending_pre_state is not None:
+                pre_state_dict = _build_pre_state_for_ledger(
+                    pre_snapshot,
+                    lending_pre_state,
+                    protocol=intent_protocol,
+                )
+            if recon is not None or lending_post_state is not None:
+                post_state_dict = _build_post_state_for_ledger(
+                    recon,
+                    lending_post_state,
+                    protocol=intent_protocol,
+                )
         except Exception as exc:  # noqa: BLE001 — never propagate state-building
             logger.debug(
                 "commit_teardown_intent: pre/post state build failed for %s: %s",

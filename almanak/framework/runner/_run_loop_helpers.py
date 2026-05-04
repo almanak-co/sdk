@@ -44,6 +44,72 @@ logger = logging.getLogger("almanak.framework.runner.strategy_runner")
 
 
 # =============================================================================
+# Cross-entry-point startup helpers
+# =============================================================================
+
+
+def reconstruct_lending_basis_store(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    strategy_id: str,
+) -> int:
+    """Replay durable accounting_events into the in-memory FIFO basis store.
+
+    Cross-process restart hole (VIB-3944): when a strategy restarts inside a
+    new CLI process — e.g. the harness's ``--once --teardown-after`` Phase 2
+    that follows a ``--max-iterations N`` Phase 1 — the in-memory
+    ``runner._lending_basis_store`` is empty. Without this rebuild step the
+    teardown REPAY's ``match_repay()`` returns ``unmatched=full_amount``, the
+    writer cannot emit ``interest_delta_usd``, and the L4 Accountant Test
+    cell fails with "FIFO basis store may not have a matching BORROW lot."
+
+    ``initialize_run_loop`` (the continuous ``run_loop`` entry) calls this
+    helper inline; the ``_run_once`` and ``_run_test_lifecycle`` CLI paths
+    in ``framework/cli/run_helpers.py`` call it after ``setup_gateway_integration``
+    so the gRPC channel is up before we issue ``GetAccountingEvents``.
+
+    Returns the number of lot operations replayed (``0`` if there are no
+    events, the persistence backend is disabled, or any error is suppressed
+    in non-live mode). In live mode any failure is converted to ``RuntimeError``
+    so we never silently start a strategy with an inconsistent FIFO view.
+    """
+    if not runner.config.enable_state_persistence:
+        return 0
+
+    # State-manager readiness gate (Claude pr-auditor 2026-05-04 review).
+    # ``initialize_run_loop`` only invokes this helper when its own
+    # ``state_manager_ready`` flag is True; the ``--once`` and
+    # ``_run_test_lifecycle`` CLI paths bypass that check, so the helper
+    # owns its own precondition. ``runner.state_manager is None`` is the
+    # observable shape when persistence is disabled or initialize() failed
+    # — early return matches the legacy "events=[] → no-op" path.
+    if getattr(runner, "state_manager", None) is None:
+        return 0
+
+    deployment_id = ""
+    try:
+        deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+        if not deployment_id:
+            return 0
+        events = runner.state_manager.get_accounting_events_sync(deployment_id)
+        if not events:
+            return 0
+        replayed = runner._lending_basis_store.reconstruct_from_events(events)
+        if replayed:
+            logger.info(
+                "Reconstructed %d FIFO lot operations for %s from accounting_events",
+                replayed,
+                deployment_id,
+            )
+        return replayed
+    except Exception as e:
+        if runner._is_live_mode():
+            raise RuntimeError(f"Failed to reconstruct FIFO basis store for {deployment_id}: {e}") from e
+        logger.warning("Failed to reconstruct FIFO basis store on startup: %s", e)
+        return 0
+
+
+# =============================================================================
 # Pre-loop initialization
 # =============================================================================
 
@@ -80,22 +146,10 @@ async def initialize_run_loop(
     # PT_REDEEM attribution is correct after a runner restart (VIB-3484).
     # Gate on state_manager_ready: an uninitialized backend returns [] silently,
     # which would leave the FIFO store empty — the exact restart hole VIB-3484 fixes.
-    if runner.config.enable_state_persistence and state_manager_ready:
-        try:
-            deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
-            events = runner.state_manager.get_accounting_events_sync(deployment_id)
-            if events:
-                replayed = runner._lending_basis_store.reconstruct_from_events(events)
-                if replayed:
-                    logger.info(
-                        "Reconstructed %d FIFO lot operations for %s from accounting_events",
-                        replayed,
-                        deployment_id,
-                    )
-        except Exception as e:
-            if runner._is_live_mode():
-                raise RuntimeError(f"Failed to reconstruct FIFO basis store for {deployment_id}: {e}") from e
-            logger.warning("Failed to reconstruct FIFO basis store on startup: %s", e)
+    # Shared helper (VIB-3944) so the ``--once``/``test-lifecycle`` CLI paths,
+    # which bypass run_loop entirely, can reuse the same rebuild step.
+    if state_manager_ready:
+        reconstruct_lending_basis_store(runner, strategy, strategy_id)
 
     # VIB-3467: drain pending/failed outbox rows from the previous run.
     if runner.config.enable_state_persistence and state_manager_ready:

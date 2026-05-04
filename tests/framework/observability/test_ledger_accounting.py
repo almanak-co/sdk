@@ -9,8 +9,6 @@ Validates Phase 1b of the Dashboard Accounting PRD:
 
 from decimal import Decimal
 
-import pytest
-
 from almanak.framework.execution.extracted_data import (
     BorrowData,
     LPCloseData,
@@ -247,9 +245,7 @@ class TestBuildLedgerEntryExtractedData:
 
         result = MagicMock()
         result.swap_amounts = None
-        result.extracted_data = {
-            "supply": SupplyData(supply_amount=5000000, a_token_received=4999000)
-        }
+        result.extracted_data = {"supply": SupplyData(supply_amount=5000000, a_token_received=4999000)}
         # Multi-tx: approve + supply
         tx1 = MagicMock(tx_hash="0xapprove", gas_used=50000, success=True)
         tx2 = MagicMock(tx_hash="0xsupply", gas_used=200000, success=True)
@@ -294,3 +290,210 @@ class TestBuildLedgerEntryExtractedData:
         )
 
         assert entry.extracted_data_json == ""
+
+
+class TestRepayWithdrawAmountIn:
+    """VIB-3939 — receipt-resolved REPAY/WITHDRAW lands on transaction_ledger.amount_in.
+
+    Pre-fix: ``RepayIntent(repay_full=True)`` and ``WithdrawIntent(withdraw_all=True)``
+    submit ``uint256.max`` to Aave; ``intent.amount`` defaults to ``Decimal(0)``;
+    the ledger's intent-attr fallback wrote ``amount_in=""`` even though the on-
+    chain ``Repay`` / ``Withdraw`` event carries the resolved amount which the
+    receipt parser already extracted onto ``result.extracted_data["repay_amount"]``
+    / ``["withdraw_amount"]``.
+
+    The fix routes REPAY/WITHDRAW through ``_extract_from_lending`` which reads
+    the receipt-resolved raw int and scales to human units via the token
+    resolver, mirroring ``accounting/category_handlers/lending_handler.py``.
+    """
+
+    def _make_intent(self, intent_type: str, token: str, amount: Decimal):
+        from unittest.mock import MagicMock
+
+        intent = MagicMock()
+        intent.intent_type = MagicMock()
+        intent.intent_type.value = intent_type
+        intent.protocol = "aave_v3"
+        intent.token = token
+        intent.amount = amount
+        # Explicitly None out every attribute on the intent-attr fallback
+        # precedence chain so the fallback test below sees only `token` /
+        # `amount` (not auto-generated MagicMock attributes that the `or`
+        # chain would treat as truthy garbage).
+        intent.from_token = None
+        intent.to_token = None
+        intent.borrow_token = None
+        intent.supply_token = None
+        intent.borrow_amount = None
+        intent.supply_amount = None
+        intent.amount_usd = None
+        intent.collateral_token = None
+        intent.collateral_amount = None
+        return intent
+
+    def _make_result(self, extracted: dict):
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.swap_amounts = None
+        result.extracted_data = extracted
+        result.transaction_results = [MagicMock(tx_hash="0xrepayhash", gas_used=53570, success=True)]
+        result.total_gas_used = 53570
+        result.total_gas_cost_wei = 0  # don't trigger gas_usd warn path
+        result.gas_cost_usd = Decimal("0")
+        return result
+
+    def test_repay_full_uint256_max_uses_receipt_resolved_amount(self):
+        """RepayIntent(repay_full=True, amount=Decimal(0)) — pre-fix wrote
+        ``amount_in=""``; post-fix reads the receipt-resolved raw int."""
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        # Mirror the May-3 looping run: 2.000001 USDT (6 decimals) repaid.
+        intent = self._make_intent("REPAY", "USDT", Decimal(0))
+        result = self._make_result({"repay_amount": 2_000_001})
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-repay",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        assert entry.intent_type == "REPAY"
+        assert entry.token_in == "USDT"
+        assert entry.amount_in == "2.000001"
+
+    def test_withdraw_all_uint256_max_uses_receipt_resolved_amount(self):
+        """WithdrawIntent(withdraw_all=True, amount=Decimal(0)) — pre-fix wrote
+        ``amount_in=""``; post-fix reads the receipt-resolved raw int."""
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        # Residual 0.5 USDC (6 decimals) withdrawn.
+        intent = self._make_intent("WITHDRAW", "USDC", Decimal(0))
+        result = self._make_result({"withdraw_amount": 500_000})
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-withdraw",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        assert entry.intent_type == "WITHDRAW"
+        assert entry.token_in == "USDC"
+        assert entry.amount_in == "0.5"
+
+    def test_repay_receipt_wins_over_intent_for_partial(self):
+        """Even when the intent carries a Decimal amount, prefer the receipt-
+        resolved value. Aave can repay strictly less than the requested amount
+        when the wallet balance is below it (the auditor needs the real number,
+        not the request)."""
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        # User asked to repay 5 USDT; protocol resolved to 2.000001 USDT
+        # (e.g. wallet balance was 2.000001 at repay time).
+        intent = self._make_intent("REPAY", "USDT", Decimal("5"))
+        result = self._make_result({"repay_amount": 2_000_001})
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-repay-partial",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        assert entry.amount_in == "2.000001"  # receipt wins
+
+    def test_repay_no_receipt_falls_back_to_intent(self):
+        """When the receipt produced no resolved amount (parser absent / parse
+        failed / receipt of a different shape), fall back to the intent-attr
+        path. Preserves historical behaviour for non-uint256.max cases."""
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        intent = self._make_intent("REPAY", "USDT", Decimal("3.5"))
+        result = self._make_result({})  # no repay_amount key
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-repay-fallback",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        # Falls back to intent-attr fallback: token_in via getattr(intent, "token", ...)
+        # and amount via getattr(intent, "amount", ...). Both populated.
+        assert entry.token_in == "USDT"
+        assert entry.amount_in == "3.5"
+
+    def test_repay_unresolvable_token_leaves_amount_empty_not_zero(self):
+        """Empty != zero. If we have a raw int but cannot scale (token resolver
+        can't resolve the symbol on the chain), leave ``amount_in=""`` rather
+        than write the unscaled raw int (which would be 18 orders of magnitude
+        wrong for a 6-decimal stablecoin) or substitute ``"0"`` (which would
+        lie about a measured non-zero amount)."""
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        intent = self._make_intent("REPAY", "MADE_UP_SYMBOL_NEVER_REGISTERED", Decimal(0))
+        result = self._make_result({"repay_amount": 2_000_001})
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-repay-noresolve",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        assert entry.token_in == "MADE_UP_SYMBOL_NEVER_REGISTERED"
+        # Empty, not "0" — the latter would falsely claim "measured zero".
+        assert entry.amount_in == ""
+
+    def test_repay_non_int_extracted_value_falls_back_safely(self):
+        """A buggy parser that emits a non-int repay_amount must not crash
+        the ledger writer. Fall back to the intent-attr path."""
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        intent = self._make_intent("REPAY", "USDT", Decimal("1.5"))
+        result = self._make_result({"repay_amount": "not-an-int"})
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-repay-badtype",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        assert entry.token_in == "USDT"
+        assert entry.amount_in == "1.5"  # intent-attr fallback
+
+    def test_deleverage_repay_full_uses_receipt_resolved_amount_codex_x2(self):
+        """Codex X2 (2026-05-04 PR #2017 audit): DELEVERAGE intents that close
+        a borrow leg in full submit ``uint256.max`` to Aave the same way
+        REPAY does, and the lending accounting path treats DELEVERAGE as a
+        repay class. Pre-fix the ledger excluded DELEVERAGE from the
+        receipt-resolved branch, so ``Intent.deleverage(repay_full=True)``'s
+        default ``Decimal(0)`` fell through the intent-attr fallback and the
+        ledger row landed ``amount_in=""`` despite the receipt carrying the
+        resolved repaid amount.
+        """
+        from almanak.framework.observability.ledger import build_ledger_entry
+
+        intent = self._make_intent("DELEVERAGE", "USDT", Decimal(0))
+        result = self._make_result({"repay_amount": 1_999_500})
+
+        entry = build_ledger_entry(
+            strategy_id="test",
+            cycle_id="cycle-deleverage",
+            intent=intent,
+            result=result,
+            chain="arbitrum",
+        )
+
+        assert entry.intent_type == "DELEVERAGE"
+        assert entry.token_in == "USDT"
+        assert entry.amount_in == "1.9995"

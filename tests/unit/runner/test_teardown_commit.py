@@ -523,3 +523,178 @@ async def test_sidecar_failure_captured_not_raised(
     assert outcome.accounting_degraded is True
     assert outcome.ledger_entry_id == "ledger-1"  # ledger + outbox succeeded
     assert any(w.kind == "sidecar" for w in outcome.degraded_writes)
+
+
+# ---------------------------------------------------------------------------
+# VIB-3934 — lending pre/post state threaded through the teardown commit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vib3934_lending_pre_state_threaded_into_pre_state_json(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """The teardown commit pipeline must serialize ``lending_pre_state``
+    (captured by the teardown manager BEFORE submission) into
+    ``transaction_ledger.pre_state_json``. Without this REPAY/WITHDRAW rows
+    can't carry collateral/debt/HF on the pre-side, lane-asymmetric with
+    iteration.
+    """
+    captured_pre_state: list[dict | None] = []
+    captured_post_state: list[dict | None] = []
+
+    runner = _make_runner(live_mode=True)
+    runner._get_gateway_client = MagicMock(return_value=None)
+    runner._capture_lending_state_safe = MagicMock(return_value=None)
+
+    async def _capture_ledger(strategy, intent, *, result, success, error="", price_oracle=None, **kwargs):
+        captured_pre_state.append(kwargs.get("pre_state"))
+        captured_post_state.append(kwargs.get("post_state"))
+        return "ledger-1"
+
+    runner._write_ledger_entry = AsyncMock(side_effect=_capture_ledger)
+
+    # A duck-typed AaveAccountState — just needs the fields lending_state_to_dict reads.
+    from decimal import Decimal
+
+    lending_pre_state = SimpleNamespace(
+        collateral_usd=Decimal("100.50"),
+        debt_usd=Decimal("40.25"),
+        health_factor=Decimal("2.50"),
+        liquidation_threshold_bps=8500,
+    )
+
+    intent = _make_intent("REPAY")
+    intent.protocol = "aave_v3"
+    result = _make_execution_result(tx_hash="0xrepay-pre")
+    context = SimpleNamespace(protocol="aave_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib3934-pre",
+        lending_pre_state=lending_pre_state,
+    )
+
+    assert outcome.accounting_degraded is False
+    assert len(captured_pre_state) == 1
+    pre = captured_pre_state[0]
+    # Lending fields merged into the pre_state dict.
+    assert pre is not None
+    assert pre.get("collateral_usd") is not None
+    assert Decimal(str(pre["collateral_usd"])) == Decimal("100.50")
+    assert Decimal(str(pre["debt_usd"])) == Decimal("40.25")
+    assert Decimal(str(pre["health_factor"])) == Decimal("2.50")
+
+
+@pytest.mark.asyncio
+async def test_vib3934_lending_post_state_captured_inside_commit(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """The teardown commit pipeline must call
+    ``runner._capture_lending_state_safe(phase="post", ...)`` and serialize
+    the result into ``transaction_ledger.post_state_json`` so lending
+    accounting events get HIGH confidence on the teardown lane.
+    """
+    captured_post_state: list[dict | None] = []
+    capture_calls: list[dict] = []
+
+    runner = _make_runner(live_mode=True)
+    runner._get_gateway_client = MagicMock(return_value="fake-gateway")
+
+    from decimal import Decimal
+
+    fake_post_state = SimpleNamespace(
+        collateral_usd=Decimal("80.00"),
+        debt_usd=Decimal("0.00"),
+        health_factor=Decimal("999999"),
+        liquidation_threshold_bps=8500,
+    )
+
+    def _capture_lending(*, intent, chain, wallet_address, gateway_client, price_oracle, phase):
+        capture_calls.append(
+            {
+                "phase": phase,
+                "chain": chain,
+                "wallet_address": wallet_address,
+                "gateway_client": gateway_client,
+            }
+        )
+        return fake_post_state if phase == "post" else None
+
+    runner._capture_lending_state_safe = MagicMock(side_effect=_capture_lending)
+    runner._teardown_price_oracle = {"USDT": Decimal("1.00"), "WETH": Decimal("2000.0")}
+
+    async def _capture_ledger(strategy, intent, *, result, success, error="", price_oracle=None, **kwargs):
+        captured_post_state.append(kwargs.get("post_state"))
+        return "ledger-1"
+
+    runner._write_ledger_entry = AsyncMock(side_effect=_capture_ledger)
+
+    intent = _make_intent("WITHDRAW")
+    intent.protocol = "aave_v3"
+    result = _make_execution_result(tx_hash="0xwithdraw-post")
+    context = SimpleNamespace(protocol="aave_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib3934-post",
+    )
+
+    assert outcome.accounting_degraded is False
+    # Only the POST-state read happens inside commit_teardown_intent —
+    # PRE-state is captured by the teardown manager before submission.
+    post_phases = [c["phase"] for c in capture_calls]
+    assert "post" in post_phases
+    assert "pre" not in post_phases
+    # The captured state was serialized into the ledger row's post_state.
+    assert len(captured_post_state) == 1
+    post = captured_post_state[0]
+    assert post is not None
+    assert Decimal(str(post["collateral_usd"])) == Decimal("80.00")
+    assert Decimal(str(post["debt_usd"])) == Decimal("0.00")
+    # Reads happened with the teardown's stash oracle (Accounting-AttemptNo17 §A4).
+    assert capture_calls[0]["gateway_client"] == "fake-gateway"
+
+
+@pytest.mark.asyncio
+async def test_vib3934_lending_post_capture_failure_never_propagates(
+    fake_strategy, patch_enricher_and_sidecar, local_db_dir: Path
+):
+    """A gateway hiccup during lending post-state capture must not crash
+    the teardown commit pipeline — degraded-but-continue semantics
+    (VIB-3773) trump ESTIMATED-vs-HIGH delta. The ledger row still lands.
+    """
+    runner = _make_runner(live_mode=True)
+    runner._get_gateway_client = MagicMock(return_value="fake-gateway")
+
+    def _explode(**_kwargs):
+        raise ConnectionError("gateway dropped")
+
+    runner._capture_lending_state_safe = MagicMock(side_effect=_explode)
+
+    intent = _make_intent("REPAY")
+    intent.protocol = "aave_v3"
+    result = _make_execution_result(tx_hash="0xrepay-explode")
+    context = SimpleNamespace(protocol="aave_v3", chain="arbitrum")
+
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        intent,
+        execution_result=result,
+        execution_context=context,
+        teardown_cycle_id="teardown-vib3934-explode",
+    )
+
+    # Helper swallowed the error — pipeline still ran end-to-end.
+    assert outcome.ledger_entry_id == "ledger-1"
+    runner._write_ledger_entry.assert_awaited_once()
+    runner._write_outbox_and_fire_processor.assert_awaited_once()

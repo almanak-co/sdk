@@ -59,6 +59,14 @@ Mirrors the iteration lane's ``_reconcile_post_execution_balances`` so
 ``transaction_ledger.post_state_json`` lands populated on every teardown
 row."""
 
+SnapshotIntentLendingState = Callable[..., Awaitable[Any | None]]
+"""Async ``(strategy, intent) -> lending state object | None``. Captures the
+on-chain lending position state (collateral / debt / HF) BEFORE the intent
+executes — the teardown counterpart of the iteration lane's pre-state
+capture at ``_init_single_chain_state``. Threaded into the commit pipeline
+so ``transaction_ledger.pre_state_json`` carries lending fields lane-
+symmetric with iteration (VIB-3934)."""
+
 
 @dataclass(frozen=True)
 class TeardownRunnerHelpers:
@@ -79,6 +87,7 @@ class TeardownRunnerHelpers:
     capture_snapshot: CaptureTeardownSnapshot | None = None
     snapshot_intent_balances: SnapshotIntentBalances | None = None
     reconcile_post_balances: ReconcilePostBalances | None = None
+    snapshot_intent_lending_state: SnapshotIntentLendingState | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -95,6 +104,11 @@ class TeardownRunnerHelpers:
         post without pre can't produce pre_state. Treat as all-or-nothing.
         """
         return self.snapshot_intent_balances is not None and self.reconcile_post_balances is not None
+
+    @property
+    def has_lending_pre_state(self) -> bool:
+        """True iff the lending pre-state capture helper is wired (VIB-3934)."""
+        return self.snapshot_intent_lending_state is not None
 
 
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
@@ -120,17 +134,37 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         del strategy
         return await snapshot_balances_for_intent(runner, intent)
 
+    async def _snapshot_intent_lending_state(strategy: Any, intent: Any) -> Any | None:
+        # VIB-3934 — capture lending pre-state via the runner's safe wrapper
+        # so REPAY/WITHDRAW/DELEVERAGE teardown rows carry collateral/debt/HF
+        # in ``pre_state_json``, lane-symmetric with the iteration lane's
+        # ``state.lending_pre_state``. Returns ``None`` for non-lending
+        # intents, missing gateway, unsupported protocols, or transient
+        # gateway failures — never raises.
+        return runner._capture_lending_state_safe(
+            intent=intent,
+            chain=getattr(strategy, "chain", "") or "",
+            wallet_address=getattr(strategy, "wallet_address", "") or "",
+            gateway_client=runner._get_gateway_client(),
+            price_oracle=getattr(runner, "_teardown_price_oracle", None),
+            phase="pre",
+        )
+
     return TeardownRunnerHelpers(
         commit=partial(commit_teardown_intent, runner),
         capture_snapshot=partial(capture_teardown_snapshot_with_accounting, runner),
         snapshot_intent_balances=_snapshot_intent_balances,
         reconcile_post_balances=partial(reconcile_post_execution_balances, runner),
+        snapshot_intent_lending_state=_snapshot_intent_lending_state,
     )
 
 
 __all__ = [
     "CaptureTeardownSnapshot",
     "CommitTeardownIntent",
+    "ReconcilePostBalances",
+    "SnapshotIntentBalances",
+    "SnapshotIntentLendingState",
     "TeardownRunnerHelpers",
     "build_runner_helpers",
 ]

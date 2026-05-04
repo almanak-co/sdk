@@ -400,3 +400,163 @@ class TestGetTrackedTokens:
         strategy = _make_strategy(NullConfig())
         tokens = strategy._get_tracked_tokens()
         assert tokens == ["WETH"]
+
+
+# ---------------------------------------------------------------------------
+# VIB-3937 — get_portfolio_snapshot must include the chain's NATIVE
+# gas-token (ETH/MATIC/AVAX/...) in wallet_balances. Without it the wallet-
+# method PnL silently misses gas spend (G6 reconciliation gap on every run
+# equals exactly Σ_gas_usd).
+# ---------------------------------------------------------------------------
+
+
+class _StubMarket:
+    """Minimal MarketSnapshot stub that returns balances/prices from dicts.
+
+    Mirrors the surface area get_portfolio_snapshot uses: ``balance(token)``
+    returns an object with a ``.balance`` Decimal attribute, ``price(token)``
+    returns a Decimal. Missing keys raise KeyError so the production
+    try/except in get_portfolio_snapshot exercises the same ``continue``
+    path it takes in the wild.
+    """
+
+    def __init__(self, balances: dict, prices: dict) -> None:
+        self._balances = balances
+        self._prices = prices
+
+    def balance(self, token, protocol=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(balance=self._balances[token])
+
+    def price(self, token):
+        return self._prices[token]
+
+
+class TestVib3937NativeTokenInWalletSnapshot:
+    """get_portfolio_snapshot must append the chain's native gas-token to
+    wallet_balances after the tracked-tokens loop. Native is gated only by
+    a successful balance/price read (NOT by `> 0`) — for any successful
+    run on a chain that consumed gas, native must have been > 0."""
+
+    def _make_arbitrum_strategy(self) -> _ConcreteStrategy:
+        config = PoolConfig(pool="WETH/USDC/500", chain="arbitrum")
+        return _make_strategy(config)
+
+    def test_native_eth_appears_in_wallet_balances_on_arbitrum(self) -> None:
+        strategy = self._make_arbitrum_strategy()
+        # Tracked tokens on this fixture are WETH + USDC. Native is ETH.
+        market = _StubMarket(
+            balances={
+                "WETH": Decimal("0.5"),
+                "USDC": Decimal("100"),
+                "ETH": Decimal("0.987654321"),  # the native gas-token
+            },
+            prices={
+                "WETH": Decimal("2300"),
+                "USDC": Decimal("1"),
+                "ETH": Decimal("2300"),
+            },
+        )
+
+        snap = strategy.get_portfolio_snapshot(market=market)
+
+        symbols = {b.symbol for b in snap.wallet_balances}
+        assert "ETH" in symbols, (
+            f"VIB-3937: native ETH must appear in wallet_balances; got {sorted(symbols)}"
+        )
+        eth_row = next(b for b in snap.wallet_balances if b.symbol == "ETH")
+        assert eth_row.balance == Decimal("0.987654321")
+        assert eth_row.price_usd == Decimal("2300")
+        assert eth_row.value_usd == Decimal("0.987654321") * Decimal("2300")
+        # Sanity: tracked-token rows still there.
+        assert {"WETH", "USDC"}.issubset(symbols)
+        # available_cash_usd includes the native bucket.
+        expected_cash = (
+            Decimal("0.5") * Decimal("2300")  # WETH
+            + Decimal("100") * Decimal("1")  # USDC
+            + Decimal("0.987654321") * Decimal("2300")  # native ETH (NEW)
+        )
+        assert snap.available_cash_usd == expected_cash
+
+    def test_native_avax_on_avalanche(self) -> None:
+        config = PoolConfig(pool="WAVAX/USDC/500", chain="avalanche")
+        strategy = _make_strategy(config)
+        market = _StubMarket(
+            balances={
+                "WAVAX": Decimal("0"),
+                "USDC": Decimal("0"),
+                "AVAX": Decimal("1.5"),  # native
+            },
+            prices={
+                "WAVAX": Decimal("30"),
+                "USDC": Decimal("1"),
+                "AVAX": Decimal("30"),
+            },
+        )
+
+        snap = strategy.get_portfolio_snapshot(market=market)
+
+        symbols = {b.symbol for b in snap.wallet_balances}
+        assert "AVAX" in symbols, (
+            f"VIB-3937: chain=avalanche native must be AVAX; got {sorted(symbols)}"
+        )
+        # WAVAX/USDC are zero so they're skipped by the `balance > 0` gate above.
+        # Native is included even if it were 0 (it's non-zero here anyway).
+        assert "WAVAX" not in symbols
+        assert "USDC" not in symbols
+
+    def test_native_fetch_failure_does_not_blank_snapshot(self) -> None:
+        """Fail-open contract: if the native balance/price is unfetchable,
+        the snapshot still returns with the tracked tokens it could read
+        (and value_confidence stays HIGH per the existing positions path)."""
+        strategy = self._make_arbitrum_strategy()
+        # ETH is deliberately absent → KeyError on market.balance("ETH")
+        market = _StubMarket(
+            balances={"WETH": Decimal("0.5"), "USDC": Decimal("100")},
+            prices={"WETH": Decimal("2300"), "USDC": Decimal("1")},
+        )
+
+        snap = strategy.get_portfolio_snapshot(market=market)
+
+        symbols = {b.symbol for b in snap.wallet_balances}
+        # Tracked tokens still captured…
+        assert {"WETH", "USDC"}.issubset(symbols)
+        # …native silently absent (the production try/except swallowed it).
+        assert "ETH" not in symbols
+
+    def test_native_not_duplicated_when_already_in_tracked_tokens(self) -> None:
+        """Defensive: a strategy whose config explicitly tracks "ETH" (rare,
+        but possible — strategies that hold native stable as an asset)
+        should not get a duplicate row from the native pass."""
+
+        @dataclass
+        class _NativeConfig:
+            pool: str = "ETH/USDC/500"
+            range_width_pct: Decimal = Decimal("0.20")
+            amount0: Decimal = Decimal("0.001")
+            amount1: Decimal = Decimal("3")
+            strategy_id: str = "test"
+            strategy_name: str = "test"
+            chain: str = "arbitrum"
+
+            def to_dict(self):
+                return {"pool": self.pool}
+
+            def update(self, **kwargs):
+                for k, v in kwargs.items():
+                    if hasattr(self, k):
+                        setattr(self, k, v)
+
+        strategy = _make_strategy(_NativeConfig())
+        market = _StubMarket(
+            balances={"ETH": Decimal("0.5"), "USDC": Decimal("100")},
+            prices={"ETH": Decimal("2300"), "USDC": Decimal("1")},
+        )
+
+        snap = strategy.get_portfolio_snapshot(market=market)
+
+        eth_rows = [b for b in snap.wallet_balances if b.symbol == "ETH"]
+        assert len(eth_rows) == 1, (
+            f"VIB-3937: ETH already in tracked tokens must not be duplicated; got {eth_rows}"
+        )

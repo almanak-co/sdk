@@ -1807,6 +1807,12 @@ class UniswapV3ReceiptParser:
             burn_liquidity_total = 0
             saw_burn = False
             saw_collect = False
+            # VIB-3940: capture the pool address from the Burn event emitter
+            # so the framework's slot0 fallback can fetch ``current_tick``
+            # at close-block when no Swap is in the receipt (canonical pure-
+            # burn close path). Mirrors the LPOpenData.pool_address capture
+            # from VIB-3893.
+            pool_address = ""
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1839,6 +1845,16 @@ class UniswapV3ReceiptParser:
                     burn_amount0 += HexDecoder.decode_uint256(data, 32)
                     burn_amount1 += HexDecoder.decode_uint256(data, 64)
                     saw_burn = True
+                    if not pool_address:
+                        # Burn is emitted by the pool itself — its emitter
+                        # address IS the pool. Capture once on the first Burn
+                        # we see; later Burns in a multicall close should be
+                        # the same pool.
+                        addr = log.get("address", "")
+                        if isinstance(addr, bytes):
+                            addr = "0x" + addr.hex()
+                        if addr:
+                            pool_address = str(addr).lower()
 
             if not (saw_collect or saw_burn):
                 return None
@@ -1851,12 +1867,20 @@ class UniswapV3ReceiptParser:
             fees0 = max(collect_amount0 - burn_amount0, 0) if saw_collect else 0
             fees1 = max(collect_amount1 - burn_amount1, 0) if saw_collect else 0
 
+            # VIB-3940: try to recover ``current_tick`` from any Swap event
+            # in the same receipt (multicall close that includes a router
+            # swap will emit one on the pool). When absent, the runner's
+            # slot0() fallback will fill the field after parsing.
+            current_tick = self._current_tick_from_swap_event(logs, pool_address) if pool_address else None
+
             return LPCloseData(
                 amount0_collected=collect_amount0 if saw_collect else burn_amount0,
                 amount1_collected=collect_amount1 if saw_collect else burn_amount1,
                 fees0=fees0,
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
+                current_tick=current_tick,  # VIB-3940
+                pool_address=pool_address,  # VIB-3940 — for framework slot0 fallback
             )
 
         except Exception as e:

@@ -117,7 +117,14 @@ class LPAccountingEvent:
                 # double-count).
                 "fees_total_usd": _enc(self.fees_total_usd),
                 "confidence": str(self.confidence),
-                "unavailable_reason": self.unavailable_reason,
+                # VIB-3938 — write JSON null when the in-memory field is the
+                # empty string ("no reason because confidence is HIGH"). Per
+                # CLAUDE.md "Empty ≠ zero": "" in payload JSON is the parser-
+                # didn't-emit signal and false-positives the 4b CONF invariant
+                # query (``IS NOT NULL`` matches ""). Real reasons (ESTIMATED
+                # / MISSING events) still serialize as themselves; only the
+                # absence-signal collapses to null.
+                "unavailable_reason": self.unavailable_reason or None,
                 # VIB-3893 — position-range metadata. Pre-fix every LP_OPEN
                 # accounting_event omitted these even though receipt-parser
                 # populated them on ``lp_open_data``; downstream Trade Tape

@@ -62,6 +62,12 @@ class TestJoeLendBorrowIntent:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-3960: JoeLend protocol wound down on-chain (Avalanche). "
+        "Reverts with `Error: wind down` for every supply/borrow/repay/withdraw call. "
+        "strict=True so an XPASS will alert us if JoeLend resurrects.",
+        strict=True,
+    )
     async def test_borrow_usdc_with_avax_collateral_using_intent(
         self,
         web3: Web3,
@@ -196,6 +202,12 @@ class TestJoeLendBorrowIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-3960: JoeLend protocol wound down on-chain (Avalanche). "
+        "Reverts with `Error: wind down` for every supply/borrow/repay/withdraw call. "
+        "strict=True so an XPASS will alert us if JoeLend resurrects.",
+        strict=True,
+    )
     async def test_repay_usdc_using_intent(
         self,
         web3: Web3,
@@ -300,6 +312,12 @@ class TestJoeLendBorrowIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="VIB-3960: JoeLend protocol wound down on-chain (Avalanche). "
+        "Reverts with `Error: wind down` for every supply/borrow/repay/withdraw call. "
+        "strict=True so an XPASS will alert us if JoeLend resurrects.",
+        strict=True,
+    )
     async def test_borrow_only_usdc_against_existing_collateral(
         self,
         web3: Web3,

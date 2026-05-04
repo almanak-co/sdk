@@ -2795,6 +2795,20 @@ def _run_once(
                 except Exception as e:
                     logger.warning(f"Failed to restore copy trading state: {e}")
 
+            # VIB-3944: rebuild lending FIFO lots from durable accounting_events.
+            # The continuous run_loop entry point does this in initialize_run_loop
+            # but --once / --teardown-after bypass that path. Without rebuild,
+            # Phase 2 teardown REPAYs land with no matching BORROW lot and the
+            # writer cannot emit interest_delta_usd → L4 Accountant Test fails.
+            # Run AFTER setup_gateway_integration so the gRPC channel is up.
+            from ..runner._run_loop_helpers import reconstruct_lending_basis_store
+
+            reconstruct_lending_basis_store(
+                runner,
+                strategy_instance,
+                strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME,
+            )
+
             # VIB-3762: route --once snapshot persistence through the
             # mode-aware wrapper so accounting failures surface the same
             # way as continuous-mode failures (live -> ACCOUNTING_FAILED,
@@ -3007,6 +3021,18 @@ def _run_test_lifecycle(
                         activity_provider.set_state(ct_state.state["copy_trading_state"])
                 except Exception as e:
                     logger.warning(f"Failed to restore copy trading state: {e}")
+
+            # VIB-3944: same cross-process FIFO rebuild as _run_once. The
+            # test-lifecycle path drives multiple force_action iterations + an
+            # optional teardown in a single CLI invocation, but the in-memory
+            # FIFO store is empty if a previous CLI process opened the borrow.
+            from ..runner._run_loop_helpers import reconstruct_lending_basis_store
+
+            reconstruct_lending_basis_store(
+                runner,
+                strategy_instance,
+                getattr(strategy_instance, "strategy_id", "") or getattr(strategy_instance, "STRATEGY_NAME", "") or "",
+            )
 
             # Single predicate: an action passes iff status is SUCCESS or HOLD.
             # Used identically by per-step failure_logs, fail-fast, and the final

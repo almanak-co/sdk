@@ -73,7 +73,18 @@ def fetch_slot0_tick(
     except Exception:
         logger.debug("slot0 eth_call failed", exc_info=True)
         return None
-    return _decode_slot0_tick(result)
+    # CodeRabbit 2026-05-04: ``_decode_slot0_tick`` can raise on a bytes
+    # response (no ``.removeprefix``) or non-hex content (``int(..., 16)``
+    # ValueError). The helper's contract is "swallow errors and return
+    # None"; let the decode path inherit that contract too rather than
+    # leaking exceptions into the caller's enrichment loop.
+    try:
+        if isinstance(result, bytes | bytearray):
+            result = "0x" + bytes(result).hex()
+        return _decode_slot0_tick(str(result) if result is not None else "")
+    except Exception:
+        logger.debug("slot0 decode failed", exc_info=True)
+        return None
 
 
 def enrich_lp_open_with_slot0(
@@ -113,8 +124,54 @@ def enrich_lp_open_with_slot0(
     return dataclasses.replace(lp_open, current_tick=tick)
 
 
+def enrich_lp_close_with_slot0(
+    lp_close: Any,
+    *,
+    gateway_client: Any,
+    chain: str,
+) -> Any:
+    """VIB-3940 — fill ``LPCloseData.current_tick`` from a slot0() RPC.
+
+    Mirror of :func:`enrich_lp_open_with_slot0`. The Uniswap V3 close path
+    captures ``current_tick`` from a Swap event in the same receipt when
+    present (post-decreaseLiquidity automatic Swap is rare; multicall paths
+    that include a router swap before/after the close emit one). When no
+    Swap is in the receipt — the canonical pure-burn close — the parser
+    leaves ``current_tick=None`` and the LP_CLOSE accounting event would
+    inherit it as null, breaking lane symmetry vs. LP_OPEN (VIB-3893).
+
+    No-ops:
+      * ``lp_close`` is None or not an ``LPCloseData``
+      * ``current_tick`` is already populated (receipt-parser path won)
+      * ``pool_address`` is empty (parser couldn't identify the pool)
+      * gateway eth_call fails or returns garbage
+
+    Errors are swallowed and the original input is returned unchanged —
+    same fail-open contract as the LP_OPEN sibling.
+    """
+    from ...execution.extracted_data import LPCloseData
+
+    if not isinstance(lp_close, LPCloseData):
+        return lp_close
+    if lp_close.current_tick is not None:
+        return lp_close
+    if not lp_close.pool_address:
+        return lp_close
+    tick = fetch_slot0_tick(gateway_client, chain, lp_close.pool_address)
+    if tick is None:
+        return lp_close
+    logger.info(
+        "VIB-3940: filled LP_CLOSE current_tick from slot0() fallback (chain=%s pool=%s tick=%d)",
+        chain,
+        lp_close.pool_address,
+        tick,
+    )
+    return dataclasses.replace(lp_close, current_tick=tick)
+
+
 __all__ = [
     "SLOT0_SELECTOR",
+    "enrich_lp_close_with_slot0",
     "enrich_lp_open_with_slot0",
     "fetch_slot0_tick",
 ]

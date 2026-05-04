@@ -412,6 +412,12 @@ def handle_lp(
         lp_close = extracted.get("lp_close_data") if isinstance(extracted, dict) else None
         if lp_close is not None:
             liquidity_v = _as_int(getattr(lp_close, "liquidity_removed", None))
+            # VIB-3940 — current_tick at close-block. Sourced from a Swap
+            # event in the close receipt when present, with a slot0() RPC
+            # fallback in the runner. Without this the LP_CLOSE accounting
+            # event inherited current_tick=None / in_range=None and
+            # violated lane symmetry vs. LP_OPEN.
+            current_tick_v = _as_int(getattr(lp_close, "current_tick", None))
         # Backfill tick range from the prior OPEN — a CLOSE receipt does
         # not re-emit the position bracket, but the bracket is immutable
         # over the position's lifetime. Without this the trade tape
@@ -421,6 +427,12 @@ def handle_lp(
                 tick_lower_v = _as_int(prior_open_payload.get("tick_lower"))
             if tick_upper_v is None:
                 tick_upper_v = _as_int(prior_open_payload.get("tick_upper"))
+        # VIB-3940 — derive in_range using the same half-open Uniswap
+        # convention as the LP_OPEN branch so the two surfaces never
+        # disagree. Requires both the backfilled bracket AND a non-null
+        # current_tick (from the close receipt or slot0 fallback).
+        if tick_lower_v is not None and tick_upper_v is not None and current_tick_v is not None:
+            in_range_v = tick_lower_v <= current_tick_v < tick_upper_v
 
     # ── Realized PnL + fees_total_usd on LP_CLOSE / LP_COLLECT_FEES ─────────
     # G6 reconciliation contract (VIB-3933, Codex audit on PR #2014):

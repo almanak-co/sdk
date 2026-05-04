@@ -279,16 +279,119 @@ def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
     return (token_in, token_out, amount_in, amount_out, "", None)
 
 
-def _extract_tokens_and_amounts(intent: Any, result: Any) -> _TokensAndAmounts:
-    """Phase beta -- dispatch between SwapAmounts, LP_OPEN, PERP_OPEN, and intent-attr fallback.
+def _extract_from_lending(
+    intent: Any,
+    result: Any,
+    intent_type: str,
+    chain: str,
+) -> _TokensAndAmounts:
+    """Phase beta-lending -- REPAY / WITHDRAW receipt-resolved amount (VIB-3939).
+
+    REPAY with ``repay_full=True`` and WITHDRAW with ``withdraw_all=True``
+    submit ``uint256.max`` to the protocol so Aave (or any compatible lending
+    pool) repays / withdraws "all available". The intent's ``amount`` stays
+    at its ``Decimal("0")`` default, so the intent-attr fallback writes
+    ``amount_in=""`` to the ledger — the audit (2026-05-03 LP+looping
+    Anvil run, Finding #7) called this out as the reason
+    ``transaction_ledger.amount_in`` was empty on the residual REPAY and
+    final WITHDRAW even though the resolved amount was visible in
+    ``accounting_events.payload.amount_token``.
+
+    The receipt parser already extracts the *resolved* amount from the
+    on-chain ``Repay`` / ``Withdraw`` event (Aave V3 emits the actual
+    repaid / withdrawn amount, not the user-supplied uint256.max sentinel)
+    and pushes it onto ``result.extracted_data["repay_amount"]`` /
+    ``["withdraw_amount"]`` as a raw integer. This helper consumes that
+    raw int and converts it to human units via the token resolver, the
+    same pattern used by ``accounting/category_handlers/lending_handler.py``
+    (``_extract_amount_human``).
+
+    Receipt-resolved value wins when present — Aave can repay strictly
+    less than the user-requested amount when the wallet balance is below
+    it, so even partial REPAY/WITHDRAW are more accurately captured from
+    the receipt than from the intent.
+
+    Falls back to ``_extract_from_intent_fallback`` when the receipt
+    didn't yield a resolved amount (parser absent, parse failed, or
+    receipt simply not a lending event). This preserves the historical
+    behavior for non-uint256.max cases where the receipt extraction is
+    a no-op and the intent attribute path was already correct.
+    """
+    extracted = getattr(result, "extracted_data", None) if result else None
+    raw: Any = None
+    if isinstance(extracted, dict):
+        # DELEVERAGE is structurally a repay — the receipt parser writes
+        # ``repay_amount``, not a separate ``deleverage_amount`` (Codex X2
+        # 2026-05-04 review). Mirror lending_handler's intent → key map.
+        key = "withdraw_amount" if intent_type == "WITHDRAW" else "repay_amount"
+        raw = extracted.get(key)
+
+    if raw is None:
+        return _extract_from_intent_fallback(intent)
+
+    try:
+        raw_int = int(raw)
+    except (TypeError, ValueError):
+        # Receipt produced a non-int value (shouldn't happen for these
+        # extractors, but fail-open to the intent-attr path rather than
+        # pretending we have a value). Empty != zero, so don't substitute.
+        return _extract_from_intent_fallback(intent)
+
+    # CodeRabbit 2026-05-04: reuse the existing intent-attr precedence chain
+    # (``from_token`` > ``borrow_token`` > ``supply_token`` > ``token``) so
+    # connectors that name the lending asset under ``borrow_token`` /
+    # ``supply_token`` (rather than the generic ``token``) still get
+    # decimals resolved. ``_extract_from_intent_fallback`` returns the full
+    # 6-tuple; we only need ``token_in`` here.
+    token_in = _extract_from_intent_fallback(intent)[0]
+
+    # Convert raw on-chain integer to human units. Without a chain or a
+    # resolvable token we can't scale safely — Empty != zero, so leave
+    # ``amount_in=""`` rather than write the unscaled raw int (which
+    # would be 18 orders of magnitude wrong for a 6-decimal stablecoin).
+    if not token_in or not chain:
+        return (token_in, "", "", "", "", None)
+
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        # ``resolver.resolve`` is typed ``-> ResolvedToken`` and raises
+        # ``TokenNotFoundError`` / ``TokenResolutionError`` on failure (never
+        # returns None). The except below is the only honest failure path.
+        token_info = resolver.resolve(token_in, chain=chain)
+        scaled = Decimal(raw_int) / Decimal(10**token_info.decimals)
+    except Exception as exc:
+        logger.debug(
+            "ledger %s: failed to scale raw amount=%s for token=%s chain=%s: %s",
+            intent_type,
+            raw_int,
+            token_in,
+            chain,
+            exc,
+        )
+        return (token_in, "", "", "", "", None)
+
+    return (token_in, "", str(scaled), "", "", None)
+
+
+def _extract_tokens_and_amounts(
+    intent: Any,
+    result: Any,
+    chain: str = "",
+) -> _TokensAndAmounts:
+    """Phase beta -- dispatch between SwapAmounts, LP_OPEN, PERP_OPEN,
+    lending (REPAY/WITHDRAW), and intent-attr fallback.
 
     A truthy ``result.swap_amounts`` drives every field (used by SWAP,
     LP_CLOSE, and anything whose receipt parser emits SwapAmounts). LP_OPEN
     intents carry amounts in ``LPOpenData`` and have no ``from_token`` /
     ``to_token``, so they get a dedicated extraction path. PERP_OPEN collateral
     lives at ``intent.collateral_token`` / ``intent.collateral_amount``, not the
-    standard from_token/to_token chain. Everything else walks the intent-attr
-    precedence chain.
+    standard from_token/to_token chain. REPAY/WITHDRAW route through the
+    lending helper so the receipt-resolved amount (post-uint256.max
+    decoding by Aave) lands on ``transaction_ledger.amount_in`` (VIB-3939).
+    Everything else walks the intent-attr precedence chain.
     """
     swap_amounts = getattr(result, "swap_amounts", None) if result else None
     if swap_amounts:
@@ -301,6 +404,14 @@ def _extract_tokens_and_amounts(intent: Any, result: Any) -> _TokensAndAmounts:
         collateral_amount = getattr(intent, "collateral_amount", None)
         amount_in = str(collateral_amount) if collateral_amount is not None else ""
         return (token_in, "", amount_in, "", "", None)
+    if intent_type in ("REPAY", "WITHDRAW", "DELEVERAGE"):
+        # DELEVERAGE is structurally a repay (closes borrow exposure) — the
+        # writer routes it through the same lending receipt path, so the
+        # ledger row must too. Without DELEVERAGE here, ``Intent.deleverage(
+        # repay_full=True)``'s default ``Decimal("0")`` falls through to the
+        # intent-attr fallback and lands ``amount_in=""`` despite the receipt
+        # carrying the resolved repaid amount.
+        return _extract_from_lending(intent, result, intent_type, chain)
     return _extract_from_intent_fallback(intent)
 
 
@@ -464,7 +575,7 @@ def build_ledger_entry(
         amount_out,
         effective_price,
         slippage_bps,
-    ) = _extract_tokens_and_amounts(intent, result)
+    ) = _extract_tokens_and_amounts(intent, result, chain=chain)
     tx_hash, gas_used, gas_usd = _extract_tx_and_gas(
         result,
         chain=chain,

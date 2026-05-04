@@ -3331,6 +3331,55 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     logger.debug(f"Could not get balance/price for {token}: {e}")
                     continue
 
+            # VIB-3937 — append the chain's NATIVE gas-token (ETH/MATIC/AVAX/...)
+            # to wallet_balances. Pre-fix it was never tracked, so wallet-method
+            # PnL silently missed gas spend (G6 reconciliation gap on every run
+            # equalled exactly Σ_gas_usd — a real $2-4 mismatch on each LP cycle).
+            #
+            # Rules differ from the tracked-tokens loop above on purpose:
+            #   * native is ALWAYS appended (even at 0) when measurable — gas is
+            #     paid from native, so for any successful run the balance must
+            #     have been > 0 at some point. Recording 0 vs. omitting the row
+            #     is the difference between "measured zero" and "unmeasured"
+            #     per CLAUDE.md "Empty ≠ zero".
+            #   * never duplicates a tracked-token entry (a strategy that already
+            #     tracks "ETH" via its config — rare — would have it from the
+            #     loop above; skip the native pass in that case).
+            #   * fail-open: a balance/price/chain-resolution error MUST NOT
+            #     blank out the snapshot. Log at DEBUG (the rest of the wallet
+            #     was captured) and continue.
+            try:
+                from ..accounting.gas_pricing import native_token_for_chain
+
+                native_symbol = native_token_for_chain(self._chain or "")
+                # Gemini 2026-05-04: ``native_token_for_chain`` returns None for
+                # unknown / unsupported chains. Skip the lookup early instead of
+                # passing None into ``market.balance`` / ``market.price`` and
+                # relying on the broad except below to swallow the resulting
+                # AttributeError. Skipping silently is the right contract here —
+                # an unknown chain shouldn't blank out the rest of the snapshot.
+                if native_symbol:
+                    # CodeRabbit 2026-05-04: case-insensitive dedupe so a tracked
+                    # token that already includes the native symbol in any casing
+                    # ("eth", "ETH", "Eth") doesn't double-add and overstate cash.
+                    native_symbol_canon = native_symbol.upper()
+                    already_tracked = any((b.symbol or "").upper() == native_symbol_canon for b in wallet_balances)
+                    if not already_tracked:
+                        native_balance_data = market.balance(native_symbol)
+                        native_price = market.price(native_symbol)
+                        native_value_usd = native_balance_data.balance * native_price
+                        wallet_value += native_value_usd
+                        wallet_balances.append(
+                            TokenBalance(
+                                symbol=native_symbol_canon,
+                                balance=native_balance_data.balance,
+                                value_usd=native_value_usd,
+                                price_usd=native_price,
+                            )
+                        )
+            except Exception as e:  # noqa: BLE001 — fail-open
+                logger.debug(f"VIB-3937 native gas-token fetch failed: {e}")
+
             return PortfolioSnapshot(
                 timestamp=datetime.now(UTC),
                 strategy_id=self._strategy_id or self.STRATEGY_NAME,

@@ -928,7 +928,13 @@ class GatewayStateManager:
             rows.sort(key=lambda r: (r.get("timestamp") or "", r.get("id") or ""))
             return rows
         except Exception as e:
-            logger.debug("GetAccountingEvents via gateway failed: %s", e)
+            # VIB-3944: was debug; bumped to warning so an empty result on a
+            # startup-critical call (FIFO basis-store reconstruction, lending
+            # PnL enrichment) is visible to operators without re-instrumenting.
+            # The fail-quiet contract still holds — we still return [] — but
+            # the operator can now see WHY the downstream caller saw an empty
+            # event list.
+            logger.warning("GetAccountingEvents via gateway failed: %s", e)
             return []
 
 

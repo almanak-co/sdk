@@ -569,6 +569,152 @@ class TestHandleLpOpen:
         assert payload["liquidity"] == 12345678901234
         assert payload["in_range"] is True
 
+    def test_vib3940_lp_close_propagates_current_tick_and_in_range(self) -> None:
+        """VIB-3940 — lane-symmetry sibling of VIB-3893. ``LPCloseData.current_tick``
+        (sourced from a Swap event in the close receipt or the runner's
+        slot0 fallback) plus ``tick_lower``/``tick_upper`` backfilled from
+        the prior OPEN must produce a non-null ``in_range`` on the LP_CLOSE
+        accounting event. Pre-fix the LP_CLOSE event always carried
+        ``current_tick=None`` and ``in_range=None`` regardless of pool
+        state — Q4 (LP composition shift) couldn't answer "was the position
+        in-range at close?" without a separate on-chain query."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        # Receipt-parser shape for a close: principal collected, fees, the
+        # liquidity removed, plus the new VIB-3940 fields current_tick +
+        # pool_address. Bracket [-1000, +1000] with current_tick=0 ⇒ in_range=True.
+        extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "1000000",
+                "amount1_collected": "1000000000000000000",
+                "fees0": "0",
+                "fees1": "0",
+                "liquidity_removed": "12345678901234",
+                "current_tick": 0,
+                "pool_address": "0xpool",
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+        # Bracket comes from the prior OPEN — the close receipt does not
+        # re-emit it. Pass it explicitly via the handler's prior_open_payload
+        # parameter (the production processor wires this from the prior
+        # accounting_event row for the same position_key).
+        prior_open = {
+            "tick_lower": -1000,
+            "tick_upper": 1000,
+            "liquidity": 12345678901234,
+            "cost_basis_usd": "100.0",
+        }
+
+        result = handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.tick_lower == -1000
+        assert result.tick_upper == 1000
+        assert result.current_tick == 0
+        assert result.in_range is True, (
+            f"VIB-3940: LP_CLOSE in_range must derive to True when -1000 <= 0 < 1000; "
+            f"got {result.in_range!r}"
+        )
+
+        # Serialized payload carries the fields too — Trade Tape reads from JSON.
+        payload = json.loads(result.to_payload_json())
+        assert payload["current_tick"] == 0
+        assert payload["in_range"] is True
+
+    def test_vib3940_lp_close_in_range_false_when_current_tick_outside_bracket(self) -> None:
+        """Same half-open convention as LP_OPEN: ``tick_lower <= current_tick <
+        tick_upper``. ``current_tick == tick_upper`` is OUT-of-range."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "1000000",
+                "amount1_collected": "1000000000000000000",
+                "fees0": "0",
+                "fees1": "0",
+                "liquidity_removed": "12345",
+                "current_tick": 1000,  # equal to tick_upper -> OUT
+                "pool_address": "0xpool",
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+        prior_open = {"tick_lower": -1000, "tick_upper": 1000, "cost_basis_usd": "100.0"}
+
+        result = handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.in_range is False
+
+    def test_vib3940_lp_close_in_range_none_when_current_tick_missing(self) -> None:
+        """When the receipt has no Swap event AND the slot0 fallback couldn't
+        run (no gateway / no pool_address), ``current_tick`` stays None and
+        ``in_range`` MUST stay None — never default to a guess. This is the
+        degraded-but-honest path the framework already takes pre-VIB-3940."""
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:0xpool",
+            market_id="0xpool",
+        )
+        extracted = json.dumps({
+            "lp_close_data": {
+                "_type": "LPCloseData",
+                "amount0_collected": "1000000",
+                "amount1_collected": "1000000000000000000",
+                "fees0": "0",
+                "fees1": "0",
+                "liquidity_removed": "12345",
+                # current_tick deliberately omitted (defaults to None)
+                # pool_address omitted too — no slot0 fallback would fire
+            }
+        })
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            extracted_data_json=extracted,
+        )
+        prior_open = {"tick_lower": -1000, "tick_upper": 1000, "cost_basis_usd": "100.0"}
+
+        result = handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
+
+        assert result is not None
+        assert result.current_tick is None
+        assert result.in_range is None
+
     def test_vib3893_in_range_false_when_current_tick_outside_bracket(self) -> None:
         """``in_range`` is half-open ``tick_lower <= current_tick <
         tick_upper`` per VIB-3887. A current_tick equal to tick_upper
