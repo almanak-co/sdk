@@ -39,6 +39,7 @@ from almanak.framework.connectors.polymarket import (
     MarketFilters,
     OrderFilters,
     PolymarketConfig,
+    PolymarketSignatureError,
     SignatureType,
     TransactionData,
 )
@@ -269,6 +270,15 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         self._available = bool(self._wallet_address) and (bool(self._private_key) or has_remote_signer)
         self._credentials_available = bool(self._api_key and self._api_secret and self._api_passphrase)
 
+        # Last-known reason credential derivation failed. Surfaced verbatim in
+        # the error returned to the strategy so an operator debugging from
+        # strategy-side logs (no gateway-container access) can act on the real
+        # cause — HTTP status, body preview, signer-service failure, missing
+        # config — instead of the generic "could not be derived" string.
+        self._last_credentials_failure: str | None = None
+        if not self._available:
+            self._last_credentials_failure = self._init_unavailable_reason()
+
         logger.debug(
             "PolymarketService initialized: available=%s, credentials=%s, signer=%s, funder=%s, signature_type=%s, remote=%s",
             self._available,
@@ -277,6 +287,31 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             self._funder_address,
             self._signature_type.name,
             has_remote_signer,
+        )
+
+    def _init_unavailable_reason(self) -> str:
+        """Describe why ``_available`` is False at init time.
+
+        Platform mode raises in ``__init__`` on missing JWT / URL — the only
+        path that reaches here is legacy mode without a configured
+        wallet+key. Be explicit about which env var is missing so the
+        operator can fix the config without grepping the source.
+
+        ``_available = bool(wallet_address) and (bool(private_key) or has_remote_signer)``
+        — once we know it's False, exactly one of the two clauses is False.
+        Branching on ``wallet_address`` alone is enough; the wallet-set
+        case implies the missing-key case by construction.
+        """
+        if not self._wallet_address:
+            return (
+                "Polymarket signer not configured: no wallet_address "
+                "(set ALMANAK_GATEWAY_WALLETS polymarket_zodiac.trading_eoa_address, "
+                "ALMANAK_GATEWAY_EOA_ADDRESS, or a private key the gateway can derive an address from)"
+            )
+        return (
+            f"Polymarket signer wallet {self._wallet_address} has no signing key "
+            "(set ALMANAK_GATEWAY_PRIVATE_KEY / POLYMARKET_PRIVATE_KEY for local mode, "
+            "or ALMANAK_GATEWAY_SIGNER_SERVICE_URL + ALMANAK_GATEWAY_SIGNER_SERVICE_JWT for platform mode)"
         )
 
     def _resolve_signer_address(self) -> str | None:
@@ -369,11 +404,18 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         ``GetOrder`` even though ``CreateAndPostOrder`` succeeded. Resolve or
         derive once, cache on the service, and reuse the same credentials for
         subsequent authenticated calls.
+
+        On failure, the raised ``ValueError`` embeds ``_last_credentials_failure``
+        — the actual HTTP status / body preview / signer-service error from
+        the most recent derive+create attempt. The strategy container has no
+        view of the gateway's stdout, so without this embedding the operator
+        sees a bare "could not be derived" with no breadcrumb to act on.
         """
         if not self._credentials_available:
             ok = await self._ensure_credentials()
             if not ok:
-                raise ValueError("Polymarket API credentials could not be derived in gateway")
+                reason = self._last_credentials_failure or "unknown reason (gateway logs may have detail)"
+                raise ValueError(f"Polymarket API credentials could not be derived in gateway: {reason}")
         return self._build_client()
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -436,6 +478,8 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             return True
 
         if not self._available:
+            # Reason was captured in __init__; preserve it so the caller can
+            # surface it in the response error.
             return False
 
         async with self._credentials_lock:
@@ -444,65 +488,178 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 return True
             return await self._derive_or_create_credentials()
 
-    async def _derive_or_create_credentials(self) -> bool:
-        """Inner credential derivation/creation (must be called while holding _credentials_lock)."""
-        # Try to derive existing credentials.
-        # ``_build_l1_headers`` is sync but in platform mode it does a
-        # blocking ``httpx.Client.post`` to the Almanak Signer Service. Run it
-        # off the event loop so a slow signer service doesn't stall other
-        # concurrent gateway RPCs. EOA mode is local-only and finishes in
-        # microseconds — the to_thread overhead is negligible.
-        try:
-            session = await self._get_session()
-            headers = await asyncio.to_thread(self._build_l1_headers)
+    # CLOB credential payload field names. Used by the redaction helper to
+    # avoid leaking partial credentials when surfacing a malformed response;
+    # case-insensitive comparison handles upstream schema drift.
+    _CREDENTIAL_FIELD_NAMES_LOWER: tuple[str, ...] = ("apikey", "secret", "passphrase")
 
-            async with session.get(f"{CLOB_BASE_URL}/auth/derive-api-key", headers=headers) as response:
-                if response.status == 200:
-                    try:
-                        data = await response.json()
-                    except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError) as e:
-                        response_text = await response.text()
-                        logger.warning(
-                            "Failed to parse derive credentials response: %s, body: %s", e, response_text[:200]
-                        )
-                    else:
-                        self._api_key = data.get("apiKey")
-                        self._api_secret = data.get("secret")
-                        self._api_passphrase = data.get("passphrase")
-                        self._credentials_available = True
-                        logger.info("Derived existing API credentials")
-                        return True
-        except (TimeoutError, aiohttp.ClientError) as e:
-            logger.warning("Failed to derive credentials: %s", e)
+    @classmethod
+    def _redact_credentials_for_reason(cls, data: object) -> str:
+        """Render a malformed ``/auth/*`` payload as a presence summary.
 
-        # Create new credentials. Same to_thread reasoning as the derive
-        # path above — protect the event loop from a slow remote signer.
-        try:
-            session = await self._get_session()
-            headers = await asyncio.to_thread(self._build_l1_headers)
+        The strategy container sees the returned ``failure_reason`` string
+        (it ends up in ``response.error`` on the gRPC reply). The whole
+        reason API credentials live in the gateway is so the strategy never
+        sees them — so even on a "200 with missing fields" response we must
+        not echo any credential value. Replace each known credential field
+        with ``<absent>`` (None / empty string) or ``<redacted len=N>`` so an
+        operator can still tell which fields the response carried without
+        ever seeing the bytes.
 
-            async with session.post(f"{CLOB_BASE_URL}/auth/api-key", headers=headers) as response:
-                if response.status == 200:
-                    try:
-                        data = await response.json()
-                    except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError) as e:
-                        response_text = await response.text()
-                        logger.warning(
-                            "Failed to parse create credentials response: %s, body: %s", e, response_text[:200]
-                        )
-                    else:
-                        self._api_key = data.get("apiKey")
-                        self._api_secret = data.get("secret")
-                        self._api_passphrase = data.get("passphrase")
-                        self._credentials_available = True
-                        logger.info("Created new API credentials")
-                        return True
+        Non-credential fields are JSON-serialised verbatim — they may carry
+        useful CLOB error context (e.g. ``{"errorCode": ...}``).
+        """
+        if not isinstance(data, dict):
+            # Defensive: ``response.json()`` may legally return a list / scalar.
+            # Don't ``repr`` the raw value — if a malformed CLOB response ever
+            # returned a bare credential string, ``repr`` would leak it. Instead
+            # return a shape-only marker; the gateway-side ``logger.warning``
+            # still has full detail for an Infra debugger.
+            return f"<unexpected-shape: {type(data).__name__}>"
+
+        redacted: dict[str, object] = {}
+        for key, value in data.items():
+            if isinstance(key, str) and key.lower() in cls._CREDENTIAL_FIELD_NAMES_LOWER:
+                if value is None or value == "":
+                    redacted[key] = "<absent>"
                 else:
-                    error_body = (await response.text())[:200]
-                    logger.error("Failed to create credentials: HTTP %s, body: %s", response.status, error_body)
-        except (TimeoutError, aiohttp.ClientError):
-            logger.exception("Failed to create credentials")
+                    # Length is fine to surface — the secret content is not.
+                    str_value = value if isinstance(value, str) else str(value)
+                    redacted[key] = f"<redacted len={len(str_value)}>"
+            else:
+                redacted[key] = value
 
+        try:
+            preview = json.dumps(redacted)
+        except (TypeError, ValueError):
+            # Last-resort fallback for unserialisable values — emit only the
+            # field names so we don't ``repr`` an unexpected object that
+            # might shadow a sensitive payload.
+            preview = "<unserialisable; keys=" + ", ".join(map(repr, data.keys())) + ">"
+        return preview[:200]
+
+    async def _attempt_credential_endpoint(
+        self,
+        method: str,
+        url: str,
+        success_log: str,
+    ) -> tuple[bool, str | None]:
+        """POST/GET ``url`` with a fresh L1-signed header set.
+
+        Returns ``(ok, failure_reason)``: on success ``(True, None)`` and the
+        api_key / secret / passphrase fields are populated on ``self``; on
+        failure ``(False, "<short reason>")`` describing exactly which step
+        broke (signing / transport / non-200 / parse / missing fields). The
+        reason is the entire diagnostic surface the strategy container ever
+        sees — gateway-side logs are richer but invisible to the operator.
+
+        ``_build_l1_headers`` is sync but in platform mode it makes a blocking
+        ``httpx.Client.post`` to the Almanak Signer Service. Run it off the
+        event loop so a slow signer service doesn't stall concurrent gateway
+        RPCs. EOA mode is local-only and finishes in microseconds — the
+        ``to_thread`` overhead is negligible.
+        """
+        try:
+            headers = await asyncio.to_thread(self._build_l1_headers)
+        except PolymarketSignatureError as e:
+            reason = f"L1 signing failed: {type(e).__name__}: {e}"
+            logger.warning("L1 signing failed for %s %s: %s", method, url, e)
+            return False, reason
+        except ValueError as e:
+            # ``_build_l1_headers`` raises ValueError when the signer wallet /
+            # signing material is misconfigured. Surface the exact message —
+            # it identifies the missing env var.
+            reason = f"L1 signing failed: {type(e).__name__}: {e}"
+            logger.warning("L1 signing config error for %s %s: %s", method, url, e)
+            return False, reason
+
+        try:
+            session = await self._get_session()
+            async with session.request(method, url, headers=headers) as response:
+                status = response.status
+                # Read the body BEFORE parsing — aiohttp's ``response.json()``
+                # consumes the underlying stream, so re-reading via
+                # ``response.text()`` from inside an ``except`` clause is not
+                # reliable across versions (cached only when the body was
+                # fully read first; ``ContentTypeError`` short-circuits before
+                # the read; mid-decode failures leave the stream in
+                # implementation-defined state). One ``text()`` up-front lets
+                # us share a single body buffer between the non-200 branch
+                # AND the parse-failure branch with no re-read. CodeRabbit
+                # PR-2027 review flagged the previous ordering as critical.
+                body_text = await response.text()
+        except (TimeoutError, aiohttp.ClientError) as e:
+            reason = f"transport error: {type(e).__name__}: {e}"
+            logger.warning("%s %s transport failure: %s", method, url, e)
+            return False, reason
+
+        if status != 200:
+            reason = f"HTTP {status}: {body_text[:200]!r}"
+            logger.warning("%s %s returned non-200: %s", method, url, reason)
+            return False, reason
+
+        try:
+            data = json.loads(body_text)
+        except (json.JSONDecodeError, ValueError) as e:
+            reason = f"200 OK but JSON parse failed: {type(e).__name__}: {e}; body={body_text[:200]!r}"
+            logger.warning("%s %s parse failure: %s", method, url, reason)
+            return False, reason
+
+        api_key = data.get("apiKey") if isinstance(data, dict) else None
+        secret = data.get("secret") if isinstance(data, dict) else None
+        passphrase = data.get("passphrase") if isinstance(data, dict) else None
+        if not (api_key and secret and passphrase):
+            # Polymarket returned 200 with an unexpected body shape. Surface a
+            # field-by-field presence summary so the operator can tell schema
+            # drift from a signature-rejected response — but never leak the
+            # values themselves: this string is returned verbatim to the
+            # strategy container, and any present credential value would
+            # cross the gateway's secret boundary (the whole reason API
+            # creds live server-side at all).
+            preview = self._redact_credentials_for_reason(data)
+            reason = f"200 OK but response missing apiKey/secret/passphrase: {preview}"
+            logger.warning("%s %s incomplete credentials body: %s", method, url, reason)
+            return False, reason
+
+        self._api_key = api_key
+        self._api_secret = secret
+        self._api_passphrase = passphrase
+        self._credentials_available = True
+        self._last_credentials_failure = None
+        logger.info(success_log)
+        return True, None
+
+    async def _derive_or_create_credentials(self) -> bool:
+        """Inner credential derivation/creation (must be called while holding _credentials_lock).
+
+        Captures BOTH the derive and create failure reasons into
+        ``_last_credentials_failure`` on failure so the caller can surface a
+        single actionable error to the strategy. A 401 from
+        ``/auth/derive-api-key`` is the *expected* state for a wallet that
+        has never been registered (no API key yet) — the diagnostic value is
+        in the create step's response, but the derive step's reason still
+        helps disambiguate "wallet unknown" from "auth signature wrong".
+        """
+        ok, derive_failure = await self._attempt_credential_endpoint(
+            "GET",
+            f"{CLOB_BASE_URL}/auth/derive-api-key",
+            "Derived existing API credentials",
+        )
+        if ok:
+            return True
+
+        ok, create_failure = await self._attempt_credential_endpoint(
+            "POST",
+            f"{CLOB_BASE_URL}/auth/api-key",
+            "Created new API credentials",
+        )
+        if ok:
+            return True
+
+        self._last_credentials_failure = (
+            f"derive-api-key: {derive_failure or '(skipped)'}; create api-key: {create_failure or '(skipped)'}"
+        )
+        logger.error("Polymarket credential derivation failed: %s", self._last_credentials_failure)
         return False
 
     # =========================================================================
@@ -1002,7 +1159,8 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
 
         if authenticated:
             if not await self._ensure_credentials():
-                return False, None, "Polymarket credentials not configured"
+                reason = self._last_credentials_failure or "Polymarket credentials not configured"
+                return False, None, f"Polymarket credentials unavailable: {reason}"
             try:
                 auth_headers = self._build_l2_headers(method, path, body)
             except ValueError as e:

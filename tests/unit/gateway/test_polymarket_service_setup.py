@@ -1209,3 +1209,396 @@ class TestEnsureWalletReadySkippedInPlatformMode:
             assert body["signing_type"] == "EVM"
             assert headers["POLY_ADDRESS"] == TRADING_EOA
             assert headers["POLY_SIGNATURE"] == "0x" + "aa" * 32 + "bb" * 32 + "1b"
+
+
+# =============================================================================
+# Credential derivation diagnostics
+# =============================================================================
+#
+# A bug report from a hosted Polymarket deployment surfaced as
+#
+#     CreateAndPostOrder failed: Polymarket API credentials could not be derived in gateway
+#
+# with no further detail visible in strategy-side logs. The gateway *did* log
+# the underlying HTTP status / body / signer-service error, but those logs
+# live in a separate container the operator could not reach. The fix routes
+# every failure branch through ``_last_credentials_failure`` and embeds it in
+# the ValueError raised by ``_build_authenticated_client`` so the strategy's
+# `response.error` carries the actual reason the operator can act on.
+#
+# These tests pin the embedding so a future refactor can't quietly drop it.
+
+
+class _AuthFakeResponse:
+    """Aiohttp response double — only ``.status`` and ``.text()`` are read.
+
+    The new credential path reads ``text()`` once up-front and parses with
+    ``json.loads`` (the order-independent, stream-safe pattern flagged by
+    CodeRabbit). The fake serializes ``json_payload`` to JSON for ``text()``
+    when ``body_text`` isn't explicitly set, so happy-path tests can pass a
+    Python dict and unhappy-path tests can pass a raw string (HTML error
+    page, malformed JSON, etc.) verbatim.
+    """
+
+    def __init__(self, status: int, *, json_payload: Any = None, body_text: str | None = None) -> None:
+        self.status = status
+        if body_text is not None:
+            self._body_text = body_text
+        elif json_payload is None:
+            self._body_text = ""
+        else:
+            self._body_text = json.dumps(json_payload)
+
+    async def __aenter__(self) -> "_AuthFakeResponse":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        return None
+
+    async def text(self) -> str:
+        return self._body_text
+
+
+class _AuthFakeSession:
+    """Aiohttp session double dispatching on ``request(method, url, ...)``.
+
+    ``responses`` maps ``(METHOD, suffix-of-URL)`` → ``_AuthFakeResponse``,
+    matching the suffix so callers can write ``("GET", "/auth/derive-api-key")``
+    rather than the full ``CLOB_BASE_URL + path``.
+    """
+
+    def __init__(self, responses: dict[tuple[str, str], _AuthFakeResponse]) -> None:
+        self._responses = responses
+        self.calls: list[tuple[str, str]] = []
+
+    def request(self, method: str, url: str, headers: Any = None) -> _AuthFakeResponse:  # noqa: ARG002
+        self.calls.append((method, url))
+        for (m, suffix), resp in self._responses.items():
+            if m == method and url.endswith(suffix):
+                return resp
+        raise AssertionError(f"_AuthFakeSession: no response registered for {method} {url}")
+
+
+def _credentialless_legacy_servicer(monkeypatch: Any) -> PolymarketServiceServicer:
+    """Build a legacy-mode servicer that has a wallet + key but no API creds.
+
+    With ``polymarket_api_key`` etc. left None, ``_credentials_available`` is
+    False and the next authenticated RPC will hit the derive-or-create path.
+    """
+    monkeypatch.delenv("ALMANAK_GATEWAY_WALLETS", raising=False)
+    s = MagicMock(spec=GatewaySettings)
+    s.private_key = TEST_PRIVATE_KEY
+    s.polymarket_private_key = None
+    s.eoa_address = TEST_WALLET
+    s.polymarket_wallet_address = None
+    s.safe_address = None
+    s.safe_mode = None
+    s.polymarket_api_key = None
+    s.polymarket_secret = None
+    s.polymarket_passphrase = None
+    return PolymarketServiceServicer(settings=s)
+
+
+class TestCredentialDerivationDiagnostics:
+    """The ValueError raised on credential-derivation failure must embed the
+    actual reason — every failure branch records ``_last_credentials_failure``
+    and ``_build_authenticated_client`` interpolates it into the message."""
+
+    @pytest.mark.asyncio
+    async def test_double_401_embeds_both_bodies_in_error(self, monkeypatch: Any) -> None:
+        """The reported failure: derive returns 401 (no creds yet — normal)
+        AND create returns 401 (the actual problem). Both reasons must end up
+        in the strategy-visible error string."""
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        fake_session = _AuthFakeSession(
+            {
+                ("GET", "/auth/derive-api-key"): _AuthFakeResponse(
+                    401, body_text='{"error":"unknown wallet"}'
+                ),
+                ("POST", "/auth/api-key"): _AuthFakeResponse(
+                    401, body_text='{"error":"signature mismatch"}'
+                ),
+            }
+        )
+        servicer._get_session = AsyncMock(return_value=fake_session)
+        servicer._build_l1_headers = MagicMock(return_value={"POLY_ADDRESS": TEST_WALLET})
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "Polymarket API credentials could not be derived in gateway" in msg
+        assert "derive-api-key" in msg
+        assert "create api-key" in msg
+        assert "HTTP 401" in msg
+        # Both response bodies appear so an operator can distinguish "wallet
+        # unknown" from "signature mismatch" without gateway-side logs.
+        assert "unknown wallet" in msg
+        assert "signature mismatch" in msg
+        # Both endpoints actually attempted — derive 401 is expected for new
+        # wallets, the create attempt is what carries the actionable signal.
+        methods = [call[0] for call in fake_session.calls]
+        assert methods == ["GET", "POST"]
+
+    @pytest.mark.asyncio
+    async def test_signing_failure_surfaces_signer_error(self, monkeypatch: Any) -> None:
+        """When ``_build_l1_headers`` raises (signer-service down, JWT expired,
+        etc.), the strategy must see the signer error — not a generic
+        "could not be derived" with no breadcrumb."""
+        from almanak.framework.connectors.polymarket.exceptions import PolymarketSignatureError
+
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        fake_session = _AuthFakeSession({})
+        servicer._get_session = AsyncMock(return_value=fake_session)
+        servicer._build_l1_headers = MagicMock(
+            side_effect=PolymarketSignatureError(
+                "Signer service authentication failed (HTTP 401); JWT may be expired"
+            )
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "L1 signing failed" in msg
+        assert "PolymarketSignatureError" in msg
+        assert "JWT may be expired" in msg
+        # No HTTP attempt should have been made — signing failure short-circuits
+        # the request side. (Both derive AND create signing attempts fail the
+        # same way, so two signer-side reasons appear, but no session calls.)
+        assert fake_session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_signing_config_value_error_surfaces(self, monkeypatch: Any) -> None:
+        """``_build_l1_headers`` raises ValueError when the signer wallet /
+        signing material is not configured (e.g., the platform shipped the
+        gateway with neither a private key nor signer-service creds). The
+        operator-visible error must name the missing config."""
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        servicer._get_session = AsyncMock(return_value=_AuthFakeSession({}))
+        servicer._build_l1_headers = MagicMock(
+            side_effect=ValueError(
+                "Polymarket L1 signing requires either a local private key or "
+                "signer_service_url + signer_service_jwt"
+            )
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "L1 signing failed" in msg
+        assert "signer_service_url" in msg
+
+    @pytest.mark.asyncio
+    async def test_transport_error_surfaces_in_message(self, monkeypatch: Any) -> None:
+        """A network-level failure (DNS, TLS, refused) must become a typed
+        diagnostic, not a stack trace the strategy can't render."""
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+
+        class _RaisingSession:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def request(self, method: str, url: str, headers: Any = None) -> Any:  # noqa: ARG002
+                self.calls.append((method, url))
+
+                class _Ctx:
+                    async def __aenter__(self_inner) -> Any:  # noqa: N805
+                        import aiohttp
+
+                        raise aiohttp.ClientConnectionError("connection refused")
+
+                    async def __aexit__(self_inner, *exc_info: Any) -> None:  # noqa: N805
+                        return None
+
+                return _Ctx()
+
+        servicer._get_session = AsyncMock(return_value=_RaisingSession())
+        servicer._build_l1_headers = MagicMock(return_value={"POLY_ADDRESS": TEST_WALLET})
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "transport error" in msg
+        assert "ClientConnectionError" in msg
+        assert "connection refused" in msg
+
+    @pytest.mark.asyncio
+    async def test_200_with_missing_fields_redacts_present_credentials(self, monkeypatch: Any) -> None:
+        """If Polymarket returns 200 OK with a partial credential body, the
+        diagnostic must (a) report which credential fields were present /
+        absent so an operator can debug schema drift, and (b) NEVER echo the
+        actual credential values — even partial leakage of ``secret`` or
+        ``passphrase`` to the strategy container would defeat the entire
+        gateway secret boundary.
+
+        Codex P1 review caught the original implementation dumping
+        ``json.dumps(data)`` verbatim; the redaction layer pins the fix.
+        """
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        # Derive returns 200 but body is missing one field → falls through to create.
+        # Create returns 200 with the same shape → also missing.
+        secret_value = "super-secret-do-not-leak"
+        passphrase_value = "p4ss-do-not-leak"
+        partial_body = {"apiKey": "", "secret": secret_value, "passphrase": passphrase_value}
+        fake_session = _AuthFakeSession(
+            {
+                ("GET", "/auth/derive-api-key"): _AuthFakeResponse(200, json_payload=partial_body),
+                ("POST", "/auth/api-key"): _AuthFakeResponse(200, json_payload=partial_body),
+            }
+        )
+        servicer._get_session = AsyncMock(return_value=fake_session)
+        servicer._build_l1_headers = MagicMock(return_value={"POLY_ADDRESS": TEST_WALLET})
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "missing apiKey/secret/passphrase" in msg
+        # Presence summary survives so the operator can disambiguate which
+        # fields drifted: empty apiKey is reported as "<absent>", non-empty
+        # secret + passphrase as "<redacted len=N>".
+        assert "<absent>" in msg
+        assert "<redacted" in msg
+        # Hard boundary: the actual secret bytes must never appear, no matter
+        # how the body is encoded (JSON quoted, raw string, etc.).
+        assert secret_value not in msg
+        assert passphrase_value not in msg
+
+    @pytest.mark.asyncio
+    async def test_200_with_unexpected_shape_does_not_repr_payload(
+        self, monkeypatch: Any
+    ) -> None:
+        """A non-dict 200 body (e.g. a list / scalar) must surface only the
+        SHAPE in the failure reason. ``repr(data)`` would echo every byte —
+        if a malformed CLOB response ever returned a bare credential string
+        as JSON, that path would leak it."""
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        leaky_string = "this-could-be-a-secret"
+        fake_session = _AuthFakeSession(
+            {
+                ("GET", "/auth/derive-api-key"): _AuthFakeResponse(200, json_payload=[leaky_string]),
+                ("POST", "/auth/api-key"): _AuthFakeResponse(200, json_payload=[leaky_string]),
+            }
+        )
+        servicer._get_session = AsyncMock(return_value=fake_session)
+        servicer._build_l1_headers = MagicMock(return_value={"POLY_ADDRESS": TEST_WALLET})
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "<unexpected-shape: list>" in msg
+        assert leaky_string not in msg
+
+    @pytest.mark.asyncio
+    async def test_200_with_unparseable_body_surfaces_parse_error(
+        self, monkeypatch: Any
+    ) -> None:
+        """A 200 response whose body isn't valid JSON (CLOB serving an HTML
+        error page, a stray reverse-proxy preamble, garbled bytes) must end
+        up as a structured parse-failure reason — not a stream-already-consumed
+        crash. CodeRabbit PR-2027 review flagged the previous ordering
+        (``await response.json()`` then re-reading via
+        ``await response.text()`` in the except clause) as a critical bug
+        because aiohttp's body stream may be drained or
+        implementation-defined after a parse failure. The fix reads ``text()``
+        once up-front and parses via ``json.loads``; this test pins the
+        reorder so a future refactor can't quietly regress it."""
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        # Simulate the upstream-failure shape that previously crashed: a
+        # plausible-looking HTML error body served with status 200.
+        html_body = "<!doctype html><title>503</title>"
+        fake_session = _AuthFakeSession(
+            {
+                ("GET", "/auth/derive-api-key"): _AuthFakeResponse(200, body_text=html_body),
+                ("POST", "/auth/api-key"): _AuthFakeResponse(200, body_text=html_body),
+            }
+        )
+        servicer._get_session = AsyncMock(return_value=fake_session)
+        servicer._build_l1_headers = MagicMock(return_value={"POLY_ADDRESS": TEST_WALLET})
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "200 OK but JSON parse failed" in msg
+        # The body SHOULD survive into the diagnostic — that's the whole
+        # reason CodeRabbit's bug was important. If a future regression
+        # re-introduces the old "json() then text()" pattern, the body
+        # capture will be empty/missing here.
+        assert "<!doctype html>" in msg or "doctype" in msg
+
+    def test_redact_credentials_for_reason_unit(self) -> None:
+        """Direct unit on the redaction helper to lock the contract: known
+        credential keys are scrubbed, presence/absence is preserved, and
+        non-credential fields pass through verbatim (they often carry
+        actionable CLOB error context like errorCode / message)."""
+        result = PolymarketServiceServicer._redact_credentials_for_reason(
+            {
+                "apiKey": "real-key-do-not-leak",
+                "secret": "",  # absent variant
+                "passphrase": None,  # absent variant
+                "errorCode": 401,
+                "message": "auth failed",
+            }
+        )
+        assert "real-key-do-not-leak" not in result
+        assert "<redacted" in result  # apiKey was non-empty
+        assert "<absent>" in result  # secret + passphrase normalised
+        # Non-credential context preserved so operators see actionable error data.
+        assert "errorCode" in result
+        assert "401" in result
+        assert "auth failed" in result
+
+    @pytest.mark.asyncio
+    async def test_successful_derive_clears_failure(self, monkeypatch: Any) -> None:
+        """Once derivation succeeds, ``_last_credentials_failure`` must clear
+        — otherwise a stale message would leak into the next request's error
+        if credentials later got invalidated."""
+        servicer = _credentialless_legacy_servicer(monkeypatch)
+        servicer._last_credentials_failure = "stale"  # simulate prior failure
+        fake_session = _AuthFakeSession(
+            {
+                ("GET", "/auth/derive-api-key"): _AuthFakeResponse(
+                    200, json_payload={"apiKey": "k", "secret": "s", "passphrase": "p"}
+                ),
+            }
+        )
+        servicer._get_session = AsyncMock(return_value=fake_session)
+        servicer._build_l1_headers = MagicMock(return_value={"POLY_ADDRESS": TEST_WALLET})
+
+        client = await servicer._build_authenticated_client()
+        assert client is not None
+        assert servicer._credentials_available is True
+        assert servicer._last_credentials_failure is None
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_servicer_surfaces_init_reason(self, monkeypatch: Any) -> None:
+        """A gateway that started without any Polymarket signer config
+        (``_available=False``) must surface the init-time reason instead of
+        the generic message. The class-level ``_init_unavailable_reason``
+        spells out which env var to set."""
+        monkeypatch.delenv("ALMANAK_GATEWAY_WALLETS", raising=False)
+        s = MagicMock(spec=GatewaySettings)
+        s.private_key = None
+        s.polymarket_private_key = None
+        s.eoa_address = None
+        s.polymarket_wallet_address = None
+        s.safe_address = None
+        s.safe_mode = None
+        s.polymarket_api_key = None
+        s.polymarket_secret = None
+        s.polymarket_passphrase = None
+        servicer = PolymarketServiceServicer(settings=s)
+        assert servicer._available is False
+        assert servicer._last_credentials_failure is not None
+
+        with pytest.raises(ValueError) as exc_info:
+            await servicer._build_authenticated_client()
+
+        msg = str(exc_info.value)
+        assert "no wallet_address" in msg
+        assert "ALMANAK_GATEWAY_EOA_ADDRESS" in msg or "trading_eoa_address" in msg
