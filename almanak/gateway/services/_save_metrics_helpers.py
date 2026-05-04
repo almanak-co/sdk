@@ -137,15 +137,20 @@ def parse_metrics_inputs(
 # ---------------------------------------------------------------------------
 
 
-# Kept as a module-level constant so the RPC body stays short. The SQL itself
-# is unchanged from the pre-refactor version.
+# Kept as a module-level constant so the RPC body stays short.
+#
+# VIB-3933 review finding #1: total_value_usd and positions_json were
+# previously omitted on the PG path, which meant the schema default of '0'
+# leaked through to dashboards once GetPortfolioMetrics started returning
+# rows on hosted Postgres. Both columns are now persisted on every UPSERT,
+# matching SQLite parity at sqlite.py:2253.
 PG_UPSERT_QUERY = """
                     INSERT INTO portfolio_metrics (
                         agent_id, initial_value_usd, initial_timestamp,
                         deposits_usd, withdrawals_usd, gas_spent_usd,
                         deployment_id, cycle_id, execution_mode, is_complete,
-                        updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        updated_at, total_value_usd, positions_json
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
                     ON CONFLICT (agent_id) DO UPDATE SET
                         initial_value_usd = EXCLUDED.initial_value_usd,
                         initial_timestamp = EXCLUDED.initial_timestamp,
@@ -156,7 +161,9 @@ PG_UPSERT_QUERY = """
                         cycle_id = EXCLUDED.cycle_id,
                         execution_mode = EXCLUDED.execution_mode,
                         is_complete = EXCLUDED.is_complete,
-                        updated_at = EXCLUDED.updated_at
+                        updated_at = EXCLUDED.updated_at,
+                        total_value_usd = EXCLUDED.total_value_usd,
+                        positions_json = EXCLUDED.positions_json
                     RETURNING agent_id
                     """
 
@@ -165,13 +172,21 @@ def build_pg_upsert_args(
     inputs: ParsedMetricsInputs,
     request: gateway_pb2.SaveMetricsRequest,
     now: datetime,
+    total_value_usd: Decimal,
+    positions_json: str = "[]",
 ) -> tuple[Any, ...]:
     """Build the positional args tuple for the portfolio_metrics UPSERT.
 
-    Preserves the exact order the pre-refactor RPC passed them:
-    ``(agent_id, initial_value_usd, initial_timestamp, deposits, withdrawals,
-    gas_spent, deployment_id, cycle_id, execution_mode, is_complete,
-    updated_at)``. Do NOT reorder — ``$1..$11`` placeholders depend on it.
+    Order matches ``$1..$13`` in :data:`PG_UPSERT_QUERY` exactly. Do NOT
+    reorder.
+
+    ``total_value_usd`` is sourced from the latest snapshot via
+    :func:`resolve_total_value_usd` — the proto contract (VIB-2765) does not
+    carry it on the wire, mirroring the SQLite path. ``positions_json``
+    defaults to ``"[]"`` because the RPC contract does not carry positions
+    either; the SQLite path also writes ``"[]"`` (the SaveMetrics request
+    doesn't carry positions; ``PortfolioMetrics.positions_json`` defaults to
+    ``"[]"`` and SQLite's writer pulls it via ``getattr``).
     """
     return (
         inputs.strategy_id,
@@ -185,6 +200,8 @@ def build_pg_upsert_args(
         request.execution_mode or "",
         request.is_complete,
         now,
+        str(total_value_usd),
+        positions_json,
     )
 
 

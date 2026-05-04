@@ -696,6 +696,547 @@ class PostgresStore:
             rows = await conn.fetch("SELECT agent_id FROM strategy_state")
             return [row["agent_id"] for row in rows]
 
+    # =========================================================================
+    # Reader methods used by DashboardService (VIB-3933)
+    #
+    # Identity convention (per AGENTS.md):
+    #   - Hosted Postgres tables key on ``agent_id`` (set from the
+    #     platform-injected ``AGENT_ID`` env var via ``resolve_agent_id``).
+    #   - Local SQLite tables key on ``strategy_id``.
+    # Callers always pass the already-resolved value; the column name is the
+    # only difference. ``accounting_events`` and ``position_events`` carry both
+    # ``agent_id`` and ``deployment_id`` columns; we filter on ``deployment_id``
+    # to mirror the SQLite signature, since under the 1 Gateway : 1 Strategy
+    # rule the two values are identical for any row written in hosted mode.
+    # =========================================================================
+
+    async def get_latest_snapshot(self, strategy_id: str) -> "PortfolioSnapshot | None":
+        """Most recent ``portfolio_snapshots`` row for a strategy."""
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json::text AS positions_text,
+                       token_prices_json::text AS token_prices_text,
+                       wallet_balances_json::text AS wallet_balances_text,
+                       chain
+                FROM portfolio_snapshots
+                WHERE agent_id = $1
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                strategy_id,
+            )
+        if row is None:
+            return None
+        return _pg_row_to_portfolio_snapshot(row)
+
+    async def get_snapshots_since(
+        self,
+        strategy_id: str,
+        since: datetime,
+        limit: int = 168,
+    ) -> list["PortfolioSnapshot"]:
+        """Snapshots for a strategy since ``since`` (timestamp ASC)."""
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json::text AS positions_text,
+                       token_prices_json::text AS token_prices_text,
+                       wallet_balances_json::text AS wallet_balances_text,
+                       chain
+                FROM portfolio_snapshots
+                WHERE agent_id = $1 AND timestamp >= $2
+                ORDER BY timestamp ASC
+                LIMIT $3
+                """,
+                strategy_id,
+                since,
+                limit,
+            )
+        return [_pg_row_to_portfolio_snapshot(row) for row in rows]
+
+    async def get_snapshot_at(
+        self,
+        strategy_id: str,
+        timestamp: datetime,
+    ) -> "PortfolioSnapshot | None":
+        """Snapshot closest to ``timestamp`` (at or before)."""
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT agent_id, timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json::text AS positions_text,
+                       token_prices_json::text AS token_prices_text,
+                       wallet_balances_json::text AS wallet_balances_text,
+                       chain
+                FROM portfolio_snapshots
+                WHERE agent_id = $1 AND timestamp <= $2
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                strategy_id,
+                timestamp,
+            )
+        if row is None:
+            return None
+        return _pg_row_to_portfolio_snapshot(row)
+
+    async def get_portfolio_metrics(self, strategy_id: str) -> "PortfolioMetrics | None":
+        """Lifetime portfolio metrics row (one per strategy)."""
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT agent_id, initial_value_usd, initial_timestamp,
+                       deposits_usd, withdrawals_usd, gas_spent_usd,
+                       total_value_usd, positions_json::text AS positions_text,
+                       cycle_id, deployment_id, execution_mode, is_complete,
+                       updated_at
+                FROM portfolio_metrics
+                WHERE agent_id = $1
+                """,
+                strategy_id,
+            )
+        if row is None:
+            return None
+        return _pg_row_to_portfolio_metrics(row)
+
+    async def get_ledger_entries(
+        self,
+        strategy_id: str,
+        since: datetime | None = None,
+        intent_type: str | None = None,
+        limit: int = 100,
+        before: datetime | None = None,
+    ) -> list["LedgerEntry"]:
+        """Transaction ledger entries (newest first), with optional filters.
+
+        Mirrors :meth:`SQLiteStore.get_ledger_entries`.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        # Build the WHERE clause dynamically to keep the optional filter
+        # parameters bound positionally for asyncpg.
+        conditions = ["agent_id = $1"]
+        params: list[Any] = [strategy_id]
+        idx = 2
+        if since is not None:
+            conditions.append(f"timestamp > ${idx}")
+            params.append(since)
+            idx += 1
+        if before is not None:
+            conditions.append(f"timestamp < ${idx}")
+            params.append(before)
+            idx += 1
+        if intent_type is not None:
+            conditions.append(f"intent_type = ${idx}")
+            params.append(intent_type)
+            idx += 1
+        where = " AND ".join(conditions)
+        params.append(limit)
+
+        sql = f"""
+            SELECT id, cycle_id, agent_id, deployment_id, execution_mode,
+                   timestamp, intent_type,
+                   token_in, amount_in, token_out, amount_out,
+                   effective_price, slippage_bps, gas_used, gas_usd,
+                   tx_hash, chain, protocol, success, error,
+                   extracted_data_json::text AS extracted_data_text,
+                   price_inputs_json::text   AS price_inputs_text,
+                   pre_state_json::text       AS pre_state_text,
+                   post_state_json::text      AS post_state_text
+            FROM transaction_ledger
+            WHERE {where}
+            ORDER BY timestamp DESC
+            LIMIT ${idx}
+        """
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_pg_row_to_ledger_entry(row) for row in rows]
+
+    async def get_accounting_events(
+        self,
+        deployment_id: str,
+        event_type: str | None = None,
+        position_key: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Typed accounting events as raw dicts (caller deserializes payload_json).
+
+        Mirrors :meth:`SQLiteStore.get_accounting_events`.
+
+        Filter is by ``deployment_id`` (not ``agent_id``) so the same
+        signature works for SQLite and Postgres callers — see the identity
+        comment at the top of this section.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        conditions = ["deployment_id = $1"]
+        params: list[Any] = [deployment_id]
+        idx = 2
+        if event_type is not None:
+            conditions.append(f"event_type = ${idx}")
+            params.append(event_type)
+            idx += 1
+        if position_key is not None:
+            conditions.append(f"position_key = ${idx}")
+            params.append(position_key)
+            idx += 1
+        where = " AND ".join(conditions)
+        params.append(limit)
+
+        sql = f"""
+            SELECT id, deployment_id, agent_id, cycle_id, execution_mode,
+                   timestamp, chain, protocol, wallet_address,
+                   event_type, position_key, ledger_entry_id, tx_hash,
+                   confidence, payload_json::text AS payload_text,
+                   schema_version
+            FROM accounting_events
+            WHERE {where}
+            ORDER BY timestamp ASC
+            LIMIT ${idx}
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_pg_row_to_accounting_event_dict(row) for row in rows]
+
+    async def get_position_events_dict(
+        self,
+        deployment_id: str,
+        position_id: str | None = None,
+        position_type: str | None = None,
+        event_type: str | None = None,
+    ) -> list[dict]:
+        """Position lifecycle events as raw dicts (timestamp ASC).
+
+        Mirrors :meth:`SQLiteStore.get_position_events_sync`. The ``_dict``
+        suffix distinguishes this from :meth:`get_position_events` (not
+        implemented here) which returns ``PositionEvent`` dataclasses.
+
+        Filter is by ``deployment_id`` (see identity comment above).
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        conditions = ["deployment_id = $1"]
+        params: list[Any] = [deployment_id]
+        idx = 2
+        if position_id is not None:
+            conditions.append(f"position_id = ${idx}")
+            params.append(position_id)
+            idx += 1
+        if position_type is not None:
+            conditions.append(f"position_type = ${idx}")
+            params.append(position_type)
+            idx += 1
+        if event_type is not None:
+            conditions.append(f"event_type = ${idx}")
+            params.append(event_type)
+            idx += 1
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT id, agent_id, deployment_id, cycle_id, execution_mode,
+                   position_id, position_type, event_type, timestamp,
+                   protocol, chain, token0, token1, amount0, amount1,
+                   value_usd, tick_lower, tick_upper, liquidity, in_range,
+                   fees_token0, fees_token1, leverage, entry_price,
+                   mark_price, unrealized_pnl, is_long, tx_hash, gas_usd,
+                   ledger_entry_id,
+                   attribution_json::text AS attribution_text,
+                   attribution_version
+            FROM position_events
+            WHERE {where}
+            ORDER BY timestamp ASC
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_pg_row_to_position_event_dict(row) for row in rows]
+
+
+# =============================================================================
+# Postgres row → framework type conversions (VIB-3933)
+# =============================================================================
+#
+# These are module-level helpers (not PostgresStore methods) so the unit
+# tests can exercise the row-shape parity with SQLite without touching a
+# real database.
+# =============================================================================
+
+
+# Effectively-unbounded query limit for asyncpg LIMIT clauses where the
+# semantic intent is "no cap" (cost-basis FIFO replay needs full history).
+# 1e9 covers any realistic strategy lifetime by ~6 orders of magnitude
+# while keeping the SQL signature compatible with int-typed limit columns.
+_UNLIMITED_QUERY_LIMIT = 1_000_000_000
+
+
+def _coerce_dt(value: Any) -> datetime | None:
+    """Return a tz-aware datetime from a Postgres ``TIMESTAMPTZ`` value.
+
+    asyncpg already returns a ``datetime``; the wrapper is here to handle
+    the rare case where a row was hand-fabricated for tests using a string.
+    Returns ``None`` only when ``value`` is ``None`` or an unrecognised type
+    — for required (NOT NULL) columns use :func:`_require_dt` instead so
+    a malformed row fails loudly.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return None
+
+
+def _require_dt(value: Any, column: str) -> datetime:
+    """Coerce a NOT NULL ``TIMESTAMPTZ`` column; raise on missing/None.
+
+    All timestamps written by the SDK to metrics_db are NOT NULL (verified
+    against the Prisma schema — `portfolio_snapshots.timestamp`,
+    `portfolio_metrics.initial_timestamp`/`updated_at`,
+    `transaction_ledger.timestamp`, `accounting_events.timestamp`,
+    `position_events.timestamp`). Silently substituting ``datetime.now(UTC)``
+    for a missing value would mask real data integrity issues — VIB-3933
+    review explicitly flagged that anti-pattern. If a row arrives here
+    without its timestamp, surface it as an error so the caller can log
+    and skip rather than fabricate a current timestamp.
+    """
+    coerced = _coerce_dt(value)
+    if coerced is None:
+        raise ValueError(
+            f"Required timestamp column {column!r} is None or unparseable; "
+            "the metrics_db schema declares this column NOT NULL — investigate "
+            "row fabrication or a schema regression."
+        )
+    return coerced
+
+
+def _pg_row_to_portfolio_snapshot(row: Any) -> "PortfolioSnapshot":
+    """Convert a ``portfolio_snapshots`` row to a ``PortfolioSnapshot``."""
+    from almanak.framework.portfolio.models import PortfolioSnapshot
+
+    timestamp = _require_dt(row["timestamp"], "portfolio_snapshots.timestamp")
+    positions_payload: Any = row.get("positions_text") or "[]"
+    if isinstance(positions_payload, str):
+        try:
+            positions_payload = json.loads(positions_payload)
+        except json.JSONDecodeError:
+            positions_payload = []
+    positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
+
+    token_prices: dict[str, dict] = {}
+    tp_text = row.get("token_prices_text")
+    if tp_text:
+        try:
+            parsed = json.loads(tp_text)
+            if isinstance(parsed, dict):
+                token_prices = parsed
+        except json.JSONDecodeError:
+            pass
+
+    wallet_balances_raw: list[dict] = []
+    wb_text = row.get("wallet_balances_text")
+    if wb_text:
+        try:
+            parsed_wb = json.loads(wb_text)
+            if isinstance(parsed_wb, list):
+                wallet_balances_raw = parsed_wb
+        except json.JSONDecodeError:
+            pass
+
+    deployed_capital_usd = str(row.get("deployed_capital_usd") or "0")
+    wallet_total_value_usd = str(row.get("wallet_total_value_usd") or "0")
+
+    return PortfolioSnapshot.from_dict(
+        {
+            "timestamp": timestamp.isoformat(),
+            "strategy_id": row["agent_id"],
+            "total_value_usd": str(row["total_value_usd"]),
+            "available_cash_usd": str(row["available_cash_usd"]),
+            "deployed_capital_usd": deployed_capital_usd,
+            "wallet_total_value_usd": wallet_total_value_usd,
+            "value_confidence": row["value_confidence"],
+            "positions": positions,
+            "wallet_balances": wallet_balances_raw,
+            "token_prices": token_prices,
+            "chain": row["chain"] or "",
+            "iteration_number": row["iteration_number"] or 0,
+            "snapshot_metadata": snapshot_metadata,
+        }
+    )
+
+
+def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
+    """Convert a ``portfolio_metrics`` row to a ``PortfolioMetrics``.
+
+    ``timestamp`` is anchored to ``initial_timestamp`` (matching the writer
+    in ``_save_metrics_helpers.build_portfolio_metrics`` which sets
+    ``timestamp=inputs.timestamp`` from ``request.initial_timestamp``).
+    Mapping it to ``updated_at`` would diverge read from write and make
+    every Postgres read look like the strategy was newly started, skewing
+    age / lifetime baseline logic that consumes ``metrics.timestamp``.
+    """
+    from decimal import Decimal
+
+    from almanak.framework.portfolio.models import PortfolioMetrics
+
+    initial_timestamp = _require_dt(row["initial_timestamp"], "portfolio_metrics.initial_timestamp")
+    is_complete = bool(row["is_complete"]) if row.get("is_complete") is not None else True
+    return PortfolioMetrics(
+        strategy_id=row["agent_id"],
+        timestamp=initial_timestamp,
+        total_value_usd=Decimal(row.get("total_value_usd") or "0"),
+        initial_value_usd=Decimal(row["initial_value_usd"]),
+        deposits_usd=Decimal(row.get("deposits_usd") or "0"),
+        withdrawals_usd=Decimal(row.get("withdrawals_usd") or "0"),
+        gas_spent_usd=Decimal(row.get("gas_spent_usd") or "0"),
+        positions_json=row.get("positions_text") or "[]",
+        cycle_id=row.get("cycle_id"),
+        deployment_id=row.get("deployment_id") or "",
+        execution_mode=row.get("execution_mode") or "",
+        is_complete=is_complete,
+    )
+
+
+def _pg_row_to_ledger_entry(row: Any) -> "LedgerEntry":
+    """Convert a ``transaction_ledger`` row to a ``LedgerEntry``."""
+    from almanak.framework.observability.ledger import LedgerEntry
+
+    timestamp = _require_dt(row["timestamp"], "transaction_ledger.timestamp")
+    return LedgerEntry(
+        id=row["id"] or "",
+        cycle_id=row.get("cycle_id") or "",
+        strategy_id=row.get("agent_id") or "",
+        deployment_id=row.get("deployment_id") or "",
+        execution_mode=row.get("execution_mode") or "",
+        timestamp=timestamp,
+        intent_type=row.get("intent_type") or "",
+        token_in=row.get("token_in") or "",
+        amount_in=row.get("amount_in") or "",
+        token_out=row.get("token_out") or "",
+        amount_out=row.get("amount_out") or "",
+        effective_price=row.get("effective_price") or "",
+        slippage_bps=row.get("slippage_bps"),
+        gas_used=row.get("gas_used") or 0,
+        gas_usd=row.get("gas_usd") or "",
+        tx_hash=row.get("tx_hash") or "",
+        chain=row.get("chain") or "",
+        protocol=row.get("protocol") or "",
+        success=bool(row.get("success", True)),
+        error=row.get("error") or "",
+        extracted_data_json=row.get("extracted_data_text") or "",
+        price_inputs_json=row.get("price_inputs_text") or "",
+        pre_state_json=row.get("pre_state_text") or "",
+        post_state_json=row.get("post_state_text") or "",
+    )
+
+
+def _pg_row_to_accounting_event_dict(row: Any) -> dict[str, Any]:
+    """Convert an ``accounting_events`` row to the SQLite-shaped dict.
+
+    Keys mirror :meth:`SQLiteStore.get_accounting_events_sync` so consumers
+    reading either backend see identical shapes. ``timestamp`` is ISO-8601
+    (matching SQLite); ``payload_json`` is a string (asyncpg returns the
+    JSONB column as ``str`` because we cast ``::text``).
+    """
+    timestamp = _require_dt(row["timestamp"], "accounting_events.timestamp")
+    return {
+        "id": row["id"] or "",
+        "deployment_id": row.get("deployment_id") or "",
+        "agent_id": row.get("agent_id") or "",
+        "strategy_id": row.get("agent_id") or "",
+        "cycle_id": row.get("cycle_id") or "",
+        "execution_mode": row.get("execution_mode") or "",
+        "timestamp": timestamp.isoformat(),
+        "chain": row.get("chain") or "",
+        "protocol": row.get("protocol") or "",
+        "wallet_address": row.get("wallet_address") or "",
+        "event_type": row.get("event_type") or "",
+        "position_key": row.get("position_key") or "",
+        "ledger_entry_id": row.get("ledger_entry_id") or "",
+        "tx_hash": row.get("tx_hash") or "",
+        "confidence": row.get("confidence") or "",
+        "payload_json": row.get("payload_text") or "{}",
+        "schema_version": int(row.get("schema_version") or 1),
+    }
+
+
+def _pg_row_to_position_event_dict(row: Any) -> dict[str, Any]:
+    """Convert a ``position_events`` row to the SQLite-shaped dict.
+
+    ``protocol_fees_usd`` is intentionally emitted as ``""`` (sentinel
+    meaning "source did not emit", per AGENTS.md "Empty ≠ zero"). The
+    column genuinely does not exist on hosted metrics_db today — verified
+    against the live staging schema 2026-05-04. The column was added to
+    SDK SQLite by VIB-3205 (commit 506f649cf, 2026-04-20 06:04 UTC) but
+    was missed by the same-day metrics-database "reconcile schema drift"
+    commit (3073f08, 2026-04-20 06:57 UTC) because the SDK PR #1602
+    hadn't merged to main yet at reconcile time. Tracked for migration:
+    file the metrics-database ticket referenced in
+    docs/internal/VIB-3933-hosted-postgres-read-path.md (review finding
+    #3). After the migration lands, add ``protocol_fees_usd`` to the
+    ``get_position_events_dict`` SELECT and read the real value here.
+    Until then the sentinel keeps dict-shape parity with SQLite so
+    consumers (GetTradeTape, lp_report) don't KeyError on hosted.
+    """
+    timestamp = _require_dt(row["timestamp"], "position_events.timestamp")
+    return {
+        "id": row["id"] or "",
+        "agent_id": row.get("agent_id") or "",
+        "deployment_id": row.get("deployment_id") or "",
+        "cycle_id": row.get("cycle_id") or "",
+        "execution_mode": row.get("execution_mode") or "",
+        "position_id": row.get("position_id") or "",
+        "position_type": row.get("position_type") or "",
+        "event_type": row.get("event_type") or "",
+        "timestamp": timestamp.isoformat(),
+        "protocol": row.get("protocol") or "",
+        "chain": row.get("chain") or "",
+        "token0": row.get("token0") or "",
+        "token1": row.get("token1") or "",
+        "amount0": row.get("amount0") or "",
+        "amount1": row.get("amount1") or "",
+        "value_usd": row.get("value_usd") or "",
+        "tick_lower": row.get("tick_lower"),
+        "tick_upper": row.get("tick_upper"),
+        "liquidity": row.get("liquidity") or "",
+        "in_range": row.get("in_range"),
+        "fees_token0": row.get("fees_token0") or "",
+        "fees_token1": row.get("fees_token1") or "",
+        "leverage": row.get("leverage") or "",
+        "entry_price": row.get("entry_price") or "",
+        "mark_price": row.get("mark_price") or "",
+        "unrealized_pnl": row.get("unrealized_pnl") or "",
+        "is_long": row.get("is_long"),
+        "tx_hash": row.get("tx_hash") or "",
+        "gas_usd": row.get("gas_usd") or "",
+        "ledger_entry_id": row.get("ledger_entry_id") or "",
+        # Sentinel for column missing on metrics_db — see docstring above.
+        "protocol_fees_usd": "",
+        "attribution_json": row.get("attribution_text") or "{}",
+        "attribution_version": int(row.get("attribution_version") or 0),
+    }
+
 
 # =============================================================================
 # STATE MANAGER
@@ -768,6 +1309,10 @@ class StateManager:
         self._warm_injected = warm_backend is not None
         self._metrics: list[TierMetrics] = []
         self._initialized = False
+        # Per-instance set so multi-instance setups don't cross-suppress
+        # warnings (CodeRabbit review). One-shot WARN per (method, identity)
+        # — see _unimplemented_warn for the visibility rationale.
+        self._unimplemented_logged: set[tuple[str, str]] = set()
 
     async def initialize(self) -> None:
         """Initialize all enabled storage tiers.
@@ -1885,6 +2430,7 @@ class StateManager:
         No LIMIT is applied: accurate cost basis requires the full event history.
         """
         if not self._warm or not hasattr(self._warm, "get_accounting_events_sync"):
+            self._unimplemented_warn("get_accounting_events_sync", deployment_id)
             return []
         try:
             return self._warm.get_accounting_events_sync(
@@ -1909,6 +2455,7 @@ class StateManager:
         Returns [] when no warm backend or the backend predates this method.
         """
         if not self._warm or not hasattr(self._warm, "get_position_events_sync"):
+            self._unimplemented_warn("get_position_events_sync", deployment_id)
             return []
         try:
             return self._warm.get_position_events_sync(
@@ -1920,6 +2467,157 @@ class StateManager:
         except Exception:
             logger.debug("get_position_events_sync failed", exc_info=True)
             return []
+
+    async def get_accounting_events_for_dashboard(
+        self,
+        deployment_id: str,
+        position_key: str | None = None,
+    ) -> list[dict]:
+        """Async-context accounting event query for the dashboard service (VIB-3933).
+
+        Distinct from :meth:`get_accounting_events_sync` (which PortfolioValuer
+        calls synchronously from inside the snapshot pipeline). The dashboard
+        service is async and must not block the event loop on Postgres I/O,
+        so it goes through this async sibling.
+
+        Dispatch:
+          - PostgresStore exposes ``get_accounting_events`` (async) — preferred.
+          - SQLiteStore exposes ``get_accounting_events_sync`` (sync) — wrapped
+            in ``run_in_executor`` so the local-mode path does not block the
+            running event loop either.
+
+        Returns ``[]`` and emits a one-shot WARN if the backend supports
+        neither (Phase 0 visibility for VIB-3933).
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm:
+            return []
+
+        # Dispatch order matters (VIB-3933 review finding #2): the dashboard
+        # contract is timestamp-ASC + no LIMIT (full history → cost-basis
+        # FIFO replay). SQLiteStore exposes that as ``get_accounting_events_sync``;
+        # its async sibling uses DESC + LIMIT 500 and is the wrong shape here.
+        # PostgresStore has only the async ``get_accounting_events`` (asyncpg
+        # is async-only); we wrote that one to ASC and pass an effectively-
+        # unbounded limit to mirror the sync semantics.
+        # Therefore: prefer ``_sync`` first (SQLite parity), fall through to
+        # async (PostgresStore).
+        if hasattr(self._warm, "get_accounting_events_sync"):
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            try:
+                return await loop.run_in_executor(
+                    None,
+                    lambda: self._warm.get_accounting_events_sync(  # type: ignore[union-attr]
+                        deployment_id=deployment_id,
+                        position_key=position_key,
+                    ),
+                )
+            except Exception:
+                logger.debug("get_accounting_events_sync (executor) failed", exc_info=True)
+                return []
+
+        if hasattr(self._warm, "get_accounting_events"):
+            try:
+                # Effectively-unbounded limit; PostgresStore's async method
+                # is ASC, mirroring the sync contract above.
+                return await self._warm.get_accounting_events(
+                    deployment_id=deployment_id,
+                    position_key=position_key,
+                    limit=_UNLIMITED_QUERY_LIMIT,
+                )
+            except Exception:
+                logger.debug("get_accounting_events (async) failed", exc_info=True)
+                return []
+
+        self._unimplemented_warn("get_accounting_events_for_dashboard", deployment_id)
+        return []
+
+    async def get_position_events_for_dashboard(
+        self,
+        deployment_id: str,
+        position_id: str | None = None,
+        position_type: str | None = None,
+        event_type: str | None = None,
+    ) -> list[dict]:
+        """Async-context position event query for the dashboard service (VIB-3933).
+
+        See :meth:`get_accounting_events_for_dashboard` for the dispatch
+        rationale. PostgresStore exposes the async ``get_position_events_dict``;
+        SQLiteStore exposes the sync ``get_position_events_sync`` which we
+        invoke through ``run_in_executor``.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm:
+            return []
+
+        # See get_accounting_events_for_dashboard for the dispatch-order
+        # rationale (VIB-3933 review finding #2). Prefer SQLite's sync
+        # contract; PostgresStore's async ``get_position_events_dict`` is
+        # ASC + no-LIMIT to mirror it.
+        if hasattr(self._warm, "get_position_events_sync"):
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            try:
+                return await loop.run_in_executor(
+                    None,
+                    lambda: self._warm.get_position_events_sync(  # type: ignore[union-attr]
+                        deployment_id=deployment_id,
+                        position_id=position_id,
+                        position_type=position_type,
+                        event_type=event_type,
+                    ),
+                )
+            except Exception:
+                logger.debug("get_position_events_sync (executor) failed", exc_info=True)
+                return []
+
+        if hasattr(self._warm, "get_position_events_dict"):
+            try:
+                return await self._warm.get_position_events_dict(
+                    deployment_id=deployment_id,
+                    position_id=position_id,
+                    position_type=position_type,
+                    event_type=event_type,
+                )
+            except Exception:
+                logger.debug("get_position_events_dict failed", exc_info=True)
+                return []
+
+        self._unimplemented_warn("get_position_events_for_dashboard", deployment_id)
+        return []
+
+    # --- Phase 0 visibility helper (VIB-3933) -----------------------------
+    #
+    # Until VIB-3933 the silent-fallthrough on missing PostgresStore methods
+    # rendered empty Senior-Quant headers as if they were a measured zero.
+    # This helper makes the gap visible: one WARN per (method, identity) pair
+    # so we don't spam logs but also don't hide regressions. The same helper
+    # is wired into the sync ``_sync`` paths above so the visibility applies
+    # whether the call ends up here from PortfolioValuer or the dashboard.
+    # ``_unimplemented_logged`` is initialised per-instance in ``__init__``
+    # so multi-instance setups don't cross-suppress.
+
+    def _unimplemented_warn(self, method: str, identity: str) -> None:
+        """One-shot WARN when the warm backend lacks ``method``."""
+        backend_name = type(self._warm).__name__ if self._warm else "None"
+        key = (method, identity or "<empty>")
+        if key in self._unimplemented_logged:
+            return
+        self._unimplemented_logged.add(key)
+        logger.warning(
+            "StateManager: warm backend %s does not implement %s — "
+            "returning empty result for identity=%s. This is the silent "
+            "fallthrough that VIB-3933 was filed for; if this is hosted "
+            "Postgres the read path is missing.",
+            backend_name,
+            method,
+            identity or "<empty>",
+        )
 
     async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
         """Partial update of attribution_json + attribution_version on a PositionEvent."""

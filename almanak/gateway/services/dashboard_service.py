@@ -1521,9 +1521,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
             try:
-                accounting_events = self._state_manager.get_accounting_events_sync(deployment_id=strategy_id)
+                # Async sibling of ``get_accounting_events_sync`` — required for
+                # hosted Postgres because asyncpg has no sync API. SQLite path
+                # gets executor-wrapped under the hood (VIB-3933).
+                accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
+                    deployment_id=strategy_id
+                )
             except Exception:
-                logger.debug("get_accounting_events_sync failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_accounting_events_for_dashboard failed for %s", strategy_id, exc_info=True)
 
         # Pull a position summary off the latest snapshot for the primary-risk gauge.
         latest_snapshot = await self._get_latest_snapshot(strategy_id)
@@ -1673,13 +1678,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
             try:
-                accounting_events = self._state_manager.get_accounting_events_sync(deployment_id=strategy_id)
+                # Async sibling — see GetQuantHeader for rationale (VIB-3933).
+                accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
+                    deployment_id=strategy_id
+                )
             except Exception:
-                logger.debug("get_accounting_events_sync failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_accounting_events_for_dashboard failed for %s", strategy_id, exc_info=True)
             try:
-                position_events = self._state_manager.get_position_events_sync(deployment_id=strategy_id)
+                position_events = await self._state_manager.get_position_events_for_dashboard(deployment_id=strategy_id)
             except Exception:
-                logger.debug("get_position_events_sync failed for %s", strategy_id, exc_info=True)
+                logger.debug("get_position_events_for_dashboard failed for %s", strategy_id, exc_info=True)
 
         # Index accounting events by ledger_entry_id and cycle_id for fast join
         events_by_ledger: dict[str, dict[str, Any]] = {}

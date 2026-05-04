@@ -844,14 +844,34 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         :mod:`._save_metrics_helpers`. Any exception maps to a uniform
         ``INTERNAL`` response with ``internal server error`` details —
         wording preserved byte-for-byte.
+
+        VIB-3933 review finding #1: the proto contract (VIB-2765) does not
+        carry ``total_value_usd``, so we mirror the SQLite path's
+        :func:`resolve_total_value_usd` lookup against the latest snapshot
+        before issuing the UPSERT. Without this, the schema default of '0'
+        leaks through to ``GetPortfolioMetrics`` and the dashboard renders
+        a $0 NAV despite snapshots existing.
         """
         from almanak.gateway.services._save_metrics_helpers import (
             PG_UPSERT_QUERY,
             build_pg_upsert_args,
+            resolve_total_value_usd,
         )
 
         try:
-            await self._snapshot_fetchrow(PG_UPSERT_QUERY, *build_pg_upsert_args(inputs, request, now))
+            # Resolve total_value_usd from the latest snapshot via PostgresStore.
+            # Best-effort: the helper swallows any backend exception and returns
+            # Decimal("0"), so a stale or missing snapshot backend never aborts
+            # the metrics write — same contract as the SQLite path.
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            total_value_usd = await resolve_total_value_usd(warm, inputs.strategy_id)
+
+            await self._snapshot_fetchrow(
+                PG_UPSERT_QUERY,
+                *build_pg_upsert_args(inputs, request, now, total_value_usd),
+            )
             logger.debug("Portfolio metrics saved for strategy=%s", inputs.strategy_id)
             return gateway_pb2.SaveMetricsResponse(success=True)
         except Exception as e:

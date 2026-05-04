@@ -284,10 +284,21 @@ async def test_postgres_branch_success(service, context):
     """When the pg pool is present, the RPC issues the UPSERT and returns success.
 
     Pins: exactly one ``_snapshot_fetchrow`` call with the agent_id /
-    timestamp / metric fields passed positionally in the documented order.
+    timestamp / metric fields passed positionally in the documented order,
+    plus the VIB-3933 finding-#1 fields ``total_value_usd`` and
+    ``positions_json`` resolved from the latest snapshot.
     """
     service._snapshot_pool = MagicMock()  # truthy => PostgreSQL branch
     service._snapshot_fetchrow = AsyncMock(return_value={"agent_id": "strat-pg"})
+
+    # VIB-3933 finding #1: PG path now reads latest snapshot for total_value_usd
+    # before issuing the UPSERT (parity with SQLite). Provide a warm backend
+    # mock that returns a snapshot with a known value.
+    snapshot = MagicMock()
+    snapshot.total_value_usd = Decimal("12345.67")
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=snapshot)
+    _install_warm_backend(service, warm)
 
     request = _make_request(
         strategy_id="strat-pg",
@@ -310,7 +321,7 @@ async def test_postgres_branch_success(service, context):
     service._snapshot_fetchrow.assert_awaited_once()
     # Positional args after the query string: agent_id, initial_value_usd,
     # timestamp, deposits, withdrawals, gas, deployment_id, cycle_id, mode,
-    # is_complete, now.
+    # is_complete, now, total_value_usd, positions_json.
     args = service._snapshot_fetchrow.call_args.args
     assert args[1] == "strat-pg"
     assert args[2] == "10000.50"
@@ -323,6 +334,12 @@ async def test_postgres_branch_success(service, context):
     assert args[9] == "live"
     assert args[10] is True
     assert isinstance(args[11], datetime) and args[11].tzinfo is not None
+    # VIB-3933 finding #1: snapshot's total_value_usd carried into the row.
+    assert args[12] == "12345.67"
+    # positions_json defaults to "[]" — proto carries no positions and SQLite
+    # path also writes "[]" via PortfolioMetrics dataclass default.
+    assert args[13] == "[]"
+    warm.get_latest_snapshot.assert_awaited_once_with("strat-pg")
 
 
 @pytest.mark.asyncio

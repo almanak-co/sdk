@@ -1,0 +1,826 @@
+"""Unit tests for ``PostgresStore`` reader methods (VIB-3933).
+
+These tests stub the asyncpg pool with a recording fake so we can pin
+down the SQL shape (column list, WHERE clause, ORDER BY) and confirm the
+row → framework-type conversion matches the SQLite contract that
+:class:`DashboardService` and ``quant_aggregations.build_quant_header``
+already consume.
+
+What is intentionally NOT covered here:
+  - End-to-end Postgres behaviour. That belongs in
+    ``tests/integration/gateway/test_dashboard_postgres_parity.py``
+    (Phase 3 of the VIB-3933 plan), which spins up a real DB.
+  - Type validation of asyncpg's parameter binding. asyncpg does that.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from almanak.framework.state.state_manager import (
+    PostgresStore,
+    _pg_row_to_accounting_event_dict,
+    _pg_row_to_ledger_entry,
+    _pg_row_to_portfolio_metrics,
+    _pg_row_to_portfolio_snapshot,
+    _pg_row_to_position_event_dict,
+)
+
+
+_AGENT_ID = "AccountingQuantLPStrategy:abc123"
+_DEPLOYMENT_ID = _AGENT_ID  # 1:1 hosted convention
+
+
+# =============================================================================
+# Fake asyncpg pool
+# =============================================================================
+
+
+class _FakeConn:
+    """Records the SQL + args of each call; returns canned rows."""
+
+    def __init__(self, fetch_rows: list | None = None, fetchrow_row: dict | None = None) -> None:
+        self.fetch_rows = fetch_rows or []
+        self.fetchrow_row = fetchrow_row
+        self.calls: list[tuple[str, str, tuple]] = []
+
+    async def fetch(self, sql: str, *args):
+        self.calls.append(("fetch", sql, args))
+        return self.fetch_rows
+
+    async def fetchrow(self, sql: str, *args):
+        self.calls.append(("fetchrow", sql, args))
+        return self.fetchrow_row
+
+
+class _FakePool:
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self._conn
+
+
+def _make_store(conn: _FakeConn) -> PostgresStore:
+    """Return a PostgresStore wired to a fake pool, skipping initialize()."""
+    store = PostgresStore(database_url="postgresql://fake/fake")
+    store._pool = _FakePool(conn)  # type: ignore[assignment]
+    store._initialized = True
+    return store
+
+
+# =============================================================================
+# Snapshot readers
+# =============================================================================
+
+
+def _snapshot_row(**overrides):
+    base = {
+        "agent_id": _AGENT_ID,
+        "timestamp": datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC),
+        "iteration_number": 5,
+        "total_value_usd": "1234.50",
+        "available_cash_usd": "100.00",
+        "deployed_capital_usd": "1100.00",
+        "wallet_total_value_usd": "1234.50",
+        "value_confidence": "HIGH",
+        "positions_text": "[]",
+        "token_prices_text": "{}",
+        "wallet_balances_text": "[]",
+        "chain": "arbitrum",
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+class _DictRow(dict):
+    """asyncpg.Record-like — both [key] and .get(key) work, plus .keys()."""
+
+    def __getitem__(self, k):
+        return super().__getitem__(k)
+
+    def get(self, k, default=None):
+        return super().get(k, default)
+
+
+@pytest.mark.asyncio
+async def test_get_latest_snapshot_keys_on_agent_id_orders_desc():
+    conn = _FakeConn(fetchrow_row=_snapshot_row())
+    store = _make_store(conn)
+
+    snap = await store.get_latest_snapshot(_AGENT_ID)
+
+    assert snap is not None
+    assert snap.strategy_id == _AGENT_ID
+    assert snap.total_value_usd == Decimal("1234.50")
+    assert snap.deployed_capital_usd == Decimal("1100.00")
+    assert snap.chain == "arbitrum"
+
+    # SQL shape — agent_id filter + DESC + LIMIT 1
+    assert len(conn.calls) == 1
+    kind, sql, args = conn.calls[0]
+    assert kind == "fetchrow"
+    assert "FROM portfolio_snapshots" in sql
+    assert "WHERE agent_id = $1" in sql
+    assert "ORDER BY timestamp DESC" in sql
+    assert "LIMIT 1" in sql
+    assert args == (_AGENT_ID,)
+
+
+@pytest.mark.asyncio
+async def test_get_latest_snapshot_returns_none_on_empty():
+    conn = _FakeConn(fetchrow_row=None)
+    store = _make_store(conn)
+
+    assert await store.get_latest_snapshot(_AGENT_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_get_snapshots_since_passes_since_and_limit():
+    conn = _FakeConn(fetch_rows=[_snapshot_row(), _snapshot_row(iteration_number=6)])
+    store = _make_store(conn)
+    since = datetime(2026, 5, 1, tzinfo=UTC)
+
+    snaps = await store.get_snapshots_since(_AGENT_ID, since, limit=42)
+
+    assert len(snaps) == 2
+    kind, sql, args = conn.calls[0]
+    assert kind == "fetch"
+    assert "WHERE agent_id = $1 AND timestamp >= $2" in sql
+    assert "ORDER BY timestamp ASC" in sql
+    assert "LIMIT $3" in sql
+    assert args == (_AGENT_ID, since, 42)
+
+
+@pytest.mark.asyncio
+async def test_get_snapshot_at_uses_at_or_before_filter():
+    conn = _FakeConn(fetchrow_row=_snapshot_row())
+    store = _make_store(conn)
+    ts = datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC)
+
+    snap = await store.get_snapshot_at(_AGENT_ID, ts)
+
+    assert snap is not None
+    _, sql, args = conn.calls[0]
+    assert "WHERE agent_id = $1 AND timestamp <= $2" in sql
+    assert "ORDER BY timestamp DESC" in sql
+    assert "LIMIT 1" in sql
+    assert args == (_AGENT_ID, ts)
+
+
+# =============================================================================
+# Portfolio metrics
+# =============================================================================
+
+
+def _metrics_row(**overrides):
+    base = {
+        "agent_id": _AGENT_ID,
+        "initial_value_usd": "10000.00",
+        "initial_timestamp": datetime(2026, 5, 1, tzinfo=UTC),
+        "deposits_usd": "500.00",
+        "withdrawals_usd": "100.00",
+        "gas_spent_usd": "12.34",
+        "total_value_usd": "11000.00",
+        "positions_text": "[]",
+        "cycle_id": "cycle-42",
+        "deployment_id": _DEPLOYMENT_ID,
+        "execution_mode": "live",
+        "is_complete": True,
+        "updated_at": datetime(2026, 5, 4, tzinfo=UTC),
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_metrics_keys_on_agent_id():
+    conn = _FakeConn(fetchrow_row=_metrics_row())
+    store = _make_store(conn)
+
+    metrics = await store.get_portfolio_metrics(_AGENT_ID)
+
+    assert metrics is not None
+    assert metrics.strategy_id == _AGENT_ID
+    assert metrics.initial_value_usd == Decimal("10000.00")
+    assert metrics.execution_mode == "live"
+    assert metrics.is_complete is True
+
+    _, sql, args = conn.calls[0]
+    assert "FROM portfolio_metrics" in sql
+    assert "WHERE agent_id = $1" in sql
+    assert args == (_AGENT_ID,)
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_metrics_returns_none_on_empty():
+    conn = _FakeConn(fetchrow_row=None)
+    store = _make_store(conn)
+
+    assert await store.get_portfolio_metrics(_AGENT_ID) is None
+
+
+# =============================================================================
+# Ledger entries
+# =============================================================================
+
+
+def _ledger_row(**overrides):
+    base = {
+        "id": "tx-1",
+        "cycle_id": "cycle-1",
+        "agent_id": _AGENT_ID,
+        "deployment_id": _DEPLOYMENT_ID,
+        "execution_mode": "live",
+        "timestamp": datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC),
+        "intent_type": "LP_OPEN",
+        "token_in": "USDC",
+        "amount_in": "1000",
+        "token_out": "WETH",
+        "amount_out": "0.3",
+        "effective_price": "3333.0",
+        "slippage_bps": 12.5,
+        "gas_used": 250000,
+        "gas_usd": "1.50",
+        "tx_hash": "0xabc",
+        "chain": "arbitrum",
+        "protocol": "uniswap_v3",
+        "success": True,
+        "error": "",
+        "extracted_data_text": '{"k":"v"}',
+        "price_inputs_text": "{}",
+        "pre_state_text": "{}",
+        "post_state_text": "{}",
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+@pytest.mark.asyncio
+async def test_get_ledger_entries_minimal_filters():
+    conn = _FakeConn(fetch_rows=[_ledger_row()])
+    store = _make_store(conn)
+
+    entries = await store.get_ledger_entries(_AGENT_ID, limit=50)
+
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.id == "tx-1"
+    assert e.intent_type == "LP_OPEN"
+    assert e.slippage_bps == 12.5
+    assert e.success is True
+    assert e.extracted_data_json == '{"k":"v"}'
+
+    _, sql, args = conn.calls[0]
+    assert "FROM transaction_ledger" in sql
+    assert "WHERE agent_id = $1" in sql
+    assert "LIMIT $2" in sql  # limit is the only extra param
+    assert "ORDER BY timestamp DESC" in sql
+    assert args == (_AGENT_ID, 50)
+
+
+@pytest.mark.asyncio
+async def test_get_ledger_entries_with_all_filters():
+    conn = _FakeConn(fetch_rows=[])
+    store = _make_store(conn)
+    since = datetime(2026, 5, 1, tzinfo=UTC)
+    before = datetime(2026, 5, 4, tzinfo=UTC)
+
+    await store.get_ledger_entries(
+        _AGENT_ID,
+        since=since,
+        intent_type="LP_OPEN",
+        limit=100,
+        before=before,
+    )
+
+    _, sql, args = conn.calls[0]
+    assert "agent_id = $1" in sql
+    assert "timestamp > $2" in sql
+    assert "timestamp < $3" in sql
+    assert "intent_type = $4" in sql
+    assert "LIMIT $5" in sql
+    assert args == (_AGENT_ID, since, before, "LP_OPEN", 100)
+
+
+# =============================================================================
+# Accounting events
+# =============================================================================
+
+
+def _ae_row(**overrides):
+    base = {
+        "id": "ae-1",
+        "deployment_id": _DEPLOYMENT_ID,
+        "agent_id": _AGENT_ID,
+        "cycle_id": "cycle-1",
+        "execution_mode": "live",
+        "timestamp": datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC),
+        "chain": "arbitrum",
+        "protocol": "uniswap_v3",
+        "wallet_address": "0xwallet",
+        "event_type": "LP_OPEN",
+        "position_key": "uniswap_v3:arbitrum:0xpool:0xnft#1234",
+        "ledger_entry_id": "tx-1",
+        "tx_hash": "0xabc",
+        "confidence": "HIGH",
+        "payload_text": '{"cost_basis_usd":"1000"}',
+        "schema_version": 2,
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+@pytest.mark.asyncio
+async def test_get_accounting_events_keys_on_deployment_id():
+    conn = _FakeConn(fetch_rows=[_ae_row()])
+    store = _make_store(conn)
+
+    rows = await store.get_accounting_events(_DEPLOYMENT_ID)
+
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["id"] == "ae-1"
+    assert r["event_type"] == "LP_OPEN"
+    assert r["payload_json"] == '{"cost_basis_usd":"1000"}'
+    assert r["timestamp"].startswith("2026-05-04T")
+    # SQLite parity: deployment_id, agent_id, strategy_id all present in dict
+    assert r["deployment_id"] == _DEPLOYMENT_ID
+    assert r["strategy_id"] == _AGENT_ID
+
+    _, sql, args = conn.calls[0]
+    assert "FROM accounting_events" in sql
+    assert "WHERE deployment_id = $1" in sql
+    assert "ORDER BY timestamp ASC" in sql
+    assert args == (_DEPLOYMENT_ID, 500)
+
+
+@pytest.mark.asyncio
+async def test_get_accounting_events_with_filters():
+    conn = _FakeConn(fetch_rows=[])
+    store = _make_store(conn)
+
+    await store.get_accounting_events(
+        _DEPLOYMENT_ID,
+        event_type="LP_OPEN",
+        position_key="some_pos",
+        limit=10,
+    )
+
+    _, sql, args = conn.calls[0]
+    assert "deployment_id = $1" in sql
+    assert "event_type = $2" in sql
+    assert "position_key = $3" in sql
+    assert "LIMIT $4" in sql
+    assert args == (_DEPLOYMENT_ID, "LP_OPEN", "some_pos", 10)
+
+
+# =============================================================================
+# Position events
+# =============================================================================
+
+
+def _pe_row(**overrides):
+    base = {
+        "id": "pe-1",
+        "agent_id": _AGENT_ID,
+        "deployment_id": _DEPLOYMENT_ID,
+        "cycle_id": "cycle-1",
+        "execution_mode": "live",
+        "position_id": "1234",
+        "position_type": "LP",
+        "event_type": "OPEN",
+        "timestamp": datetime(2026, 5, 4, 9, 0, 0, tzinfo=UTC),
+        "protocol": "uniswap_v3",
+        "chain": "arbitrum",
+        "token0": "USDC",
+        "token1": "WETH",
+        "amount0": "1000",
+        "amount1": "0.3",
+        "value_usd": "2000",
+        "tick_lower": -100,
+        "tick_upper": 100,
+        "liquidity": "12345",
+        "in_range": True,
+        "fees_token0": "0",
+        "fees_token1": "0",
+        "leverage": "",
+        "entry_price": "",
+        "mark_price": "",
+        "unrealized_pnl": "",
+        "is_long": None,
+        "tx_hash": "0xabc",
+        "gas_usd": "1.50",
+        "ledger_entry_id": "tx-1",
+        "attribution_text": "{}",
+        "attribution_version": 1,
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+@pytest.mark.asyncio
+async def test_get_position_events_dict_keys_on_deployment_id():
+    conn = _FakeConn(fetch_rows=[_pe_row()])
+    store = _make_store(conn)
+
+    rows = await store.get_position_events_dict(_DEPLOYMENT_ID)
+
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["id"] == "pe-1"
+    assert r["position_type"] == "LP"
+    assert r["event_type"] == "OPEN"
+    assert r["in_range"] is True
+    assert r["timestamp"].startswith("2026-05-04T")
+
+    _, sql, args = conn.calls[0]
+    assert "FROM position_events" in sql
+    assert "WHERE deployment_id = $1" in sql
+    assert "ORDER BY timestamp ASC" in sql
+    assert args == (_DEPLOYMENT_ID,)
+
+
+@pytest.mark.asyncio
+async def test_get_position_events_dict_with_all_filters():
+    conn = _FakeConn(fetch_rows=[])
+    store = _make_store(conn)
+
+    await store.get_position_events_dict(
+        _DEPLOYMENT_ID,
+        position_id="42",
+        position_type="LP",
+        event_type="CLOSE",
+    )
+
+    _, sql, args = conn.calls[0]
+    assert "deployment_id = $1" in sql
+    assert "position_id = $2" in sql
+    assert "position_type = $3" in sql
+    assert "event_type = $4" in sql
+    assert args == (_DEPLOYMENT_ID, "42", "LP", "CLOSE")
+
+
+# =============================================================================
+# Row-conversion parity (no DB needed)
+# =============================================================================
+
+
+def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
+    payload = (
+        '{"schema_version":1,"positions":[{"position_type":"LP","protocol":"u3",'
+        '"chain":"arbitrum","value_usd":"1","label":"x"}],'
+        '"metadata":{"source":"test"},"reconciliation":{"gap_usd":"0"}}'
+    )
+    row = _DictRow(
+        {
+            "agent_id": _AGENT_ID,
+            "timestamp": datetime(2026, 5, 4, tzinfo=UTC),
+            "iteration_number": 1,
+            "total_value_usd": "1",
+            "available_cash_usd": "0",
+            "deployed_capital_usd": "1",
+            "wallet_total_value_usd": "1",
+            "value_confidence": "HIGH",
+            "positions_text": payload,
+            "token_prices_text": "{}",
+            "wallet_balances_text": "[]",
+            "chain": "arbitrum",
+        }
+    )
+    snap = _pg_row_to_portfolio_snapshot(row)
+    assert snap.strategy_id == _AGENT_ID
+    assert len(snap.positions) == 1
+    # Envelope metadata round-trips into snapshot_metadata
+    assert snap.snapshot_metadata.get("source") == "test"
+
+
+def test_pg_row_to_portfolio_metrics_defaults_missing_columns():
+    row = _DictRow(
+        {
+            "agent_id": _AGENT_ID,
+            "initial_value_usd": "100",
+            "initial_timestamp": datetime(2026, 5, 1, tzinfo=UTC),
+            "deposits_usd": None,  # NULL on legacy row → defaults to "0"
+            "withdrawals_usd": "0",
+            "gas_spent_usd": "0",
+            "total_value_usd": None,
+            "positions_text": None,
+            "cycle_id": None,
+            "deployment_id": "",
+            "execution_mode": "",
+            "is_complete": None,
+            "updated_at": datetime(2026, 5, 4, tzinfo=UTC),
+        }
+    )
+    metrics = _pg_row_to_portfolio_metrics(row)
+    assert metrics.deposits_usd == Decimal("0")
+    assert metrics.total_value_usd == Decimal("0")
+    assert metrics.positions_json == "[]"
+    assert metrics.is_complete is True
+
+
+def test_pg_row_to_ledger_entry_preserves_jsonb_text_passthrough():
+    row = _DictRow(
+        {
+            "id": "tx-1",
+            "cycle_id": "c1",
+            "agent_id": _AGENT_ID,
+            "deployment_id": _DEPLOYMENT_ID,
+            "execution_mode": "live",
+            "timestamp": datetime(2026, 5, 4, tzinfo=UTC),
+            "intent_type": "SUPPLY",
+            "token_in": "USDC",
+            "amount_in": "100",
+            "token_out": "aUSDC",
+            "amount_out": "100",
+            "effective_price": "1",
+            "slippage_bps": None,  # optional field
+            "gas_used": 100000,
+            "gas_usd": "0.50",
+            "tx_hash": "0xa",
+            "chain": "arbitrum",
+            "protocol": "aave_v3",
+            "success": True,
+            "error": "",
+            "extracted_data_text": '{"protocol_fees":{"total_usd":"0"}}',
+            "price_inputs_text": '{"USDC":"1.0"}',
+            "pre_state_text": "{}",
+            "post_state_text": "{}",
+        }
+    )
+    entry = _pg_row_to_ledger_entry(row)
+    assert entry.id == "tx-1"
+    assert entry.slippage_bps is None  # tri-state preserved
+    assert entry.extracted_data_json.startswith("{")
+    assert entry.price_inputs_json == '{"USDC":"1.0"}'
+
+
+def test_pg_row_to_accounting_event_dict_matches_sqlite_keys():
+    row = _ae_row()
+    d = _pg_row_to_accounting_event_dict(row)
+    # The SQLite version returns a dict with exactly these keys; consumer
+    # parity is the contract.
+    expected_keys = {
+        "id",
+        "deployment_id",
+        "agent_id",
+        "strategy_id",
+        "cycle_id",
+        "execution_mode",
+        "timestamp",
+        "chain",
+        "protocol",
+        "wallet_address",
+        "event_type",
+        "position_key",
+        "ledger_entry_id",
+        "tx_hash",
+        "confidence",
+        "payload_json",
+        "schema_version",
+    }
+    assert expected_keys.issubset(d.keys())
+    assert d["payload_json"] == '{"cost_basis_usd":"1000"}'
+    assert d["schema_version"] == 2
+
+
+def test_pg_row_to_position_event_dict_preserves_tri_state_in_range():
+    row = _pe_row(in_range=None)
+    d = _pg_row_to_position_event_dict(row)
+    # in_range tri-state matters for the dashboard's primary-risk gauge
+    # (VIB-3893): None must not collapse to False.
+    assert d["in_range"] is None
+
+
+def test_pg_row_to_position_event_dict_emits_protocol_fees_sentinel():
+    """``protocol_fees_usd`` key is present even though the column is missing
+    on hosted metrics_db (review finding #3).
+
+    Verified against the live staging schema 2026-05-04: ``position_events``
+    has 33 columns, ``protocol_fees_usd`` is not among them. The column was
+    added to SDK SQLite by VIB-3205 but missed by the same-day metrics-
+    database reconcile commit (timing race with PR #1602 merge).
+
+    Until the metrics-database migration lands, this converter emits ``""``
+    so consumers (GetTradeTape, lp_report) get a stable dict shape — per
+    AGENTS.md "Empty ≠ zero", ``""`` honestly means "source did not emit".
+    """
+    d = _pg_row_to_position_event_dict(_pe_row())
+    assert "protocol_fees_usd" in d
+    assert d["protocol_fees_usd"] == ""
+
+
+def test_position_event_dict_keyset_parity_pg_vs_sqlite():
+    """SQLite and Postgres position_event dicts must expose identical keys.
+
+    Regression for review finding #3: a future schema-drift migration that
+    adds a column to one backend but not the other (or to neither) must
+    not silently produce different dict shapes downstream — that was
+    exactly how protocol_fees_usd slipped between the SDK and metrics_db.
+
+    Compares the field set produced by each converter against a fresh
+    fixture row with all advertised columns populated.
+    """
+    pg_dict = _pg_row_to_position_event_dict(_pe_row())
+
+    # Build a SQLite-row-shape dict to feed the SQLite converter. SQLite's
+    # ``get_position_events_sync`` returns ``dict(sqlite3.Row)`` directly
+    # — we mimic that here so the comparison is over public output keys.
+    sqlite_row_dict = {
+        "id": "pe-1",
+        "deployment_id": _DEPLOYMENT_ID,
+        "cycle_id": "cycle-1",
+        "execution_mode": "live",
+        "position_id": "1234",
+        "position_type": "LP",
+        "event_type": "OPEN",
+        "timestamp": "2026-05-04T09:00:00+00:00",
+        "protocol": "uniswap_v3",
+        "chain": "arbitrum",
+        "token0": "USDC",
+        "token1": "WETH",
+        "amount0": "1000",
+        "amount1": "0.3",
+        "value_usd": "2000",
+        "tick_lower": -100,
+        "tick_upper": 100,
+        "liquidity": "12345",
+        "in_range": True,
+        "fees_token0": "0",
+        "fees_token1": "0",
+        "leverage": "",
+        "entry_price": "",
+        "mark_price": "",
+        "unrealized_pnl": "",
+        "is_long": None,
+        "tx_hash": "0xabc",
+        "gas_usd": "1.50",
+        "ledger_entry_id": "tx-1",
+        "protocol_fees_usd": "",
+        "attribution_json": "{}",
+        "attribution_version": 1,
+    }
+    # Every key SQLite returns must be present in the PG-converter output.
+    # (PG output may carry extras like ``agent_id`` — those are additive,
+    # not regressive — but it must not LOSE any SQLite key.)
+    missing_on_pg = set(sqlite_row_dict.keys()) - set(pg_dict.keys())
+    assert not missing_on_pg, (
+        f"PG position_event dict is missing keys present on SQLite: {missing_on_pg}. "
+        "If you added a column to one backend, add it (or its sentinel) to the other."
+    )
+
+
+# =============================================================================
+# Dashboard dispatch — VIB-3933 review finding #2
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_dashboard_dispatch_prefers_sqlite_sync_for_accounting_events():
+    """SQLite-side dashboard reads must use the sync ASC/no-LIMIT contract.
+
+    Regression for VIB-3933 review finding #2: an earlier dispatch
+    preferred ``get_accounting_events`` (async DESC LIMIT 500) over the
+    sync ASC unlimited path, which silently changed local-mode dashboard
+    semantics. SQLite should hit the sync path.
+    """
+    from almanak.framework.state.state_manager import StateManager
+
+    sm = StateManager.__new__(StateManager)
+    sm._initialized = True
+    sm._unimplemented_logged = set()
+
+    sync_calls: list = []
+    async_calls: list = []
+
+    class _SQLiteLike:
+        def get_accounting_events_sync(self, deployment_id, position_key=None):
+            sync_calls.append((deployment_id, position_key))
+            return [{"id": "from-sync"}]
+
+        async def get_accounting_events(self, deployment_id, event_type=None, position_key=None, limit=500):
+            async_calls.append((deployment_id, limit))
+            return [{"id": "from-async"}]
+
+    sm._warm = _SQLiteLike()  # type: ignore[assignment]
+
+    rows = await sm.get_accounting_events_for_dashboard("dep-1")
+
+    assert rows == [{"id": "from-sync"}]
+    assert sync_calls == [("dep-1", None)]
+    assert async_calls == []  # async path must NOT be reached on SQLite
+
+
+@pytest.mark.asyncio
+async def test_dashboard_dispatch_uses_async_when_only_async_available():
+    """PostgresStore exposes only the async method; dispatch must use it."""
+    from almanak.framework.state.state_manager import StateManager
+
+    sm = StateManager.__new__(StateManager)
+    sm._initialized = True
+    sm._unimplemented_logged = set()
+
+    async_calls: list = []
+
+    class _PostgresLike:
+        async def get_accounting_events(self, deployment_id, event_type=None, position_key=None, limit=500):
+            async_calls.append((deployment_id, limit))
+            return [{"id": "from-pg"}]
+
+    sm._warm = _PostgresLike()  # type: ignore[assignment]
+
+    rows = await sm.get_accounting_events_for_dashboard("dep-1")
+
+    assert rows == [{"id": "from-pg"}]
+    # Effectively-unbounded limit mirrors SQLite sync's no-LIMIT contract.
+    assert async_calls == [("dep-1", 10**9)]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_dispatch_prefers_sqlite_sync_for_position_events():
+    """Same dispatch order for position events (VIB-3933 finding #2)."""
+    from almanak.framework.state.state_manager import StateManager
+
+    sm = StateManager.__new__(StateManager)
+    sm._initialized = True
+    sm._unimplemented_logged = set()
+
+    sync_calls: list = []
+    async_calls: list = []
+
+    class _SQLiteLike:
+        def get_position_events_sync(self, deployment_id, position_id=None, position_type=None, event_type=None):
+            sync_calls.append(deployment_id)
+            return [{"id": "from-sync"}]
+
+        async def get_position_events_dict(self, deployment_id, **kwargs):
+            async_calls.append(deployment_id)
+            return [{"id": "from-async"}]
+
+    sm._warm = _SQLiteLike()  # type: ignore[assignment]
+
+    rows = await sm.get_position_events_for_dashboard("dep-1")
+
+    assert rows == [{"id": "from-sync"}]
+    assert async_calls == []
+
+
+# =============================================================================
+# PG metrics writer parity — VIB-3933 review finding #1
+# =============================================================================
+
+
+def test_pg_upsert_query_includes_total_value_and_positions_columns():
+    """The PG UPSERT must persist total_value_usd and positions_json (VIB-3933 finding #1).
+
+    Without these columns being written, the schema default '0' leaks
+    through to GetPortfolioMetrics and dashboards render $0 NAV despite
+    snapshots existing. Mirror of SQLite's writer at sqlite.py:2253.
+    """
+    from almanak.gateway.services._save_metrics_helpers import PG_UPSERT_QUERY
+
+    # INSERT column list must include both fields.
+    assert "total_value_usd" in PG_UPSERT_QUERY
+    assert "positions_json" in PG_UPSERT_QUERY
+    # On UPDATE conflict path, both must also be refreshed (otherwise the
+    # second row a strategy ever writes still loses the value).
+    assert "total_value_usd = EXCLUDED.total_value_usd" in PG_UPSERT_QUERY
+    assert "positions_json = EXCLUDED.positions_json" in PG_UPSERT_QUERY
+
+
+def test_build_pg_upsert_args_appends_total_value_and_positions():
+    """Positional args must end with total_value_usd then positions_json."""
+    from almanak.gateway.proto import gateway_pb2
+    from almanak.gateway.services._save_metrics_helpers import (
+        ParsedMetricsInputs,
+        build_pg_upsert_args,
+    )
+
+    inputs = ParsedMetricsInputs(
+        strategy_id=_AGENT_ID,
+        initial_value_usd=Decimal("100"),
+        deposits_usd=Decimal("0"),
+        withdrawals_usd=Decimal("0"),
+        gas_spent_usd=Decimal("0"),
+        timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    request = gateway_pb2.SaveMetricsRequest()
+    now = datetime(2026, 5, 4, tzinfo=UTC)
+
+    args = build_pg_upsert_args(inputs, request, now, Decimal("12345.67"))
+
+    # Length matches $1..$13 placeholders in PG_UPSERT_QUERY.
+    assert len(args) == 13
+    assert args[11] == "12345.67"  # total_value_usd
+    assert args[12] == "[]"  # positions_json default
+
+    # Override positions_json explicitly.
+    args2 = build_pg_upsert_args(inputs, request, now, Decimal("0"), positions_json='[{"x":1}]')
+    assert args2[12] == '[{"x":1}]'
