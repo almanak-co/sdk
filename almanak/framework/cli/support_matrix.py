@@ -142,14 +142,8 @@ def _build_matrix() -> dict:  # noqa: C901
     except ImportError:
         pass
 
-    # Joe Lend (Banker Joe) — Avalanche Compound V2 fork
-    try:
-        from almanak.framework.connectors.joelend.adapter import JoeLendAdapter  # noqa: F401
-
-        lending_protocols.setdefault("joelend", set()).add("avalanche")
-        all_chains.add("avalanche")
-    except ImportError:
-        pass
+    # Joe Lend (Banker Joe) — DORMANT (governance wound down the protocol; VIB-3960).
+    # Connector kept in-tree only for historical receipt parsing; full removal in July.
 
     # Jupiter Lend — Solana isolated-vault lending
     try:

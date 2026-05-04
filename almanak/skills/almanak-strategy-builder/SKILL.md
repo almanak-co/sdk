@@ -1343,7 +1343,7 @@ class MyStrategy(IntentStrategy):
 | Radiant V2 | `RADIANT_V2` | Lending | `radiant_v2` |
 | LiFi | `LIFI` | Bridge | `lifi` |
 | BenQi | `BENQI` | Lending | `benqi` |
-| Joe Lend | `JOE_LEND` | Lending | `joelend` |
+| Joe Lend (DORMANT) | `JOE_LEND` | Lending — wound down on-chain (VIB-3960); compiler short-circuits. Do NOT use. | `joelend` |
 | Silo V2 | `SILO_V2` | Lending | `silo_v2` |
 | Euler V2 | `EULER_V2` | Lending | `euler_v2` |
 | Vault | `VAULT` | ERC-4626 | `vault` |

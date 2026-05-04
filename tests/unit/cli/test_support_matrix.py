@@ -273,7 +273,7 @@ class TestPreviouslyMissingConnectors:
         ("name", "category", "expected_chains"),
         [
             ("silo_v2", "lending", {"avalanche"}),
-            ("joelend", "lending", {"avalanche"}),
+            # joelend removed — Joe Lend wound down by governance; VIB-3960
             ("jupiter_lend", "lending", {"solana"}),
             ("aster_perps", "perps", {"bsc"}),
             ("pancakeswap_perps", "perps", {"bsc"}),

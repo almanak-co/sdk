@@ -1,30 +1,14 @@
-"""Joe Lend (Banker Joe) Adapter (Compound V2 fork on Avalanche).
+"""Joe Lend (Banker Joe) Adapter — DORMANT / DEPRECATED.
 
-This module provides an adapter for interacting with the Joe Lend (Banker Joe)
-lending protocol on Avalanche, supporting supply, withdraw, borrow, and repay operations.
+Joe Lend (the lending arm of Trader Joe / LFJ on Avalanche) was wound down by
+its governance in 2026. The on-chain jToken contracts now revert every
+supply/borrow/repay/withdraw call with ``Error: wind down``.
 
-Joe Lend uses a jToken model (Compound V2 architecture):
-- Each asset has a corresponding jToken (e.g., jUSDC, jAVAX)
-- Supply mints jTokens, withdraw redeems them
-- Borrowing is per-asset, collateral enabled via Joetroller.enterMarkets()
-- Interest accrues via exchange rate between jToken and underlying
-
-Supported chain: Avalanche
-
-Example:
-    from almanak.framework.connectors.joelend import JoeLendAdapter, JoeLendConfig
-
-    config = JoeLendConfig(
-        chain="avalanche",
-        wallet_address="0x...",
-    )
-    adapter = JoeLendAdapter(config)
-
-    # Supply USDC
-    result = adapter.supply(asset="USDC", amount=Decimal("1000"))
-
-    # Borrow AVAX against USDC collateral
-    result = adapter.borrow(asset="AVAX", amount=Decimal("10"))
+This connector is kept in-tree only so historical receipts can still be
+parsed; any attempt to instantiate ``JoeLendAdapter`` raises
+``JoeLendDeprecatedError`` immediately. Dormancy was introduced in
+VIB-3960; full removal of the connector dir, helpers, and receipt
+parser is tracked in VIB-3963 (target: July).
 """
 
 from __future__ import annotations
@@ -38,6 +22,24 @@ if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
 
 logger = logging.getLogger(__name__)
+
+
+class JoeLendDeprecatedError(RuntimeError):
+    """Raised on any attempt to use the Joe Lend connector.
+
+    The protocol was wound down by governance; on-chain calls revert with
+    ``Error: wind down``. We fail fast here rather than letting strategies
+    discover the wind-down only after a real submission attempt.
+    """
+
+
+_DEPRECATION_MESSAGE = (
+    "Joe Lend (Banker Joe) was wound down by its governance and is no longer "
+    "operational on Avalanche. All supply/borrow/repay/withdraw calls revert "
+    "on-chain with 'Error: wind down'. The connector has been retired from "
+    "the Almanak SDK supported-protocol surface (VIB-3960). Full removal "
+    "tracked in VIB-3963."
+)
 
 
 # =============================================================================
@@ -181,12 +183,19 @@ class JoeLendAdapter:
     operations using the jToken (Compound V2) architecture.
     """
 
+    # Class-level attribute declarations so mypy can type-check the (now
+    # unreachable) instance methods that reference them. Construction always
+    # raises JoeLendDeprecatedError before these would be set on an instance,
+    # so the values are immaterial — the declarations exist only for static
+    # analysis until the July full-removal (VIB-3963).
+    config: JoeLendConfig
+    chain: str
+    wallet_address: str
+    joetroller_address: str = JOELEND_JOETROLLER_ADDRESS
+    token_resolver: TokenResolverType | None = None
+
     def __init__(self, config: JoeLendConfig, token_resolver: TokenResolverType | None = None) -> None:
-        self.config = config
-        self.chain = config.chain
-        self.wallet_address = config.wallet_address
-        self.joetroller_address = JOELEND_JOETROLLER_ADDRESS
-        self.token_resolver = token_resolver
+        raise JoeLendDeprecatedError(_DEPRECATION_MESSAGE)
 
     def _resolve_asset_key(self, asset: str) -> str | None:
         """Resolve asset symbol to canonical JOELEND_J_TOKENS key.

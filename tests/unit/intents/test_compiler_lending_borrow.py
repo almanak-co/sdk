@@ -160,7 +160,6 @@ class TestDispatcher:
             "spark",
             "compound_v3",
             "benqi",
-            "joelend",
             "euler_v2",
             "silo_v2",
         ):
@@ -1070,144 +1069,6 @@ class TestBenqiHelper:
 # ---------------------------------------------------------------------------
 
 
-JOELEND_J = "almanak.framework.connectors.joelend.adapter.JOELEND_J_TOKENS"
-JOELEND_ADAPTER = "almanak.framework.connectors.joelend.adapter.JoeLendAdapter"
-JOELEND_CONFIG = "almanak.framework.connectors.joelend.adapter.JoeLendConfig"
-
-
-class TestJoeLendHelper:
-    def test_non_avalanche_fails(self):
-        compiler = _mock_compiler(chain="ethereum")
-        intent = _borrow_intent(protocol="joelend")
-        result = cl._compile_borrow_joelend(
-            compiler, intent, _mock_token("WAVAX", decimals=18), _mock_token("USDC"), Decimal("1")
-        )
-        assert result.status == CompilationStatus.FAILED
-        assert "Joe Lend is only available on Avalanche" in result.error
-
-    def test_unknown_collateral_asset_fails(self):
-        compiler = _mock_compiler(chain="avalanche")
-        with (
-            patch(JOELEND_J, {"WAVAX": object()}),
-            patch(JOELEND_ADAPTER) as mock_adapter_cls,
-            patch(JOELEND_CONFIG),
-        ):
-            mock_adapter = MagicMock()
-            mock_adapter.joetroller_address = "0xjoe"
-            mock_adapter.get_market_info.return_value = None
-            mock_adapter_cls.return_value = mock_adapter
-            intent = _borrow_intent(protocol="joelend", collateral_token="XYZ")
-            result = cl._compile_borrow_joelend(
-                compiler, intent, _mock_token("XYZ", decimals=18), _mock_token("USDC"), Decimal("1")
-            )
-        assert result.status == CompilationStatus.FAILED
-        assert "Joe Lend does not support collateral asset" in result.error
-
-    def test_success_with_erc20_collateral(self):
-        compiler = _mock_compiler(chain="avalanche")
-        with patch(JOELEND_ADAPTER) as mock_adapter_cls, patch(JOELEND_CONFIG):
-            mock_adapter = MagicMock()
-            mock_adapter.joetroller_address = "0xjoe"
-            collateral_market = MagicMock()
-            collateral_market.j_token_address = "0xjtok"
-            collateral_market.underlying_address = None
-            mock_adapter.get_market_info.return_value = collateral_market
-            mock_adapter.supply.return_value = _mock_tx_result()
-            mock_adapter.enter_markets.return_value = _mock_tx_result()
-            mock_adapter.borrow.return_value = _mock_tx_result()
-            mock_adapter_cls.return_value = mock_adapter
-            intent = _borrow_intent(protocol="joelend", collateral_token="USDC")
-            result = cl._compile_borrow_joelend(
-                compiler, intent, _mock_token("USDC", decimals=6), _mock_token("USDT"), Decimal("100")
-            )
-        assert result.status == CompilationStatus.SUCCESS
-        assert result.action_bundle.metadata["protocol"] == "joelend"
-
-    def test_native_collateral_wraps(self):
-        compiler = _mock_compiler(chain="avalanche")
-        with patch(JOELEND_ADAPTER) as mock_adapter_cls, patch(JOELEND_CONFIG):
-            mock_adapter = MagicMock()
-            mock_adapter.joetroller_address = "0xjoe"
-            collateral_market = MagicMock()
-            collateral_market.j_token_address = "0xjtok"
-            collateral_market.underlying_address = "0xwavax"
-            mock_adapter.get_market_info.return_value = collateral_market
-            mock_adapter.supply.return_value = _mock_tx_result()
-            mock_adapter.enter_markets.return_value = _mock_tx_result()
-            mock_adapter.borrow.return_value = _mock_tx_result()
-            mock_adapter_cls.return_value = mock_adapter
-            intent = _borrow_intent(protocol="joelend", collateral_token="AVAX")
-            result = cl._compile_borrow_joelend(
-                compiler,
-                intent,
-                _mock_token("AVAX", decimals=18, is_native=True),
-                _mock_token("USDC"),
-                Decimal("1"),
-            )
-        assert result.status == CompilationStatus.SUCCESS
-        assert result.transactions[0].tx_type == "wrap_native"
-
-    def test_supply_failure(self):
-        compiler = _mock_compiler(chain="avalanche")
-        with patch(JOELEND_ADAPTER) as mock_adapter_cls, patch(JOELEND_CONFIG):
-            mock_adapter = MagicMock()
-            mock_adapter.joetroller_address = "0xjoe"
-            collateral_market = MagicMock()
-            collateral_market.j_token_address = "0xjtok"
-            collateral_market.underlying_address = None
-            mock_adapter.get_market_info.return_value = collateral_market
-            mock_adapter.supply.return_value = _mock_failed_result("bad supply")
-            mock_adapter_cls.return_value = mock_adapter
-            intent = _borrow_intent(protocol="joelend", collateral_token="USDC")
-            result = cl._compile_borrow_joelend(
-                compiler, intent, _mock_token("USDC", decimals=6), _mock_token("USDT"), Decimal("100")
-            )
-        assert result.status == CompilationStatus.FAILED
-        assert "Joe Lend supply collateral failed" in result.error
-
-    def test_enter_markets_failure(self):
-        compiler = _mock_compiler(chain="avalanche")
-        with patch(JOELEND_ADAPTER) as mock_adapter_cls, patch(JOELEND_CONFIG):
-            mock_adapter = MagicMock()
-            mock_adapter.joetroller_address = "0xjoe"
-            collateral_market = MagicMock()
-            collateral_market.j_token_address = "0xjtok"
-            collateral_market.underlying_address = None
-            mock_adapter.get_market_info.return_value = collateral_market
-            mock_adapter.supply.return_value = _mock_tx_result()
-            mock_adapter.enter_markets.return_value = _mock_failed_result("not listed")
-            mock_adapter_cls.return_value = mock_adapter
-            intent = _borrow_intent(protocol="joelend", collateral_token="USDC")
-            result = cl._compile_borrow_joelend(
-                compiler, intent, _mock_token("USDC", decimals=6), _mock_token("USDT"), Decimal("100")
-            )
-        assert result.status == CompilationStatus.FAILED
-        assert "Joe Lend enterMarkets failed" in result.error
-
-    def test_borrow_failure(self):
-        compiler = _mock_compiler(chain="avalanche")
-        with patch(JOELEND_ADAPTER) as mock_adapter_cls, patch(JOELEND_CONFIG):
-            mock_adapter = MagicMock()
-            mock_adapter.joetroller_address = "0xjoe"
-            collateral_market = MagicMock()
-            collateral_market.j_token_address = "0xjtok"
-            collateral_market.underlying_address = None
-            mock_adapter.get_market_info.return_value = collateral_market
-            mock_adapter.supply.return_value = _mock_tx_result()
-            mock_adapter.enter_markets.return_value = _mock_tx_result()
-            mock_adapter.borrow.return_value = _mock_failed_result("oracle")
-            mock_adapter_cls.return_value = mock_adapter
-            intent = _borrow_intent(protocol="joelend", collateral_token="USDC")
-            result = cl._compile_borrow_joelend(
-                compiler, intent, _mock_token("USDC", decimals=6), _mock_token("USDT"), Decimal("100")
-            )
-        assert result.status == CompilationStatus.FAILED
-        assert "Joe Lend borrow failed" in result.error
-
-
-# ---------------------------------------------------------------------------
-# Euler V2
-# ---------------------------------------------------------------------------
 
 
 EULER_ADAPTER = "almanak.framework.connectors.euler_v2.adapter.EulerV2Adapter"
@@ -1509,6 +1370,55 @@ def test_module_exposes_all_helpers():
     ):
         assert hasattr(cl, name), f"Missing module-level helper: {name}"
 
+
+class TestJoeLendDormant:
+    """Lock the VIB-3960 dormancy contract: dispatch short-circuits and
+    adapter constructor raises. These tests are the *positive assertion*
+    that the wind-down guard fires; without them a future refactor that
+    removes the short-circuit at the top of compile_borrow would silently
+    re-route joelend intents into the (now-stub) helper functions.
+    """
+
+    def test_dispatch_returns_failed_with_deprecation_message(self):
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _borrow_intent(protocol="joelend")
+        result = cl.compile_borrow(compiler, intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "wound down" in result.error.lower()
+        # Mock-call assertion: confirms the dispatcher returned BEFORE
+        # reaching the Solana fallback (which would have invoked
+        # compiler._compile_kamino_borrow). Locks Codex P2 #1 from the PR audit.
+        compiler._compile_kamino_borrow.assert_not_called()
+        assert "VIB-3960" in result.error
+
+    def test_dispatch_short_circuits_before_solana_fallback(self):
+        """A misconfigured (joelend, solana) intent must NOT route to Kamino.
+        Codex P2 finding on PR #2023 audit."""
+        compiler = _mock_compiler(chain="solana", is_solana=True)
+        compiler._resolve_token.side_effect = lambda t, chain=None: _mock_token(symbol=t)
+
+        intent = _borrow_intent(protocol="joelend")
+        result = cl.compile_borrow(compiler, intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert "wound down" in result.error.lower()
+        # Mock-call assertion: confirms the dispatcher returned BEFORE
+        # reaching the Solana fallback (which would have invoked
+        # compiler._compile_kamino_borrow). Locks Codex P2 #1 from the PR audit.
+        compiler._compile_kamino_borrow.assert_not_called()
+
+    def test_adapter_constructor_raises_deprecated_error(self):
+        from almanak.framework.connectors.joelend.adapter import (
+            JoeLendAdapter,
+            JoeLendConfig,
+            JoeLendDeprecatedError,
+        )
+
+        with pytest.raises(JoeLendDeprecatedError, match="wound down"):
+            JoeLendAdapter(JoeLendConfig(chain="avalanche", wallet_address="0x" + "0" * 40))
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

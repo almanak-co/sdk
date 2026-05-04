@@ -36,7 +36,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [BenQi](benqi.md) | Lending | Avalanche | `benqi` |
 | [Silo V2](silo_v2.md) | Lending | Avalanche | `silo_v2` |
 | [Drift](drift.md) | Perpetuals | Solana | `drift` |
-| [Joe Lend](joelend.md) | Lending | Avalanche | `joelend` |
+| [Joe Lend](joelend.md) | Lending — DORMANT | Avalanche | `joelend` (deprecated; VIB-3960) |
 | [Euler V2](euler_v2.md) | Lending | Avalanche | `euler_v2` |
 | [Fluid DEX](fluid.md) | DEX | Ethereum, Arbitrum | `fluid` |
 | [Gimo Finance](gimo.md) | Liquid Staking | 0G Chain | `gimo` |

@@ -174,6 +174,11 @@ class Protocol(Enum):
     SILO_V2 = "SILO_V2"
     LIFI = "LIFI"
     BENQI = "BENQI"
+    # JOE_LEND retained for historical ActionBundle deserialization only —
+    # protocol wound down by governance (VIB-3960). Compiler dispatch
+    # short-circuits to CompilationStatus.FAILED with a deprecation message;
+    # adapter constructor raises JoeLendDeprecatedError. Full enum removal
+    # is part of the July full-cleanup ticket (VIB-3963).
     JOE_LEND = "JOE_LEND"
     EULER_V2 = "EULER_V2"
 

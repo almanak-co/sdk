@@ -201,7 +201,7 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
         "bsc",
     },  # SushiSwap V3 DEX — avalanche excluded: zero usable liquidity (VIB-2069)
     "benqi": {"avalanche"},  # BENQI (Compound V2 fork) on Avalanche
-    "joelend": {"avalanche"},  # Joe Lend / Banker Joe (Compound V2 fork) on Avalanche
+    # joelend removed — Joe Lend (Banker Joe) was wound down by governance; VIB-3960
     "euler_v2": {"avalanche", "ethereum"},  # Euler V2 (ERC-4626 vaults + EVC)
     "silo_v2": {"avalanche"},  # Silo V2 isolated lending on Avalanche
     "gimo": {"zerog"},  # Gimo Finance liquid staking on 0G Chain

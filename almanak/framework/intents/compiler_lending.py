@@ -36,6 +36,23 @@ MAX_UINT256 = compiler_constants.MAX_UINT256
 _AAVE_GET_RESERVE_CONFIG_SELECTOR = "0x3e150141"
 
 
+_JOELEND_DORMANT_MESSAGE = (
+    "Joe Lend (Banker Joe) was wound down by its governance and is no longer "
+    "operational on Avalanche. All on-chain calls revert with 'Error: wind "
+    "down'. The connector has been retired from the Almanak SDK supported-"
+    "protocol surface (VIB-3960). Full removal tracked in VIB-3963."
+)
+
+
+def _joelend_dormant_result(intent_id: str) -> CompilationResult:
+    """Short-circuit any joelend lending intent at compile time."""
+    return CompilationResult(
+        status=CompilationStatus.FAILED,
+        error=_JOELEND_DORMANT_MESSAGE,
+        intent_id=intent_id,
+    )
+
+
 class AssetNotCollateralEligibleError(ValueError):
     """An asset cannot be enabled as collateral on the target Aave V3 market.
 
@@ -584,6 +601,12 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:  # noqa
     try:
         protocol_lower = intent.protocol.lower()
 
+        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
+        # otherwise a (joelend, solana) intent would route to Kamino instead of
+        # failing with the deprecation message (VIB-3960).
+        if protocol_lower == "joelend":
+            return _joelend_dormant_result(intent.intent_id)
+
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_borrow_jupiter_lend(compiler, intent)
@@ -641,8 +664,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:  # noqa
             )
         if protocol_lower == "benqi":
             return _compile_borrow_benqi(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
-        if protocol_lower == "joelend":
-            return _compile_borrow_joelend(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
+        # joelend handled at the top of the function (VIB-3960 dormancy guard).
         if protocol_lower == "euler_v2":
             return _compile_borrow_euler_v2(compiler, intent, collateral_token, borrow_token, collateral_amount_decimal)
         if protocol_lower == "silo_v2":
@@ -650,7 +672,7 @@ def compile_borrow(compiler, intent: BorrowIntent) -> CompilationResult:  # noqa
 
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, euler_v2, silo_v2",
             intent_id=intent.intent_id,
         )
 
@@ -1695,187 +1717,16 @@ def _compile_borrow_joelend(
     borrow_token: Any,
     collateral_amount_decimal: Decimal,
 ) -> CompilationResult:
-    """Compile BORROW for Joe Lend (Compound V2 fork on Avalanche — Banker Joe)."""
-    from ..connectors.joelend.adapter import (
-        JOELEND_J_TOKENS,
-        JoeLendAdapter,
-        JoeLendConfig,
-    )
+    """Compile BORROW for Joe Lend — DORMANT.
 
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = []
-
-    if compiler.chain != "avalanche":
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-            intent_id=intent.intent_id,
-        )
-
-    joelend_config = JoeLendConfig(
-        chain=compiler.chain,
-        wallet_address=compiler.wallet_address,
-    )
-    joelend_adapter = JoeLendAdapter(joelend_config)
-
-    # If collateral > 0, first supply collateral + enterMarkets
-    if collateral_amount_decimal > 0:
-        collateral_symbol = collateral_token.symbol.upper()
-        jl_collateral_market = joelend_adapter.get_market_info(collateral_symbol)
-
-        if not jl_collateral_market:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Joe Lend does not support collateral asset: {collateral_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-                intent_id=intent.intent_id,
-            )
-
-        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
-
-        # If collateral is native AVAX, wrap to WAVAX first.
-        # jAVAX rejects raw native deposits ("only wrapped native contract
-        # could send native token") so we must go through WAVAX.
-        if collateral_token.is_native and jl_collateral_market.underlying_address:
-            wavax_address = jl_collateral_market.underlying_address
-            wrap_tx = TransactionData(
-                to=wavax_address,
-                value=collateral_amount_wei,
-                data="0xd0e30db0",  # WAVAX deposit() selector
-                gas_estimate=50_000,
-                description=f"Wrap {collateral_amount_decimal} AVAX to WAVAX for Joe Lend collateral",
-                tx_type="wrap_native",
-            )
-            transactions.append(wrap_tx)
-            approve_token_address = wavax_address
-        else:
-            approve_token_address = collateral_token.address
-
-        # Build approve TX for jToken
-        approve_txs = compiler._build_approve_tx(
-            approve_token_address,
-            jl_collateral_market.j_token_address,
-            collateral_amount_wei,
-        )
-        transactions.extend(approve_txs)
-
-        # Build supply (mint) TX
-        jl_supply_result = joelend_adapter.supply(
-            asset=collateral_symbol,
-            amount=collateral_amount_decimal,
-        )
-
-        if not jl_supply_result.success:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Joe Lend supply collateral failed: {jl_supply_result.error}",
-                intent_id=intent.intent_id,
-            )
-
-        assert jl_supply_result.tx_data is not None
-        supply_data = jl_supply_result.tx_data["data"]
-        if not supply_data.startswith("0x"):
-            supply_data = "0x" + supply_data
-
-        supply_tx = TransactionData(
-            to=jl_supply_result.tx_data["to"],
-            value=int(jl_supply_result.tx_data.get("value", 0)),
-            data=supply_data,
-            gas_estimate=jl_supply_result.gas_estimate,
-            description=jl_supply_result.description,
-            tx_type="lending_supply_collateral",
-        )
-        transactions.append(supply_tx)
-
-        # Build enterMarkets TX to enable as collateral
-        jl_enter_result = joelend_adapter.enter_markets([collateral_symbol])
-        if not jl_enter_result.success:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Joe Lend enterMarkets failed: {jl_enter_result.error}",
-                intent_id=intent.intent_id,
-            )
-        assert jl_enter_result.tx_data is not None
-        enter_data = jl_enter_result.tx_data["data"]
-        if not enter_data.startswith("0x"):
-            enter_data = "0x" + enter_data
-        enter_tx = TransactionData(
-            to=jl_enter_result.tx_data["to"],
-            value=0,
-            data=enter_data,
-            gas_estimate=jl_enter_result.gas_estimate,
-            description=jl_enter_result.description,
-            tx_type="lending_enter_markets",
-        )
-        transactions.append(enter_tx)
-    else:
-        warnings.append("No collateral supplied - borrowing against existing collateral")
-
-    # Build borrow TX
-    borrow_symbol = borrow_token.symbol.upper()
-    borrow_result = joelend_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
-
-    if not borrow_result.success:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend borrow failed: {borrow_result.error}",
-            intent_id=intent.intent_id,
-        )
-
-    assert borrow_result.tx_data is not None
-    borrow_data = borrow_result.tx_data["data"]
-    if not borrow_data.startswith("0x"):
-        borrow_data = "0x" + borrow_data
-
-    borrow_tx = TransactionData(
-        to=borrow_result.tx_data["to"],
-        value=int(borrow_result.tx_data.get("value", 0)),
-        data=borrow_data,
-        gas_estimate=borrow_result.gas_estimate,
-        description=borrow_result.description,
-        tx_type="lending_borrow",
-    )
-    transactions.append(borrow_tx)
-
-    # Build ActionBundle
-    total_gas = sum(tx.gas_estimate for tx in transactions)
-    action_bundle = ActionBundle(
-        intent_type=IntentType.BORROW.value,
-        transactions=[tx.to_dict() for tx in transactions],
-        metadata={
-            "protocol": intent.protocol,
-            "joetroller_address": joelend_adapter.joetroller_address,
-            "collateral_token": collateral_token.to_dict(),
-            "borrow_token": borrow_token.to_dict(),
-            "collateral_amount": str(collateral_amount_decimal),
-            "borrow_amount": str(intent.borrow_amount),
-            "chain": compiler.chain,
-        },
-    )
-
-    result.action_bundle = action_bundle
-    result.transactions = transactions
-    result.total_gas_estimate = total_gas
-    result.warnings = warnings
-
-    collateral_fmt = format_token_amount(
-        int(collateral_amount_decimal * Decimal(10**collateral_token.decimals)),
-        collateral_token.symbol,
-        collateral_token.decimals,
-    )
-    borrow_fmt = format_token_amount(
-        int(intent.borrow_amount * Decimal(10**borrow_token.decimals)),
-        borrow_token.symbol,
-        borrow_token.decimals,
-    )
-
-    logger.info(f"Compiled BORROW: Supply {collateral_fmt} (collateral) -> Borrow {borrow_fmt}")
-    logger.info(f"   Protocol: Joe Lend | Txs: {len(transactions)} | Gas: {total_gas:,}")
-
-    return result
+    The protocol was wound down by governance (VIB-3960). The compiler
+    dispatchers short-circuit ``protocol == "joelend"`` *before* this
+    helper is reachable; this body is defense-in-depth so any future
+    direct call (e.g. test patch, accidental refactor) still produces a
+    clean ``CompilationStatus.FAILED`` instead of an uncaught
+    ``JoeLendDeprecatedError`` from the adapter constructor.
+    """
+    return _joelend_dormant_result(intent.intent_id)
 
 
 def _compile_borrow_euler_v2(
@@ -2209,6 +2060,12 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:  # noqa: 
     try:
         protocol_lower = intent.protocol.lower()
 
+        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
+        # otherwise a (joelend, solana) intent would route to Kamino instead of
+        # failing with the deprecation message (VIB-3960).
+        if protocol_lower == "joelend":
+            return _joelend_dormant_result(intent.intent_id)
+
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_repay_jupiter_lend(compiler, intent)
@@ -2276,10 +2133,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:  # noqa: 
             return _compile_repay_benqi(
                 compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
             )
-        if protocol_lower == "joelend":
-            return _compile_repay_joelend(
-                compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
-            )
+        # joelend handled at the top of the function (VIB-3960 dormancy guard).
         if protocol_lower == "euler_v2":
             return _compile_repay_euler_v2(
                 compiler, intent, repay_token, repay_amount_decimal, amount_description, initial_warnings
@@ -2291,7 +2145,7 @@ def compile_repay(compiler, intent: RepayIntent) -> CompilationResult:  # noqa: 
 
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, euler_v2, silo_v2",
             intent_id=intent.intent_id,
         )
 
@@ -3141,172 +2995,16 @@ def _compile_repay_joelend(
     amount_description: str,
     initial_warnings: list[str],
 ) -> CompilationResult:
-    """Compile REPAY for Joe Lend (Compound V2 fork on Avalanche — Banker Joe)."""
-    from ..connectors.joelend.adapter import (
-        JOELEND_J_TOKENS,
-        JoeLendAdapter,
-        JoeLendConfig,
-    )
+    """Compile REPAY for Joe Lend — DORMANT.
 
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = list(initial_warnings)
-
-    if compiler.chain != "avalanche":
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-            intent_id=intent.intent_id,
-        )
-
-    joelend_config = JoeLendConfig(
-        chain=compiler.chain,
-        wallet_address=compiler.wallet_address,
-    )
-    joelend_adapter = JoeLendAdapter(joelend_config)
-
-    repay_symbol = repay_token.symbol.upper()
-    jl_repay_market = joelend_adapter.get_market_info(repay_symbol)
-
-    if not jl_repay_market:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend does not support asset: {repay_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    # If repaying native AVAX, wrap to WAVAX first.
-    # jAVAX rejects raw native deposits so we must go through WAVAX.
-    if repay_token.is_native and jl_repay_market.underlying_address:
-        # For native AVAX repay_full, recover an explicit amount because
-        # we need a concrete value for the wrap TX.
-        if intent.repay_full and not repay_amount_decimal:
-            if intent.amount is not None and intent.amount != "all" and Decimal(str(intent.amount)) > 0:
-                repay_amount_decimal = Decimal(str(intent.amount))
-                logger.info(
-                    "Recovered repay amount %s from intent for native AVAX repay_full",
-                    repay_amount_decimal,
-                )
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Joe Lend native AVAX repay_full requires an explicit positive repay amount (query debt balance first)",
-                    intent_id=intent.intent_id,
-                )
-
-        if not intent.repay_full:
-            if repay_amount_decimal is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
-                    intent_id=intent.intent_id,
-                )
-
-        assert repay_amount_decimal is not None  # guaranteed by branches above
-        wavax_address = jl_repay_market.underlying_address
-        wrap_amount = repay_amount_decimal
-        if intent.repay_full:
-            # Add 0.1% buffer to account for interest accrual between
-            # debt query and execution (matches the old native repay path).
-            wrap_amount = repay_amount_decimal * Decimal("1.001")
-        repay_amount_wei = int(wrap_amount * Decimal(10**repay_token.decimals))
-        wrap_tx = TransactionData(
-            to=wavax_address,
-            value=repay_amount_wei,
-            data="0xd0e30db0",  # WAVAX deposit() selector
-            gas_estimate=50_000,
-            description=f"Wrap {wrap_amount} AVAX to WAVAX for Joe Lend repay",
-            tx_type="wrap_native",
-        )
-        transactions.append(wrap_tx)
-        approve_token_address = wavax_address
-    else:
-        approve_token_address = repay_token.address
-
-    # Build approve TX for jToken
-    if not intent.repay_full:
-        if repay_amount_decimal is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Joe Lend repay requires an explicit amount (or use repay_full=True)",
-                intent_id=intent.intent_id,
-            )
-        repay_amount_wei = int(repay_amount_decimal * Decimal(10**repay_token.decimals))
-        approve_txs = compiler._build_approve_tx(
-            approve_token_address,
-            jl_repay_market.j_token_address,
-            repay_amount_wei,
-        )
-        transactions.extend(approve_txs)
-    else:
-        # For repay_full, approve MAX_UINT256
-        from ..connectors.joelend.adapter import MAX_UINT256 as JOELEND_MAX_UINT256
-
-        approve_txs = compiler._build_approve_tx(
-            approve_token_address,
-            jl_repay_market.j_token_address,
-            JOELEND_MAX_UINT256,
-        )
-        transactions.extend(approve_txs)
-
-    # Build repay TX
-    repay_result = joelend_adapter.repay(
-        asset=repay_symbol,
-        amount=repay_amount_decimal if repay_amount_decimal is not None else Decimal("0"),
-        repay_all=intent.repay_full,
-    )
-
-    if not repay_result.success:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend repay failed: {repay_result.error}",
-            intent_id=intent.intent_id,
-        )
-
-    assert repay_result.tx_data is not None
-    repay_data = repay_result.tx_data["data"]
-    if not repay_data.startswith("0x"):
-        repay_data = "0x" + repay_data
-
-    amount_description = "all" if intent.repay_full else str(repay_amount_decimal)
-
-    repay_tx = TransactionData(
-        to=repay_result.tx_data["to"],
-        value=int(repay_result.tx_data.get("value", 0)),
-        data=repay_data,
-        gas_estimate=repay_result.gas_estimate,
-        description=repay_result.description,
-        tx_type="lending_repay",
-    )
-    transactions.append(repay_tx)
-
-    total_gas = sum(tx.gas_estimate for tx in transactions)
-    action_bundle = ActionBundle(
-        intent_type=IntentType.REPAY.value,
-        transactions=[tx.to_dict() for tx in transactions],
-        metadata={
-            "protocol": intent.protocol,
-            "joetroller_address": joelend_adapter.joetroller_address,
-            "repay_token": repay_token.to_dict(),
-            "repay_amount": amount_description,
-            "repay_full": intent.repay_full,
-            "chain": compiler.chain,
-        },
-    )
-
-    result.action_bundle = action_bundle
-    result.transactions = transactions
-    result.total_gas_estimate = total_gas
-    result.warnings = warnings
-
-    logger.info(
-        f"Compiled REPAY: {amount_description} {repay_token.symbol} to Joe Lend, "
-        f"full={intent.repay_full}, {len(transactions)} txs, {total_gas} gas"
-    )
-    return result
+    The protocol was wound down by governance (VIB-3960). The compiler
+    dispatchers short-circuit ``protocol == "joelend"`` *before* this
+    helper is reachable; this body is defense-in-depth so any future
+    direct call (e.g. test patch, accidental refactor) still produces a
+    clean ``CompilationStatus.FAILED`` instead of an uncaught
+    ``JoeLendDeprecatedError`` from the adapter constructor.
+    """
+    return _joelend_dormant_result(intent.intent_id)
 
 
 def _compile_repay_euler_v2(
@@ -3589,6 +3287,12 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:  # noqa
     try:
         protocol_lower = intent.protocol.lower()
 
+        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
+        # otherwise a (joelend, solana) intent would route to Kamino instead of
+        # failing with the deprecation message (VIB-3960).
+        if protocol_lower == "joelend":
+            return _joelend_dormant_result(intent.intent_id)
+
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_supply_jupiter_lend(compiler, intent)
@@ -3635,8 +3339,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:  # noqa
             return _compile_supply_compound_v3(compiler, intent, supply_token, amount_decimal)
         if protocol_lower == "benqi":
             return _compile_supply_benqi(compiler, intent, supply_token, amount_decimal)
-        if protocol_lower == "joelend":
-            return _compile_supply_joelend(compiler, intent, supply_token, amount_decimal)
+        # joelend handled at the top of the function (VIB-3960 dormancy guard).
         if protocol_lower == "euler_v2":
             return _compile_supply_euler_v2(compiler, intent, supply_token, amount_decimal)
         if protocol_lower == "silo_v2":
@@ -3644,7 +3347,7 @@ def compile_supply(compiler, intent: SupplyIntent) -> CompilationResult:  # noqa
 
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, compound_v3, benqi, euler_v2, silo_v2",
             intent_id=intent.intent_id,
         )
 
@@ -4508,148 +4211,16 @@ def _compile_supply_joelend(
     supply_token: Any,
     amount_decimal: Decimal,
 ) -> CompilationResult:
-    """Compile SUPPLY for Joe Lend (Compound V2 fork on Avalanche - Banker Joe)."""
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = []
+    """Compile SUPPLY for Joe Lend — DORMANT.
 
-    from ..connectors.joelend.adapter import (
-        JOELEND_J_TOKENS,
-        JoeLendAdapter,
-        JoeLendConfig,
-    )
-
-    if compiler.chain != "avalanche":
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-            intent_id=intent.intent_id,
-        )
-
-    joelend_config = JoeLendConfig(
-        chain=compiler.chain,
-        wallet_address=compiler.wallet_address,
-    )
-    joelend_adapter = JoeLendAdapter(joelend_config)
-
-    supply_symbol = supply_token.symbol.upper()
-    jl_supply_market = joelend_adapter.get_market_info(supply_symbol)
-
-    if not jl_supply_market:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend does not support asset: {supply_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    supply_amount_wei = int(amount_decimal * Decimal(10**supply_token.decimals))
-
-    # If supplying native AVAX, wrap to WAVAX first.
-    # jAVAX rejects raw native deposits so we must go through WAVAX.
-    if supply_token.is_native and jl_supply_market.underlying_address:
-        wavax_address = jl_supply_market.underlying_address
-        wrap_tx = TransactionData(
-            to=wavax_address,
-            value=supply_amount_wei,
-            data="0xd0e30db0",  # WAVAX deposit() selector
-            gas_estimate=50_000,
-            description=f"Wrap {amount_decimal} AVAX to WAVAX for Joe Lend supply",
-            tx_type="wrap_native",
-        )
-        transactions.append(wrap_tx)
-        approve_token_address = wavax_address
-    else:
-        approve_token_address = supply_token.address
-
-    # Build approve TX for jToken
-    approve_txs = compiler._build_approve_tx(
-        approve_token_address,
-        jl_supply_market.j_token_address,
-        supply_amount_wei,
-    )
-    transactions.extend(approve_txs)
-
-    # Build supply (mint) TX
-    jl_supply_result = joelend_adapter.supply(
-        asset=supply_symbol,
-        amount=amount_decimal,
-    )
-
-    if not jl_supply_result.success:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend supply failed: {jl_supply_result.error}",
-            intent_id=intent.intent_id,
-        )
-
-    assert jl_supply_result.tx_data is not None
-    supply_data = jl_supply_result.tx_data["data"]
-    if not supply_data.startswith("0x"):
-        supply_data = "0x" + supply_data
-
-    supply_tx = TransactionData(
-        to=jl_supply_result.tx_data["to"],
-        value=int(jl_supply_result.tx_data.get("value", 0)),
-        data=supply_data,
-        gas_estimate=jl_supply_result.gas_estimate,
-        description=jl_supply_result.description or f"Supply {amount_decimal} {supply_token.symbol} to Joe Lend",
-        tx_type="lending_supply",
-    )
-    transactions.append(supply_tx)
-
-    # Optionally enable as collateral via enterMarkets
-    if intent.use_as_collateral:
-        jl_enter_result = joelend_adapter.enter_markets([supply_symbol])
-        if not jl_enter_result.success:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Joe Lend enterMarkets failed: {jl_enter_result.error}",
-                intent_id=intent.intent_id,
-            )
-        assert jl_enter_result.tx_data is not None
-        enter_data = jl_enter_result.tx_data["data"]
-        if not enter_data.startswith("0x"):
-            enter_data = "0x" + enter_data
-        enter_tx = TransactionData(
-            to=jl_enter_result.tx_data["to"],
-            value=0,
-            data=enter_data,
-            gas_estimate=jl_enter_result.gas_estimate,
-            description=jl_enter_result.description,
-            tx_type="lending_enter_markets",
-        )
-        transactions.append(enter_tx)
-
-    # Build ActionBundle
-    total_gas = sum(tx.gas_estimate for tx in transactions)
-
-    action_bundle = ActionBundle(
-        intent_type=IntentType.SUPPLY.value,
-        transactions=[tx.to_dict() for tx in transactions],
-        metadata={
-            "protocol": intent.protocol,
-            "joetroller_address": joelend_adapter.joetroller_address,
-            "j_token_address": jl_supply_market.j_token_address,
-            "supply_token": supply_token.to_dict(),
-            "supply_amount": str(amount_decimal),
-            "use_as_collateral": intent.use_as_collateral,
-            "chain": compiler.chain,
-        },
-    )
-
-    result.action_bundle = action_bundle
-    result.transactions = transactions
-    result.total_gas_estimate = total_gas
-    result.warnings = warnings
-
-    supply_fmt = format_token_amount(supply_amount_wei, supply_token.symbol, supply_token.decimals)
-    collateral_str = " (as collateral)" if intent.use_as_collateral else ""
-    logger.info(f"Compiled SUPPLY: {supply_fmt} to Joe Lend{collateral_str}")
-    logger.info(f"   Txs: {len(transactions)} | Gas: {total_gas:,}")
-    return result
+    The protocol was wound down by governance (VIB-3960). The compiler
+    dispatchers short-circuit ``protocol == "joelend"`` *before* this
+    helper is reachable; this body is defense-in-depth so any future
+    direct call (e.g. test patch, accidental refactor) still produces a
+    clean ``CompilationStatus.FAILED`` instead of an uncaught
+    ``JoeLendDeprecatedError`` from the adapter constructor.
+    """
+    return _joelend_dormant_result(intent.intent_id)
 
 
 def _compile_supply_euler_v2(
@@ -4886,6 +4457,12 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:  # 
     try:
         protocol_lower = intent.protocol.lower()
 
+        # JoeLend dormancy short-circuit MUST run before the Solana fallback —
+        # otherwise a (joelend, solana) intent would route to Kamino instead of
+        # failing with the deprecation message (VIB-3960).
+        if protocol_lower == "joelend":
+            return _joelend_dormant_result(intent.intent_id)
+
         # Solana lending path (Kamino / Jupiter Lend)
         if protocol_lower == "jupiter_lend":
             return _compile_withdraw_jupiter_lend(compiler, intent)
@@ -4949,10 +4526,7 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:  # 
             )
         elif protocol_lower == "benqi":
             return _compile_withdraw_benqi(compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings)
-        elif protocol_lower == "joelend":
-            return _compile_withdraw_joelend(
-                compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
-            )
+        # joelend handled at the top of the function (VIB-3960 dormancy guard).
         elif protocol_lower == "euler_v2":
             return _compile_withdraw_euler_v2(
                 compiler, intent, withdraw_token, withdraw_amount_decimal, initial_warnings
@@ -4964,7 +4538,7 @@ def compile_withdraw(compiler, intent: WithdrawIntent) -> CompilationResult:  # 
 
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, pendle, compound_v3, benqi, joelend, euler_v2, silo_v2",
+            error=f"Unsupported lending protocol: {intent.protocol}. Supported: aave_v3, morpho, morpho_blue, curvance, spark, pendle, compound_v3, benqi, euler_v2, silo_v2",
             intent_id=intent.intent_id,
         )
 
@@ -5730,100 +5304,16 @@ def _compile_withdraw_joelend(
     withdraw_amount_decimal: Decimal | None,
     initial_warnings: list[str],
 ) -> CompilationResult:
-    """Compile WITHDRAW for Joe Lend (Compound V2 fork on Avalanche - Banker Joe)."""
-    from ..connectors.joelend.adapter import (
-        JOELEND_J_TOKENS,
-        JoeLendAdapter,
-        JoeLendConfig,
-    )
+    """Compile WITHDRAW for Joe Lend — DORMANT.
 
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
-    transactions: list[TransactionData] = []
-    warnings: list[str] = list(initial_warnings)
-
-    if compiler.chain != "avalanche":
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend is only available on Avalanche, got: {compiler.chain}",
-            intent_id=intent.intent_id,
-        )
-
-    joelend_config = JoeLendConfig(
-        chain=compiler.chain,
-        wallet_address=compiler.wallet_address,
-    )
-    joelend_adapter = JoeLendAdapter(joelend_config)
-
-    withdraw_symbol = withdraw_token.symbol.upper()
-    jl_withdraw_market = joelend_adapter.get_market_info(withdraw_symbol)
-
-    if not jl_withdraw_market:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend does not support asset: {withdraw_symbol}. Supported: {list(JOELEND_J_TOKENS.keys())}",
-            intent_id=intent.intent_id,
-        )
-
-    # Build withdraw (redeem) TX
-    jl_withdraw_result = joelend_adapter.withdraw(
-        asset=withdraw_symbol,
-        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-        withdraw_all=intent.withdraw_all,
-    )
-
-    if not jl_withdraw_result.success:
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            error=f"Joe Lend withdraw failed: {jl_withdraw_result.error}",
-            intent_id=intent.intent_id,
-        )
-
-    amount_display = "all" if intent.withdraw_all else str(withdraw_amount_decimal)
-
-    assert jl_withdraw_result.tx_data is not None
-    withdraw_data = jl_withdraw_result.tx_data["data"]
-    if not withdraw_data.startswith("0x"):
-        withdraw_data = "0x" + withdraw_data
-
-    withdraw_tx = TransactionData(
-        to=jl_withdraw_result.tx_data["to"],
-        value=int(jl_withdraw_result.tx_data.get("value", 0)),
-        data=withdraw_data,
-        gas_estimate=jl_withdraw_result.gas_estimate,
-        description=jl_withdraw_result.description
-        or f"Withdraw {amount_display} {withdraw_token.symbol} from Joe Lend",
-        tx_type="lending_withdraw",
-    )
-    transactions.append(withdraw_tx)
-
-    total_gas = sum(tx.gas_estimate for tx in transactions)
-
-    action_bundle = ActionBundle(
-        intent_type=IntentType.WITHDRAW.value,
-        transactions=[tx.to_dict() for tx in transactions],
-        metadata={
-            "protocol": intent.protocol,
-            "joetroller_address": joelend_adapter.joetroller_address,
-            "j_token_address": jl_withdraw_market.j_token_address,
-            "withdraw_token": withdraw_token.to_dict(),
-            "withdraw_amount": amount_display,
-            "withdraw_all": intent.withdraw_all,
-            "chain": compiler.chain,
-        },
-    )
-
-    result.action_bundle = action_bundle
-    result.transactions = transactions
-    result.total_gas_estimate = total_gas
-    result.warnings = warnings
-
-    logger.info(
-        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Joe Lend)"
-    )
-    return result
+    The protocol was wound down by governance (VIB-3960). The compiler
+    dispatchers short-circuit ``protocol == "joelend"`` *before* this
+    helper is reachable; this body is defense-in-depth so any future
+    direct call (e.g. test patch, accidental refactor) still produces a
+    clean ``CompilationStatus.FAILED`` instead of an uncaught
+    ``JoeLendDeprecatedError`` from the adapter constructor.
+    """
+    return _joelend_dormant_result(intent.intent_id)
 
 
 def _compile_withdraw_euler_v2(

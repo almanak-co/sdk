@@ -1,36 +1,16 @@
-"""Joe Lend (Banker Joe) Lending Connector (Compound V2 fork on Avalanche).
+"""Joe Lend (Banker Joe) Lending Connector — DORMANT / DEPRECATED.
 
-This module provides adapters and utilities for interacting with Joe Lend (Banker Joe),
-a lending/borrowing protocol on Avalanche using the jToken architecture.
+Joe Lend (the lending arm of Trader Joe / LFJ on Avalanche) was wound down
+by its governance in 2026. The on-chain jToken contracts now revert every
+supply/borrow/repay/withdraw call with ``Error: wind down``.
 
-Joe Lend Features:
-- Compound V2-style jToken model
-- Supply to earn yield (mint jTokens)
-- Borrow against collateral (enterMarkets + borrow)
-- Multiple asset markets: AVAX, USDC.e, USDT.e, WETH.e, WBTC.e, DAI.e
+The connector has been removed from the SDK's officially supported
+protocol surface (info matrix, vocabulary, execution config, CLI, demo
+strategies). ``JoeLendAdapter`` is retained only so historical receipts
+can still be parsed via ``JoeLendReceiptParser``; instantiating the
+adapter raises ``JoeLendDeprecatedError`` on construction.
 
-Supported Chains:
-- Avalanche
-
-Example:
-    from almanak.framework.connectors.joelend import (
-        JoeLendAdapter,
-        JoeLendConfig,
-        JoeLendReceiptParser,
-    )
-
-    config = JoeLendConfig(
-        chain="avalanche",
-        wallet_address="0x...",
-    )
-    adapter = JoeLendAdapter(config)
-
-    # Supply USDC.e
-    result = adapter.supply(asset="USDC.e", amount=Decimal("1000"))
-
-    # Parse receipts
-    parser = JoeLendReceiptParser(underlying_decimals=6)
-    events = parser.parse_receipt(receipt)
+Full removal is tracked for July (VIB-3960).
 """
 
 from .adapter import (
@@ -51,6 +31,7 @@ from .adapter import (
     # Adapter
     JoeLendAdapter,
     JoeLendConfig,
+    JoeLendDeprecatedError,
     # Data classes
     JoeLendMarketInfo,
     JoeLendPosition,
@@ -73,6 +54,7 @@ __all__ = [
     # Adapter
     "JoeLendAdapter",
     "JoeLendConfig",
+    "JoeLendDeprecatedError",
     # Data classes
     "JoeLendMarketInfo",
     "JoeLendPosition",

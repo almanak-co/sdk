@@ -34,7 +34,8 @@ Registered Protocols:
     - morpho_blue / morpho: MorphoBlueReceiptParser
     - compound_v3: CompoundV3ReceiptParser
     - benqi: BenqiReceiptParser (Compound V2 fork on Avalanche)
-    - joelend: JoeLendReceiptParser (Banker Joe / Compound V2 fork on Avalanche)
+    - joelend: JoeLendReceiptParser — DORMANT, kept only to parse historical
+      receipts; protocol wound down on-chain (VIB-3960)
     - euler_v2: EulerV2ReceiptParser (ERC-4626 vaults + EVC on Avalanche)
     - silo_v2: SiloV2ReceiptParser (Isolated lending on Avalanche)
 
