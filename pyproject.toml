@@ -178,15 +178,18 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Phase 0 floor (2026-05-04): pre-omit measured 55.26% on the unit-test scope; post-omit
-# computation projects 58.66% (verified by re-processing the JSON, but the local .coverage
-# file is stale so pytest-cov hasn't re-confirmed). Floor set just below the verified
-# pre-omit number to guarantee the first CI run is green; ratchet to ~57-58 in the next
-# phase merge once CI reports the real post-omit number.
+# Coverage floor — ratchets up after each phase, never down.
+#
+# Floor history:
+#   2026-05-04 — Phase 0 (#2035) initial floor: 55 (pre-omit measured 55.26%)
+#   2026-05-04 — Phase 0 + 6a (#2039) merged: CI measured 66.69% on the full unit-scope
+#                (152 593 stmts, 22 210 tests passing, 8m02s with COVERAGE_CORE=sysmon).
+#                Bumped to 65 → 1.69 pt buffer for normal noise.
+#
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 55
+fail_under = 65
 show_missing = true
 skip_empty = true
 
