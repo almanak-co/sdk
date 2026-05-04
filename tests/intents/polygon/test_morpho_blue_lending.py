@@ -101,11 +101,6 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 @pytest.mark.lending
 class TestMorphoBlueBorrowIntent:
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["morpho_blue"],
-        intent_types=["BORROW"],
-        config={"collateral_token": "WBTC", "borrow_token": "USDC"},
-    )
     async def test_borrow_usdc_with_wbtc_collateral_using_intent(
         self,
         web3: Web3,
@@ -313,11 +308,6 @@ async def _setup_borrow(
 @pytest.mark.lending
 class TestMorphoBlueRepayIntent:
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["morpho_blue"],
-        intent_types=["BORROW", "REPAY"],
-        config={"collateral_token": "WBTC", "borrow_token": "USDC"},
-    )
     async def test_repay_usdc_full_after_borrow(
         self,
         web3: Web3,
@@ -441,11 +431,6 @@ class TestMorphoBlueRepayIntent:
 @pytest.mark.lending
 class TestMorphoBlueWithdrawCollateralIntent:
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["morpho_blue"],
-        intent_types=["BORROW", "REPAY", "WITHDRAW"],
-        config={"collateral_token": "WBTC", "borrow_token": "USDC"},
-    )
     async def test_withdraw_wbtc_collateral_after_repay(
         self,
         web3: Web3,

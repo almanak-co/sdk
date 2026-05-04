@@ -49,9 +49,7 @@ TEST_WEB3_REQUEST_TIMEOUT = (TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_RPC_READ_TIM
 # Polygon-specific read timeout: bumped 30s -> 60s (#1804). The polygon Anvil fork
 # consistently hits ReadTimeoutError at the 30s default set by #1738 under CI load
 # (see PR #1798 run 24793717120). Scoped to polygon only; other chains keep 30s.
-TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS = float(
-    os.environ.get("ALMANAK_TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS", "60")
-)
+TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS", "60"))
 TEST_POLYGON_WEB3_REQUEST_TIMEOUT = (
     TEST_RPC_CONNECT_TIMEOUT_SECONDS,
     TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS,
@@ -64,9 +62,7 @@ TEST_FUNDING_RPC_MAX_RETRIES = int(os.environ.get("ALMANAK_TEST_FUNDING_RPC_MAX_
 TEST_FUNDING_RPC_BACKOFF_SECONDS = float(os.environ.get("ALMANAK_TEST_FUNDING_RPC_BACKOFF_SECONDS", "2.0"))
 
 # Health check timeout for recovery path (generous, since the fork is already degraded).
-TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS = float(
-    os.environ.get("ALMANAK_TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS", "15.0")
-)
+TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_RECOVERY_HEALTH_TIMEOUT_SECONDS", "15.0"))
 
 # Fixed Anvil recovery policy for intent tests
 TEST_ANVIL_RECOVERY_MAX_RESTARTS = 2
@@ -428,8 +424,6 @@ ERC20_ABI = [
 ]
 
 
-
-
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -663,10 +657,7 @@ def _retry_on_network_error(
                 )
                 time.sleep(delay)
             else:
-                print(
-                    f"  [retry] {description} failed after {attempts} attempts "
-                    f"({type(e).__name__}: {e})"
-                )
+                print(f"  [retry] {description} failed after {attempts} attempts ({type(e).__name__}: {e})")
     if last_error is not None:
         raise last_error
     raise RuntimeError(f"{description} failed without a captured retryable exception")
@@ -823,9 +814,7 @@ def assert_swap_semantic_match(
     # 1. Amount match: receipt amount_in should be close to intent amount
     actual_in = getattr(swap_result, "amount_in_decimal", None)
     if actual_in is not None:
-        assert actual_in > 0, (
-            f"L3 semantic: receipt amount_in must be positive, got {actual_in}"
-        )
+        assert actual_in > 0, f"L3 semantic: receipt amount_in must be positive, got {actual_in}"
         expected = Decimal(str(intent_amount))
         deviation_bps = abs(actual_in - expected) / expected * 10000
         assert deviation_bps <= tolerance_bps, (
@@ -836,9 +825,7 @@ def assert_swap_semantic_match(
     # 2. Effective price sanity: must be positive and finite
     effective_price = getattr(swap_result, "effective_price", None)
     if effective_price is not None:
-        assert effective_price > 0, (
-            f"L3 semantic: effective_price must be positive, got {effective_price}"
-        )
+        assert effective_price > 0, f"L3 semantic: effective_price must be positive, got {effective_price}"
 
     # 3. Token address match (if receipt parser populates token_in/token_out)
     receipt_token_in = getattr(swap_result, "token_in", None)
@@ -868,9 +855,7 @@ def assert_swap_semantic_match(
     # 4. Receipt amounts must be bilateral (non-zero on both sides)
     actual_out = getattr(swap_result, "amount_out_decimal", None)
     if actual_out is not None:
-        assert actual_out > 0, (
-            f"L3 semantic: receipt amount_out must be positive, got {actual_out}"
-        )
+        assert actual_out > 0, f"L3 semantic: receipt amount_out must be positive, got {actual_out}"
 
 
 def assert_swap_bilateral_deltas(
@@ -905,8 +890,7 @@ def assert_swap_bilateral_deltas(
         f"Got: {format_token_amount(amount_spent, in_decimals)}"
     )
     assert amount_received > 0, (
-        f"Output token must increase (no-op guard). "
-        f"Got delta: {format_token_amount(amount_received, out_decimals)}"
+        f"Output token must increase (no-op guard). Got delta: {format_token_amount(amount_received, out_decimals)}"
     )
     return amount_spent, amount_received
 
@@ -929,12 +913,10 @@ def assert_swap_conservation(
     out_after = get_token_balance(web3, token_out, wallet)
 
     assert in_after == in_balance_before, (
-        f"Input token balance must be unchanged after failed swap. "
-        f"Before: {in_balance_before}, After: {in_after}"
+        f"Input token balance must be unchanged after failed swap. Before: {in_balance_before}, After: {in_after}"
     )
     assert out_after == out_balance_before, (
-        f"Output token balance must be unchanged after failed swap. "
-        f"Before: {out_balance_before}, After: {out_after}"
+        f"Output token balance must be unchanged after failed swap. Before: {out_balance_before}, After: {out_after}"
     )
 
 
@@ -977,11 +959,13 @@ def _wrap_native_token(wallet: str, weth_address: str, amount: int, rpc_url: str
     checksum_weth = Web3.to_checksum_address(weth_address)
 
     def _wrap_call() -> None:
-        tx_hash = w3.eth.send_transaction({
-            "from": checksum_wallet,
-            "to": checksum_weth,
-            "value": amount,
-        })
+        tx_hash = w3.eth.send_transaction(
+            {
+                "from": checksum_wallet,
+                "to": checksum_weth,
+                "value": amount,
+            }
+        )
         w3.eth.wait_for_transaction_receipt(tx_hash, timeout=TEST_RPC_READ_TIMEOUT_SECONDS)
 
     _retry_on_network_error(_wrap_call, description="wrap_native_token")
@@ -1014,7 +998,9 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "borrow: Tests for borrow intents")
     config.addinivalue_line("markers", "repay: Tests for repay intents")
     config.addinivalue_line("markers", "withdraw: Tests for withdraw intents")
-    config.addinivalue_line("markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt")
+    config.addinivalue_line(
+        "markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt"
+    )
 
 
 # =============================================================================
@@ -1080,9 +1066,7 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
         try:
             resp = web3_instance.provider.make_request("evm_snapshot", [])
         except Exception as e:
-            raise _PristineTransportError(
-                f"initial pristine snapshot transport error for chain {chain_id}: {e}"
-            ) from e
+            raise _PristineTransportError(f"initial pristine snapshot transport error for chain {chain_id}: {e}") from e
         new_snap = resp.get("result") if isinstance(resp, dict) else None
         if new_snap is None:
             print(f"WARNING: evm_snapshot returned no result for chain {chain_id}: {resp}")
@@ -1105,9 +1089,7 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
         resp = web3_instance.provider.make_request("evm_revert", [snap_id])
         reverted = bool(resp.get("result")) if isinstance(resp, dict) else False
     except Exception as e:
-        raise _PristineTransportError(
-            f"pristine revert transport error for chain {chain_id}: {e}"
-        ) from e
+        raise _PristineTransportError(f"pristine revert transport error for chain {chain_id}: {e}") from e
 
     for old_key in list(_module_baselines):
         if old_key[0] == chain_id:
@@ -1595,7 +1577,7 @@ def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
     for attempt in range(3):
         resp = requests.get(base_url, params=params, headers=headers, timeout=15)
         if resp.status_code == 429:
-            backoff = (attempt + 1)  # 1s, 2s
+            backoff = attempt + 1  # 1s, 2s
             print(f"    Rate limited (429), retrying in {backoff}s (attempt {attempt + 1}/3)...")
             time.sleep(backoff)
             continue
@@ -1623,8 +1605,7 @@ def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
 
     if missing:
         raise RuntimeError(
-            f"CoinGecko returned no USD price for: {', '.join(missing)}. "
-            f"Response keys: {list(data.keys())}"
+            f"CoinGecko returned no USD price for: {', '.join(missing)}. Response keys: {list(data.keys())}"
         )
 
     return prices
@@ -1809,48 +1790,36 @@ def _build_zodiac_context(
     web3: Web3,
     chain: str,
     anvil_rpc_url: str,
-    marker_kwargs: dict[str, Any],
     *,
     member_eoa: str = TEST_WALLET,
     member_private_key: str = TEST_PRIVATE_KEY,
-    strategy_name: str = "zodiac-fixture-pilot",
 ) -> "ZodiacContext":
-    """Deploy Safe+Roles, apply the manifest the marker declares, seed tokens.
+    """Deploy Safe+Roles, assign role, seed tokens. Manifest is applied later.
 
-    Ownership of this helper intentionally sits in the shared conftest (not
-    the harness module) because it composes fixtures, manifest generation,
-    and wallet seeding — the three surfaces pytest fixtures already own.
+    Phase G post-pivot (opt-out model): the manifest is generated and applied
+    at execute-time from the intents the test actually compiles, not at
+    fixture setup from marker kwargs. This helper is therefore stripped to
+    just the on-chain plumbing — Safe deploy, Roles deploy, role assignment,
+    eager token seeding. The ``ZodiacOrchestrator`` consumes the recorded
+    intents and calls ``apply_manifest_targets`` itself before each execute.
 
     Side effects:
       - ``anvil_setBalance`` funds ``ZODIAC_OWNER_ADDRESS`` with 10 native
         tokens so the owner can pay gas for Safe admin txs.
-      - ``fund_erc20_token`` seeds the Safe with every token+slot pair in
-        ``CHAIN_CONFIGS[chain]`` (eager funding — see fixture docstring).
+      - ``fund_erc20_token`` best-effort seeds the Safe with every token+slot
+        pair in ``CHAIN_CONFIGS[chain]``. Without a marker, the fixture has
+        no list of "required" tokens — failures during setup log a warning;
+        if a token is genuinely needed, the test surfaces a clear "balance 0"
+        error at execute time.
     """
     # Local imports to keep the shared conftest from taking a hard import
-    # dependency on Safe / manifest machinery at collection time. Only tests
-    # that actually use ``zodiac_safe`` pay the cost.
-    from almanak.framework.permissions.generator import generate_manifest
+    # dependency on Safe machinery at collection time. Only tests that
+    # actually use ``zodiac_safe`` pay the cost.
     from tests.intents._zodiac_helpers import (
-        apply_manifest_targets,
         assign_role_to_member,
         deploy_test_safe,
         deploy_test_zodiac_roles,
     )
-
-    protocols = list(marker_kwargs.get("protocols") or [])
-    intent_types = [it.upper() for it in (marker_kwargs.get("intent_types") or [])]
-    config = dict(marker_kwargs.get("config") or {})
-    if not protocols:
-        raise ValueError(
-            "uses_zodiac marker: protocols=[] — at least one protocol is required to "
-            "generate a manifest. Add protocols=[...] to the marker kwargs."
-        )
-    if not intent_types:
-        raise ValueError(
-            "uses_zodiac marker: intent_types=[] — at least one intent type is required. "
-            "Add intent_types=[...] to the marker kwargs."
-        )
 
     # Owner gas. ``anvil_setBalance`` is idempotent and cheap.
     fund_native_token(ZODIAC_OWNER_ADDRESS, 10 * 10**18, anvil_rpc_url)
@@ -1861,13 +1830,13 @@ def _build_zodiac_context(
     # opaque insufficient-balance error — the Safe's own native balance matters
     # regardless of what the member EOA holds.
     fund_native_token(safe, 10 * 10**18, anvil_rpc_url)
-    roles = deploy_test_zodiac_roles(
-        web3, safe, ZODIAC_OWNER_ADDRESS, ZODIAC_OWNER_PRIVATE_KEY
-    )
-    # Per-test role key derived from the protocol set so two tests on the same
-    # fork that end up on the same Roles instance won't collide. Not a security
-    # property — tests isolate via fresh Roles deploys — just a debugging aid.
-    role_label = ("zodiac-pilot:" + "+".join(sorted(protocols))).encode("utf-8")
+    roles = deploy_test_zodiac_roles(web3, safe, ZODIAC_OWNER_ADDRESS, ZODIAC_OWNER_PRIVATE_KEY)
+    # Single fixed role label per chain — the manifest is keyed by this role
+    # at apply-time, and the orchestrator passes the same key into
+    # ``execTransactionWithRole``. Was previously per-protocol-set keyed off
+    # the marker; under late-binding the protocol set isn't known yet, so the
+    # label is just the chain name.
+    role_label = f"zodiac-fixture:{chain}".encode()
     role_key = role_label[:32].ljust(32, b"\0")
 
     assign_role_to_member(
@@ -1880,113 +1849,32 @@ def _build_zodiac_context(
         owner_private_key=ZODIAC_OWNER_PRIVATE_KEY,
     )
 
-    manifest = generate_manifest(
-        strategy_name=strategy_name,
-        chain=chain,
-        supported_protocols=protocols,
-        intent_types=intent_types,
-        config=config,
-        rpc_url=anvil_rpc_url,
-    )
-    targets = manifest.to_zodiac_targets()
-    if not targets:
-        raise RuntimeError(
-            f"uses_zodiac: generate_manifest produced no Zodiac targets for "
-            f"protocols={protocols} intent_types={intent_types} on {chain}. "
-            "The Safe cannot execute anything without applied targets — check "
-            "the manifest generator's supported-protocols set."
-        )
-    apply_manifest_targets(
-        web3,
-        roles,
-        safe,
-        role_key,
-        targets=targets,
-        owner_eoa=ZODIAC_OWNER_ADDRESS,
-        owner_private_key=ZODIAC_OWNER_PRIVATE_KEY,
-    )
-
     # Eager token seeding — fund the Safe with the same tokens the EOA would
     # have received. The existing module-scoped ``funded_wallet`` seeding has
     # already run (it seeded ``TEST_WALLET``); here we mirror the same set
     # onto the Safe. Storage-slot writes are cheap (~20ms/token on Anvil), so
     # we don't bother filtering by what the test will actually spend.
-    #
-    # Required-token policy: tokens named by the marker's ``config`` (the
-    # intent's inputs — ``base_token``, ``quote_token``, etc.) fail the
-    # fixture fast on probe OR fund errors. Swallowing those errors turns a
-    # setup failure into a mysterious downstream "zero balance" execution
-    # error that's much harder to diagnose.
     chain_cfg = CHAIN_CONFIGS[chain]
-    required_symbols = {
-        str(config[key])
-        for key in (
-            "base_token",
-            "quote_token",
-            "token",
-            "collateral_token",
-            "borrow_token",
-            "token0",
-            "token1",
-        )
-        if key in config and config[key] is not None
-    }
-    funding_errors: dict[str, str] = {}
     for token_symbol, token_address in chain_cfg.get("tokens", {}).items():
         balance_slot = chain_cfg.get("balance_slots", {}).get(token_symbol)
         if balance_slot is None:
             continue
         try:
             decimals = get_token_decimals(web3, token_address)
-        except Exception as exc:
-            if token_symbol in required_symbols:
-                raise RuntimeError(
-                    f"uses_zodiac setup failed: decimals probe failed for "
-                    f"required token {token_symbol} ({token_address}): {exc}"
-                ) from exc
-            # Non-required token — skip rather than abort the fixture.
+        except Exception:  # noqa: BLE001 — best-effort
             continue
         if token_symbol in ("WETH", "WAVAX", "WMATIC", "WBNB", "WMON", "W0G"):
             # Wrapped-native tokens: use direct storage-slot writes for the
-            # Safe (wrapping requires an EOA→WETH self-call, which would have
-            # to go through execTransactionWithRole — a chicken/egg problem
-            # during setup). Storage writes give the same end-state.
+            # Safe (wrapping requires an EOA→WETH self-call, which would
+            # need to go through execTransactionWithRole — a chicken/egg
+            # problem during setup). Storage writes give the same end-state.
             amount = 10 * (10**decimals)
         else:
             amount = 100_000 * (10**decimals)
         try:
-            fund_erc20_token(
-                safe, token_address, amount, balance_slot, anvil_rpc_url
-            )
+            fund_erc20_token(safe, token_address, amount, balance_slot, anvil_rpc_url)
         except Exception as exc:  # noqa: BLE001 — token-seeding failures shouldn't hide authz errors
-            funding_errors[token_symbol] = str(exc)
-            if token_symbol in required_symbols:
-                raise RuntimeError(
-                    f"uses_zodiac setup failed: could not fund required token "
-                    f"{token_symbol} ({token_address}) on Safe {safe}: {exc}"
-                ) from exc
             print(f"  [zodiac_safe] warning: could not fund Safe with {token_symbol}: {exc}")
-
-    # Post-seed verification for required tokens. A successful ``fund_erc20_token``
-    # write doesn't guarantee the balance materialised (wrong balance slot, proxy
-    # storage layout, etc.) — the only reliable signal is a balance read.
-    for token_symbol in required_symbols:
-        token_address = chain_cfg.get("tokens", {}).get(token_symbol)
-        if token_address is None:
-            raise RuntimeError(
-                f"uses_zodiac setup failed: required token {token_symbol} is not "
-                f"configured in CHAIN_CONFIGS[{chain!r}] — marker config references "
-                f"a token that has no entry on this chain."
-            )
-        balance = get_token_balance(web3, token_address, safe)
-        if balance == 0:
-            detail = funding_errors.get(
-                token_symbol, "balance remained zero after setup"
-            )
-            raise RuntimeError(
-                f"uses_zodiac setup failed: required token {token_symbol} "
-                f"({token_address}) was not funded on Safe {safe} ({detail})."
-            )
 
     return ZodiacContext(
         safe_address=safe,
@@ -1996,44 +1884,92 @@ def _build_zodiac_context(
         owner_private_key=ZODIAC_OWNER_PRIVATE_KEY,
         member_eoa=member_eoa,
         member_private_key=member_private_key,
-        manifest_targets=targets,
+        # Empty: the orchestrator generates and applies targets at execute
+        # time from the intents the test compiles. This list is retained on
+        # the dataclass for backward compat with the runner-based negative
+        # tests in ``tests/intents/<chain>/test_permission_onchain.py``.
+        manifest_targets=[],
     )
 
 
-def uses_zodiac_marker(request: pytest.FixtureRequest) -> pytest.Mark | None:
-    """Return the ``uses_zodiac`` marker on the current test, or ``None``.
+def no_zodiac_marker(request: pytest.FixtureRequest) -> pytest.Mark | None:
+    """Return the ``no_zodiac`` opt-out marker on the current test, or ``None``.
 
-    Exposed here (rather than buried inside the fixture body) so per-chain
-    conftests' ``funded_wallet`` / ``orchestrator`` overrides can check it
-    without each reinventing the ``request.node.get_closest_marker`` call.
+    The opt-out model (post-Phase-G pivot): every intent test runs through
+    Safe+Zodiac by default. Tests that legitimately can't run that way —
+    aggregator tests with non-deterministic routing, EOA-specific failure
+    paths, infrastructure tests that bypass the orchestrator — opt out via
+    ``@pytest.mark.no_zodiac(reason="...")``.
+    """
+    return request.node.get_closest_marker("no_zodiac")
+
+
+def uses_zodiac_marker(request: pytest.FixtureRequest) -> pytest.Mark | None:
+    """Return the legacy ``uses_zodiac`` marker on the current test, or ``None``.
+
+    Retained for transition only — under the opt-out model, the marker has
+    no effect; tests run under Zodiac by default. Will be removed once all
+    stale ``uses_zodiac`` decorators are deleted from the test files.
     """
     return request.node.get_closest_marker("uses_zodiac")
+
+
+@pytest.fixture
+def _zodiac_intent_recorder(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Any]:
+    """Capture every intent passed to ``IntentCompiler.compile`` during the test.
+
+    Returns a live ``list`` that the orchestrator reads at execute time to
+    derive a manifest from the test's actual intents (late-binding). The
+    monkey-patch is auto-reverted at fixture teardown via ``monkeypatch``.
+
+    No-op for opt-out tests: the captured list is returned empty and no
+    monkey-patch is installed, so the standard ``IntentCompiler.compile`` is
+    untouched.
+    """
+    captured: list[Any] = []
+    if no_zodiac_marker(request) is not None:
+        return captured
+
+    from almanak.framework.intents.compiler import IntentCompiler
+
+    original_compile = IntentCompiler.compile
+
+    def recording_compile(self, intent):  # type: ignore[no-redef]
+        captured.append(intent)
+        return original_compile(self, intent)
+
+    monkeypatch.setattr(IntentCompiler, "compile", recording_compile)
+    return captured
 
 
 @pytest.fixture
 def zodiac_safe(
     request: pytest.FixtureRequest,
 ) -> ZodiacContext | None:
-    """Per-test Safe+Zodiac context when ``@pytest.mark.uses_zodiac(...)`` is set.
+    """Per-test Safe+Zodiac context for opt-in-by-default intent tests.
 
-    Returns ``None`` for unmarked tests so every test can request this fixture
-    safely (the chain conftests' fixture overrides key off the return value).
+    Returns ``None`` only when the test carries ``@pytest.mark.no_zodiac(...)``;
+    otherwise deploys a fresh Safe + Roles Modifier on the chain's Anvil fork,
+    seeds the Safe with the chain's stock token balances, and returns the
+    context that the chain conftest's ``funded_wallet`` / ``orchestrator``
+    overrides consume.
 
-    The actual fork+deploy work is driven by ``_build_zodiac_context``. This
-    fixture wires in the per-chain ``web3`` / ``anvil_rpc_url`` / ``chain_name``
-    fixtures from the chain-local conftest, which is why the shared conftest
-    defines it here but each chain supplies the fork.
+    Manifest is NOT applied at fixture setup. The ``ZodiacOrchestrator`` reads
+    intents the test compiles (captured via ``_zodiac_intent_recorder``) and
+    calls ``apply_manifest_targets`` itself before each execute. This is the
+    "late-binding" path — the manifest scope matches what the test actually
+    does, not what a marker declares.
 
     Scope is per-test (``function``). A Safe + Roles deploy is ~1-2s on Anvil;
-    per-test keeps state leakage impossible at the cost of a small wall-clock
-    hit. If G.2 finds the overhead unacceptable, the scope can be bumped to
-    ``class`` for tests that share a marker shape — measured first.
+    per-test keeps state leakage impossible.
     """
-    marker = uses_zodiac_marker(request)
-    if marker is None:
+    if no_zodiac_marker(request) is not None:
         return None
 
-    # Chain-local fixtures. Delayed lookup — unmarked tests never run this
+    # Chain-local fixtures. Delayed lookup — opt-out tests never run this
     # block, so they don't force the Anvil fork to spin up.
     web3: Web3 = request.getfixturevalue("web3")
     anvil_rpc_url: str = request.getfixturevalue("anvil_rpc_url")
@@ -2049,5 +1985,4 @@ def zodiac_safe(
         web3=web3,
         chain=chain,
         anvil_rpc_url=anvil_rpc_url,
-        marker_kwargs=dict(marker.kwargs),
     )

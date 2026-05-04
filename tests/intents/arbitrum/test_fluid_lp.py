@@ -15,6 +15,8 @@ from almanak.framework.connectors.fluid.receipt_parser import FluidReceiptParser
 from almanak.framework.connectors.fluid.sdk import FluidSDK, FluidSDKError
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 
+pytestmark = pytest.mark.no_zodiac(reason="fluid connector not in manifest matrix")
+
 CHAIN_NAME = "arbitrum"
 
 

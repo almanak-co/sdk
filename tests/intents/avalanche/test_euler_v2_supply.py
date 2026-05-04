@@ -32,6 +32,8 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+pytestmark = pytest.mark.no_zodiac(reason="euler_v2 connector not in manifest matrix")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================

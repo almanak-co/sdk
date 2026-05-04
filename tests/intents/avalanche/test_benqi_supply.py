@@ -29,6 +29,8 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+pytestmark = pytest.mark.no_zodiac(reason="benqi connector not in manifest matrix")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================

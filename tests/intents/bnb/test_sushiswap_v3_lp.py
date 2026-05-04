@@ -19,11 +19,9 @@ To run:
     uv run pytest tests/intents/bnb/test_sushiswap_v3_lp.py -v -s
 """
 
-import time
 from decimal import Decimal
 
 import pytest
-from eth_account import Account
 from web3 import Web3
 
 from almanak.core.contracts import SUSHISWAP_V3, get_address
@@ -34,7 +32,11 @@ from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
     SwapIntent,
-    UniswapV3LPAdapter,
+)
+from tests.intents._lp_setup_helpers import (
+    collect_all_tokens,
+    decrease_all_liquidity,
+    query_position_liquidity,
 )
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
@@ -66,72 +68,14 @@ RANGE_UPPER = Decimal("0.05")
 
 
 # =============================================================================
-# Helpers
+# Helpers (shared)
 # =============================================================================
-
-
-def _send_raw_tx(web3: Web3, private_key: str, to: str, data: bytes, value: int = 0) -> dict:
-    """Send a raw transaction on Anvil."""
-    account = Account.from_key(private_key)
-    nonce = web3.eth.get_transaction_count(account.address)
-    tx = {
-        "to": Web3.to_checksum_address(to),
-        "data": "0x" + data.hex(),
-        "value": value,
-        "gas": 1_000_000,
-        "gasPrice": web3.eth.gas_price,
-        "nonce": nonce,
-        "chainId": web3.eth.chain_id,
-    }
-    signed = account.sign_transaction(tx)
-    raw_tx = getattr(signed, "rawTransaction", None) or getattr(signed, "raw_transaction", None)
-    if raw_tx is None:
-        raise AssertionError("Signed transaction is missing raw transaction bytes")
-    tx_hash = web3.eth.send_raw_transaction(raw_tx)
-    return web3.eth.wait_for_transaction_receipt(tx_hash)
-
-
-def _query_position_liquidity(web3: Web3, position_manager: str, token_id: int) -> int:
-    """Query position liquidity from NonfungiblePositionManager.positions()."""
-    selector = "0x99fbab88"  # positions(uint256)
-    data = selector + hex(token_id)[2:].zfill(64)
-    result = web3.eth.call({"to": Web3.to_checksum_address(position_manager), "data": data})
-    # positions() returns: nonce(0), operator(1), token0(2), token1(3),
-    # fee(4), tickLower(5), tickUpper(6), liquidity(7), ...
-    liquidity_offset = 7 * 32
-    return int.from_bytes(result[liquidity_offset : liquidity_offset + 32], byteorder="big")
-
-
-def _decrease_all_liquidity(web3: Web3, private_key: str, position_manager: str, token_id: int) -> None:
-    """Decrease all liquidity from a position via direct contract call."""
-    liquidity = _query_position_liquidity(web3, position_manager, token_id)
-    if liquidity == 0:
-        return
-
-    adapter = UniswapV3LPAdapter(chain=CHAIN_NAME)
-    deadline = int(time.time()) + 86400
-    calldata = adapter.get_decrease_liquidity_calldata(
-        token_id=token_id,
-        liquidity=liquidity,
-        amount0_min=0,
-        amount1_min=0,
-        deadline=deadline,
-    )
-    receipt = _send_raw_tx(web3, private_key, position_manager, calldata)
-    assert receipt["status"] == 1, "decreaseLiquidity direct call failed"
-
-
-def _collect_all_tokens(web3: Web3, private_key: str, position_manager: str, token_id: int, recipient: str) -> None:
-    """Collect all owed tokens from a position via direct contract call."""
-    adapter = UniswapV3LPAdapter(chain=CHAIN_NAME)
-    calldata = adapter.get_collect_calldata(
-        token_id=token_id,
-        recipient=recipient,
-        amount0_max=MAX_UINT128,
-        amount1_max=MAX_UINT128,
-    )
-    receipt = _send_raw_tx(web3, private_key, position_manager, calldata)
-    assert receipt["status"] == 1, "collect direct call failed"
+#
+# ``query_position_liquidity``, ``decrease_all_liquidity``, and
+# ``collect_all_tokens`` live in ``tests/intents/_lp_setup_helpers.py`` so
+# the no-liquidity edge-case tests route their setup tx through whatever
+# orchestrator the test holds — EOA-signed under ``ExecutionOrchestrator``,
+# ``execTransactionWithRole``-wrapped under ``ZodiacOrchestrator``.
 
 
 async def _open_position_via_intent(
@@ -199,11 +143,6 @@ class TestSushiSwapV3LPOpenIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["sushiswap_v3"],
-        intent_types=["LP_OPEN"],
-        config={"token0": "USDT", "token1": "WBNB"},
-    )
     async def test_lp_open_usdt_wbnb(
         self,
         web3: Web3,
@@ -300,7 +239,7 @@ class TestSushiSwapV3LPOpenIntent:
         print(f"\nPosition ID: {position_id}")
 
         # 6. Verify on-chain position has liquidity
-        liquidity = _query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity > 0, f"Position must have positive liquidity, got {liquidity}"
         print(f"On-chain liquidity: {liquidity}")
 
@@ -343,11 +282,6 @@ class TestSushiSwapV3LPCloseIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["sushiswap_v3"],
-        intent_types=["LP_OPEN", "LP_CLOSE"],
-        config={"token0": "USDT", "token1": "WBNB"},
-    )
     async def test_lp_close_position_with_liquidity(
         self,
         web3: Web3,
@@ -381,7 +315,7 @@ class TestSushiSwapV3LPCloseIntent:
         print(f"Opened position #{position_id}")
 
         # 2. Verify it has liquidity
-        liquidity = _query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity > 0, f"Position must have liquidity before close, got {liquidity}"
         print(f"Position liquidity: {liquidity}")
 
@@ -486,15 +420,24 @@ class TestSushiSwapV3LPCloseIntent:
         print(f"Opened position #{position_id}")
 
         # 2. Decrease all liquidity directly
-        _decrease_all_liquidity(web3, test_private_key, POSITION_MANAGER, position_id)
+        await decrease_all_liquidity(
+            web3, orchestrator,
+            chain=CHAIN_NAME, protocol="sushiswap_v3",
+            position_manager=POSITION_MANAGER, token_id=position_id,
+        )
         print("Decreased all liquidity via direct call")
 
         # 3. Collect all owed tokens directly
-        _collect_all_tokens(web3, test_private_key, POSITION_MANAGER, position_id, funded_wallet)
+        await collect_all_tokens(
+            web3, orchestrator,
+            chain=CHAIN_NAME, protocol="sushiswap_v3",
+            position_manager=POSITION_MANAGER, token_id=position_id,
+            recipient=funded_wallet,
+        )
         print("Collected all owed tokens via direct call")
 
         # 4. Verify 0 liquidity
-        liquidity = _query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity == 0, f"Expected 0 liquidity after decrease, got {liquidity}"
         print(f"Position liquidity: {liquidity}")
 
@@ -614,13 +557,17 @@ class TestSushiSwapV3LPCloseIntent:
                 print(f"Swap failed (non-critical for this test): {swap_result.error}")
 
         # 3. Decrease all liquidity (tokens become owed but not collected)
-        _decrease_all_liquidity(web3, test_private_key, POSITION_MANAGER, position_id)
+        await decrease_all_liquidity(
+            web3, orchestrator,
+            chain=CHAIN_NAME, protocol="sushiswap_v3",
+            position_manager=POSITION_MANAGER, token_id=position_id,
+        )
         print("Decreased all liquidity via direct call (tokens now owed)")
 
         # 4. Do NOT collect - leave tokens owed
 
         # 5. Verify 0 liquidity
-        liquidity = _query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity == 0, f"Expected 0 liquidity after decrease, got {liquidity}"
         print(f"Position liquidity: {liquidity}")
 

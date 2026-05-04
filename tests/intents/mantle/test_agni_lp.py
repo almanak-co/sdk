@@ -34,6 +34,8 @@ from tests.intents.conftest import (
 )
 from tests.intents.pool_helpers import fail_if_v3_pool_missing
 
+pytestmark = pytest.mark.no_zodiac(reason="agni connector not in manifest matrix")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================

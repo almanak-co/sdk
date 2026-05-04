@@ -146,6 +146,9 @@ def _extract_revert_selector(web3: Web3, tx_hash: bytes | str, block_number: int
     else). Replay at the same block the tx was included in gives the identical
     state context, so the revert-data matches 1:1.
 
+    Thin wrapper around :func:`_extract_revert_info`; existing callers that
+    only need the selector keep their signature unchanged.
+
     This mirrors ``PublicMempoolSubmitter._extract_revert_reason_from_tx`` in
     the framework: the pattern is intentionally duplicated in the test harness
     rather than imported because the test path needs synchronous, lower-level
@@ -154,13 +157,32 @@ def _extract_revert_selector(web3: Web3, tx_hash: bytes | str, block_number: int
     third place, extract a shared util in ``almanak/framework/execution/`` and
     wrap both call sites.
     """
+    selector, _reason = _extract_revert_info(web3, tx_hash, block_number)
+    return selector
+
+
+def _extract_revert_info(web3: Web3, tx_hash: bytes | str, block_number: int) -> tuple[str | None, str | None]:
+    """Replay ``tx_hash`` via ``eth_call`` and return ``(selector, decoded_reason)``.
+
+    Decodes the human-readable revert reason for the two standard encodings:
+    ``Error(string)`` (selector ``0x08c379a0``) and ``Panic(uint256)``
+    (selector ``0x4e487b71``). Custom errors return ``reason=None`` —
+    callers should surface the selector in the user-facing message instead.
+
+    The reason is what makes ``ZodiacOrchestrator``'s wrapped-revert error
+    match the same assertions an EOA-mode tester would use ("insufficient
+    balance", "transfer amount exceeds balance", etc.). Without it, the
+    inner protocol revert is silently squashed into a generic "execution
+    reverted" string and brittle test assertions on revert phrasing fail
+    under default-on Zodiac.
+    """
     tx_hex = tx_hash.hex() if isinstance(tx_hash, (bytes, bytearray)) else tx_hash
     if not tx_hex.startswith("0x"):
         tx_hex = "0x" + tx_hex
     try:
         tx = web3.eth.get_transaction(tx_hex)
     except Exception:
-        return None
+        return None, None
     call_params: dict[str, Any] = {
         "from": tx.get("from"),
         "to": tx.get("to"),
@@ -172,9 +194,100 @@ def _extract_revert_selector(web3: Web3, tx_hash: bytes | str, block_number: int
     try:
         web3.eth.call(call_params, block_identifier=block_number)
     except Exception as err:
-        return _selector_from_web3_error(err)
+        hex_data = _revert_hex_from_error(err)
+        if hex_data is None:
+            return None, None
+        selector = _normalise_selector(hex_data)
+        reason = _decode_revert_reason(hex_data)
+        return selector, reason
     # eth_call succeeded but the mined tx reverted — state drift. Treat as
     # "unknown revert" so callers fall through to the generic-failure path.
+    return None, None
+
+
+_PANIC_CODE_LABELS: dict[int, str] = {
+    0x01: "assert(false)",
+    0x11: "arithmetic overflow/underflow",
+    0x12: "division or modulo by zero",
+    0x21: "enum out of range",
+    0x22: "incorrectly encoded storage byte array",
+    0x31: "pop on empty array",
+    0x32: "array out-of-bounds access",
+    0x41: "memory allocation overflow",
+    0x51: "uninitialized internal function call",
+}
+
+
+def _revert_hex_from_error(err: BaseException) -> str | None:
+    """Return the full ``0x...`` revert-data hex from a web3.py exception, or None.
+
+    Mirrors the extraction strategies in :func:`_selector_from_web3_error`
+    but yields the *full* hex blob (selector + ABI-encoded args) so callers
+    can decode the reason — not just the 4-byte prefix.
+    """
+    data: Any = None
+    if err.args and isinstance(err.args[0], dict):
+        root = err.args[0]
+        data = root.get("data")
+        if data is None and isinstance(root.get("error"), dict):
+            data = root["error"].get("data")
+    while isinstance(data, dict):
+        data = data.get("data")
+    if data is None:
+        data = getattr(err, "data", None)
+        while isinstance(data, dict):
+            data = data.get("data")
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return "0x" + bytes(data).hex()
+    if isinstance(data, str):
+        match = _SELECTOR_RE.search(data)
+        if match:
+            return match.group(0)
+    # Last-resort: scan the exception message itself.
+    match = _SELECTOR_RE.search(str(err))
+    if match:
+        return match.group(0)
+    return None
+
+
+def _decode_revert_reason(hex_data: str) -> str | None:
+    """Decode a revert payload to a human-readable reason, or return None.
+
+    Handles the standard ABI revert encodings:
+
+    - ``Error(string)`` — selector ``0x08c379a0`` followed by ABI-encoded
+      string. Returns the string verbatim.
+    - ``Panic(uint256)`` — selector ``0x4e487b71`` followed by a uint256
+      panic code. Returns ``"Panic(<label>)"`` mapping the canonical
+      Solidity panic codes to human labels.
+
+    Returns ``None`` for custom errors (selector + arbitrary ABI-encoded
+    data); the caller's code surfaces the selector in the error message
+    in that case, keeping the diagnostic loop one bisection away.
+    """
+    if not hex_data or len(hex_data) < 10:
+        return None
+    selector = hex_data[:10].lower()
+    payload = hex_data[10:]
+    try:
+        payload_bytes = bytes.fromhex(payload)
+    except ValueError:
+        return None
+    if selector == "0x08c379a0":  # Error(string)
+        try:
+            from eth_abi import decode as abi_decode
+
+            (reason,) = abi_decode(["string"], payload_bytes)
+            return str(reason)
+        except Exception:
+            return None
+    if selector == "0x4e487b71":  # Panic(uint256)
+        try:
+            code = int.from_bytes(payload_bytes[:32], "big") if payload_bytes else 0
+        except Exception:
+            return None
+        label = _PANIC_CODE_LABELS.get(code, f"code 0x{code:02x}")
+        return f"Panic({label})"
     return None
 
 
@@ -408,9 +521,7 @@ def _exec_bundle_via_zodiac(
         # needs at least ``_ZODIAC_WRAPPER_GAS`` regardless of the inner-tx
         # gas hint, and ``UnsignedTransaction`` uses ``gas_limit``.
         inner_gas = (
-            tx.get("gas")
-            if isinstance(tx, dict)
-            else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
+            tx.get("gas") if isinstance(tx, dict) else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
         )
         built = roles_c.functions.execTransactionWithRole(
             Web3.to_checksum_address(to_addr),
@@ -449,8 +560,7 @@ def _find_target_by_selector(targets: list[dict], selector_hex: str) -> dict:
     matches = [
         t
         for t in targets
-        if t.get("clearance") == 2
-        and any(fn.get("selector", "").lower() == needle for fn in t.get("functions", []))
+        if t.get("clearance") == 2 and any(fn.get("selector", "").lower() == needle for fn in t.get("functions", []))
     ]
     if len(matches) != 1:
         raise AssertionError(
@@ -696,10 +806,7 @@ def _assert_balances_any_increased(
         report.append((label, delta))
         if delta > 0:
             any_gained = True
-    assert any_gained, (
-        f"{context}: expected at least one of {[r[0] for r in report]} to increase, "
-        f"got deltas {report}."
-    )
+    assert any_gained, f"{context}: expected at least one of {[r[0] for r in report]} to increase, got deltas {report}."
 
 
 # =============================================================================
@@ -756,9 +863,7 @@ def _deploy_and_setup_zodiac(
     Thin wrapper around ``_setup_zodiac_env`` — exposed so P1 seeding can
     deploy the Safe BEFORE the manifest is applied (seeding runs in between).
     """
-    return _setup_zodiac_env(
-        web3, funded_wallet, test_private_key, role_label=role_label
-    )
+    return _setup_zodiac_env(web3, funded_wallet, test_private_key, role_label=role_label)
 
 
 def _apply_manifest_for_case(
@@ -779,9 +884,7 @@ def _apply_manifest_for_case(
     seeding can run between deploy and apply.
     """
     manifest_config = _build_manifest_config(case)
-    strategy_name = (
-        f"perm_onchain_{case.protocol}_{case.intent_type.lower()}{strategy_suffix}"
-    )
+    strategy_name = f"perm_onchain_{case.protocol}_{case.intent_type.lower()}{strategy_suffix}"
     manifest = generate_manifest(
         strategy_name=strategy_name,
         chain=case.chain,
@@ -823,9 +926,7 @@ def _setup_zodiac_and_apply_manifest(
     between the two halves (WITHDRAW, BORROW, REPAY, LP_CLOSE) should call
     them directly.
     """
-    safe, roles, role_key = _deploy_and_setup_zodiac(
-        web3, funded_wallet, test_private_key, role_label=role_label
-    )
+    safe, roles, role_key = _deploy_and_setup_zodiac(web3, funded_wallet, test_private_key, role_label=role_label)
     targets = _apply_manifest_for_case(
         case,
         web3=web3,
@@ -875,12 +976,8 @@ def _run_swap_positive(
     """SWAP positive path: fund input token, execute, assert bilateral deltas."""
     from_symbol = case.config["from_token"]
     to_symbol = case.config["to_token"]
-    from_addr, from_decimals, amount_wei = _token_amount_wei(
-        web3, case.chain, from_symbol, case.config["amount"]
-    )
-    to_addr, to_decimals, _ = _token_amount_wei(
-        web3, case.chain, to_symbol, 0
-    )
+    from_addr, from_decimals, amount_wei = _token_amount_wei(web3, case.chain, from_symbol, case.config["amount"])
+    to_addr, to_decimals, _ = _token_amount_wei(web3, case.chain, to_symbol, 0)
 
     safe, roles, role_key, _targets = _setup_zodiac_and_apply_manifest(
         case,
@@ -895,9 +992,7 @@ def _run_swap_positive(
         f"Safe funding failed for {from_symbol} on {case.chain}"
     )
 
-    compilation = _compile_for_safe(
-        case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
     bundle = compilation.action_bundle
     assert bundle is not None and bundle.transactions, "ActionBundle must contain at least one tx"
@@ -967,17 +1062,13 @@ def _run_lend_positive(
 
     cfg = case.config
     token_symbol = cfg["token"]
-    token_addr, token_decimals, amount_wei = _token_amount_wei(
-        web3, case.chain, token_symbol, cfg.get("amount", 0)
-    )
+    token_addr, token_decimals, amount_wei = _token_amount_wei(web3, case.chain, token_symbol, cfg.get("amount", 0))
 
     # Phase: deploy Safe + Roles FIRST, seed prior state BEFORE applying the
     # manifest. Seeding runs via Safe.execTransaction (owner-signed), so the
     # absence of manifest targets is the point — we do not want the seeding
     # bundle accidentally authorised and passing the authz assertion trivially.
-    safe, roles, role_key = _deploy_and_setup_zodiac(
-        web3, funded_wallet, test_private_key, role_label=role_label
-    )
+    safe, roles, role_key = _deploy_and_setup_zodiac(web3, funded_wallet, test_private_key, role_label=role_label)
 
     # P1 seeding — land prior on-chain state so WITHDRAW / REPAY have something
     # to operate on. SUPPLY needs no seeding.
@@ -1024,9 +1115,7 @@ def _run_lend_positive(
     if fund_wei > 0:
         _fund_safe_with_token(safe, token_symbol, fund_wei, case.chain, anvil_rpc_url)
 
-    compilation = _compile_for_safe(
-        case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
     bundle = compilation.action_bundle
     assert bundle is not None and bundle.transactions, "ActionBundle must contain at least one tx"
@@ -1098,19 +1187,13 @@ def _run_lend_borrow_positive(
     cfg = case.config
     collat_symbol = cfg["collateral_token"]
     borrow_symbol = cfg["borrow_token"]
-    collat_addr, _, collat_wei = _token_amount_wei(
-        web3, case.chain, collat_symbol, cfg["collateral_amount"]
-    )
-    borrow_addr, borrow_decimals, _ = _token_amount_wei(
-        web3, case.chain, borrow_symbol, 0
-    )
+    collat_addr, _, collat_wei = _token_amount_wei(web3, case.chain, collat_symbol, cfg["collateral_amount"])
+    borrow_addr, borrow_decimals, _ = _token_amount_wei(web3, case.chain, borrow_symbol, 0)
 
     # Deploy Safe + Roles first; seed (if needed) BEFORE the manifest is
     # applied; THEN apply the manifest. Collateral seeding is a plain SUPPLY
     # tx executed by the Safe owner — Zodiac is not involved until step 3.
-    safe, roles, role_key = _deploy_and_setup_zodiac(
-        web3, funded_wallet, test_private_key, role_label=role_label
-    )
+    safe, roles, role_key = _deploy_and_setup_zodiac(web3, funded_wallet, test_private_key, role_label=role_label)
 
     if case.protocol != "compound_v3":
         _seed_borrow_collateral(
@@ -1142,9 +1225,7 @@ def _run_lend_borrow_positive(
         f"Safe collateral funding failed for {collat_symbol} on {case.chain}"
     )
 
-    compilation = _compile_for_safe(
-        case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
     bundle = compilation.action_bundle
     assert bundle is not None and bundle.transactions, "ActionBundle must contain at least one tx"
@@ -1214,9 +1295,7 @@ def _run_lp_open_positive(
     if amount1_wei > 0:
         _fund_safe_with_token(safe, token1_symbol, amount1_wei * 2, case.chain, anvil_rpc_url)
 
-    compilation = _compile_for_safe(
-        case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
     bundle = compilation.action_bundle
     assert bundle is not None and bundle.transactions, "ActionBundle must contain at least one tx"
@@ -1276,9 +1355,7 @@ def _run_lp_close_positive(
     # Deploy Safe + Roles, seed an LP_OPEN via Safe (no Zodiac), then apply
     # the CLOSE manifest. The seeded OPEN mints the position whose identity
     # is merged into the CLOSE case config.
-    safe, roles, role_key = _deploy_and_setup_zodiac(
-        web3, funded_wallet, test_private_key, role_label=role_label
-    )
+    safe, roles, role_key = _deploy_and_setup_zodiac(web3, funded_wallet, test_private_key, role_label=role_label)
     position_identity = _seed_lp_position(
         case,
         safe=safe,
@@ -1311,9 +1388,7 @@ def _run_lp_close_positive(
         test_private_key=test_private_key,
     )
 
-    compilation = _compile_for_safe(
-        close_case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(close_case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
     bundle = compilation.action_bundle
     assert bundle is not None and bundle.transactions, "ActionBundle must contain at least one tx"
@@ -1453,18 +1528,12 @@ def _compile_and_seed(
     Returns the list of receipts (one per inner tx). Any compile failure or
     revert raises ``SeedingFailed`` with ``step_label`` in the message.
     """
-    compilation = _compile_for_safe(
-        case_like, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(case_like, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     if compilation.status.value != "SUCCESS":
-        raise SeedingFailed(
-            f"Seeding step {step_label!r}: compile failed: {compilation.error}"
-        )
+        raise SeedingFailed(f"Seeding step {step_label!r}: compile failed: {compilation.error}")
     bundle = compilation.action_bundle
     if bundle is None or not bundle.transactions:
-        raise SeedingFailed(
-            f"Seeding step {step_label!r}: empty ActionBundle — compiler did not emit any tx"
-        )
+        raise SeedingFailed(f"Seeding step {step_label!r}: empty ActionBundle — compiler did not emit any tx")
     return _exec_bundle_via_safe(
         web3,
         safe,
@@ -1676,20 +1745,9 @@ def _seed_supply_then_borrow(
     # unit-based heuristic (safe only when both tokens share a unit scale,
     # e.g. stablecoin-on-stablecoin).
     _TARGET_LTV = Decimal("0.20")
-    borrow_price = (
-        price_oracle.get(borrow_symbol) if isinstance(price_oracle, dict) else None
-    )
-    collateral_price = (
-        price_oracle.get(collateral_token_symbol)
-        if isinstance(price_oracle, dict)
-        else None
-    )
-    if (
-        borrow_price is not None
-        and collateral_price is not None
-        and borrow_price > 0
-        and collateral_price > 0
-    ):
+    borrow_price = price_oracle.get(borrow_symbol) if isinstance(price_oracle, dict) else None
+    collateral_price = price_oracle.get(collateral_token_symbol) if isinstance(price_oracle, dict) else None
+    if borrow_price is not None and collateral_price is not None and borrow_price > 0 and collateral_price > 0:
         collateral_value_usd = borrow_amount_dec * Decimal(str(borrow_price)) / _TARGET_LTV
         collateral_amount_dec = collateral_value_usd / Decimal(str(collateral_price))
         # Guard against sub-unit WETH rounding — 1 WETH is always safe headroom.
@@ -1703,11 +1761,7 @@ def _seed_supply_then_borrow(
         )
         # Legacy heuristic: 1 WETH against any stablecoin debt, else 10x units.
         # Correct only when borrow and collateral share a unit scale.
-        collateral_amount_dec = (
-            Decimal("1")
-            if collateral_token_symbol == "WETH"
-            else borrow_amount_dec * Decimal(10)
-        )
+        collateral_amount_dec = Decimal("1") if collateral_token_symbol == "WETH" else borrow_amount_dec * Decimal(10)
 
     # 1. SUPPLY collateral.
     supply_cfg: dict[str, Any] = {
@@ -1728,9 +1782,7 @@ def _seed_supply_then_borrow(
         config=supply_cfg,
     )
 
-    _, _, collat_wei = _token_amount_wei(
-        web3, case.chain, collateral_token_symbol, collateral_amount_dec
-    )
+    _, _, collat_wei = _token_amount_wei(web3, case.chain, collateral_token_symbol, collateral_amount_dec)
     _fund_safe_with_token(safe, collateral_token_symbol, collat_wei * 2, case.chain, anvil_rpc_url)
 
     _compile_and_seed(
@@ -2096,9 +2148,7 @@ def run_negative_authorisation_case(
         owner_private_key=test_private_key,
     )
 
-    compilation = _compile_for_safe(
-        case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle
-    )
+    compilation = _compile_for_safe(case, safe=safe, anvil_rpc_url=anvil_rpc_url, price_oracle=price_oracle)
     assert compilation.status.value == "SUCCESS", (
         f"Compile should still succeed (authz is on-chain only): {compilation.error}"
     )
@@ -2106,9 +2156,7 @@ def run_negative_authorisation_case(
     assert bundle is not None and bundle.transactions, "ActionBundle must contain at least one tx"
 
     # Record pre-execution balances for the conservation check.
-    balances_before = {
-        addr: get_token_balance(web3, addr, safe) for addr, _label in snapshot_tokens
-    }
+    balances_before = {addr: get_token_balance(web3, addr, safe) for addr, _label in snapshot_tokens}
 
     with pytest.raises(RuntimeError, match="execTransactionWithRole reverted mid-bundle"):
         _exec_bundle_via_zodiac(
@@ -2160,56 +2208,66 @@ def _prefund_for_negative(
     Mirrors the positive path's funding so the negative assertion isolates
     the authorisation failure from funding failures. Returns the list of
     token addresses the caller should include in the conservation check.
+
+    **Fail-fast on funding misses.** Every fund call is followed by a
+    balance probe: if Anvil storage-slot writes silently no-op (wrong slot,
+    proxy storage layout shift, etc.), the downstream "no value moved"
+    assertion would otherwise still pass on a zero-balance Safe and turn
+    an infra failure into a false-green authz test. The probe converts
+    that into a loud setup error.
     """
     it = case.intent_type.upper()
     cfg = case.config
 
+    def _fund_and_verify(symbol: str, addr: str, amount_wei: int) -> None:
+        if amount_wei <= 0:
+            return
+        _fund_safe_with_token(safe, symbol, amount_wei, case.chain, anvil_rpc_url)
+        actual = get_token_balance(web3, addr, safe)
+        if actual < amount_wei:
+            raise SeedingFailed(
+                f"Negative-path prefunding failed for {symbol} ({addr}) on "
+                f"{case.chain}: requested {amount_wei}, Safe balance after "
+                f"fund is {actual}. Likely a storage-slot misconfiguration "
+                f"or proxy storage layout shift; bailing out so the conservation "
+                f"check below doesn't pass on a zero-balance Safe."
+            )
+
     if it == "SWAP":
         from_symbol = cfg["from_token"]
         to_symbol = cfg["to_token"]
-        from_addr, _, amount_wei = _token_amount_wei(
-            web3, case.chain, from_symbol, cfg["amount"]
-        )
+        from_addr, _, amount_wei = _token_amount_wei(web3, case.chain, from_symbol, cfg["amount"])
         to_addr, _, _ = _token_amount_wei(web3, case.chain, to_symbol, 0)
-        _fund_safe_with_token(safe, from_symbol, amount_wei * 2, case.chain, anvil_rpc_url)
+        _fund_and_verify(from_symbol, from_addr, amount_wei * 2)
         return [(from_addr, from_symbol), (to_addr, to_symbol)]
 
     if it in {"SUPPLY", "WITHDRAW", "REPAY"}:
         token_symbol = cfg["token"]
-        token_addr, _, amount_wei = _token_amount_wei(
-            web3, case.chain, token_symbol, cfg.get("amount", 0)
-        )
-        fund_wei = amount_wei * 2
-        if fund_wei > 0:
-            _fund_safe_with_token(safe, token_symbol, fund_wei, case.chain, anvil_rpc_url)
+        token_addr, _, amount_wei = _token_amount_wei(web3, case.chain, token_symbol, cfg.get("amount", 0))
+        _fund_and_verify(token_symbol, token_addr, amount_wei * 2)
         return [(token_addr, token_symbol)]
 
     if it == "BORROW":
         collat_symbol = cfg["collateral_token"]
         borrow_symbol = cfg["borrow_token"]
-        collat_addr, _, collat_wei = _token_amount_wei(
-            web3, case.chain, collat_symbol, cfg["collateral_amount"]
-        )
+        collat_addr, _, collat_wei = _token_amount_wei(web3, case.chain, collat_symbol, cfg["collateral_amount"])
         borrow_addr, _, _ = _token_amount_wei(web3, case.chain, borrow_symbol, 0)
-        _fund_safe_with_token(safe, collat_symbol, collat_wei * 2, case.chain, anvil_rpc_url)
+        _fund_and_verify(collat_symbol, collat_addr, collat_wei * 2)
         return [(collat_addr, collat_symbol), (borrow_addr, borrow_symbol)]
 
     if it == "LP_OPEN":
         token0_symbol = cfg["token0"]
         token1_symbol = cfg["token1"]
-        token0_addr, _, amount0_wei = _token_amount_wei(
-            web3, case.chain, token0_symbol, cfg.get("amount0", 0)
-        )
-        token1_addr, _, amount1_wei = _token_amount_wei(
-            web3, case.chain, token1_symbol, cfg.get("amount1", 0)
-        )
-        if amount0_wei > 0:
-            _fund_safe_with_token(safe, token0_symbol, amount0_wei * 2, case.chain, anvil_rpc_url)
-        if amount1_wei > 0:
-            _fund_safe_with_token(safe, token1_symbol, amount1_wei * 2, case.chain, anvil_rpc_url)
+        token0_addr, _, amount0_wei = _token_amount_wei(web3, case.chain, token0_symbol, cfg.get("amount0", 0))
+        token1_addr, _, amount1_wei = _token_amount_wei(web3, case.chain, token1_symbol, cfg.get("amount1", 0))
+        _fund_and_verify(token0_symbol, token0_addr, amount0_wei * 2)
+        _fund_and_verify(token1_symbol, token1_addr, amount1_wei * 2)
         return [(token0_addr, token0_symbol), (token1_addr, token1_symbol)]
 
     if it == "LP_CLOSE":
+        # No funding required — the position itself provides the tokens
+        # the close path withdraws. The conservation check downstream
+        # watches both leg tokens.
         token0_symbol = cfg["token0"]
         token1_symbol = cfg["token1"]
         token0_addr, _, _ = _token_amount_wei(web3, case.chain, token0_symbol, 0)
@@ -2249,9 +2307,7 @@ def _get_case_modules() -> tuple[tuple[str, ModuleType], ...]:
         if case_file.name == "__init__.py":
             continue
         protocol = case_file.stem
-        spec = importlib.util.spec_from_file_location(
-            f"_perm_cases_runtime.{protocol}", case_file
-        )
+        spec = importlib.util.spec_from_file_location(f"_perm_cases_runtime.{protocol}", case_file)
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Failed to load spec for {case_file}")
         module = importlib.util.module_from_spec(spec)
@@ -2382,6 +2438,15 @@ class ZodiacOrchestrator:
         member_private_key: str,
         chain: str,
         rpc_url: str,
+        # Late-binding manifest application params — populated when the
+        # opt-out fixture creates the orchestrator (default-on Zodiac model).
+        # When omitted, ``execute`` falls back to the legacy assumption that
+        # targets were applied at fixture setup (the marker-driven path).
+        safe_address: str | None = None,
+        owner_eoa: str | None = None,
+        owner_private_key: str | None = None,
+        recorded_intents: list[Any] | None = None,
+        strategy_name: str = "zodiac-fixture-pilot",
     ) -> None:
         self.web3 = web3
         self.roles_address = Web3.to_checksum_address(roles_address)
@@ -2394,6 +2459,17 @@ class ZodiacOrchestrator:
             address=self.roles_address,
             abi=ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
         )
+        # Late-binding state. ``recorded_intents`` is the live list owned by
+        # the recorder fixture — appended-to by the monkey-patched
+        # ``IntentCompiler.compile``. ``_applied_targets`` dedupes
+        # ``apply_manifest_targets`` calls across multiple ``execute`` calls in
+        # the same test so we only pay for incremental scope expansion.
+        self.safe_address = Web3.to_checksum_address(safe_address) if safe_address else None
+        self.owner_eoa = Web3.to_checksum_address(owner_eoa) if owner_eoa else None
+        self.owner_private_key = owner_private_key
+        self.recorded_intents = recorded_intents
+        self.strategy_name = strategy_name
+        self._applied_targets: set[tuple[str, str, int]] = set()
 
     async def execute(self, action_bundle: Any, context: Any = None) -> Any:
         """Route ``action_bundle.transactions`` through ``execTransactionWithRole``.
@@ -2402,7 +2478,17 @@ class ZodiacOrchestrator:
         actual on-chain work is synchronous (Anvil RPC over HTTP); we expose
         an ``async def`` signature so tests that ``await`` the call work
         unchanged.
+
+        Late-binding manifest application: when the orchestrator was
+        constructed with ``safe_address`` / ``owner_*`` / ``recorded_intents``
+        (the opt-out fixture path), generate a manifest from the intents the
+        recorder captured, apply only the *new* ``(target, selector)`` tuples
+        to Roles via ``apply_manifest_targets``, and update the local cache.
+        Repeated ``execute`` calls in the same test (supply → withdraw,
+        LP open → close) extend the manifest incrementally instead of
+        re-applying the full target set every time.
         """
+        self._apply_pending_manifest_targets()
         # Local imports keep this harness importable from test files without
         # pulling in the whole execution package at collection time.
         from almanak.framework.execution.interfaces import TransactionReceipt
@@ -2432,9 +2518,7 @@ class ZodiacOrchestrator:
             # fall back to both names in case a dict-shaped tx with ``gas`` is
             # ever passed.
             inner_gas = (
-                tx.get("gas")
-                if isinstance(tx, dict)
-                else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
+                tx.get("gas") if isinstance(tx, dict) else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
             )
             built = self._roles_contract.functions.execTransactionWithRole(
                 Web3.to_checksum_address(to_addr),
@@ -2480,9 +2564,12 @@ class ZodiacOrchestrator:
                 # Disambiguate: authz-denial vs protocol revert. We replay the
                 # tx via eth_call to pull the revert data; a selector match
                 # against the Zodiac set means the Modifier blocked the call.
-                selector = _extract_revert_selector(
-                    self.web3, tx_hash_bytes, receipt["blockNumber"]
-                )
+                # The companion ``reason`` decodes ``Error(string)`` /
+                # ``Panic(uint256)`` revert payloads so balance-guard tests
+                # ("insufficient balance", "transfer amount exceeds balance",
+                # …) keep matching their assertions even though the inner
+                # revert is wrapped in ``execTransactionWithRole``.
+                selector, reason = _extract_revert_info(self.web3, tx_hash_bytes, receipt["blockNumber"])
                 if is_zodiac_authz_revert(selector):
                     raise AuthorizationFailed(
                         "Zodiac Roles Modifier blocked execTransactionWithRole "
@@ -2491,11 +2578,13 @@ class ZodiacOrchestrator:
                     )
                 # Protocol revert — record the error and break; downstream
                 # assertions compare against ``success=False``.
+                err_parts = [f"Inner tx reverted under execTransactionWithRole (to={to_addr}, tx={tx_hash_hex}"]
+                if selector:
+                    err_parts.append(f", selector={selector}")
+                if reason:
+                    err_parts.append(f", reason={reason!r}")
                 err_msg = (
-                    f"Inner tx reverted under execTransactionWithRole "
-                    f"(to={to_addr}, tx={tx_hash_hex}"
-                    + (f", selector={selector}" if selector else "")
-                    + "). Not a Zodiac authz denial — check balance / slippage / "
+                    "".join(err_parts) + "). Not a Zodiac authz denial — check balance / slippage / "
                     "connector semantics."
                 )
                 tx_result.error = err_msg
@@ -2514,6 +2603,248 @@ class ZodiacOrchestrator:
 
         result.phase = ExecutionPhase.COMPLETE
         return result
+
+    def _apply_pending_manifest_targets(self) -> None:
+        """Derive a manifest from ``recorded_intents`` and apply NEW targets.
+
+        No-op when the orchestrator wasn't constructed for late-binding
+        (``recorded_intents`` is ``None``). Skips silently if there are no
+        recorded intents yet — the test may have built the orchestrator
+        without compiling anything; the subsequent execute will fail loudly
+        on a Zodiac authz revert which is the right signal.
+        """
+        if self.recorded_intents is None:
+            return
+        if self.safe_address is None or self.owner_eoa is None or self.owner_private_key is None:
+            return
+        if not self.recorded_intents:
+            return
+
+        protocols, intent_types, config = _derive_manifest_inputs(self.recorded_intents)
+        if not protocols or not intent_types:
+            return
+
+        manifest = generate_manifest(
+            strategy_name=self.strategy_name,
+            chain=self.chain,
+            supported_protocols=sorted(protocols),
+            intent_types=sorted(intent_types),
+            config=config,
+            rpc_url=self.rpc_url,
+        )
+        targets = manifest.to_zodiac_targets()
+        new_targets = _filter_new_targets(targets, self._applied_targets)
+        if not new_targets:
+            return
+
+        apply_manifest_targets(
+            self.web3,
+            self.roles_address,
+            self.safe_address,
+            self.role_key,
+            targets=new_targets,
+            owner_eoa=self.owner_eoa,
+            owner_private_key=self.owner_private_key,
+        )
+        for fingerprint in _target_fingerprints(new_targets):
+            self._applied_targets.add(fingerprint)
+
+
+def _derive_manifest_inputs(
+    intents: Sequence[Any],
+) -> tuple[set[str], set[str], dict[str, Any]]:
+    """Derive ``(protocols, intent_types, config)`` from observed source intents.
+
+    Token symbols / addresses are aggregated into ``config["anvil_funding"]``
+    rather than into the per-intent-type ``_TOKEN_CONFIG_FIELDS`` keys. The
+    manifest generator's ``_extract_token_permissions`` scans both surfaces
+    for token symbols, but ``anvil_funding`` is a dict keyed by symbol — so
+    a multi-step test that compiles two intents with *different* asset pairs
+    (e.g. supply USDC, then borrow WETH) gets approves for ALL referenced
+    tokens. Using a typed key like ``from_token`` would have stamped only
+    the first intent's value and silently dropped the rest, leading to
+    false-negative AuthorizationFailed reverts mid-test.
+    """
+    protocols: set[str] = set()
+    intent_types: set[str] = set()
+    token_symbols: set[str] = set()
+
+    for intent in intents:
+        proto = getattr(intent, "protocol", None)
+        if proto:
+            protocols.add(str(proto))
+        itype = _intent_type_for(intent)
+        if itype:
+            intent_types.add(itype)
+        for symbol in _intent_token_symbols(intent):
+            if symbol:
+                token_symbols.add(symbol)
+
+    config: dict[str, Any] = {}
+    if token_symbols:
+        # Value is irrelevant — only the keys are scanned. Use the symbol
+        # itself as a small debugging aid so the dict prints meaningfully.
+        config["anvil_funding"] = {sym: sym for sym in sorted(token_symbols)}
+    return protocols, intent_types, config
+
+
+def _intent_type_for(intent: Any) -> str | None:
+    """Return the canonical intent-type string for an intent instance.
+
+    The ``Intent.intent_type`` attribute is an ``IntentType`` enum on most
+    intent classes; ``str(IntentType.SUPPLY)`` returns ``"IntentType.SUPPLY"``
+    rather than the canonical ``"SUPPLY"`` value, so we read ``.value`` when
+    available and fall back to the class-name table for plain-class intents.
+    """
+    explicit = getattr(intent, "intent_type", None)
+    if explicit is not None:
+        return str(getattr(explicit, "value", explicit)).upper()
+    return _INTENT_CLASS_TO_TYPE.get(type(intent).__name__)
+
+
+# Intent class → canonical IntentType.value. Kept in lock-step with
+# ``INTENT_CLASS_TO_TYPE`` in ``tests/unit/permissions/_marker_discovery.py``
+# — the discovery scanner uses its copy at gate time, this one is used by
+# ``_intent_type_for`` at execute time as a fallback when an Intent instance
+# is missing the ``.intent_type`` attribute. Drift between the two would
+# silently under-cover permission pairs for whichever intent the smaller
+# table omits, so any change here MUST also land in the discovery module.
+_INTENT_CLASS_TO_TYPE: dict[str, str] = {
+    "SwapIntent": "SWAP",
+    "LPOpenIntent": "LP_OPEN",
+    "LPCloseIntent": "LP_CLOSE",
+    "CollectFeesIntent": "LP_COLLECT_FEES",
+    "SupplyIntent": "SUPPLY",
+    "WithdrawIntent": "WITHDRAW",
+    "BorrowIntent": "BORROW",
+    "RepayIntent": "REPAY",
+    "PerpOpenIntent": "PERP_OPEN",
+    "PerpCloseIntent": "PERP_CLOSE",
+    "VaultDepositIntent": "VAULT_DEPOSIT",
+    "VaultRedeemIntent": "VAULT_REDEEM",
+    "BridgeIntent": "BRIDGE",
+    "FlashLoanIntent": "FLASH_LOAN",
+}
+
+
+def _intent_token_symbols(intent: Any) -> list[str]:
+    """Return the list of token symbols/addresses an intent references.
+
+    Per-intent dispatch — the same ``.token`` attribute means different things
+    on ``SupplyIntent`` (supply token) vs ``WithdrawIntent`` (withdraw token)
+    vs ``RepayIntent`` (repay token), but for ERC-20 approve discovery only
+    the symbol set matters. The caller aggregates these into a single set so
+    multi-step tests (open then close, supply then borrow) cover every asset.
+
+    **Drift hazard**: ``_INTENT_CLASS_TO_TYPE`` (above) lists every intent
+    class the discovery + harness recognise; this function only enumerates
+    the subset whose tests currently exercise ERC-20 approves under Zodiac.
+    When a future phase wires ``CollectFeesIntent``, ``PerpOpenIntent``,
+    ``VaultDepositIntent``, ``BridgeIntent``, ``FlashLoanIntent``, etc. into
+    the default-on Zodiac path, extend this dispatch with the matching
+    token-attribute reads — otherwise those intents produce empty token
+    sets and the manifest's ERC-20 approve permissions are silently
+    incomplete. The fall-through ``return []`` is the safe default, not a
+    "we covered this" signal.
+    """
+    if isinstance(intent, SwapIntent):
+        return [str(intent.from_token), str(intent.to_token)]
+    if isinstance(intent, SupplyIntent):
+        return [str(intent.token)]
+    if isinstance(intent, WithdrawIntent):
+        return [str(intent.token)]
+    if isinstance(intent, BorrowIntent):
+        return [str(intent.collateral_token), str(intent.borrow_token)]
+    if isinstance(intent, RepayIntent):
+        return [str(intent.token)]
+    if isinstance(intent, LPOpenIntent):
+        # Pool format: ``"token0/token1[/fee]"`` (see compiler ``_parse_pool_info``).
+        pool = getattr(intent, "pool", None) or ""
+        parts = pool.split("/")
+        if len(parts) >= 2:
+            return [parts[0], parts[1]]
+        return []
+    # LPCloseIntent + any future intent types: tokens are inferred at compile
+    # time (e.g. from ``position_id``); no explicit config contribution. Tests
+    # that close-only without an open-first will rely on the manifest's
+    # connector-side discovery of the position's token pair.
+    return []
+
+
+def _target_fingerprints(targets: list[dict]) -> list[tuple[str, str, int]]:
+    """Return ``[(addr_lower, selector_or_wildcard, exec_options), ...]``.
+
+    The fingerprint key includes ``executionOptions`` so a re-application
+    that widens execution options on the same ``(addr, selector)`` (e.g.
+    NONE → SEND, or SEND → SEND+DELEGATECALL) is treated as a *new* rule
+    rather than skipped as a duplicate. This is forward-looking — the
+    current manifest generator emits one entry per ``(addr, selector)``
+    so the wider key is functionally equivalent for today, but it avoids
+    a silent under-application if the generator ever starts producing
+    multiple entries with distinct options.
+
+    For ``clearance == 1`` (whole-contract wildcard) the selector slot is
+    ``"*"``. For ``clearance == 2`` (function-scoped) we emit one
+    fingerprint per ``(addr, selector)`` pair plus the target-level
+    options (``apply_manifest_targets`` uses target-level
+    ``executionOptions`` for both ``allowTarget`` and ``allowFunction``).
+
+    Note: this fingerprint does NOT cover scope-target *parameter*
+    constraints (e.g. ``scopeFunction`` with per-arg conditions). The
+    current ``apply_manifest_targets`` only emits unparameterised
+    ``allowFunction`` calls, so parameter constraints aren't part of the
+    on-chain rule yet. If a future generator change adds
+    ``scopeFunction``-style rules, extend this fingerprint to include a
+    stable hash of each function's full constraint payload.
+    """
+    out: list[tuple[str, str, int]] = []
+    for target in targets:
+        addr = str(target["address"]).lower()
+        clearance = int(target.get("clearance", 0))
+        exec_options = int(target.get("executionOptions", 0))
+        if clearance == 1:
+            out.append((addr, "*", exec_options))
+        elif clearance == 2:
+            for fn in target.get("functions") or []:
+                selector = str(fn.get("selector") or "").lower()
+                if selector:
+                    out.append((addr, selector, exec_options))
+    return out
+
+
+def _filter_new_targets(
+    targets: list[dict],
+    already_applied: set[tuple[str, str, int]],
+) -> list[dict]:
+    """Return only the targets whose fingerprints aren't already in the cache.
+
+    A clearance=2 target with one selector already applied and one not is
+    surfaced as a single-function target (the un-applied selector only) so
+    the redundant ``scopeTarget`` call for the second pass is skipped only
+    when EVERY function on the target has already been applied. This keeps
+    application correct under interleaved single- and multi-selector entries
+    on the same address.
+    """
+    new_list: list[dict] = []
+    for target in targets:
+        addr = str(target["address"]).lower()
+        clearance = int(target.get("clearance", 0))
+        exec_options = int(target.get("executionOptions", 0))
+        if clearance == 1:
+            if (addr, "*", exec_options) not in already_applied:
+                new_list.append(target)
+            continue
+        if clearance == 2:
+            new_functions = [
+                fn
+                for fn in (target.get("functions") or [])
+                if (addr, str(fn.get("selector") or "").lower(), exec_options) not in already_applied
+            ]
+            if new_functions:
+                new_target = dict(target)
+                new_target["functions"] = new_functions
+                new_list.append(new_target)
+    return new_list
 
 
 def _normalise_bundle_tx(tx: Any) -> tuple[str, int, bytes]:

@@ -31,6 +31,8 @@ from tests.intents.conftest import (
     get_token_balance,
 )
 
+pytestmark = pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================

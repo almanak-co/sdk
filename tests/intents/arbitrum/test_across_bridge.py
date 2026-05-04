@@ -56,6 +56,8 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+pytestmark = pytest.mark.no_zodiac(reason="Phase E BRIDGE not landed: across not in synthetic-intents matrix")
+
 
 def _sync_anvil_time_to_wall_clock(web3: Web3) -> int:
     """Advance the Anvil fork's block timestamp to the current wall clock.

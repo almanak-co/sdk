@@ -241,11 +241,6 @@ class TestCurveCryptoSwapExecution:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["curve"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDT", "quote_token": "WETH"},
-    )
     async def test_usdt_to_weth_full_lifecycle(
         self,
         web3: Web3,
@@ -418,11 +413,6 @@ class TestCurveCryptoSwapExecution:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["curve"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDT", "quote_token": "WETH"},
-    )
     async def test_weth_to_usdt_reverse_direction(
         self,
         web3: Web3,

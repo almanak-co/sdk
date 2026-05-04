@@ -57,6 +57,8 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+pytestmark = pytest.mark.no_zodiac(reason="Phase E BRIDGE not landed: stargate not in synthetic-intents matrix")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================

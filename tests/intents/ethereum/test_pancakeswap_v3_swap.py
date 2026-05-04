@@ -57,11 +57,6 @@ class TestPancakeSwapV3SwapIntent:
 
     @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 USDT->WETH swap reverts with STF intermittently on Ethereum", strict=False)
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["pancakeswap_v3"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDT", "quote_token": "WETH"},
-    )
     async def test_swap_usdt_to_weth_using_intent(
         self,
         web3: Web3,
@@ -189,11 +184,6 @@ class TestPancakeSwapV3SwapIntent:
 
     @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 WETH->USDT swap reverts with STF intermittently on Ethereum", strict=False)
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["pancakeswap_v3"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDT", "quote_token": "WETH"},
-    )
     async def test_swap_weth_to_usdt_using_intent(
         self,
         web3: Web3,

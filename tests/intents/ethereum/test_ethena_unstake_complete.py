@@ -44,6 +44,8 @@ from almanak.framework.connectors.ethena.receipt_parser import EthenaReceiptPars
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import UnstakeIntent
 
+pytestmark = pytest.mark.no_zodiac(reason="ethena connector not in manifest matrix")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================

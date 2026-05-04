@@ -27,6 +27,8 @@ from tests.intents._permission_onchain_harness import (
     run_positive_authorisation_case,
 )
 
+pytestmark = pytest.mark.no_zodiac(reason="Phase F runner uses run_positive_authorisation_case which manages its own Safe")
+
 CHAIN_NAME = "arbitrum"
 
 # Resolved at collection time — the nightly workflow re-collects per run, so

@@ -56,11 +56,6 @@ class TestAerodromeSwapIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["aerodrome"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDC", "quote_token": "WETH"},
-    )
     async def test_swap_usdc_to_weth_using_intent(
         self,
         web3: Web3,
@@ -192,11 +187,6 @@ class TestAerodromeSwapIntent:
         print("\nALL CHECKS PASSED ✓")
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["aerodrome"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDC", "quote_token": "WETH"},
-    )
     async def test_swap_weth_to_usdc_using_intent(
         self,
         web3: Web3,

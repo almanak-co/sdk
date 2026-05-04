@@ -115,11 +115,6 @@ class TestAaveV3SupplyIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["aave_v3"],
-        intent_types=["SUPPLY"],
-        config={"supply_token": "WETH"},
-    )
     async def test_supply_weth_using_intent(
         self,
         web3: Web3,
@@ -224,11 +219,6 @@ class TestAaveV3SupplyIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["aave_v3"],
-        intent_types=["SUPPLY", "WITHDRAW"],
-        config={"supply_token": "WETH", "withdraw_token": "WETH"},
-    )
     async def test_withdraw_weth_using_intent(
         self,
         web3: Web3,
@@ -415,11 +405,6 @@ class TestAaveV3BorrowIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["aave_v3"],
-        intent_types=["BORROW"],
-        config={"collateral_token": "WETH", "borrow_token": "USDC"},
-    )
     async def test_borrow_usdc_after_supply_weth(
         self,
         web3: Web3,
@@ -541,11 +526,6 @@ class TestAaveV3RepayIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["aave_v3"],
-        intent_types=["BORROW", "REPAY"],
-        config={"collateral_token": "WETH", "borrow_token": "USDC"},
-    )
     async def test_repay_usdc_after_borrow(
         self,
         web3: Web3,

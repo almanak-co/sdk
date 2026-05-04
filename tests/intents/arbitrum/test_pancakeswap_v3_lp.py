@@ -122,11 +122,6 @@ class TestPancakeSwapV3LPOpenIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["pancakeswap_v3"],
-        intent_types=["LP_OPEN"],
-        config={"token0": "WETH", "token1": "USDC"},
-    )
     async def test_lp_open_weth_usdc(
         self,
         web3: Web3,
@@ -263,11 +258,6 @@ class TestPancakeSwapV3LPCloseIntent:
     """Test PancakeSwap V3 LP Close using LPCloseIntent on Arbitrum."""
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["pancakeswap_v3"],
-        intent_types=["LP_OPEN", "LP_CLOSE"],
-        config={"token0": "WETH", "token1": "USDC"},
-    )
     async def test_lp_close_position_with_liquidity(
         self,
         web3: Web3,

@@ -208,21 +208,22 @@ def orchestrator(
     anvil_rpc_url: str,
     web3: Web3,
     zodiac_safe: ZodiacContext | None,
+    _zodiac_intent_recorder: list,
 ):
     """Create the execution orchestrator for this test.
 
-    Returns a ``ZodiacOrchestrator`` when ``@pytest.mark.uses_zodiac(...)`` is
-    set — the marker's manifest has been applied on-chain (see
-    ``zodiac_safe``) and each tx in the bundle will be routed through
-    ``Roles.execTransactionWithRole`` signed by the member EOA. The outward
-    contract (``async def execute(action_bundle) -> ExecutionResult``) is
-    identical, so unchanged tests run unchanged.
+    Returns a ``ZodiacOrchestrator`` by default — under the opt-out model,
+    every intent test routes through Safe + Roles + ``execTransactionWithRole``
+    unless it carries ``@pytest.mark.no_zodiac(reason="...")``. The
+    orchestrator generates a manifest at execute-time from the intents
+    recorded by ``_zodiac_intent_recorder`` and applies new targets to Roles
+    incrementally.
 
-    Without the marker: returns the standard ``ExecutionOrchestrator`` with a
-    permissive ``TransactionRiskConfig`` because Polygon fork gas heuristics
-    can still diverge from production caps even with the startup base-fee
-    override. The gas price guard is a production safety net, not something
-    intent tests need to exercise.
+    For ``no_zodiac``-marked tests: returns the standard ``ExecutionOrchestrator``
+    with a permissive ``TransactionRiskConfig`` because Polygon fork gas
+    heuristics can still diverge from production caps even with the startup
+    base-fee override. The gas price guard is a production safety net, not
+    something intent tests need to exercise.
     """
     if zodiac_safe is not None:
         return ZodiacOrchestrator(
@@ -233,6 +234,10 @@ def orchestrator(
             member_private_key=zodiac_safe.member_private_key,
             chain=CHAIN_NAME,
             rpc_url=anvil_rpc_url,
+            safe_address=zodiac_safe.safe_address,
+            owner_eoa=zodiac_safe.owner_eoa,
+            owner_private_key=zodiac_safe.owner_private_key,
+            recorded_intents=_zodiac_intent_recorder,
         )
     signer = LocalKeySigner(private_key=test_private_key)
     submitter = PublicMempoolSubmitter(

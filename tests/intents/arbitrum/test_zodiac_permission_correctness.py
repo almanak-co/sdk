@@ -40,6 +40,8 @@ from tests.intents._zodiac_helpers import (
 from tests.intents.conftest import CHAIN_CONFIGS
 from tests.intents.permission_cases.uniswap_v3 import CASES as UNISWAP_V3_CASES
 
+pytestmark = pytest.mark.no_zodiac(reason="Pilot test deploys its own Safe+Roles; conftest fixture would conflict")
+
 CHAIN_NAME = "arbitrum"
 
 

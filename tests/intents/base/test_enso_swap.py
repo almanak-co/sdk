@@ -39,10 +39,10 @@ from tests.intents.conftest import (
 CHAIN_NAME = "base"
 
 # Enso API requires an API key -- skip gracefully when not available
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("ENSO_API_KEY"),
-    reason="ENSO_API_KEY not set -- Enso intent tests require API access",
-)
+pytestmark = [
+    pytest.mark.no_zodiac(reason="Aggregator routes non-deterministically; plan excludes from Zodiac coverage"),
+    pytest.mark.skipif(not os.environ.get('ENSO_API_KEY'), reason='ENSO_API_KEY not set -- Enso intent tests require API access'),
+]
 
 
 # =============================================================================

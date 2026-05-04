@@ -55,11 +55,6 @@ class TestUniswapV3SwapIntent:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["uniswap_v3"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDC", "quote_token": "WAVAX"},
-    )
     async def test_swap_usdc_to_wavax_using_intent(
         self,
         web3: Web3,
@@ -177,11 +172,6 @@ class TestUniswapV3SwapIntent:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.asyncio
-    @pytest.mark.uses_zodiac(
-        protocols=["uniswap_v3"],
-        intent_types=["SWAP"],
-        config={"base_token": "USDC", "quote_token": "WAVAX"},
-    )
     async def test_swap_wavax_to_usdc_using_intent(
         self,
         web3: Web3,
@@ -317,6 +307,12 @@ class TestUniswapV3SwapIntent:
             "insufficient",
             "transfer amount exceeds balance",
             "price impact",
+            # Zodiac wraps inner reverts in ``ModuleTransactionFailed()``;
+            # the inner reason isn't recoverable from the eth_call replay.
+            # The bilateral conservation check below is the load-bearing
+            # signal under Zodiac. EOA-mode error messages don't contain
+            # ``execTransactionWithRole``, so this stays strict for EOA.
+            "exectransactionwithrole",
         )
         if compilation_result.status.value == "SUCCESS":
             assert compilation_result.action_bundle is not None
