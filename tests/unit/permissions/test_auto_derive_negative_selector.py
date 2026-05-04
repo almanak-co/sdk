@@ -22,11 +22,15 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.framework.execution.signer.safe.constants import (
+    MULTISEND_SELECTOR as _SAFE_MULTISEND_SELECTOR,
+)
+from almanak.framework.intents.compiler import (
+    ERC20_APPROVE_SELECTOR as _ERC20_APPROVE_SELECTOR,
+)
 from tests.intents._permission_onchain_harness import (
     PermissionTestCase,
     _auto_derive_load_bearing_selector,
-    _ERC20_APPROVE_SELECTOR,
-    _SAFE_MULTISEND_SELECTOR,
     run_negative_authorisation_case,
 )
 

@@ -50,6 +50,37 @@ _TOKEN_CONFIG_FIELDS = frozenset(
 
 MANIFEST_VERSION = "1.0"
 
+# Selectors emitted by ``_build_infrastructure_permissions`` that are NOT
+# load-bearing for any specific protocol bundle — they are batching primitives
+# (Safe MultiSend) or per-token approvals (ERC-20 ``approve``) that are present
+# on every manifest but aren't necessarily hit by every compiled bundle.
+#
+# Negative-authorisation tests (see
+# ``tests/intents/_permission_onchain_harness._auto_derive_load_bearing_selector``)
+# revoke a target to prove the manifest is load-bearing. Revoking these
+# universal-infra selectors produces false-pass results: the bundle still
+# succeeds via the non-infra path, the negative test surfaces as
+# "DID NOT RAISE", and Zodiac never actually denies — the entire signal the
+# negative test is meant to produce is lost.
+#
+# Protocol-conditional infra selectors (Enso Router, etc.) are deliberately
+# NOT in this set — they ARE load-bearing for their protocol's bundles, and
+# revoking them in a negative test for that protocol IS the right behavior.
+#
+# Anyone adding a new universal infrastructure selector to
+# ``_build_infrastructure_permissions`` (a future global delegatecall batcher,
+# fee router, unified executor) MUST also add it here, or negative-anchor
+# tests will silently false-pass on every chain. The unit test
+# ``test_universal_infrastructure_selectors_match_exclusion_set`` in
+# ``tests/unit/permissions/test_generator_infrastructure_exclusion.py``
+# enforces this contract.
+INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS: frozenset[str] = frozenset(
+    {
+        MULTISEND_SELECTOR,
+        ERC20_APPROVE_SELECTOR,
+    }
+)
+
 # One-way open→close teardown complements.  If a strategy declares an "open"
 # intent type, the corresponding "close" type is needed for teardown.
 # Only open→close direction is expanded to respect least-privilege: a strategy

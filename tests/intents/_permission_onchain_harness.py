@@ -51,7 +51,10 @@ from almanak.framework.intents import (
     WithdrawIntent,
 )
 from almanak.framework.intents.compiler import IntentCompiler
-from almanak.framework.permissions.generator import generate_manifest
+from almanak.framework.permissions.generator import (
+    INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS,
+    generate_manifest,
+)
 from tests.intents._zodiac_helpers import (
     _exec_safe_tx,
     apply_manifest_targets,
@@ -651,38 +654,20 @@ def _find_target_by_selector(targets: list[dict], selector_hex: str) -> dict:
     return matches[0]
 
 
-# ERC-20 ``approve(address,uint256)`` — the approval selector the manifest
-# generator writes onto every operand-token target. The load-bearing target
-# the negative test wants to revoke is the protocol's *core* call (swap /
-# supply / mint / etc.), NOT the approve. Exclude it when auto-deriving.
-_ERC20_APPROVE_SELECTOR = "0x095ea7b3"
-
-# Selectors on "infrastructure" targets that the manifest generator always
-# emits but which aren't necessarily hit by every compiled bundle. Revoking
-# these produces a false negative (the bundle still succeeds through a
-# non-infrastructure path), so they must be excluded from auto-derivation.
-#
-# - ``0x8d80ff0a`` — Safe MultiSend ``multiSend(bytes)``. Declared on every
-#   manifest as a DELEGATECALL target so bundles that DO batch through
-#   MultiSend are authorised, but a simple single-leg swap won't hit it.
-_SAFE_MULTISEND_SELECTOR = "0x8d80ff0a"
-
-_NON_LOAD_BEARING_SELECTORS = frozenset(
-    {
-        _ERC20_APPROVE_SELECTOR,
-        _SAFE_MULTISEND_SELECTOR,
-    }
-)
-
-
 def _auto_derive_load_bearing_selector(targets: list[dict]) -> tuple[str, str] | None:
     """Pick the ``(address, selector)`` pair for the 'load-bearing' negative test.
 
     Heuristic: scan ``targets`` for function-scoped (``clearance == 2``)
-    entries whose selectors are NOT in ``_NON_LOAD_BEARING_SELECTORS`` (ERC-20
-    ``approve`` + Safe MultiSend). Among those, pick the one with the lowest
+    entries whose selectors are NOT in
+    ``INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS`` (ERC-20 ``approve`` + Safe
+    MultiSend). Among those, pick the one with the lowest
     ``(target_address, selector)`` tuple so the choice is deterministic
     across runs and Python versions.
+
+    See ``permissions.generator.INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS``
+    for the canonical exclusion set and rationale (single source of truth
+    shared with the manifest generator so a new universal-infra selector
+    can't drift the two definitions apart).
 
     Returns the winning ``(address, selector)`` tuple — caller revokes the
     exact target without a secondary lookup. Previously this returned just
@@ -724,7 +709,7 @@ def _auto_derive_load_bearing_selector(targets: list[dict]) -> tuple[str, str] |
             continue
         for fn in t.get("functions", []):
             sel = fn.get("selector", "").lower()
-            if sel and sel not in _NON_LOAD_BEARING_SELECTORS:
+            if sel and sel not in INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS:
                 candidates.append((address, sel))
     if not candidates:
         return None
