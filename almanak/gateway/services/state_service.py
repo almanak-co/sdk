@@ -692,7 +692,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         request: gateway_pb2.GetLatestSnapshotRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.SnapshotData:
-        """Get the most recent portfolio snapshot."""
+        """Get the most recent portfolio snapshot.
+
+        Both Postgres (`PostgresStore.get_latest_snapshot`) and SQLite
+        (`SQLiteStore.get_latest_snapshot`) backends now implement this read
+        identically — VIB-3933 closed the hosted-Postgres reader gap. Single
+        delegation path; no inline SQL or backend branching.
+        """
         try:
             strategy_id = validate_strategy_id(request.strategy_id)
         except ValidationError as e:
@@ -701,51 +707,32 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return gateway_pb2.SnapshotData(found=False)
 
         strategy_id = resolve_agent_id(strategy_id)
-        await self._ensure_snapshot_pool()
 
-        if self._snapshot_pool is not None:
-            try:
-                row = await self._snapshot_fetchrow(
-                    """
-                    SELECT agent_id, timestamp, iteration_number, total_value_usd,
-                           available_cash_usd, value_confidence, positions_json, chain
-                    FROM portfolio_snapshots
-                    WHERE agent_id = $1
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                    """,
-                    strategy_id,
-                )
-                if row is None:
-                    return gateway_pb2.SnapshotData(found=False)
-                return self._row_to_snapshot_data(row)
-            except Exception as e:
-                logger.error(f"GetLatestSnapshot failed for {strategy_id}: {e}")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_latest_snapshot"):
                 return gateway_pb2.SnapshotData(found=False)
-        else:
-            try:
-                await self._ensure_initialized()
-                assert self._state_manager is not None
-                warm = self._state_manager.warm_backend
-                assert warm is not None
-                snapshot = await warm.get_latest_snapshot(strategy_id)  # type: ignore[attr-defined]
-                if snapshot is None:
-                    return gateway_pb2.SnapshotData(found=False)
-                return self._snapshot_to_proto(snapshot)
-            except Exception as e:
-                logger.error(f"GetLatestSnapshot (SQLite) failed for {strategy_id}: {e}")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
+            snapshot = await warm.get_latest_snapshot(strategy_id)
+            if snapshot is None:
                 return gateway_pb2.SnapshotData(found=False)
+            return self._snapshot_to_proto(snapshot)
+        except Exception as e:
+            logger.error(f"GetLatestSnapshot failed for {strategy_id}: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SnapshotData(found=False)
 
     async def GetSnapshotsSince(
         self,
         request: gateway_pb2.GetSnapshotsSinceRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.SnapshotList:
-        """Get portfolio snapshots since a given timestamp."""
+        """Get portfolio snapshots since a given timestamp.
+
+        See :meth:`GetLatestSnapshot` for the dedup rationale (VIB-3933 Phase 2).
+        """
         try:
             strategy_id = validate_strategy_id(request.strategy_id)
         except ValidationError as e:
@@ -756,66 +743,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         strategy_id = resolve_agent_id(strategy_id)
         since = datetime.fromtimestamp(request.since, tz=UTC)
         limit = min(request.limit if request.limit > 0 else 168, MAX_SNAPSHOTS)
-        await self._ensure_snapshot_pool()
 
-        if self._snapshot_pool is not None:
-            try:
-                rows = await self._snapshot_fetch(
-                    """
-                    SELECT agent_id, timestamp, iteration_number, total_value_usd,
-                           available_cash_usd, value_confidence, positions_json, chain
-                    FROM portfolio_snapshots
-                    WHERE agent_id = $1 AND timestamp >= $2
-                    ORDER BY timestamp ASC
-                    LIMIT $3
-                    """,
-                    strategy_id,
-                    since,
-                    limit,
-                )
-                return gateway_pb2.SnapshotList(snapshots=[self._row_to_snapshot_data(row) for row in rows])
-            except Exception as e:
-                logger.error(f"GetSnapshotsSince failed for {strategy_id}: {e}")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_snapshots_since"):
                 return gateway_pb2.SnapshotList()
-        else:
-            try:
-                await self._ensure_initialized()
-                assert self._state_manager is not None
-                warm = self._state_manager.warm_backend
-                assert warm is not None
-                snapshots = await warm.get_snapshots_since(strategy_id, since, limit)  # type: ignore[attr-defined]
-                return gateway_pb2.SnapshotList(snapshots=[self._snapshot_to_proto(s) for s in snapshots])
-            except Exception as e:
-                logger.error(f"GetSnapshotsSince (SQLite) failed for {strategy_id}: {e}")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.SnapshotList()
-
-    @staticmethod
-    def _row_to_snapshot_data(row: Any) -> gateway_pb2.SnapshotData:
-        """Convert an asyncpg row to a SnapshotData protobuf message."""
-        ts = row["timestamp"]
-        positions_json = row["positions_json"]
-        if isinstance(positions_json, str):
-            positions_bytes = positions_json.encode("utf-8")
-        elif isinstance(positions_json, dict | list):
-            positions_bytes = json.dumps(positions_json).encode("utf-8")
-        else:
-            positions_bytes = b"[]"
-
-        return gateway_pb2.SnapshotData(
-            strategy_id=row["agent_id"],
-            timestamp=int(ts.timestamp()) if hasattr(ts, "timestamp") else 0,
-            iteration_number=row["iteration_number"] or 0,
-            total_value_usd=row["total_value_usd"] or "0",
-            available_cash_usd=row["available_cash_usd"] or "0",
-            value_confidence=row["value_confidence"] or "HIGH",
-            positions_json=positions_bytes,
-            chain=row["chain"] or "",
-            found=True,
-        )
+            snapshots = await warm.get_snapshots_since(strategy_id, since, limit)
+            return gateway_pb2.SnapshotList(snapshots=[self._snapshot_to_proto(s) for s in snapshots])
+        except Exception as e:
+            logger.error(f"GetSnapshotsSince failed for {strategy_id}: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SnapshotList()
 
     @staticmethod
     def _snapshot_to_proto(snapshot: Any) -> gateway_pb2.SnapshotData:
