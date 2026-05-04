@@ -16,9 +16,10 @@ on demand. Run together they pin both halves of the lazy contract.
 
 Coverage: walks ``almanak.framework`` and ``almanak.gateway`` recursively
 and tries ``importlib.import_module`` on every discovered module. Skips:
-- ``*.tests.*`` (in-tree connector test directories — historical and not
-  exercised by the pytest runner; failures here mean stale fixtures, not
-  production runtime bugs).
+- ``*.tests.*`` (defensive — connector unit tests have been consolidated
+  into ``tests/unit/connectors/`` so no in-tree test packages should exist
+  under ``almanak.framework.connectors``; the filter is retained so a
+  stray re-introduction is silently tolerated rather than failing CI).
 - ``*.__main__`` (CLI entry points that ``sys.exit()`` on import — running
   them as modules is a separate concern).
 
@@ -27,8 +28,6 @@ the import error. The most common causes:
 - A circular import introduced by a refactor.
 - A top-level ``from X import Y`` referencing a name that no longer exists.
 - A new optional-dep import at module top level instead of function scope.
-- A new module added under ``almanak.framework.connectors.X.tests/`` — add
-  it to the SKIP filter explicitly, or move the test to ``tests/``.
 
 Subprocess execution: pytest itself loads many modules (numpy/pandas via
 plugins) and the lazy-imports feature mutates global ``sys.modules`` state.
@@ -130,7 +129,5 @@ def test_every_runtime_module_imports_cleanly() -> None:
             "  - A circular import introduced by a refactor",
             "  - A top-level `from X import Y` where Y no longer exists",
             "  - A new optional-dep import at module top level (move to function scope)",
-            "  - A new in-tree test directory under almanak/framework/connectors/X/tests/",
-            "    (add to the skip filter or move under tests/)",
         ]
         raise AssertionError("\n".join(lines))

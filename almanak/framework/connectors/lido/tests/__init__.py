@@ -1,1 +1,0 @@
-"""Lido connector tests."""

@@ -1,1 +1,0 @@
-"""Ethena connector tests."""

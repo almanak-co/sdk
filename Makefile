@@ -58,9 +58,11 @@ test-unit:
 # Alias for test-unit
 test: test-unit
 
-# Run connector tests (SDK, Adapter, Receipt Parser tests within connectors)
+# Run connector tests (consolidated under tests/unit/connectors/ — the inline
+# almanak/framework/connectors/<X>/tests/ directories were merged into the
+# central tree; see CLAUDE.md "Repo Conventions").
 test-connectors:
-	uv run pytest almanak/framework/connectors/*/tests/ -v
+	uv run pytest tests/unit/connectors/ -v --import-mode=importlib
 
 # Run intent tests (Anvil is auto-managed by pytest fixtures)
 # Usage: make test-intents                    # all chains (one at a time)
