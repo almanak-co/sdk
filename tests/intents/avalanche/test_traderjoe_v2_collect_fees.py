@@ -1,0 +1,486 @@
+"""4-layer intent test for TraderJoe V2 LP_COLLECT_FEES on Avalanche Anvil fork.
+
+Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for
+collecting fees from a Liquidity Book position via ``LBPair.collectFees``:
+
+1. Open an LP position in the WAVAX/USDC binStep=20 LBPair (setup).
+2. Build a ``CollectFeesIntent`` for the same pool.
+3. Compile to ActionBundle via :class:`IntentCompiler`
+   (routes to ``_compile_collect_fees_traderjoe_v2``).
+4. Execute via the chain's orchestrator. Under the default-on Zodiac model
+   this is a :class:`ZodiacOrchestrator` that derives the manifest from the
+   intents we compile and applies new ``(target, selector)`` pairs to the
+   Roles Modifier — proving the manifest authorises ``LBPair.collectFees``.
+5. Either: parse the receipt + assert ``ClaimedFees`` was emitted +
+   non-negative wallet deltas; or — when the LBPair reverts on its own
+   internal zero-fee guard — assert the failure is NOT a Zodiac
+   authorisation denial (see "Authz coverage decision" below).
+
+NO MOCKING. All transactions execute on a real Anvil fork and verify state.
+
+Authz coverage decision (issue #1855)
+-------------------------------------
+The pair ``(traderjoe_v2, LP_COLLECT_FEES)`` was deferred from the on-chain
+permission gate when Phase A–F shipped because activating it required:
+
+- a ``CollectFeesIntent`` test that compiles AND executes through Zodiac
+  (Phase A–F's harness-branch shape);
+- an authz-meaningful pass criterion that doesn't rely on synthetic fee
+  revenue accruing to a freshly-minted position.
+
+Phase G's pivot to default-on Zodiac means (1) is automatic — every intent
+test in ``tests/intents/<chain>/`` runs through Safe + Roles + late-binding
+manifest by default, so the act of compiling + executing a ``CollectFeesIntent``
+under the standard ``orchestrator`` fixture IS the authz proof.
+
+For (2): the ticket explicitly accepts "skip the fee-balance assertion and
+only assert authz succeeds" as the production-correct minimum. We take that
+route deliberately. The alternative — Anvil time-travel + simulated swap
+activity to accrue real fees — would fabricate fee revenue that wouldn't
+exist on a freshly minted position and introduce fragility (fork-block
+sensitivity, slippage tolerance, route stability).
+
+Concretely "authz succeeds" means: the Zodiac Roles Modifier did NOT block
+the call. The :class:`ZodiacOrchestrator` raises ``AuthorizationFailed``
+when an inner revert's 4-byte selector matches the Roles authz error set
+(``ConditionViolation`` / ``NoMembership`` / legacy variants); any other
+revert is a protocol-layer concern that the manifest doesn't speak to.
+
+The TraderJoe V2 LBPair (V2.0 implementation) reverts ``collectFees`` with
+empty revert-data when ``account`` has zero accrued fees across the
+requested bins. On a freshly minted position no swap activity has crossed
+the bins yet so all fee accumulators are zero — the inner revert is a
+LBPair contract-level guard, NOT a manifest gap. We accept either outcome
+as authz-positive: a successful collection (fees > 0 path; verify the
+ClaimedFees event + non-negative wallet deltas) or a non-authz revert
+(fees = 0 path; verify the orchestrator did NOT raise
+``AuthorizationFailed``).
+
+To run::
+
+    uv run pytest tests/intents/avalanche/test_traderjoe_v2_collect_fees.py -v -s
+"""
+
+from decimal import Decimal
+
+import pytest
+from web3 import Web3
+
+from almanak.framework.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
+from almanak.framework.connectors.traderjoe_v2.permission_hints import (
+    _TRADERJOE_COLLECT_FEES_SELECTOR,
+)
+from almanak.framework.connectors.traderjoe_v2.receipt_parser import (
+    TraderJoeV2EventType,
+    TraderJoeV2ReceiptParser,
+)
+from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+from almanak.framework.intents import (
+    CollectFeesIntent,
+    IntentCompiler,
+    LPOpenIntent,
+)
+from tests.intents._permission_onchain_harness import (
+    AuthorizationFailed,
+    is_zodiac_authz_revert,
+)
+from tests.intents.conftest import (
+    CHAIN_CONFIGS,
+    format_token_amount,
+    get_token_balance,
+    get_token_decimals,
+)
+from tests.intents.pool_helpers import fail_if_traderjoe_pool_missing
+
+# =============================================================================
+# Test Configuration
+# =============================================================================
+
+CHAIN_NAME = "avalanche"
+
+# WAVAX/USDC LBPair with binStep=20 (0.2% fee tier). Pinned in
+# ``almanak.core.contracts.TRADERJOE_V2_LBPAIRS`` so the static permission
+# entry for ``collectFees`` lands on this exact address at manifest time.
+POOL = "WAVAX/USDC/20"
+LP_AMOUNT_WAVAX = Decimal("2.0")  # token X
+LP_AMOUNT_USDC = Decimal("50")  # token Y
+
+# Wide range to ensure both tokens are deposited (TJv2 LP_OPEN bin selection
+# is range-driven). Mirrors ``test_traderjoe_v2_lp.py`` so the position shape
+# is identical to the other LP intent tests on this fork.
+RANGE_LOWER = Decimal("5")
+RANGE_UPPER = Decimal("500")
+
+BIN_STEP = 20
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _get_position_via_adapter(
+    rpc_url: str,
+    wallet: str,
+    token_x: str,
+    token_y: str,
+    bin_step: int,
+):
+    """Query position using TraderJoeV2Adapter (matches sibling LP test)."""
+    config = TraderJoeV2Config(
+        chain=CHAIN_NAME,
+        wallet_address=wallet,
+        rpc_url=rpc_url,
+    )
+    adapter = TraderJoeV2Adapter(config)
+    return adapter.get_position(token_x, token_y, bin_step, wallet=wallet)
+
+
+async def _open_position_via_intent(
+    funded_wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    anvil_rpc_url: str,
+) -> None:
+    """Open an LP position so ``CollectFeesIntent`` has something to target.
+
+    Mirrors ``test_traderjoe_v2_lp.py::_open_position_via_intent``. The same
+    intent flow is used so the orchestrator's late-binding manifest also
+    applies ``addLiquidity`` (LBRouter) targets on top of ``collectFees``
+    (LBPair) — confirming the multi-step manifest extension path works.
+    """
+    intent = LPOpenIntent(
+        pool=POOL,
+        amount0=LP_AMOUNT_WAVAX,
+        amount1=LP_AMOUNT_USDC,
+        range_lower=RANGE_LOWER,
+        range_upper=RANGE_UPPER,
+        protocol="traderjoe_v2",
+        chain=CHAIN_NAME,
+    )
+    compiler = IntentCompiler(
+        chain=CHAIN_NAME,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+        rpc_url=anvil_rpc_url,
+    )
+    open_compilation = compiler.compile(intent)
+    assert open_compilation.status.value == "SUCCESS", (
+        f"Setup LP_OPEN compilation failed: {open_compilation.error}"
+    )
+    assert open_compilation.action_bundle is not None
+
+    open_execution = await orchestrator.execute(open_compilation.action_bundle)
+    assert open_execution.success, f"Setup LP_OPEN execution failed: {open_execution.error}"
+
+
+def _is_authz_failure(error_message: str | None) -> bool:
+    """Return True iff ``error_message`` carries a Zodiac authz selector.
+
+    ``ZodiacOrchestrator.execute`` raises ``AuthorizationFailed`` when the
+    inner revert's 4-byte selector is in
+    :data:`tests.intents._permission_onchain_harness._ZODIAC_AUTHZ_ERROR_SELECTORS`,
+    so reaching this helper means the orchestrator already ruled the failure
+    NOT-authz. Belt-and-suspenders: re-parse the formatted error string for
+    a literal selector and double-check via :func:`is_zodiac_authz_revert`.
+    Defensive — guards against the orchestrator's authz classification ever
+    drifting from this test's interpretation of "authz succeeded".
+    """
+    if not error_message:
+        return False
+    # ``ZodiacOrchestrator.execute`` formats non-authz reverts as:
+    #   "Inner tx reverted under execTransactionWithRole (..., selector=0xabcdef12)..."
+    # — extract the selector and run it through the authoritative classifier.
+    marker = "selector="
+    idx = error_message.find(marker)
+    if idx == -1:
+        return False
+    selector = error_message[idx + len(marker) : idx + len(marker) + 10]
+    return is_zodiac_authz_revert(selector.lower())
+
+
+# =============================================================================
+# CollectFeesIntent Tests
+# =============================================================================
+
+
+@pytest.mark.avalanche
+@pytest.mark.lp
+class TestTraderJoeV2CollectFeesIntent:
+    """Test TraderJoe V2 LP_COLLECT_FEES using ``CollectFeesIntent``.
+
+    Verifies the full Intent flow:
+
+    - LP_OPEN setup mints a position into the WAVAX/USDC binStep=20 LBPair.
+    - ``CollectFeesIntent`` creation succeeds (no protocol_params required —
+      the connector adapter discovers the position from the LBPair on-chain).
+    - ``IntentCompiler`` routes to ``_compile_collect_fees_traderjoe_v2`` and
+      builds an ActionBundle whose only TX is
+      ``LBPair.collectFees(account, binIds)``.
+    - The orchestrator executes the bundle. Under default-on Zodiac, this
+      doubles as the manifest-authorisation proof: if the LBPair
+      ``collectFees`` selector is missing from the static permissions,
+      ``execTransactionWithRole`` would surface ``AuthorizationFailed``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_collect_fees_wavax_usdc(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ):
+        """LP_COLLECT_FEES on a freshly-opened WAVAX/USDC LB position.
+
+        4-Layer Verification:
+
+        1. **Compilation**: ``IntentCompiler`` -> SUCCESS with ActionBundle
+           containing exactly one ``traderjoe_v2_collect_fees`` TX targeted
+           at the LBPair address.
+        2. **Execution**: orchestrator does NOT raise ``AuthorizationFailed``.
+           Either ``execution_result.success == True`` (the LBPair accrued
+           non-zero fees and the collect succeeded) OR
+           ``execution_result.success == False`` with a non-authz inner
+           revert (the LBPair's zero-fee guard fired). Both outcomes prove
+           the manifest authorises ``LBPair.collectFees``; what they
+           disprove is "the Roles Modifier blocked the call". This is the
+           production-correct minimum the ticket calls option (a).
+        3. **Receipt parsing** (success path): ``TraderJoeV2ReceiptParser``
+           emits a ``CLAIMED_FEES`` event for the LBPair address.
+        4. **Balance deltas** (success path): WAVAX / USDC balances are
+           non-negative and equal to the parser-extracted fee amounts.
+
+        Per the issue body's "fix shape" option (a): we deliberately do NOT
+        attempt to accrue fees via Anvil time-travel + synthetic swap
+        activity. The authz-success criterion is the load-bearing assertion
+        for permission coverage; fee-revenue assertions belong in connector
+        unit tests, not in the on-chain authz harness.
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_addr = tokens["USDC"]
+        wavax_addr = tokens["WAVAX"]
+        fail_if_traderjoe_pool_missing(web3, CHAIN_NAME, wavax_addr, usdc_addr, BIN_STEP)
+        usdc_decimals = get_token_decimals(web3, usdc_addr)
+        wavax_decimals = get_token_decimals(web3, wavax_addr)
+
+        print(f"\n{'=' * 80}")
+        print("Test: LP_COLLECT_FEES WAVAX/USDC via CollectFeesIntent (TraderJoe V2)")
+        print(f"{'=' * 80}")
+
+        # 1. Setup: open LP position so collectFees has bins to target.
+        print("\n--- Setup: Opening LP position ---")
+        await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
+
+        position = _get_position_via_adapter(
+            rpc_url=anvil_rpc_url,
+            wallet=funded_wallet,
+            token_x=wavax_addr,
+            token_y=usdc_addr,
+            bin_step=BIN_STEP,
+        )
+        assert position is not None and position.bin_ids, (
+            "Setup LP_OPEN must yield a TraderJoe V2 position with bin IDs"
+        )
+        print(f"Position opened across {len(position.bin_ids)} bins")
+
+        # Record balances BEFORE collect to drive the balance-delta layer.
+        wavax_before = get_token_balance(web3, wavax_addr, funded_wallet)
+        usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
+        print(f"WAVAX before collect: {format_token_amount(wavax_before, wavax_decimals)}")
+        print(f"USDC before collect:  {format_token_amount(usdc_before, usdc_decimals)}")
+
+        # 2. Layer 1: Compilation
+        collect_intent = CollectFeesIntent(
+            pool=POOL,
+            protocol="traderjoe_v2",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        print("\nCompiling CollectFeesIntent...")
+        compilation_result = compiler.compile(collect_intent)
+
+        assert compilation_result.status.value == "SUCCESS", (
+            f"LP_COLLECT_FEES compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+
+        bundle = compilation_result.action_bundle
+        assert len(bundle.transactions) == 1, (
+            f"TraderJoe V2 LP_COLLECT_FEES should compile to exactly one TX, "
+            f"got {len(bundle.transactions)}"
+        )
+        first_tx = bundle.transactions[0]
+        tx_to = first_tx["to"] if isinstance(first_tx, dict) else first_tx.to
+        tx_data = first_tx["data"] if isinstance(first_tx, dict) else first_tx.data
+        tx_data_hex = tx_data.hex() if hasattr(tx_data, "hex") else tx_data
+        if not tx_data_hex.startswith("0x"):
+            tx_data_hex = f"0x{tx_data_hex}"
+        # The collect TX must target the LBPair, not the LBRouter — the
+        # static permission for ``collectFees`` lives on the LBPair only,
+        # so a misrouted TX would surface as AuthorizationFailed even when
+        # the manifest is correct.
+        assert Web3.to_checksum_address(tx_to) == Web3.to_checksum_address(
+            position.pool_address
+        ), (
+            f"collect_fees TX must target the LBPair {position.pool_address}, "
+            f"got {tx_to}"
+        )
+        # Pin the selector too: a wrong LBPair method (e.g. ``increaseOracleLength``)
+        # at the right target would surface later as ``AuthorizationFailed`` and
+        # look like a manifest regression even though the bug is in the compiler.
+        # Imported from ``permission_hints`` so the test and the manifest read
+        # the same canonical value.
+        assert tx_data_hex[:10].lower() == _TRADERJOE_COLLECT_FEES_SELECTOR, (
+            f"collect_fees TX must use selector {_TRADERJOE_COLLECT_FEES_SELECTOR} "
+            f"(collectFees(address,uint256[])), got {tx_data_hex[:10]}"
+        )
+        print(f"ActionBundle: 1 TX targeting LBPair {tx_to}, selector {tx_data_hex[:10]}")
+
+        # 3. Layer 2: Execution. Authz-success means the orchestrator does
+        #    not raise AuthorizationFailed. If the LBPair reverts internally
+        #    on its zero-fee guard the orchestrator returns success=False
+        #    with a non-authz selector — that's still authz-positive.
+        print("\nExecuting LP_COLLECT_FEES via orchestrator...")
+        try:
+            execution_result = await orchestrator.execute(bundle)
+        except AuthorizationFailed as exc:
+            pytest.fail(
+                f"Zodiac Roles Modifier blocked LBPair.collectFees: {exc}\n"
+                "This means the LP_COLLECT_FEES manifest is missing the "
+                "LBPair collectFees(address,uint256[]) selector — issue #1855."
+            )
+
+        # Sanity: if execution failed, surface that the failure is NOT a
+        # Zodiac authz revert (that would already have raised above, but
+        # guard against drift in the orchestrator's classification).
+        if not execution_result.success:
+            assert not _is_authz_failure(execution_result.error), (
+                f"Inner-tx revert carries a Zodiac authz selector: "
+                f"{execution_result.error}. Manifest gap — issue #1855."
+            )
+            # Layer 4: balance conservation on the failure path. A revert
+            # inside the LBPair (e.g. the zero-fee guard) MUST roll back to
+            # the snapshot — neither WAVAX nor USDC may move. Catches a
+            # silent partial-effect regression in either the LBPair or the
+            # orchestrator's revert handling.
+            wavax_after_failed = get_token_balance(web3, wavax_addr, funded_wallet)
+            usdc_after_failed = get_token_balance(web3, usdc_addr, funded_wallet)
+            assert wavax_after_failed == wavax_before, (
+                f"On failed LP_COLLECT_FEES, WAVAX balance must be unchanged "
+                f"(before={wavax_before}, after={wavax_after_failed})."
+            )
+            assert usdc_after_failed == usdc_before, (
+                f"On failed LP_COLLECT_FEES, USDC balance must be unchanged "
+                f"(before={usdc_before}, after={usdc_after_failed})."
+            )
+            print(
+                f"Execution returned success=False with a non-authz inner revert: "
+                f"{execution_result.error}"
+            )
+            print(
+                "This is the LBPair's zero-fee guard firing on a freshly minted "
+                "position (no swap activity has crossed the bins yet). The "
+                "Roles Modifier authorised the call to LBPair.collectFees — "
+                "that's the load-bearing authz proof for #1855."
+            )
+            print("\nALL AUTHZ ASSERTIONS PASSED (option (a) — authz-only)")
+            return
+
+        # Successful execution path — the position had non-zero fees, so we
+        # can ALSO exercise the receipt-parsing and balance-delta layers.
+        print(f"Execution successful! {len(execution_result.transaction_results)} transactions")
+
+        # 4. Layer 3: Receipt parsing. Assert ClaimedFees was emitted on
+        #    the LBPair (the canonical event for LBPair.collectFees).
+        parser = TraderJoeV2ReceiptParser()
+        found_claimed_fees_event = False
+        parsed_fees_x = 0
+        parsed_fees_y = 0
+        for tx_result in execution_result.transaction_results:
+            if not tx_result.receipt:
+                continue
+            receipt_dict = tx_result.receipt.to_dict()
+            parse_result = parser.parse_receipt(receipt_dict)
+            assert parse_result.success, (
+                f"Receipt parsing must succeed, got: {parse_result.error}"
+            )
+            for event in parse_result.events:
+                if event.event_type == TraderJoeV2EventType.CLAIMED_FEES:
+                    found_claimed_fees_event = True
+                    assert (
+                        Web3.to_checksum_address(event.contract_address)
+                        == Web3.to_checksum_address(position.pool_address)
+                    ), (
+                        f"ClaimedFees emitted on {event.contract_address}, "
+                        f"expected LBPair {position.pool_address}"
+                    )
+            collected = parser.extract_collected_fees(receipt_dict)
+            if collected and collected.success:
+                parsed_fees_x += int(collected.fees_x or 0)
+                parsed_fees_y += int(collected.fees_y or 0)
+        assert found_claimed_fees_event, (
+            "Receipt must surface a ClaimedFees event on the LBPair — "
+            "the canonical signal that LBPair.collectFees executed."
+        )
+        print(
+            f"Parser observed ClaimedFees on LBPair "
+            f"(fees_x={parsed_fees_x}, fees_y={parsed_fees_y})"
+        )
+
+        # 5. Layer 4: Balance deltas. Wallet must not LOSE tokens during a
+        #    fee collection. Parser-extracted amounts must agree with wallet
+        #    deltas — the receipt parser and on-chain state must match.
+        wavax_after = get_token_balance(web3, wavax_addr, funded_wallet)
+        usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
+        wavax_delta = wavax_after - wavax_before
+        usdc_delta = usdc_after - usdc_before
+        print(f"WAVAX delta: {format_token_amount(wavax_delta, wavax_decimals)}")
+        print(f"USDC delta:  {format_token_amount(usdc_delta, usdc_decimals)}")
+        assert wavax_delta >= 0, (
+            f"WAVAX balance must not decrease during fee collection, got {wavax_delta}"
+        )
+        assert usdc_delta >= 0, (
+            f"USDC balance must not decrease during fee collection, got {usdc_delta}"
+        )
+        assert wavax_delta == parsed_fees_x, (
+            f"WAVAX wallet delta ({wavax_delta}) must equal parser fees_x "
+            f"({parsed_fees_x}) — receipt parser and on-chain state disagree"
+        )
+        assert usdc_delta == parsed_fees_y, (
+            f"USDC wallet delta ({usdc_delta}) must equal parser fees_y "
+            f"({parsed_fees_y}) — receipt parser and on-chain state disagree"
+        )
+
+        # 6. Position must remain open after fee collection. Fee collection
+        #    explicitly does NOT remove liquidity (that's the LP_CLOSE path);
+        #    if the bin set went empty something else broke.
+        position_after = _get_position_via_adapter(
+            rpc_url=anvil_rpc_url,
+            wallet=funded_wallet,
+            token_x=wavax_addr,
+            token_y=usdc_addr,
+            bin_step=BIN_STEP,
+        )
+        assert position_after is not None and position_after.bin_ids, (
+            "Position must remain open after LP_COLLECT_FEES — "
+            "fee collection must NOT remove liquidity"
+        )
+        assert set(position_after.bin_ids) == set(position.bin_ids), (
+            "Bin set must be unchanged by fee collection "
+            f"(before={sorted(position.bin_ids)}, "
+            f"after={sorted(position_after.bin_ids)})"
+        )
+
+        print("\nALL 4 LAYERS PASSED")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])

@@ -29,6 +29,7 @@ LBRouter function selectors:
 
 LBPair function selectors:
 - approveForAll(address,bool)           = 0xe584b654
+- collectFees(address,uint256[])        = 0x225b20b9
 """
 
 from almanak.core.contracts import TRADERJOE_V2_LBPAIRS
@@ -46,8 +47,18 @@ _TRADERJOE_SWAP_EXACT_TOKENS_FOR_TOKENS_SELECTOR = "0x2a443fae"
 # (per-pair ERC1155-like contract), TX 1 of the bundle. Spender is the LBRouter.
 _TRADERJOE_APPROVE_FOR_ALL_SELECTOR = "0xe584b654"
 
+# collectFees(address,uint256[]) — emitted by LP_COLLECT_FEES compile path on
+# the LBPair. Standalone fee collection (no removeLiquidity / no router):
+# ``LBPair.collectFees(account, binIds)`` is called directly on the per-pair
+# contract by the Safe. Per-pair address is dynamic per (tokenX, tokenY,
+# binStep), so we surface one static permission per registered LBPair just
+# like ``approveForAll`` (issue #1855). Pinned because the offline compile
+# path can't resolve the LBPair without an RPC handshake.
+_TRADERJOE_COLLECT_FEES_SELECTOR = "0x225b20b9"
+
 _TRADERJOE_SWAP_SIG = "swapExactTokensForTokens(uint256,uint256,(uint256[],uint8[],address[]),address,uint256)"
 _TRADERJOE_APPROVE_FOR_ALL_SIG = "approveForAll(address,bool)"
+_TRADERJOE_COLLECT_FEES_SIG = "collectFees(address,uint256[])"
 
 
 def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
@@ -88,12 +99,28 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
         #   2. LBRouter.removeLiquidity(...)        — target = router (above)
         # The LBPair target is dynamic per (tokenX, tokenY, binStep), so we
         # surface one static permission per registered pair.
+        #
+        # LP_COLLECT_FEES (issue #1855) compiles to a single TX:
+        #   LBPair.collectFees(account, binIds) — target = pair contract
+        # The router is NOT involved (TraderJoe V2 is the only LP connector
+        # exposing standalone fee collection — Uni V3 / pancakeswap / sushiswap
+        # / aerodrome use ``decreaseLiquidity + collect`` atomically via the
+        # NPM). The LBPair target address is dynamic, so the same registry-
+        # driven pinning we use for ``approveForAll`` is the only path to
+        # authorise this selector under offline manifest discovery.
+        #
+        # Both selectors are emitted on the SAME LBPair address but for
+        # different intent flows; we register one entry per (intent_type,
+        # selector) so ``StaticPermissionEntry.intent_types`` can scope each
+        # one independently and SWAP-only / LP_OPEN-only manifests stay at
+        # least-privilege.
         for pair in TRADERJOE_V2_LBPAIRS.get(chain, []):
             address = str(pair["address"])
+            label = f"TraderJoe V2 LBPair {pair['tokenX']}/{pair['tokenY']}/{pair['bin_step']}"
             entries.append(
                 StaticPermissionEntry(
                     target=address.lower(),
-                    label=f"TraderJoe V2 LBPair {pair['tokenX']}/{pair['tokenY']}/{pair['bin_step']}",
+                    label=label,
                     selectors={
                         _TRADERJOE_APPROVE_FOR_ALL_SELECTOR: _TRADERJOE_APPROVE_FOR_ALL_SIG,
                     },
@@ -111,6 +138,22 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     intent_types=frozenset({"LP_CLOSE"}),
                 )
             )
+            entries.append(
+                StaticPermissionEntry(
+                    target=address.lower(),
+                    label=label,
+                    selectors={
+                        _TRADERJOE_COLLECT_FEES_SELECTOR: _TRADERJOE_COLLECT_FEES_SIG,
+                    },
+                    # ``collectFees`` is only emitted by the LP_COLLECT_FEES
+                    # compile path (``_compile_collect_fees_traderjoe_v2`` in
+                    # ``intents/compiler.py``). Scoping to LP_COLLECT_FEES
+                    # keeps this selector out of SWAP / LP_OPEN / LP_CLOSE
+                    # manifests where it isn't needed — same least-privilege
+                    # principle as the LP_CLOSE-scoped ``approveForAll`` above.
+                    intent_types=frozenset({"LP_COLLECT_FEES"}),
+                )
+            )
 
         result[chain] = entries
     return result
@@ -124,5 +167,6 @@ PERMISSION_HINTS = PermissionHints(
         _TRADERJOE_REMOVE_LIQUIDITY_SELECTOR: "removeLiquidity(address,address,uint16,uint256,uint256,uint256[],uint256[],address,uint256)",
         _TRADERJOE_SWAP_EXACT_TOKENS_FOR_TOKENS_SELECTOR: _TRADERJOE_SWAP_SIG,
         _TRADERJOE_APPROVE_FOR_ALL_SELECTOR: _TRADERJOE_APPROVE_FOR_ALL_SIG,
+        _TRADERJOE_COLLECT_FEES_SELECTOR: _TRADERJOE_COLLECT_FEES_SIG,
     },
 )

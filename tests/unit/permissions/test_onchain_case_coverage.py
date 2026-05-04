@@ -47,9 +47,7 @@ _SENTINEL_SUFFIX = ".permissions_onchain_exempt"
 # Adding to this dict is a deliberate, review-checkable action — reviewers
 # should prefer "write the intent test" or "exempt the whole protocol via
 # a sentinel" over "add a deferral here."
-_DEFERRED_PAIRS: dict[tuple[str, str], str] = {
-    ("traderjoe_v2", "LP_COLLECT_FEES"): "Requires a ``CollectFeesIntent`` harness branch; see plan doc Phase F P1.",
-}
+_DEFERRED_PAIRS: dict[tuple[str, str], str] = {}
 
 
 def _is_deferred(protocol: str, intent_type: str) -> str | None:

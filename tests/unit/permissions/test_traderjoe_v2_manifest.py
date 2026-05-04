@@ -226,6 +226,41 @@ class TestTraderJoeV2LPCloseCoverage:
         )
 
 
+class TestTraderJoeV2LPCollectFeesCoverage:
+    """LP_COLLECT_FEES on avalanche must authorise ``collectFees`` on the
+    LBPair (issue #1855).
+
+    LP_COLLECT_FEES compiles to a single TX: ``LBPair.collectFees(account,
+    binIds)`` on the per-pair contract. The router is NOT involved — TJv2
+    is the only LP connector exposing standalone fee collection (see
+    ``permission_hints.supports_standalone_fee_collection``).
+
+    The LBPair address is dynamic per ``(tokenX, tokenY, binStep)`` so the
+    selector is surfaced via a static permission entry per registered LBPair
+    in :data:`almanak.core.contracts.TRADERJOE_V2_LBPAIRS`. This test pins
+    the expected coverage so a refactor of either ``permission_hints.py`` or
+    ``synthetic_intents._build_lp_collect_fees_intents`` cannot silently
+    drop it.
+    """
+
+    # WAVAX/USDC binStep=20 LBPair on avalanche, verified on-chain via
+    # LBFactory.getLBPairInformation(WAVAX, USDC, 20). Same address as the
+    # LP_CLOSE coverage test above.
+    _WAVAX_USDC_BS20_LBPAIR = "0xd446eb1660f766d533beceef890df7a69d26f7d1"
+    # collectFees(address,uint256[])
+    _COLLECT_FEES_SELECTOR = "0x225b20b9"
+
+    def test_lp_collect_fees_manifest_includes_lbpair_collect_fees(self) -> None:
+        """The LP_COLLECT_FEES manifest must authorise ``collectFees`` on
+        every registered LBPair on the chain. Regression for #1855.
+        """
+        manifest = _manifest_pairs_for(["LP_COLLECT_FEES"])
+        assert (self._WAVAX_USDC_BS20_LBPAIR, self._COLLECT_FEES_SELECTOR) in manifest, (
+            f"Manifest missing LBPair collectFees for {self._WAVAX_USDC_BS20_LBPAIR}. "
+            f"Got pairs: {sorted(manifest)}"
+        )
+
+
 class TestTraderJoeV2LBPairLeastPrivilegeScoping:
     """Regression for PR #1923 review (Codex P1 + Gemini medium): LBPair
     ``approveForAll`` must be scoped to LP_CLOSE-only and must NOT leak into
@@ -249,6 +284,8 @@ class TestTraderJoeV2LBPairLeastPrivilegeScoping:
 
     # approveForAll(address,bool)
     _APPROVE_FOR_ALL_SELECTOR = "0xe584b654"
+    # collectFees(address,uint256[])
+    _COLLECT_FEES_SELECTOR = "0x225b20b9"
 
     def test_swap_only_manifest_does_not_authorise_lbpair_approve_for_all(self) -> None:
         """A SWAP-only TJv2 strategy must NOT have ``approveForAll`` on any
@@ -298,4 +335,43 @@ class TestTraderJoeV2LBPairLeastPrivilegeScoping:
         assert len(lbpair_permissions) > 0, (
             "LP_CLOSE-only manifest must include at least one LBPair target so "
             "the Safe can call approveForAll on the LBPair contract."
+        )
+
+    @pytest.mark.parametrize(
+        "intent_types,reason",
+        [
+            (["SWAP"], "SWAP intents target the LBRouter only, not LBPair"),
+            (
+                ["LP_CLOSE"],
+                "LP_CLOSE only authorises approveForAll on the LBPair, not collectFees",
+            ),
+        ],
+    )
+    def test_collect_fees_selector_does_not_leak_into_other_intent_types(
+        self, intent_types: list[str], reason: str
+    ) -> None:
+        """Issue #1855 regression: ``collectFees`` must not leak outside the
+        LP_COLLECT_FEES intent-type scope.
+
+        The LBPair static permission for ``collectFees`` is intent-scoped to
+        ``LP_COLLECT_FEES`` so SWAP-only and LP_CLOSE-only manifests stay at
+        least-privilege. If the scoping ever drifts (e.g. someone adds the
+        selector to the LP_CLOSE-scoped entry instead of a dedicated
+        LP_COLLECT_FEES entry), this regression test surfaces it.
+        """
+        manifest = generate_manifest(
+            strategy_name=f"tjv2-{'-'.join(intent_types).lower()}-no-collect-fees",
+            chain="avalanche",
+            supported_protocols=["traderjoe_v2"],
+            intent_types=intent_types,
+        )
+        leaked = [
+            (p.target, p.label)
+            for p in manifest.permissions
+            for sel in p.function_selectors
+            if sel.selector.lower() == self._COLLECT_FEES_SELECTOR
+        ]
+        assert leaked == [], (
+            f"{intent_types} manifest must not include collectFees on any "
+            f"target — {reason}. Got: {leaked}"
         )
