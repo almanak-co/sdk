@@ -1031,25 +1031,53 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
         render_paper_session_detail(strategy)
         return
 
-    # Senior-Quant header — money / risk / audit. Falls back to the
-    # legacy 4-tile metric grid when the gateway's aggregations are
-    # unavailable (gateway down, RPC error, fresh strategy with no rows).
+    # Senior-Quant header — money / risk / audit. VIB-3969: three
+    # focused gateway RPCs replace the legacy ``GetQuantHeader`` god-
+    # object. We fire them concurrently from a single ThreadPool because
+    # the three handlers do disjoint Postgres reads and the latency wins
+    # are real (PnL is hot-read, audit is heavy server-side compute).
+    # Each slice degrades independently — a missing audit fetch should
+    # not blank the eyeball card.
+    from concurrent.futures import ThreadPoolExecutor
+
     from almanak.framework.dashboard.data_source import (
-        GatewayConnectionError,
-        get_quant_header,
+        get_audit_posture,
+        get_cost_stack,
+        get_pnl_summary,
+    )
+    from almanak.framework.dashboard.gateway_client import (
+        AuditPosture,
+        CostStackInfo,
+        PnLSummary,
     )
 
-    quant_header = None
-    try:
-        quant_header = get_quant_header(strategy.id)
-    except GatewayConnectionError:
-        st.warning("Gateway unavailable — quant header degraded.")
-    except Exception as exc:  # noqa: BLE001 — page must remain renderable
-        # Any other failure (bad payload, gRPC stub mismatch, etc.) must
-        # not take down the entire detail page. Surface the issue and
-        # fall back to the legacy 4-tile metric grid via the renderer.
-        st.error(f"Quant header unavailable: {exc}")
-    render_quant_header(strategy, quant_header)
+    # Each future is collected in its own try block so one failed slice
+    # does not discard already-computed siblings (CodeRabbit). The
+    # data_source layer already converts gateway outages into ``None``
+    # returns, so reaching the broad ``except`` here means an unexpected
+    # programming error (bad payload, stub mismatch) — surface it but
+    # keep rendering the slices we did manage to fetch.
+    pnl_slice: PnLSummary | None = None
+    cost_slice: CostStackInfo | None = None
+    audit_slice: AuditPosture | None = None
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_pnl = ex.submit(get_pnl_summary, strategy.id)
+        f_cost = ex.submit(get_cost_stack, strategy.id)
+        f_audit = ex.submit(get_audit_posture, strategy.id)
+        try:
+            pnl_slice = f_pnl.result()
+        except Exception as exc:  # noqa: BLE001 — page must remain renderable
+            st.error(f"Quant pnl slice unavailable: {exc}")
+        try:
+            cost_slice = f_cost.result()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Quant cost slice unavailable: {exc}")
+        try:
+            audit_slice = f_audit.result()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Quant audit slice unavailable: {exc}")
+
+    render_quant_header(strategy, pnl_slice, cost_slice, audit_slice)
 
     st.divider()
 

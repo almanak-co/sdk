@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -19,6 +25,8 @@ def render_custom_dashboard(
 ) -> None:
     """Render the MACD Crossover custom dashboard."""
     st.title("MACD Crossover Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config
     macd_fast = strategy_config.get("macd_fast", 12)
@@ -66,6 +74,9 @@ def render_custom_dashboard(
     # PnL
     st.subheader("Performance")
     _render_pnl(session_state)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position(session_state: dict[str, Any], base_token: str, quote_token: str) -> None:

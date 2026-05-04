@@ -1,4 +1,5 @@
 import ast
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,6 +11,8 @@ from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
     SupportedChain,
     generate_config_json,
+    generate_dashboard_metadata,
+    generate_dashboard_ui,
     generate_pyproject_toml,
     generate_strategy_file,
 )
@@ -66,6 +69,97 @@ def test_generate_pyproject_toml_has_run_section() -> None:
 
     assert "[tool.almanak.run]" in pyproject
     assert "interval = 60" in pyproject
+
+
+# ---------------------------------------------------------------------------
+# Dashboard scaffold tests — every new strategy ships with a starter
+# dashboard/ui.py that is wired to the standard trade-tape section.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_dashboard_ui_is_valid_python() -> None:
+    """Scaffolded ``dashboard/ui.py`` must parse without syntax errors."""
+    ast.parse(generate_dashboard_ui("Mean Reversion"))
+
+
+def test_generate_dashboard_ui_passes_ruff() -> None:
+    """Scaffolded ``dashboard/ui.py`` must pass ruff (E/W/F/I)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ui_path = Path(tmpdir) / "ui.py"
+        ui_path.write_text(generate_dashboard_ui("Mean Reversion"))
+
+        result = subprocess.run(
+            ["uv", "run", "ruff", "check", str(ui_path), "--select", "E,W,F,I"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"ruff check failed for scaffolded ui.py:\n{result.stdout}\n{result.stderr}"
+        )
+
+
+def test_generate_dashboard_ui_includes_three_section_helpers() -> None:
+    """The scaffold must pre-wire all three section helpers (VIB-3969)
+    so accounting is visually QA'able from day one — PnL eyeball at the
+    top, audit detail at the bottom — both the imports and the calls."""
+    code = generate_dashboard_ui("Mean Reversion")
+
+    # Import line — multi-line `from … import (…)` form so ruff stays happy.
+    assert "render_pnl_section" in code
+    assert "render_cost_stack_section" in code
+    assert "render_trade_tape_section" in code
+
+    # All three helpers actually invoked inside render_custom_dashboard.
+    assert "render_pnl_section(strategy_id)" in code
+    assert "render_cost_stack_section(strategy_id" in code  # may have heading kwarg
+    assert "render_trade_tape_section(strategy_id)" in code
+
+
+def test_generate_dashboard_ui_section_order_is_pnl_then_audit() -> None:
+    """The 3-section layout depends on PnL appearing BEFORE the audit
+    block. Authors place primitive-specific UI between them, but PnL
+    must lead the page so the operator sees money status first."""
+    code = generate_dashboard_ui("Mean Reversion")
+
+    pnl_idx = code.index("render_pnl_section(strategy_id)")
+    cost_idx = code.index("render_cost_stack_section(strategy_id")
+    tape_idx = code.index("render_trade_tape_section(strategy_id)")
+    assert pnl_idx < cost_idx < tape_idx, "section order must be PnL → Cost Stack → Trade Tape"
+
+
+def test_generate_dashboard_ui_defines_render_custom_dashboard() -> None:
+    """The scaffold must define the function the platform's dashboard
+    image looks for."""
+    tree = ast.parse(generate_dashboard_ui("Mean Reversion"))
+    func_names = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    assert "render_custom_dashboard" in func_names
+
+
+def test_generate_dashboard_metadata_is_valid_json() -> None:
+    """Scaffolded ``dashboard/metadata.json`` must parse and carry the
+    three fields the discoverer reads. ``icon`` defaults to an empty
+    string per CLAUDE.md "no emojis unless asked" — strategy authors
+    set their own."""
+    payload = json.loads(generate_dashboard_metadata("Mean Reversion"))
+
+    assert payload["display_name"] == "Mean Reversion"
+    assert payload["description"]
+    assert "icon" in payload
+    assert payload["icon"] == ""
+
+
+def test_generate_dashboard_ui_is_valid_python_for_names_with_quotes() -> None:
+    """Strategy names containing ``"`` must produce valid Python — the
+    template embeds names via ``json.dumps`` to escape them safely."""
+    code = generate_dashboard_ui('My"Strategy')
+    ast.parse(code)  # raises if scaffold output is malformed
+
+
+def test_generate_dashboard_ui_is_valid_python_for_names_with_backslash() -> None:
+    """Backslash in name shouldn't generate an escape-sequence trap."""
+    code = generate_dashboard_ui("Foo\\Bar")
+    ast.parse(code)
 
 
 # ---------------------------------------------------------------------------

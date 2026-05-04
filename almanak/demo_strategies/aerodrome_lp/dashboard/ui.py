@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -27,6 +33,8 @@ def render_custom_dashboard(
     - Estimated APR
     """
     st.title("Aerodrome LP Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values
     pool = strategy_config.get("pool", "WETH/USDC")
@@ -69,6 +77,9 @@ def render_custom_dashboard(
     # APR Estimate section
     st.subheader("APR Estimate")
     _render_apr_estimate(session_state, stable)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_lp_position(session_state: dict[str, Any], token0: str, token1: str) -> None:

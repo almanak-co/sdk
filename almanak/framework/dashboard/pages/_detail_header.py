@@ -21,7 +21,11 @@ from typing import Any
 
 import streamlit as st
 
-from almanak.framework.dashboard.gateway_client import QuantHeaderInfo
+from almanak.framework.dashboard.gateway_client import (
+    AuditPosture,
+    CostStackInfo,
+    PnLSummary,
+)
 from almanak.framework.dashboard.models import Strategy
 from almanak.framework.dashboard.theme import get_chain_color, get_status_color
 from almanak.framework.dashboard.utils import (
@@ -129,14 +133,14 @@ _RISK_COLORS = {
 }
 
 
-def _primary_risk_glossary(h: QuantHeaderInfo) -> str:
+def _primary_risk_glossary(p: PnLSummary) -> str:
     """VIB-3926 — primitive-aware tooltip text for the primary-risk tile.
 
     Returns a one-line glossary explaining the metric and the colour
     ladder. Written so a Senior Quant scanning cold understands what
     the tile is asserting without opening a separate doc.
     """
-    kind = (h.primary_risk_kind or "").lower()
+    kind = (p.primary_risk_kind or "").lower()
     if kind == "lp":
         return (
             "LP in-range status. Green = current_tick ∈ [tick_lower, tick_upper); "
@@ -171,7 +175,12 @@ def _pct(value: Decimal, *, decimals: int = 2) -> str:
     return f"{sign}{abs(value):.{decimals}f}%"
 
 
-def render_quant_header(strategy: Strategy, header: QuantHeaderInfo | None) -> None:
+def render_quant_header(
+    strategy: Strategy,
+    pnl: PnLSummary | None,
+    cost: CostStackInfo | None = None,
+    audit: AuditPosture | None = None,
+) -> None:
     """Render the Senior-Quant header card.
 
     Three rows:
@@ -179,22 +188,35 @@ def render_quant_header(strategy: Strategy, header: QuantHeaderInfo | None) -> N
       Row 2 — Position & Risk (open exposure, primary risk, cost stack, cash buffer)
       Row 3 — Audit (G6 reconciliation, audit trail completeness, Accountant posture)
 
-    When ``header`` is None (gateway down / RPC error), falls back to a
-    degraded card sourced from the existing ``Strategy`` model so the
-    page still renders something useful.
+    VIB-3969: takes the three focused slices independently — operator
+    console fetches them concurrently from the trio of dedicated RPCs.
+    Any slice may be None if its RPC failed; rows that depend on a
+    missing slice are skipped gracefully (rather than collapsing the
+    whole header).
+
+    When ``pnl`` is None (e.g., a fresh strategy with no snapshots /
+    gateway-down on the eyeball card), falls back to a degraded view
+    sourced from the existing ``Strategy`` model so the page still
+    renders something useful.
     """
-    if header is None:
+    if pnl is None:
         st.warning("Quant header unavailable — gateway returned no aggregations. Falling back to summary metrics.")
         _render_fallback_metrics(strategy)
         return
 
-    _maybe_render_beta_banner(header)
-    _render_money_row(header)
-    _render_risk_row(header, strategy)
-    _render_audit_row(header)
+    _maybe_render_beta_banner(pnl)
+    render_money_trail(pnl)
+    # Position & Risk row depends mostly on ``pnl`` (Open Exposure,
+    # Primary Risk, Cash Buffer) — only the Cost Stack tile needs
+    # ``cost``. Render all 4 tiles whenever ``pnl`` is present and let
+    # the cost tile degrade to an info banner when its RPC failed, so
+    # the operator never panic-thinks their open positions vanished.
+    _render_risk_row(pnl, cost, strategy)
+    if audit is not None:
+        _render_audit_row(audit)
 
 
-def _maybe_render_beta_banner(h: QuantHeaderInfo) -> None:
+def _maybe_render_beta_banner(p: PnLSummary) -> None:
     """VIB-3929 — beta-accounting banner on lending + perp pages.
 
     LP ships under the full ship gate (7/7). Lending and perp ship
@@ -207,10 +229,10 @@ def _maybe_render_beta_banner(h: QuantHeaderInfo) -> None:
     LP ship gate is unconditional.
 
     Primitive detection is `primary_risk_kind` (set by
-    `build_quant_header` from the live PositionSummary), which is the
+    `compute_pnl_summary` from the live PositionSummary), which is the
     same source the risk tile uses; the two surfaces stay in sync.
     """
-    kind = (getattr(h, "primary_risk_kind", "") or "").lower()
+    kind = (getattr(p, "primary_risk_kind", "") or "").lower()
     if kind not in ("lending", "perp"):
         return
     primitive_label = {"lending": "Lending", "perp": "Perpetuals"}[kind]
@@ -239,7 +261,12 @@ def _maybe_render_beta_banner(h: QuantHeaderInfo) -> None:
 # --- Row 1: Money trail --------------------------------------------------
 
 
-def _render_money_row(h: QuantHeaderInfo) -> None:
+def render_money_trail(p: PnLSummary) -> None:
+    """Render the Money Trail row (Deployed / NAV / Lifetime PnL / Net APR).
+
+    Public renderer — used by the operator-console quant header AND by
+    ``render_pnl_section`` (custom-dashboard helper). VIB-3969.
+    """
     st.markdown(
         '<div style="font-size:0.85rem;color:#888;letter-spacing:0.08em;'
         'margin-top:0.5rem;margin-bottom:0.25rem;">MONEY TRAIL</div>',
@@ -254,35 +281,35 @@ def _render_money_row(h: QuantHeaderInfo) -> None:
     with c1:
         st.metric(
             "Deployed",
-            format_usd(h.deployed_usd),
+            format_usd(p.deployed_usd),
             help=(
                 "Money put in. Wallet pre-state at first action × oracle prices "
                 "+ deposits − withdrawals (VIB-3914 wallet-anchored)."
             ),
         )
     with c2:
-        confidence_icon = _CONFIDENCE_ICONS.get(h.value_confidence, "")
+        confidence_icon = _CONFIDENCE_ICONS.get(p.value_confidence, "")
         st.metric(
             "NAV now",
-            format_usd(h.nav_usd) + confidence_icon,
+            format_usd(p.nav_usd) + confidence_icon,
             help=(
                 f"Net Asset Value = open positions + cash. "
-                f"Confidence: {h.value_confidence}. HIGH = oracle "
+                f"Confidence: {p.value_confidence}. HIGH = oracle "
                 "quotes available; ESTIMATED = derived from latest "
                 "snapshot (CONF / VIB-3886)."
             ),
         )
     with c3:
-        delta = _signed(h.lifetime_pnl_usd) + f"  ({_pct(h.lifetime_pnl_pct)})"
+        delta = _signed(p.lifetime_pnl_usd) + f"  ({_pct(p.lifetime_pnl_pct)})"
         st.metric(
             "Lifetime PnL",
-            format_usd(abs(h.lifetime_pnl_usd)),
+            format_usd(abs(p.lifetime_pnl_usd)),
             delta=delta,
             help="Wallet method: NAV now − Deployed. The broker-statement PnL — fees, gas, slippage, IL all baked in.",
         )
     with c4:
-        apr_label = f"{_pct(h.net_apr_pct)} APR"
-        sub = f"max DD {_pct(h.max_drawdown_pct, decimals=1)}" if h.max_drawdown_pct > 0 else f"{h.age_days}d age"
+        apr_label = f"{_pct(p.net_apr_pct)} APR"
+        sub = f"max DD {_pct(p.max_drawdown_pct, decimals=1)}" if p.max_drawdown_pct > 0 else f"{p.age_days}d age"
         st.metric(
             "Net APR",
             apr_label,
@@ -292,10 +319,44 @@ def _render_money_row(h: QuantHeaderInfo) -> None:
         )
 
 
+def render_cost_stack(cost: CostStackInfo) -> None:
+    """Render the life-to-date Cost Stack tile (Gas / Fees / Slip / Earn).
+
+    Public renderer — used inside the operator-console Position & Risk
+    row AND by ``render_cost_stack_section`` (custom-dashboard helper).
+    VIB-3969.
+    """
+    cost_html = (
+        f"<div style='color:#888;font-size:0.85rem;'>Cost stack (LTD)</div>"
+        f"<div style='font-size:0.95rem;line-height:1.5;'>"
+        f"<span style='color:#f44336;'>Gas −{format_usd(cost.cost_gas_usd)}</span><br>"
+        f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd)}</span><br>"
+        f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd)}</span><br>"
+        f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd)}</span>"
+        f"</div>"
+    )
+    # VIB-3926 — life-to-date cost decomposition. Gas is on every tx;
+    # protocol fees apply to swaps (Uniswap 0.05%, etc.) and lending
+    # protocols; slippage is the realized vs quoted execution gap;
+    # earn is LP fees + lending interest accrued.
+    cost_tooltip = _e(
+        "Life-to-date cost & earn breakdown. "
+        "Gas: native ETH × USD at TX time, every tx. "
+        "Fees: Uniswap pool fee + bridge / aggregator fees on swaps. "
+        "Slip: realised slippage vs quote. "
+        "Earn: LP fees + lending interest accrued."
+    )
+    st.markdown(
+        f"<div title='{cost_tooltip}' style='background:#1e1e1e;border:1px solid #333;"
+        f"border-radius:4px;padding:0.5rem 0.75rem;'>{cost_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # --- Row 2: Position + risk ----------------------------------------------
 
 
-def _render_risk_row(h: QuantHeaderInfo, strategy: Strategy) -> None:
+def _render_risk_row(p: PnLSummary, cost: CostStackInfo | None, strategy: Strategy) -> None:
     st.markdown(
         '<div style="font-size:0.85rem;color:#888;letter-spacing:0.08em;'
         'margin-top:0.75rem;margin-bottom:0.25rem;">POSITION &amp; RISK</div>',
@@ -304,8 +365,8 @@ def _render_risk_row(h: QuantHeaderInfo, strategy: Strategy) -> None:
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        deployed = h.deployed_capital_usd
-        nav = h.nav_usd
+        deployed = p.deployed_capital_usd
+        nav = p.nav_usd
         pct = (deployed / nav * Decimal("100")) if nav > 0 else Decimal("0")
         st.metric(
             "Open exposure",
@@ -314,20 +375,20 @@ def _render_risk_row(h: QuantHeaderInfo, strategy: Strategy) -> None:
             delta_color="off",
             help=(
                 f"Capital currently in positions (sum of cost bases). "
-                f"{h.open_position_count} open position(s). "
+                f"{p.open_position_count} open position(s). "
                 "Distinct from Deployed: this is now, that is lifetime."
             ),
         )
 
     with c2:
-        risk_color = _RISK_COLORS.get(h.primary_risk_color, "#888888")
-        label_html = _e(h.primary_risk_label or "Positions")
-        value_html = _e(h.primary_risk_value or "N/A")
+        risk_color = _RISK_COLORS.get(p.primary_risk_color, "#888888")
+        label_html = _e(p.primary_risk_label or "Positions")
+        value_html = _e(p.primary_risk_value or "N/A")
         # VIB-3926 — primary-risk tile uses custom HTML; tooltip lives on
         # the outer div via the standard ``title`` attribute. Glossary
         # text is primitive-aware so the tooltip explains the threshold
         # ladder for whichever metric is currently rendered.
-        risk_tooltip = _e(_primary_risk_glossary(h))
+        risk_tooltip = _e(_primary_risk_glossary(p))
         st.markdown(
             f"""
             <div title="{risk_tooltip}" style="
@@ -344,38 +405,16 @@ def _render_risk_row(h: QuantHeaderInfo, strategy: Strategy) -> None:
         )
 
     with c3:
-        cs = h
-        cost_html = (
-            f"<div style='color:#888;font-size:0.85rem;'>Cost stack (LTD)</div>"
-            f"<div style='font-size:0.95rem;line-height:1.5;'>"
-            f"<span style='color:#f44336;'>Gas −{format_usd(cs.cost_gas_usd)}</span><br>"
-            f"<span style='color:#f44336;'>Fees −{format_usd(cs.cost_protocol_fees_usd)}</span><br>"
-            f"<span style='color:#f44336;'>Slip −{format_usd(cs.cost_slippage_usd)}</span><br>"
-            f"<span style='color:#00c853;'>Earn +{format_usd(cs.fees_earned_usd + cs.interest_earned_usd)}</span>"
-            f"</div>"
-        )
-        # VIB-3926 — life-to-date cost decomposition. Gas is on every tx;
-        # protocol fees apply to swaps (Uniswap 0.05%, etc.) and lending
-        # protocols; slippage is the realized vs quoted execution gap;
-        # earn is LP fees + lending interest accrued.
-        cost_tooltip = _e(
-            "Life-to-date cost & earn breakdown. "
-            "Gas: native ETH × USD at TX time, every tx. "
-            "Fees: Uniswap pool fee + bridge / aggregator fees on swaps. "
-            "Slip: realised slippage vs quote. "
-            "Earn: LP fees + lending interest accrued."
-        )
-        st.markdown(
-            f"<div title='{cost_tooltip}' style='background:#1e1e1e;border:1px solid #333;"
-            f"border-radius:4px;padding:0.5rem 0.75rem;'>{cost_html}</div>",
-            unsafe_allow_html=True,
-        )
+        if cost is not None:
+            render_cost_stack(cost)
+        else:
+            st.info("Cost stack unavailable — gateway returned no aggregations.")
 
     with c4:
-        cash_pct = (h.available_cash_usd / h.nav_usd * Decimal("100")) if h.nav_usd > 0 else Decimal("0")
+        cash_pct = (p.available_cash_usd / p.nav_usd * Decimal("100")) if p.nav_usd > 0 else Decimal("0")
         st.metric(
             "Cash buffer",
-            format_usd(h.available_cash_usd),
+            format_usd(p.available_cash_usd),
             delta=f"{cash_pct:.0f}% of NAV",
             delta_color="off",
             help=(
@@ -389,7 +428,7 @@ def _render_risk_row(h: QuantHeaderInfo, strategy: Strategy) -> None:
 # --- Row 3: Audit posture -------------------------------------------------
 
 
-def _render_audit_row(h: QuantHeaderInfo) -> None:
+def _render_audit_row(audit: AuditPosture) -> None:
     st.markdown(
         '<div style="font-size:0.85rem;color:#888;letter-spacing:0.08em;'
         'margin-top:0.75rem;margin-bottom:0.25rem;">AUDIT</div>',
@@ -398,21 +437,21 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        if h.g6_status == "PASS":
+        if audit.g6_status == "PASS":
             color = "#00c853"
             badge = "PASS"
-            sub = f"gap {format_usd(h.g6_gap_usd)} ≤ ε {format_usd(h.g6_epsilon_usd)}"
-        elif h.g6_status == "FAIL":
+            sub = f"gap {format_usd(audit.g6_gap_usd)} ≤ ε {format_usd(audit.g6_epsilon_usd)}"
+        elif audit.g6_status == "FAIL":
             color = "#f44336"
             badge = "FAIL"
-            sub = f"gap {format_usd(h.g6_gap_usd)} > ε {format_usd(h.g6_epsilon_usd)}"
+            sub = f"gap {format_usd(audit.g6_gap_usd)} > ε {format_usd(audit.g6_epsilon_usd)}"
         else:
             color = "#888888"
             badge = "NA"
             sub = "no events yet"
 
         components_lines = "".join(
-            f"<div>Σ_{name}: <code>{format_usd(value)}</code></div>" for name, value in h.g6_components.items()
+            f"<div>Σ_{name}: <code>{format_usd(value)}</code></div>" for name, value in audit.g6_components.items()
         )
         st.markdown(
             f"""
@@ -423,8 +462,8 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
               <div style="color:{color};font-weight:600;font-size:1.2rem;">{badge}</div>
               <div style="color:#aaa;font-size:0.8rem;">{sub}</div>
               <div style="color:#aaa;font-size:0.8rem;">
-                wallet: <code>{format_usd(h.g6_wallet_pnl_usd)}</code> ·
-                comp: <code>{format_usd(h.g6_component_pnl_usd)}</code>
+                wallet: <code>{format_usd(audit.g6_wallet_pnl_usd)}</code> ·
+                comp: <code>{format_usd(audit.g6_component_pnl_usd)}</code>
               </div>
             </div>
             """,
@@ -434,12 +473,12 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
             st.markdown(components_lines, unsafe_allow_html=True)
 
     with c2:
-        total = max(h.ledger_total, 1)
-        price_pct = (h.ledger_with_price_inputs * 100) // total
-        prepost_pct = (h.ledger_with_pre_post_state * 100) // total
-        gas_pct = (h.ledger_with_gas_usd * 100) // total
-        ev_total = max(h.events_total, 1)
-        ver_pct = (h.events_with_versions * 100) // ev_total
+        total = max(audit.ledger_total, 1)
+        price_pct = (audit.ledger_with_price_inputs * 100) // total
+        prepost_pct = (audit.ledger_with_pre_post_state * 100) // total
+        gas_pct = (audit.ledger_with_gas_usd * 100) // total
+        ev_total = max(audit.events_total, 1)
+        ver_pct = (audit.events_with_versions * 100) // ev_total
 
         def _icon(num: int, denom: int) -> str:
             if denom == 0:
@@ -456,17 +495,17 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
                         padding:0.5rem 0.75rem;">
               <div style="color:#888;font-size:0.85rem;">Audit trail</div>
               <div style="font-size:0.9rem;line-height:1.6;">
-                {_icon(h.ledger_with_price_inputs, h.ledger_total)}
-                  price_inputs &nbsp;<code>{h.ledger_with_price_inputs}/{h.ledger_total}</code>
+                {_icon(audit.ledger_with_price_inputs, audit.ledger_total)}
+                  price_inputs &nbsp;<code>{audit.ledger_with_price_inputs}/{audit.ledger_total}</code>
                   ({price_pct}%)<br>
-                {_icon(h.ledger_with_pre_post_state, h.ledger_total)}
-                  pre+post state &nbsp;<code>{h.ledger_with_pre_post_state}/{h.ledger_total}</code>
+                {_icon(audit.ledger_with_pre_post_state, audit.ledger_total)}
+                  pre+post state &nbsp;<code>{audit.ledger_with_pre_post_state}/{audit.ledger_total}</code>
                   ({prepost_pct}%)<br>
-                {_icon(h.ledger_with_gas_usd, h.ledger_total)}
-                  gas_usd &nbsp;<code>{h.ledger_with_gas_usd}/{h.ledger_total}</code>
+                {_icon(audit.ledger_with_gas_usd, audit.ledger_total)}
+                  gas_usd &nbsp;<code>{audit.ledger_with_gas_usd}/{audit.ledger_total}</code>
                   ({gas_pct}%)<br>
-                {_icon(h.events_with_versions, h.events_total)}
-                  versions &nbsp;<code>{h.events_with_versions}/{h.events_total}</code>
+                {_icon(audit.events_with_versions, audit.events_total)}
+                  versions &nbsp;<code>{audit.events_with_versions}/{audit.events_total}</code>
                   ({ver_pct}%)
               </div>
             </div>
@@ -475,10 +514,10 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
         )
 
     with c3:
-        passed = h.cells_passed
-        failed = h.cells_failed
-        xfail = h.cells_xfail
-        total = h.cells_total or 21
+        passed = audit.cells_passed
+        failed = audit.cells_failed
+        xfail = audit.cells_xfail
+        total = audit.cells_total or 21
 
         if failed > 0:
             color = "#f44336"
@@ -490,12 +529,12 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
         chips_failing = "".join(
             f"<span style='background:#3a1c1c;color:#f44336;border-radius:4px;"
             f"padding:1px 6px;margin:1px;font-size:0.78rem;display:inline-block;'>{_e(c)}</span>"
-            for c in h.failing_cells[:6]
+            for c in audit.failing_cells[:6]
         )
         chips_xfail = "".join(
             f"<span style='background:#2a2a2a;color:#888;border-radius:4px;"
             f"padding:1px 6px;margin:1px;font-size:0.78rem;display:inline-block;'>{_e(c)}</span>"
-            for c in h.xfail_cells[:6]
+            for c in audit.xfail_cells[:6]
         )
 
         st.markdown(
@@ -504,7 +543,7 @@ def _render_audit_row(h: QuantHeaderInfo) -> None:
                         border-left:3px solid {color};border-radius:4px;
                         padding:0.5rem 0.75rem;">
               <div style="color:#888;font-size:0.85rem;">
-                Accountant Test posture · primitive: <strong>{_e(h.primitive)}</strong>
+                Accountant Test posture · primitive: <strong>{_e(audit.primitive)}</strong>
               </div>
               <div style="color:{color};font-weight:600;font-size:1.4rem;">
                 {passed} / {total}
@@ -548,6 +587,7 @@ def _render_fallback_metrics(strategy: Strategy) -> None:
 # Backwards-compatible alias for callers that haven't migrated.
 def render_key_metrics(strategy: Strategy) -> None:
     """Deprecated: prefer ``render_quant_header``. Kept for callers that
-    don't yet pass the QuantHeaderInfo through (e.g. AppTest fixtures).
+    don't yet pass the focused PnL/Cost/Audit slices through (e.g.
+    AppTest fixtures that only have a ``Strategy`` to render against).
     """
     _render_fallback_metrics(strategy)

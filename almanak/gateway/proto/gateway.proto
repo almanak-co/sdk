@@ -1265,9 +1265,20 @@ service DashboardService {
   // Get structured trade records from the transaction ledger (VIB-2402).
   rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse);
 
-  // Senior-Quant header aggregations: money trail, cost stack,
-  // reconciliation, audit-trail completeness, Accountant posture.
-  rpc GetQuantHeader(GetQuantHeaderRequest) returns (QuantHeaderInfo);
+  // PnL summary — the 5-second eyeball: am I making or losing money?
+  // Reads latest portfolio_snapshots row + portfolio_metrics row.
+  // Hot-read; safe to cache aggressively. (VIB-3969)
+  rpc GetPnLSummary(GetPnLSummaryRequest) returns (PnLSummary);
+
+  // Cost stack — life-to-date Gas / Fees / Slip / Earn decomposition.
+  // Reads transaction_ledger + accounting_events (sum aggregations).
+  // Mid-weight; cumulative. (VIB-3969)
+  rpc GetCostStack(GetCostStackRequest) returns (CostStackInfo);
+
+  // Audit posture — Reconciliation (G6) + audit-trail completeness +
+  // Accountant Test 21-cell matrix. Heavy; cold-read; QA-grade.
+  // Server-computed only — never reconstruct G6 client-side. (VIB-3969)
+  rpc GetAuditPosture(GetAuditPostureRequest) returns (AuditPosture);
 
   // Trade tape: ledger × accounting × position-event joined view, one
   // row per intent, with receipt-parsed and oracle-quote payloads.
@@ -1554,15 +1565,19 @@ message LedgerEntryInfo {
 }
 
 // Senior-Quant header messages -----------------------------------------------
+//
+// VIB-3969: three cohesive sub-messages, each backed by its own RPC.
+// PnLSummary is the eyeball card a strategy operator scans first;
+// CostStackInfo and AuditPosture are independently fetchable so a PnL
+// consumer never pays for G6 reconciliation or the 21-cell Accountant
+// Test matrix.
 
-message GetQuantHeaderRequest {
-  string strategy_id = 1;
-}
-
-// Aggregated header card data: money trail, cost stack, position summary,
-// reconciliation (G6), audit-trail completeness, and Accountant posture.
+// PnLSummary — the 5-second eyeball card. Wallet-level NAV/PnL/APR plus
+// the cash buffer and the primitive-aware primary-risk gauge that the
+// operator-console Position & Risk row renders. Lightweight: latest
+// snapshot + portfolio_metrics + first-action ledger anchor.
 // All decimals serialized as strings to preserve precision.
-message QuantHeaderInfo {
+message PnLSummary {
   // Money trail (G1, G4, G5)
   string deployed_usd = 1;          // initial + deposits - withdrawals
   string nav_usd = 2;               // current portfolio value
@@ -1574,57 +1589,85 @@ message QuantHeaderInfo {
   string value_confidence = 8;      // HIGH | ESTIMATED | STALE | UNAVAILABLE
   int64  age_days = 9;
 
-  // Position + risk
-  string deployed_capital_usd = 20; // open positions
+  // Position + cash
+  string deployed_capital_usd = 20; // open positions (sum of cost bases)
   string available_cash_usd = 21;
   int32  open_position_count = 22;
-  string primary_risk_label = 23;   // "HF 1.78" | "in-range YES" | "Lev 1.7×"
-  string primary_risk_value = 24;
-  string primary_risk_color = 25;   // "green" | "yellow" | "red" | "neutral"
-  string primary_risk_kind = 26;    // "lp" | "lending" | "perp" | "none"
 
-  // Cost stack (life-to-date) (G2, G3, P3, P5)
-  string cost_gas_usd = 30;
-  string cost_protocol_fees_usd = 31;
-  string cost_slippage_usd = 32;
-  string fees_earned_usd = 33;
-  string interest_paid_usd = 34;
-  string interest_earned_usd = 35;
-  string funding_paid_usd = 36;
-  string funding_earned_usd = 37;
-  string realized_pnl_usd = 38;
-  string il_usd = 39;               // diagnostic only
+  // Primary-risk gauge (LP range / lending HF / perp leverage). Kept on
+  // PnLSummary so the operator console assembles its full eyeball row
+  // from one fetch; primitive-specific dashboards typically render their
+  // own richer gauge from ``templates/{lp,lending,perp}_dashboard.py``.
+  string primary_risk_kind = 30;    // "lp" | "lending" | "perp" | "none"
+  string primary_risk_label = 31;   // "Range" | "Health Factor" | "Leverage"
+  string primary_risk_value = 32;   // "in-range YES" | "1.78" | "1.7×"
+  string primary_risk_color = 33;   // "green" | "yellow" | "red" | "neutral"
+}
 
-  // Reconciliation (G6)
-  string g6_status = 50;            // "PASS" | "FAIL" | "NA"
-  string g6_wallet_pnl_usd = 51;
-  string g6_component_pnl_usd = 52;
-  string g6_gap_usd = 53;
-  string g6_epsilon_usd = 54;
-  string g6_sum_swap = 55;
-  string g6_sum_lp = 56;
-  string g6_sum_perp = 57;
-  string g6_sum_fees = 58;
-  string g6_sum_funding = 59;
-  string g6_sum_interest = 60;
-  string g6_sum_gas = 61;
+// CostStackInfo — life-to-date cost & earn decomposition. Same numbers
+// the operator console renders in the "Cost stack (LTD)" tile. Generic
+// across primitives: every primitive emits Gas, slippage, protocol fees,
+// and earnings.
+message CostStackInfo {
+  string cost_gas_usd = 1;
+  string cost_protocol_fees_usd = 2;
+  string cost_slippage_usd = 3;
+  string fees_earned_usd = 4;
+  string interest_paid_usd = 5;
+  string interest_earned_usd = 6;
+  string funding_paid_usd = 7;
+  string funding_earned_usd = 8;
+  string realized_pnl_usd = 9;
+  string il_usd = 10;               // diagnostic only
+}
 
-  // Audit-trail completeness (G9, G12, G13)
-  int32 ledger_total = 70;
-  int32 ledger_with_price_inputs = 71;
-  int32 ledger_with_pre_post_state = 72;
-  int32 ledger_with_gas_usd = 73;
-  int32 events_total = 74;
-  int32 events_with_versions = 75;
+// AuditPosture — Reconciliation (G6) + audit-trail completeness +
+// Accountant Test posture. Server-computed only: clients must never
+// reconstruct G6 from sub-fields, since the math would drift between the
+// dashboard and the accountant test harness.
+message AuditPosture {
+  // Reconciliation (G6) — wallet PnL ≡ Σ component PnL invariant.
+  string g6_status = 1;             // "PASS" | "FAIL" | "NA"
+  string g6_wallet_pnl_usd = 2;
+  string g6_component_pnl_usd = 3;
+  string g6_gap_usd = 4;
+  string g6_epsilon_usd = 5;
+  string g6_sum_swap = 6;
+  string g6_sum_lp = 7;
+  string g6_sum_perp = 8;
+  string g6_sum_fees = 9;
+  string g6_sum_funding = 10;
+  string g6_sum_interest = 11;
+  string g6_sum_gas = 12;
 
-  // Accountant Test posture
-  string primitive = 80;            // "lp" | "lending" | "perp" | "swap" | "mixed"
-  int32 cells_passed = 81;
-  int32 cells_failed = 82;
-  int32 cells_xfail = 83;
-  int32 cells_total = 84;
-  repeated string failing_cells = 85;
-  repeated string xfail_cells = 86;
+  // Audit-trail completeness (G9, G12, G13).
+  int32 ledger_total = 20;
+  int32 ledger_with_price_inputs = 21;
+  int32 ledger_with_pre_post_state = 22;
+  int32 ledger_with_gas_usd = 23;
+  int32 events_total = 24;
+  int32 events_with_versions = 25;
+
+  // Accountant Test posture — 21-cell matrix score per primitive.
+  string primitive = 30;            // "lp" | "lending" | "perp" | "swap" | "mixed"
+  int32 cells_passed = 31;
+  int32 cells_failed = 32;
+  int32 cells_xfail = 33;
+  int32 cells_total = 34;
+  repeated string failing_cells = 35;
+  repeated string xfail_cells = 36;
+}
+
+message GetPnLSummaryRequest {
+  string strategy_id = 1;
+}
+
+message GetCostStackRequest {
+  string strategy_id = 1;
+}
+
+message GetAuditPostureRequest {
+  string strategy_id = 1;
 }
 
 // Trade tape messages --------------------------------------------------------

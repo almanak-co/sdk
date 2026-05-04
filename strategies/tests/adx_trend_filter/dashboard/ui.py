@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -19,6 +25,8 @@ def render_custom_dashboard(
 ) -> None:
     """Render the ADX Trend Filter custom dashboard."""
     st.title("ADX Trend Filter Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config
     adx_period = strategy_config.get("adx_period", 14)
@@ -72,6 +80,9 @@ def render_custom_dashboard(
     # PnL
     st.subheader("Performance")
     _render_pnl(session_state)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position(session_state: dict[str, Any], base_token: str, quote_token: str) -> None:

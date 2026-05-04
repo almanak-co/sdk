@@ -1860,40 +1860,34 @@ class TestGetStrategyDetailsFallbacksAndOptIns:
         assert response.summary.strategy_id == "test_strategy"
 
 
-class TestGetQuantHeader:
-    """Smoke tests for GetQuantHeader RPC.
+class TestGetPnLSummary:
+    """Smoke tests for GetPnLSummary RPC (VIB-3969).
 
-    The aggregation logic (cost stack, reconciliation, audit-trail,
-    Accountant-posture) lives in
-    ``almanak.framework.dashboard.quant_aggregations`` and is exhaustively
-    covered by ``tests/unit/dashboard/test_quant_aggregations.py``. The
-    tests here exercise the gateway-side surface only: request validation,
-    proto roundtripping, and the no-data degraded shape.
+    The aggregation logic is exhaustively covered by
+    ``tests/unit/dashboard/test_quant_aggregations.py``. The tests here
+    exercise the gateway-side surface: request validation, proto
+    roundtripping, and the no-data degraded shape.
     """
 
     @pytest.mark.asyncio
     async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
-        """An invalid strategy_id sets INVALID_ARGUMENT and returns an empty proto."""
         dashboard_service._initialized = True
-        request = gateway_pb2.GetQuantHeaderRequest(strategy_id="")
-        response = await dashboard_service.GetQuantHeader(request, mock_context)
+        request = gateway_pb2.GetPnLSummaryRequest(strategy_id="")
+        response = await dashboard_service.GetPnLSummary(request, mock_context)
         mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
-        assert isinstance(response, gateway_pb2.QuantHeaderInfo)
+        assert isinstance(response, gateway_pb2.PnLSummary)
 
     @pytest.mark.asyncio
     async def test_no_state_manager_returns_degraded_response(self, dashboard_service, mock_context):
-        """No state_manager wired → proto returned, no crash, UNAVAILABLE-shaped."""
         dashboard_service._initialized = True
         dashboard_service._state_manager = None
-        request = gateway_pb2.GetQuantHeaderRequest(strategy_id="test_strategy")
-        response = await dashboard_service.GetQuantHeader(request, mock_context)
-        assert isinstance(response, gateway_pb2.QuantHeaderInfo)
-        # Empty inputs collapse to UNAVAILABLE confidence rather than raising.
+        request = gateway_pb2.GetPnLSummaryRequest(strategy_id="test_strategy")
+        response = await dashboard_service.GetPnLSummary(request, mock_context)
+        assert isinstance(response, gateway_pb2.PnLSummary)
         assert response.value_confidence in ("", "UNAVAILABLE")
 
     @pytest.mark.asyncio
-    async def test_empty_backend_returns_zero_decimals_as_strings(self, dashboard_service, mock_context):
-        """A state_manager that returns no rows still produces a valid response."""
+    async def test_empty_backend_returns_zero_decimals(self, dashboard_service, mock_context):
         dashboard_service._initialized = True
         sm = MagicMock()
         sm.get_portfolio_metrics = AsyncMock(return_value=None)
@@ -1902,14 +1896,63 @@ class TestGetQuantHeader:
         sm.get_accounting_events_sync = MagicMock(return_value=[])
         dashboard_service._state_manager = sm
 
-        request = gateway_pb2.GetQuantHeaderRequest(strategy_id="test_strategy")
-        response = await dashboard_service.GetQuantHeader(request, mock_context)
-        # Decimal fields are exposed on the wire as strings — empty/0 input
-        # must round-trip as parseable Decimal-looking strings, not raise.
-        assert isinstance(response, gateway_pb2.QuantHeaderInfo)
+        request = gateway_pb2.GetPnLSummaryRequest(strategy_id="test_strategy")
+        response = await dashboard_service.GetPnLSummary(request, mock_context)
+        assert isinstance(response, gateway_pb2.PnLSummary)
         for field in ("deployed_usd", "nav_usd", "lifetime_pnl_usd"):
             value = getattr(response, field)
             assert value in ("", "0", "0.00") or Decimal(value) == Decimal("0")
+
+
+class TestGetCostStack:
+    """Smoke tests for GetCostStack RPC (VIB-3969)."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+        dashboard_service._initialized = True
+        request = gateway_pb2.GetCostStackRequest(strategy_id="")
+        response = await dashboard_service.GetCostStack(request, mock_context)
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert isinstance(response, gateway_pb2.CostStackInfo)
+
+    @pytest.mark.asyncio
+    async def test_no_state_manager_returns_zero_decimals(self, dashboard_service, mock_context):
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = None
+        request = gateway_pb2.GetCostStackRequest(strategy_id="test_strategy")
+        response = await dashboard_service.GetCostStack(request, mock_context)
+        assert isinstance(response, gateway_pb2.CostStackInfo)
+        for field in (
+            "cost_gas_usd",
+            "cost_protocol_fees_usd",
+            "cost_slippage_usd",
+            "fees_earned_usd",
+        ):
+            value = getattr(response, field)
+            assert value in ("", "0", "0.00") or Decimal(value) == Decimal("0")
+
+
+class TestGetAuditPosture:
+    """Smoke tests for GetAuditPosture RPC (VIB-3969)."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_strategy_id_returns_invalid_argument(self, dashboard_service, mock_context):
+        dashboard_service._initialized = True
+        request = gateway_pb2.GetAuditPostureRequest(strategy_id="")
+        response = await dashboard_service.GetAuditPosture(request, mock_context)
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert isinstance(response, gateway_pb2.AuditPosture)
+
+    @pytest.mark.asyncio
+    async def test_no_state_manager_returns_na_status(self, dashboard_service, mock_context):
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = None
+        request = gateway_pb2.GetAuditPostureRequest(strategy_id="test_strategy")
+        response = await dashboard_service.GetAuditPosture(request, mock_context)
+        assert isinstance(response, gateway_pb2.AuditPosture)
+        # Empty inputs → no events → G6 has no data → NA status, not
+        # PASS or FAIL (G6 must never appear to pass on zero rows).
+        assert response.g6_status in ("", "NA")
 
 
 class TestGetTradeTape:

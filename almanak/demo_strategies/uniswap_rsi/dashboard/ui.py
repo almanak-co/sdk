@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -27,6 +33,8 @@ def render_custom_dashboard(
     - Cumulative PnL
     """
     st.title("Uniswap RSI Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values
     base_token = strategy_config.get("base_token", "WETH")
@@ -65,6 +73,9 @@ def render_custom_dashboard(
     # PnL section
     st.subheader("Performance")
     _render_pnl(session_state)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_rsi_indicator(

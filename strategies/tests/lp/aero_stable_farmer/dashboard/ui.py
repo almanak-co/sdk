@@ -11,6 +11,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -28,6 +34,8 @@ def render_custom_dashboard(
     - Stable pool health (peg status)
     """
     st.title("Aerodrome Stable Yield Farmer Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values with defaults
     pool = strategy_config.get("pool", "USDC/USDbC")
@@ -79,6 +87,9 @@ def render_custom_dashboard(
     # Stable Pool Health / Peg Status section
     st.subheader("Stable Pool Health")
     _render_peg_status(session_state, token0, token1)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_lp_balance(

@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 # Volatility regime thresholds (matching strategy.py)
 LOW_VOL_THRESHOLD = Decimal("0.02")  # ATR < 2% = low volatility
 HIGH_VOL_THRESHOLD = Decimal("0.05")  # ATR > 5% = high volatility
@@ -39,6 +45,8 @@ def render_custom_dashboard(
     - Chain selector if deployed on multiple chains
     """
     st.title("Uniswap V3 Volatility-Adaptive LP Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values with defaults
     pool = strategy_config.get("pool", "WETH/USDC/3000")
@@ -84,6 +92,9 @@ def render_custom_dashboard(
     # Historical Adjustments Section
     st.subheader("Range Width Adjustment History")
     _render_adjustment_history(api_client, strategy_id)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_chain_selector(current_chain: str, session_state: dict[str, Any]) -> None:

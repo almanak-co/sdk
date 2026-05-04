@@ -7,6 +7,7 @@ Example:
     almanak new-strategy --template dynamic_lp --name my_strategy --chain arbitrum
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -4225,6 +4226,107 @@ ALMANAK_PRIVATE_KEY=
 """
 
 
+def generate_dashboard_ui(name: str) -> str:
+    """Generate a starter ``dashboard/ui.py``.
+
+    The stub follows the standard 3-section layout (VIB-3969):
+      1. Title + strategy info
+      2. ``render_pnl_section`` — 5-second eyeball at the top
+      3. Author's primitive-specific content (TODO placeholder)
+      4. ``render_cost_stack_section`` + ``render_trade_tape_section``
+         at the bottom for audit / detail
+    """
+    snake = to_snake_case(name)
+    display_name = snake.replace("_", " ").title()
+    # Embed strings via ``json.dumps`` so quotes / backslashes / unicode
+    # in the strategy name can never break the generated Python file.
+    title_literal = json.dumps(display_name)
+
+    # Docstrings can't go through json.dumps (the surrounding triple
+    # quotes are part of the file), so neutralise the two characters
+    # that can break a triple-quoted block: backslashes (escape
+    # sequence warnings) and embedded ``"``. Apply to both the human
+    # display name and the snake_case form, since ``to_snake_case`` does
+    # not strip non-alphanumeric characters.
+    def _docstring_safe(s: str) -> str:
+        return s.replace("\\", "/").replace('"', "'")
+
+    display_doc = _docstring_safe(display_name)
+    snake_doc = _docstring_safe(snake)
+    return f'''"""{display_doc} Dashboard.
+
+Custom Streamlit dashboard for the {snake_doc} strategy. Loaded by the
+hosted platform's dashboard image and by ``almanak dashboard``
+locally — both call ``render_custom_dashboard()`` with the same
+arguments.
+"""
+
+from typing import Any
+
+import streamlit as st
+
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
+
+def render_custom_dashboard(
+    strategy_id: str,
+    strategy_config: dict[str, Any],
+    api_client: Any,
+    session_state: dict[str, Any],
+) -> None:
+    """Render the {display_doc} custom dashboard.
+
+    Args:
+        strategy_id: Stable identifier for this deployment.
+        strategy_config: Snapshot of the strategy's runtime config.
+        api_client: Gateway-backed API client (read-only).
+        session_state: Shared Streamlit session state.
+    """
+    st.title({title_literal})
+    st.markdown(f"**Strategy ID:** `{{strategy_id}}`")
+
+    # 1. PnL eyeball — am I making or losing money? (top of dashboard)
+    render_pnl_section(strategy_id)
+
+    # 2. TODO(strategy author): replace this placeholder with your own
+    # metrics, charts, and tables — LP range plots, health-factor
+    # gauges, indicator charts, etc. See almanak/demo_strategies/*/
+    # dashboard/ui.py for end-to-end examples and
+    # almanak/framework/dashboard/templates/ for prebuilt LP / lending
+    # / perp / TA / prediction sections.
+    st.divider()
+    st.markdown("### Position")
+    st.info("This is a starter dashboard. Add your strategy-specific UI here.")
+
+    # 3. Audit — life-to-date costs + transaction-level detail (bottom)
+    st.divider()
+    st.markdown("## Audit")
+    render_cost_stack_section(strategy_id, heading="")
+    render_trade_tape_section(strategy_id)
+'''
+
+
+def generate_dashboard_metadata(name: str) -> str:
+    """Generate ``dashboard/metadata.json`` (display name, icon, blurb).
+
+    The icon field is intentionally left empty — strategy authors set
+    their own (e.g. ``"icon": "📊"``) when they want one. The CLAUDE.md
+    "no emojis unless asked" rule keeps the framework default neutral.
+    """
+    snake = to_snake_case(name)
+    display_name = snake.replace("_", " ").title()
+    payload = {
+        "display_name": display_name,
+        "description": f"Custom dashboard for the {snake} strategy.",
+        "icon": "",
+    }
+    return json.dumps(payload, indent=4) + "\n"
+
+
 def register_strategy_in_factory(
     name: str,
     strategies_dir: Path,
@@ -4555,6 +4657,20 @@ def new_strategy(
             fh.write(agents_md_content)
         files_created.append("AGENTS.md")
 
+        # dashboard/ui.py + dashboard/metadata.json — every strategy
+        # ships with a starter custom dashboard. The stub already
+        # includes the trade-tape section so accounting is visually
+        # QA'able from day one, both locally and on the hosted platform.
+        dashboard_dir = strategy_dir / "dashboard"
+        dashboard_dir.mkdir(exist_ok=True)
+        dashboard_ui_file = dashboard_dir / "ui.py"
+        dashboard_ui_file.write_text(generate_dashboard_ui(name), encoding="utf-8")
+        files_created.append("dashboard/ui.py")
+
+        dashboard_metadata_file = dashboard_dir / "metadata.json"
+        dashboard_metadata_file.write_text(generate_dashboard_metadata(name), encoding="utf-8")
+        files_created.append("dashboard/metadata.json")
+
         # Print success message
         click.echo()
         click.echo(f"Created strategy '{snake_name}' in {strategy_dir}")
@@ -4566,6 +4682,7 @@ def new_strategy(
         click.echo("  .env                 - Environment variables (edit this)")
         click.echo("  .gitignore           - Git ignore rules")
         click.echo("  AGENTS.md            - AI agent guide")
+        click.echo("  dashboard/           - Streamlit dashboard (with trade tape)")
         click.echo("  tests/               - Test scaffold")
         click.echo()
         click.echo("Next steps:")

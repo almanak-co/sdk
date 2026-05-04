@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 # Supported chains for this strategy
 SUPPORTED_CHAINS = ["arbitrum", "base", "optimism", "ethereum"]
 
@@ -30,6 +36,8 @@ def render_custom_dashboard(
     - In-range time percentage
     """
     st.title("Uniswap V3 Asymmetric Bullish LP Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values with defaults
     pool = strategy_config.get("pool", "WETH/USDC/3000")
@@ -76,6 +84,9 @@ def render_custom_dashboard(
     # Rebalance History
     st.subheader("Rebalance History")
     _render_rebalance_history(api_client, strategy_id)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_asymmetric_config(upside_pct: str, downside_pct: str) -> None:

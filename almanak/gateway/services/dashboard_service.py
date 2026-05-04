@@ -1456,36 +1456,26 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # Senior-Quant header + trade tape (dashboard redesign)
     # ----------------------------------------------------------------------
 
-    async def GetQuantHeader(  # noqa: C901
-        self,
-        request: gateway_pb2.GetQuantHeaderRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> gateway_pb2.QuantHeaderInfo:
-        """Aggregate the Senior-Quant header card from the accounting tables.
+    async def _load_quant_inputs(  # noqa: C901
+        self, strategy_id: str
+    ) -> tuple[Any, list[Any], list[Any], list[dict[str, Any]], Any]:
+        """Load the on-disk inputs every quant aggregation needs.
 
-        Reads transaction_ledger, accounting_events, portfolio_metrics,
-        portfolio_snapshots through the StateManager. Pure read-side; no
-        new schema, no writes. Empty inputs collapse to an
-        ``UNAVAILABLE``-confidence header rather than raising.
+        Shared data path for ``GetPnLSummary`` / ``GetCostStack`` /
+        ``GetAuditPosture`` (and the deprecated ``GetQuantHeader``
+        composer). Returns ``(portfolio_metrics, snapshots,
+        ledger_entries, accounting_events, position_summary)``.
+
+        Hosted Postgres uses async backends with no sync API, so all I/O
+        here is awaited (VIB-3933). Failures collapse to empty inputs
+        rather than raising — the compute_* layer is built to handle
+        missing data and surface ``UNAVAILABLE`` confidence.
         """
-        try:
-            strategy_id = validate_strategy_id(request.strategy_id)
-        except ValidationError as e:
-            logger.warning("Invalid strategy_id in GetQuantHeader: %s", e)
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.QuantHeaderInfo()
-
-        await self._ensure_initialized()
-        strategy_id = resolve_agent_id(strategy_id)
-
-        from almanak.framework.dashboard.quant_aggregations import build_quant_header
-
-        portfolio_metrics = None
+        portfolio_metrics: Any = None
         snapshots: list[Any] = []
         ledger_entries: list[Any] = []
         accounting_events: list[dict[str, Any]] = []
-        position_summary = None
+        position_summary: Any = None
 
         if self._state_manager is not None:
             try:
@@ -1498,13 +1488,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
             except Exception:
                 logger.debug("get_snapshots_since failed for %s", strategy_id, exc_info=True)
-            # GetQuantHeader is the senior-quant LTD aggregation surface
-            # (cost stack, audit-trail counts, G6 reconciliation). A hard
-            # row cap silently understates lifetime totals and can mis-PASS
-            # G6 by undercounting gas. Lift the cap to a value that covers
-            # any realistic strategy in this PR's window; warn when hit so
-            # the operator knows aggregation may be partial. The proper fix
-            # — a SQL-side aggregation RPC that pushes SUM/COUNT into the
+            # The quant aggregations are LTD surfaces (cost stack,
+            # audit-trail counts, G6 reconciliation). A hard row cap
+            # silently understates lifetime totals and can mis-PASS G6 by
+            # undercounting gas. Cap is sized to cover any realistic
+            # strategy in this PR's window; warn when hit so operators
+            # know aggregation may be partial. The proper fix — a
+            # SQL-side aggregation RPC that pushes SUM/COUNT into the
             # backend — is tracked separately (see notes/audit-pr-*.md).
             try:
                 ledger_entries = await self._state_manager.get_ledger_entries(
@@ -1512,7 +1502,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
                 if len(ledger_entries) >= _QUANT_HEADER_LEDGER_CAP:
                     logger.warning(
-                        "GetQuantHeader: ledger row count hit cap (%d) for strategy=%s — "
+                        "Quant aggregation: ledger row count hit cap (%d) for strategy=%s — "
                         "LTD cost stack and audit-trail counts may be partial. "
                         "Add SQL-side aggregation when this fires regularly.",
                         _QUANT_HEADER_LEDGER_CAP,
@@ -1521,9 +1511,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
             try:
-                # Async sibling of ``get_accounting_events_sync`` — required for
-                # hosted Postgres because asyncpg has no sync API. SQLite path
-                # gets executor-wrapped under the hood (VIB-3933).
                 accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
                     deployment_id=strategy_id
                 )
@@ -1576,7 +1563,42 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
             position_summary = _PosShim(latest_snapshot)
 
-        header = build_quant_header(
+        return portfolio_metrics, snapshots, ledger_entries, accounting_events, position_summary
+
+    async def GetPnLSummary(
+        self,
+        request: gateway_pb2.GetPnLSummaryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PnLSummary:
+        """5-second-eyeball card: wallet money trail + cash + primary-risk gauge.
+
+        VIB-3969: focused replacement for the PnL-shaped slice of
+        ``GetQuantHeader``. Clients calling this never pay the cost of
+        computing G6 reconciliation or the 21-cell Accountant Test
+        posture.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetPnLSummary: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.PnLSummary()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        from almanak.framework.dashboard.quant_aggregations import compute_pnl_summary
+
+        (
+            portfolio_metrics,
+            snapshots,
+            ledger_entries,
+            accounting_events,
+            position_summary,
+        ) = await self._load_quant_inputs(strategy_id)
+
+        pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
             snapshots=snapshots,
             ledger_entries=ledger_entries,
@@ -1584,58 +1606,162 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             position_summary=position_summary,
         )
 
-        return gateway_pb2.QuantHeaderInfo(
-            deployed_usd=str(header.deployed_usd),
-            nav_usd=str(header.nav_usd),
-            lifetime_pnl_usd=str(header.lifetime_pnl_usd),
-            lifetime_pnl_pct=f"{header.lifetime_pnl_pct:.2f}",
-            net_apr_pct=f"{header.net_apr_pct:.2f}",
-            max_drawdown_pct=f"{header.max_drawdown_pct:.2f}",
-            current_drawdown_pct=f"{header.current_drawdown_pct:.2f}",
-            value_confidence=header.value_confidence,
-            age_days=header.age_days,
-            deployed_capital_usd=str(header.deployed_capital_usd),
-            available_cash_usd=str(header.available_cash_usd),
-            open_position_count=header.open_position_count,
-            primary_risk_label=header.primary_risk_label,
-            primary_risk_value=header.primary_risk_value,
-            primary_risk_color=header.primary_risk_color,
-            primary_risk_kind=header.primary_risk_kind,
-            cost_gas_usd=str(header.cost_stack.gas_usd),
-            cost_protocol_fees_usd=str(header.cost_stack.protocol_fees_usd),
-            cost_slippage_usd=str(header.cost_stack.slippage_usd),
-            fees_earned_usd=str(header.cost_stack.fees_earned_usd),
-            interest_paid_usd=str(header.cost_stack.interest_paid_usd),
-            interest_earned_usd=str(header.cost_stack.interest_earned_usd),
-            funding_paid_usd=str(header.cost_stack.funding_paid_usd),
-            funding_earned_usd=str(header.cost_stack.funding_earned_usd),
-            realized_pnl_usd=str(header.cost_stack.realized_pnl_usd),
-            il_usd=str(header.cost_stack.il_usd),
-            g6_status=("PASS" if header.reconciliation.passed else "FAIL") if header.reconciliation.has_data else "NA",
-            g6_wallet_pnl_usd=str(header.reconciliation.wallet_pnl_usd),
-            g6_component_pnl_usd=str(header.reconciliation.component_pnl_usd),
-            g6_gap_usd=str(header.reconciliation.gap_usd),
-            g6_epsilon_usd=str(header.reconciliation.epsilon_usd),
-            g6_sum_swap=str(header.reconciliation.sum_swap),
-            g6_sum_lp=str(header.reconciliation.sum_lp),
-            g6_sum_perp=str(header.reconciliation.sum_perp),
-            g6_sum_fees=str(header.reconciliation.sum_fees),
-            g6_sum_funding=str(header.reconciliation.sum_funding),
-            g6_sum_interest=str(header.reconciliation.sum_interest),
-            g6_sum_gas=str(header.reconciliation.sum_gas),
-            ledger_total=header.audit_trail.ledger_total,
-            ledger_with_price_inputs=header.audit_trail.ledger_with_price_inputs,
-            ledger_with_pre_post_state=header.audit_trail.ledger_with_pre_post_state,
-            ledger_with_gas_usd=header.audit_trail.ledger_with_gas_usd,
-            events_total=header.audit_trail.events_total,
-            events_with_versions=header.audit_trail.events_with_versions,
-            primitive=header.posture.primitive,
-            cells_passed=header.posture.cells_passed,
-            cells_failed=header.posture.cells_failed,
-            cells_xfail=header.posture.cells_xfail,
-            cells_total=header.posture.cells_total,
-            failing_cells=header.posture.failing,
-            xfail_cells=header.posture.xfail,
+        return gateway_pb2.PnLSummary(
+            deployed_usd=str(pnl.deployed_usd),
+            nav_usd=str(pnl.nav_usd),
+            lifetime_pnl_usd=str(pnl.lifetime_pnl_usd),
+            lifetime_pnl_pct=f"{pnl.lifetime_pnl_pct:.2f}",
+            net_apr_pct=f"{pnl.net_apr_pct:.2f}",
+            max_drawdown_pct=f"{pnl.max_drawdown_pct:.2f}",
+            current_drawdown_pct=f"{pnl.current_drawdown_pct:.2f}",
+            value_confidence=pnl.value_confidence,
+            age_days=pnl.age_days,
+            deployed_capital_usd=str(pnl.deployed_capital_usd),
+            available_cash_usd=str(pnl.available_cash_usd),
+            open_position_count=pnl.open_position_count,
+            primary_risk_kind=pnl.primary_risk_kind,
+            primary_risk_label=pnl.primary_risk_label,
+            primary_risk_value=pnl.primary_risk_value,
+            primary_risk_color=pnl.primary_risk_color,
+        )
+
+    async def GetCostStack(
+        self,
+        request: gateway_pb2.GetCostStackRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.CostStackInfo:
+        """Life-to-date Gas / Fees / Slip / Earn decomposition.
+
+        VIB-3969: focused replacement for the cost-stack slice of
+        ``GetQuantHeader``. Reads ledger + accounting_events; cost is
+        proportional to ledger length.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetCostStack: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.CostStackInfo()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        from almanak.framework.dashboard.quant_aggregations import compute_cost_stack
+
+        _, _, ledger_entries, accounting_events, _ = await self._load_quant_inputs(strategy_id)
+
+        cs = compute_cost_stack(ledger_entries, accounting_events)
+
+        return gateway_pb2.CostStackInfo(
+            cost_gas_usd=str(cs.gas_usd),
+            cost_protocol_fees_usd=str(cs.protocol_fees_usd),
+            cost_slippage_usd=str(cs.slippage_usd),
+            fees_earned_usd=str(cs.fees_earned_usd),
+            interest_paid_usd=str(cs.interest_paid_usd),
+            interest_earned_usd=str(cs.interest_earned_usd),
+            funding_paid_usd=str(cs.funding_paid_usd),
+            funding_earned_usd=str(cs.funding_earned_usd),
+            realized_pnl_usd=str(cs.realized_pnl_usd),
+            il_usd=str(cs.il_usd),
+        )
+
+    async def GetAuditPosture(
+        self,
+        request: gateway_pb2.GetAuditPostureRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.AuditPosture:
+        """Reconciliation (G6) + audit-trail completeness + Accountant Test posture.
+
+        VIB-3969: focused replacement for the audit slice of
+        ``GetQuantHeader``. Server-computed only — clients must NOT
+        reconstruct G6 client-side, or the math will drift between the
+        dashboard and the accountant test harness.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning("Invalid strategy_id in GetAuditPosture: %s", e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.AuditPosture()
+
+        await self._ensure_initialized()
+        strategy_id = resolve_agent_id(strategy_id)
+
+        from almanak.framework.dashboard.quant_aggregations import (
+            _detect_primitive,
+            compute_audit_trail,
+            compute_cost_stack,
+            compute_pnl_summary,
+            compute_reconciliation,
+            evaluate_posture,
+        )
+
+        (
+            portfolio_metrics,
+            snapshots,
+            ledger_entries,
+            accounting_events,
+            position_summary,
+        ) = await self._load_quant_inputs(strategy_id)
+
+        # Reconciliation needs deployed/NAV anchored the same way the PnL
+        # surface anchors them — so the dashboard and accountant test
+        # agree. Recompute the PnL slice (cheap; same inputs already
+        # loaded) rather than baking those values into a separate config.
+        pnl = compute_pnl_summary(
+            portfolio_metrics=portfolio_metrics,
+            snapshots=snapshots,
+            ledger_entries=ledger_entries,
+            accounting_events=accounting_events,
+            position_summary=position_summary,
+        )
+        cost_stack = compute_cost_stack(ledger_entries, accounting_events)
+        audit_trail = compute_audit_trail(ledger_entries, accounting_events)
+        reconciliation = compute_reconciliation(
+            initial_value_usd=pnl.deployed_usd,
+            nav_usd=pnl.nav_usd,
+            cost_stack=cost_stack,
+            accounting_events=accounting_events,
+        )
+        primitive = _detect_primitive(accounting_events)
+        posture = evaluate_posture(
+            primitive=primitive,
+            ledger_entries=ledger_entries,
+            accounting_events=accounting_events,
+            snapshots=snapshots,
+            audit=audit_trail,
+            reconciliation=reconciliation,
+            portfolio_metrics=portfolio_metrics,
+        )
+
+        return gateway_pb2.AuditPosture(
+            g6_status=("PASS" if reconciliation.passed else "FAIL") if reconciliation.has_data else "NA",
+            g6_wallet_pnl_usd=str(reconciliation.wallet_pnl_usd),
+            g6_component_pnl_usd=str(reconciliation.component_pnl_usd),
+            g6_gap_usd=str(reconciliation.gap_usd),
+            g6_epsilon_usd=str(reconciliation.epsilon_usd),
+            g6_sum_swap=str(reconciliation.sum_swap),
+            g6_sum_lp=str(reconciliation.sum_lp),
+            g6_sum_perp=str(reconciliation.sum_perp),
+            g6_sum_fees=str(reconciliation.sum_fees),
+            g6_sum_funding=str(reconciliation.sum_funding),
+            g6_sum_interest=str(reconciliation.sum_interest),
+            g6_sum_gas=str(reconciliation.sum_gas),
+            ledger_total=audit_trail.ledger_total,
+            ledger_with_price_inputs=audit_trail.ledger_with_price_inputs,
+            ledger_with_pre_post_state=audit_trail.ledger_with_pre_post_state,
+            ledger_with_gas_usd=audit_trail.ledger_with_gas_usd,
+            events_total=audit_trail.events_total,
+            events_with_versions=audit_trail.events_with_versions,
+            primitive=posture.primitive,
+            cells_passed=posture.cells_passed,
+            cells_failed=posture.cells_failed,
+            cells_xfail=posture.cells_xfail,
+            cells_total=posture.cells_total,
+            failing_cells=posture.failing,
+            xfail_cells=posture.xfail,
         )
 
     async def GetTradeTape(  # noqa: C901

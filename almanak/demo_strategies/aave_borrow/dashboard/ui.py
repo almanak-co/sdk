@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 # Placeholder USD prices per collateral token, lowercase keyed. Real dashboards
 # should source these from oracles / reserve data -- these values are only used
 # to estimate demo UI numbers. wstETH / weETH / rETH / cbETH carry their
@@ -48,6 +54,8 @@ def render_custom_dashboard(
     - Liquidation threshold
     """
     st.title("Aave Borrow Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values with defaults
     # Default is wstETH rather than WETH because Aave V3 governance froze the
@@ -88,6 +96,9 @@ def render_custom_dashboard(
     # Liquidation Risk section
     st.subheader("Liquidation Risk")
     _render_liquidation_risk(session_state, collateral_token)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position_overview(

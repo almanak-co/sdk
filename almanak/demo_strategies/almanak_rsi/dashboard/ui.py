@@ -18,6 +18,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
 from almanak.framework.dashboard.plots.base import get_default_config
 
 
@@ -38,6 +43,8 @@ def render_custom_dashboard(
     - Trade history
     """
     st.title("ALMANAK RSI Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values
     base_token = strategy_config.get("base_token", "ALMANAK")
@@ -91,6 +98,9 @@ def render_custom_dashboard(
     # Trade History section
     st.subheader("Recent Trades")
     _render_trade_history(api_client, strategy_id)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_rsi_chart_with_signals(

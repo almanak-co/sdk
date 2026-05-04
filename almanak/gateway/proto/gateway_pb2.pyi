@@ -4943,27 +4943,19 @@ class LedgerEntryInfo(_message.Message):
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
 
 @_typing.final
-class GetQuantHeaderRequest(_message.Message):
-    """Senior-Quant header messages -----------------------------------------------"""
+class PnLSummary(_message.Message):
+    """Senior-Quant header messages -----------------------------------------------
 
-    DESCRIPTOR: _descriptor.Descriptor
+    VIB-3969: three cohesive sub-messages, each backed by its own RPC.
+    PnLSummary is the eyeball card a strategy operator scans first;
+    CostStackInfo and AuditPosture are independently fetchable so a PnL
+    consumer never pays for G6 reconciliation or the 21-cell Accountant
+    Test matrix.
 
-    STRATEGY_ID_FIELD_NUMBER: _builtins.int
-    strategy_id: _builtins.str
-    def __init__(
-        self,
-        *,
-        strategy_id: _builtins.str = ...,
-    ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-
-Global___GetQuantHeaderRequest: _TypeAlias = GetQuantHeaderRequest  # noqa: Y015
-
-@_typing.final
-class QuantHeaderInfo(_message.Message):
-    """Aggregated header card data: money trail, cost stack, position summary,
-    reconciliation (G6), audit-trail completeness, and Accountant posture.
+    PnLSummary — the 5-second eyeball card. Wallet-level NAV/PnL/APR plus
+    the cash buffer and the primitive-aware primary-risk gauge that the
+    operator-console Position & Risk row renders. Lightweight: latest
+    snapshot + portfolio_metrics + first-action ledger anchor.
     All decimals serialized as strings to preserve precision.
     """
 
@@ -4981,10 +4973,79 @@ class QuantHeaderInfo(_message.Message):
     DEPLOYED_CAPITAL_USD_FIELD_NUMBER: _builtins.int
     AVAILABLE_CASH_USD_FIELD_NUMBER: _builtins.int
     OPEN_POSITION_COUNT_FIELD_NUMBER: _builtins.int
+    PRIMARY_RISK_KIND_FIELD_NUMBER: _builtins.int
     PRIMARY_RISK_LABEL_FIELD_NUMBER: _builtins.int
     PRIMARY_RISK_VALUE_FIELD_NUMBER: _builtins.int
     PRIMARY_RISK_COLOR_FIELD_NUMBER: _builtins.int
-    PRIMARY_RISK_KIND_FIELD_NUMBER: _builtins.int
+    deployed_usd: _builtins.str
+    """Money trail (G1, G4, G5)
+    initial + deposits - withdrawals
+    """
+    nav_usd: _builtins.str
+    """current portfolio value"""
+    lifetime_pnl_usd: _builtins.str
+    """nav - deployed"""
+    lifetime_pnl_pct: _builtins.str
+    net_apr_pct: _builtins.str
+    max_drawdown_pct: _builtins.str
+    current_drawdown_pct: _builtins.str
+    value_confidence: _builtins.str
+    """HIGH | ESTIMATED | STALE | UNAVAILABLE"""
+    age_days: _builtins.int
+    deployed_capital_usd: _builtins.str
+    """Position + cash
+    open positions (sum of cost bases)
+    """
+    available_cash_usd: _builtins.str
+    open_position_count: _builtins.int
+    primary_risk_kind: _builtins.str
+    """Primary-risk gauge (LP range / lending HF / perp leverage). Kept on
+    PnLSummary so the operator console assembles its full eyeball row
+    from one fetch; primitive-specific dashboards typically render their
+    own richer gauge from ``templates/{lp,lending,perp}_dashboard.py``.
+    "lp" | "lending" | "perp" | "none"
+    """
+    primary_risk_label: _builtins.str
+    """"Range" | "Health Factor" | "Leverage" """
+    primary_risk_value: _builtins.str
+    """"in-range YES" | "1.78" | "1.7×" """
+    primary_risk_color: _builtins.str
+    """"green" | "yellow" | "red" | "neutral" """
+    def __init__(
+        self,
+        *,
+        deployed_usd: _builtins.str = ...,
+        nav_usd: _builtins.str = ...,
+        lifetime_pnl_usd: _builtins.str = ...,
+        lifetime_pnl_pct: _builtins.str = ...,
+        net_apr_pct: _builtins.str = ...,
+        max_drawdown_pct: _builtins.str = ...,
+        current_drawdown_pct: _builtins.str = ...,
+        value_confidence: _builtins.str = ...,
+        age_days: _builtins.int = ...,
+        deployed_capital_usd: _builtins.str = ...,
+        available_cash_usd: _builtins.str = ...,
+        open_position_count: _builtins.int = ...,
+        primary_risk_kind: _builtins.str = ...,
+        primary_risk_label: _builtins.str = ...,
+        primary_risk_value: _builtins.str = ...,
+        primary_risk_color: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PnLSummary: _TypeAlias = PnLSummary  # noqa: Y015
+
+@_typing.final
+class CostStackInfo(_message.Message):
+    """CostStackInfo — life-to-date cost & earn decomposition. Same numbers
+    the operator console renders in the "Cost stack (LTD)" tile. Generic
+    across primitives: every primitive emits Gas, slippage, protocol fees,
+    and earnings.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
     COST_GAS_USD_FIELD_NUMBER: _builtins.int
     COST_PROTOCOL_FEES_USD_FIELD_NUMBER: _builtins.int
     COST_SLIPPAGE_USD_FIELD_NUMBER: _builtins.int
@@ -4995,6 +5056,46 @@ class QuantHeaderInfo(_message.Message):
     FUNDING_EARNED_USD_FIELD_NUMBER: _builtins.int
     REALIZED_PNL_USD_FIELD_NUMBER: _builtins.int
     IL_USD_FIELD_NUMBER: _builtins.int
+    cost_gas_usd: _builtins.str
+    cost_protocol_fees_usd: _builtins.str
+    cost_slippage_usd: _builtins.str
+    fees_earned_usd: _builtins.str
+    interest_paid_usd: _builtins.str
+    interest_earned_usd: _builtins.str
+    funding_paid_usd: _builtins.str
+    funding_earned_usd: _builtins.str
+    realized_pnl_usd: _builtins.str
+    il_usd: _builtins.str
+    """diagnostic only"""
+    def __init__(
+        self,
+        *,
+        cost_gas_usd: _builtins.str = ...,
+        cost_protocol_fees_usd: _builtins.str = ...,
+        cost_slippage_usd: _builtins.str = ...,
+        fees_earned_usd: _builtins.str = ...,
+        interest_paid_usd: _builtins.str = ...,
+        interest_earned_usd: _builtins.str = ...,
+        funding_paid_usd: _builtins.str = ...,
+        funding_earned_usd: _builtins.str = ...,
+        realized_pnl_usd: _builtins.str = ...,
+        il_usd: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CostStackInfo: _TypeAlias = CostStackInfo  # noqa: Y015
+
+@_typing.final
+class AuditPosture(_message.Message):
+    """AuditPosture — Reconciliation (G6) + audit-trail completeness +
+    Accountant Test posture. Server-computed only: clients must never
+    reconstruct G6 from sub-fields, since the math would drift between the
+    dashboard and the accountant test harness.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
     G6_STATUS_FIELD_NUMBER: _builtins.int
     G6_WALLET_PNL_USD_FIELD_NUMBER: _builtins.int
     G6_COMPONENT_PNL_USD_FIELD_NUMBER: _builtins.int
@@ -5020,48 +5121,8 @@ class QuantHeaderInfo(_message.Message):
     CELLS_TOTAL_FIELD_NUMBER: _builtins.int
     FAILING_CELLS_FIELD_NUMBER: _builtins.int
     XFAIL_CELLS_FIELD_NUMBER: _builtins.int
-    deployed_usd: _builtins.str
-    """Money trail (G1, G4, G5)
-    initial + deposits - withdrawals
-    """
-    nav_usd: _builtins.str
-    """current portfolio value"""
-    lifetime_pnl_usd: _builtins.str
-    """nav - deployed"""
-    lifetime_pnl_pct: _builtins.str
-    net_apr_pct: _builtins.str
-    max_drawdown_pct: _builtins.str
-    current_drawdown_pct: _builtins.str
-    value_confidence: _builtins.str
-    """HIGH | ESTIMATED | STALE | UNAVAILABLE"""
-    age_days: _builtins.int
-    deployed_capital_usd: _builtins.str
-    """Position + risk
-    open positions
-    """
-    available_cash_usd: _builtins.str
-    open_position_count: _builtins.int
-    primary_risk_label: _builtins.str
-    """"HF 1.78" | "in-range YES" | "Lev 1.7×" """
-    primary_risk_value: _builtins.str
-    primary_risk_color: _builtins.str
-    """"green" | "yellow" | "red" | "neutral" """
-    primary_risk_kind: _builtins.str
-    """"lp" | "lending" | "perp" | "none" """
-    cost_gas_usd: _builtins.str
-    """Cost stack (life-to-date) (G2, G3, P3, P5)"""
-    cost_protocol_fees_usd: _builtins.str
-    cost_slippage_usd: _builtins.str
-    fees_earned_usd: _builtins.str
-    interest_paid_usd: _builtins.str
-    interest_earned_usd: _builtins.str
-    funding_paid_usd: _builtins.str
-    funding_earned_usd: _builtins.str
-    realized_pnl_usd: _builtins.str
-    il_usd: _builtins.str
-    """diagnostic only"""
     g6_status: _builtins.str
-    """Reconciliation (G6)
+    """Reconciliation (G6) — wallet PnL ≡ Σ component PnL invariant.
     "PASS" | "FAIL" | "NA"
     """
     g6_wallet_pnl_usd: _builtins.str
@@ -5076,14 +5137,14 @@ class QuantHeaderInfo(_message.Message):
     g6_sum_interest: _builtins.str
     g6_sum_gas: _builtins.str
     ledger_total: _builtins.int
-    """Audit-trail completeness (G9, G12, G13)"""
+    """Audit-trail completeness (G9, G12, G13)."""
     ledger_with_price_inputs: _builtins.int
     ledger_with_pre_post_state: _builtins.int
     ledger_with_gas_usd: _builtins.int
     events_total: _builtins.int
     events_with_versions: _builtins.int
     primitive: _builtins.str
-    """Accountant Test posture
+    """Accountant Test posture — 21-cell matrix score per primitive.
     "lp" | "lending" | "perp" | "swap" | "mixed"
     """
     cells_passed: _builtins.int
@@ -5097,32 +5158,6 @@ class QuantHeaderInfo(_message.Message):
     def __init__(
         self,
         *,
-        deployed_usd: _builtins.str = ...,
-        nav_usd: _builtins.str = ...,
-        lifetime_pnl_usd: _builtins.str = ...,
-        lifetime_pnl_pct: _builtins.str = ...,
-        net_apr_pct: _builtins.str = ...,
-        max_drawdown_pct: _builtins.str = ...,
-        current_drawdown_pct: _builtins.str = ...,
-        value_confidence: _builtins.str = ...,
-        age_days: _builtins.int = ...,
-        deployed_capital_usd: _builtins.str = ...,
-        available_cash_usd: _builtins.str = ...,
-        open_position_count: _builtins.int = ...,
-        primary_risk_label: _builtins.str = ...,
-        primary_risk_value: _builtins.str = ...,
-        primary_risk_color: _builtins.str = ...,
-        primary_risk_kind: _builtins.str = ...,
-        cost_gas_usd: _builtins.str = ...,
-        cost_protocol_fees_usd: _builtins.str = ...,
-        cost_slippage_usd: _builtins.str = ...,
-        fees_earned_usd: _builtins.str = ...,
-        interest_paid_usd: _builtins.str = ...,
-        interest_earned_usd: _builtins.str = ...,
-        funding_paid_usd: _builtins.str = ...,
-        funding_earned_usd: _builtins.str = ...,
-        realized_pnl_usd: _builtins.str = ...,
-        il_usd: _builtins.str = ...,
         g6_status: _builtins.str = ...,
         g6_wallet_pnl_usd: _builtins.str = ...,
         g6_component_pnl_usd: _builtins.str = ...,
@@ -5149,10 +5184,58 @@ class QuantHeaderInfo(_message.Message):
         failing_cells: _abc.Iterable[_builtins.str] | None = ...,
         xfail_cells: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "cells_failed", b"cells_failed", "cells_passed", b"cells_passed", "cells_total", b"cells_total", "cells_xfail", b"cells_xfail", "cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "events_total", b"events_total", "events_with_versions", b"events_with_versions", "failing_cells", b"failing_cells", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "g6_component_pnl_usd", b"g6_component_pnl_usd", "g6_epsilon_usd", b"g6_epsilon_usd", "g6_gap_usd", b"g6_gap_usd", "g6_status", b"g6_status", "g6_sum_fees", b"g6_sum_fees", "g6_sum_funding", b"g6_sum_funding", "g6_sum_gas", b"g6_sum_gas", "g6_sum_interest", b"g6_sum_interest", "g6_sum_lp", b"g6_sum_lp", "g6_sum_perp", b"g6_sum_perp", "g6_sum_swap", b"g6_sum_swap", "g6_wallet_pnl_usd", b"g6_wallet_pnl_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "ledger_total", b"ledger_total", "ledger_with_gas_usd", b"ledger_with_gas_usd", "ledger_with_pre_post_state", b"ledger_with_pre_post_state", "ledger_with_price_inputs", b"ledger_with_price_inputs", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "primitive", b"primitive", "realized_pnl_usd", b"realized_pnl_usd", "value_confidence", b"value_confidence", "xfail_cells", b"xfail_cells"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cells_failed", b"cells_failed", "cells_passed", b"cells_passed", "cells_total", b"cells_total", "cells_xfail", b"cells_xfail", "events_total", b"events_total", "events_with_versions", b"events_with_versions", "failing_cells", b"failing_cells", "g6_component_pnl_usd", b"g6_component_pnl_usd", "g6_epsilon_usd", b"g6_epsilon_usd", "g6_gap_usd", b"g6_gap_usd", "g6_status", b"g6_status", "g6_sum_fees", b"g6_sum_fees", "g6_sum_funding", b"g6_sum_funding", "g6_sum_gas", b"g6_sum_gas", "g6_sum_interest", b"g6_sum_interest", "g6_sum_lp", b"g6_sum_lp", "g6_sum_perp", b"g6_sum_perp", "g6_sum_swap", b"g6_sum_swap", "g6_wallet_pnl_usd", b"g6_wallet_pnl_usd", "ledger_total", b"ledger_total", "ledger_with_gas_usd", b"ledger_with_gas_usd", "ledger_with_pre_post_state", b"ledger_with_pre_post_state", "ledger_with_price_inputs", b"ledger_with_price_inputs", "primitive", b"primitive", "xfail_cells", b"xfail_cells"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-Global___QuantHeaderInfo: _TypeAlias = QuantHeaderInfo  # noqa: Y015
+Global___AuditPosture: _TypeAlias = AuditPosture  # noqa: Y015
+
+@_typing.final
+class GetPnLSummaryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPnLSummaryRequest: _TypeAlias = GetPnLSummaryRequest  # noqa: Y015
+
+@_typing.final
+class GetCostStackRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetCostStackRequest: _TypeAlias = GetCostStackRequest  # noqa: Y015
+
+@_typing.final
+class GetAuditPostureRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetAuditPostureRequest: _TypeAlias = GetAuditPostureRequest  # noqa: Y015
 
 @_typing.final
 class GetTradeTapeRequest(_message.Message):

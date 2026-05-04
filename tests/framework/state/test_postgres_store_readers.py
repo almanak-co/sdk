@@ -3,8 +3,9 @@
 These tests stub the asyncpg pool with a recording fake so we can pin
 down the SQL shape (column list, WHERE clause, ORDER BY) and confirm the
 row → framework-type conversion matches the SQLite contract that
-:class:`DashboardService` and ``quant_aggregations.build_quant_header``
-already consume.
+:class:`DashboardService` and the ``quant_aggregations`` builders
+(``compute_pnl_summary`` / ``compute_cost_stack`` / etc.) already
+consume.
 
 What is intentionally NOT covered here:
   - End-to-end Postgres behaviour. That belongs in

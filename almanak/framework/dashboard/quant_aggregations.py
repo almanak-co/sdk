@@ -313,13 +313,60 @@ def _open_position_cost_basis(accounting_events: list[dict[str, Any]]) -> Decima
 
 
 # ---------------------------------------------------------------------------
-# Public entry: compute_quant_header
+# Public entries: compute_pnl_summary, compute_cost_stack (below),
+# compute_reconciliation (below), compute_audit_trail (below),
+# evaluate_posture (below), build_quant_header (composer; deprecated)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
+class PnLSummary:
+    """5-second-eyeball card: wallet money trail + cash + primary-risk gauge.
+
+    The decomposed slice of ``QuantHeader`` that powers
+    ``GetPnLSummary`` and ``render_pnl_section`` (VIB-3969). Excludes
+    cost-stack, reconciliation, audit-trail, and Accountant-Test
+    posture — those have their own focused builders / RPCs so a PnL
+    consumer never pays the cost of computing G6 + the 21-cell matrix.
+    """
+
+    # Money trail (G1, G4, G5)
+    deployed_usd: Decimal = Decimal("0")
+    nav_usd: Decimal = Decimal("0")
+    lifetime_pnl_usd: Decimal = Decimal("0")
+    lifetime_pnl_pct: Decimal = Decimal("0")
+    net_apr_pct: Decimal = Decimal("0")
+    max_drawdown_pct: Decimal = Decimal("0")
+    current_drawdown_pct: Decimal = Decimal("0")
+    value_confidence: str = "UNAVAILABLE"
+    age_days: int = 0
+
+    # Position + cash
+    deployed_capital_usd: Decimal = Decimal("0")
+    available_cash_usd: Decimal = Decimal("0")
+    open_position_count: int = 0
+
+    # Primary-risk gauge — primitive-aware tile rendered next to the
+    # money trail. Kept on PnLSummary so the operator console assembles
+    # its full eyeball row from one fetch (LP range / lending HF /
+    # perp leverage, depending on what's open).
+    # VIB-3925 — honest empty-state copy. "Positions N/A" reads as broken;
+    # "No active positions" reads as honest.
+    primary_risk_label: str = "No active positions"
+    primary_risk_value: str = ""
+    primary_risk_color: str = "neutral"
+    primary_risk_kind: str = "none"
+
+
+@dataclass
 class QuantHeader:
-    """The full Senior-Quant header card payload."""
+    """DEPRECATED (VIB-3969): legacy bundle of PnL + Cost + Audit slices.
+
+    Kept as a server-side composer for one release while the operator
+    console migrates to ``GetPnLSummary`` / ``GetCostStack`` /
+    ``GetAuditPosture``. New consumers should depend on the focused
+    sub-types directly.
+    """
 
     deployed_usd: Decimal = Decimal("0")
     nav_usd: Decimal = Decimal("0")
@@ -333,10 +380,6 @@ class QuantHeader:
     deployed_capital_usd: Decimal = Decimal("0")
     available_cash_usd: Decimal = Decimal("0")
     open_position_count: int = 0
-    # VIB-3925 — honest empty-state copy. "Positions N/A" reads as broken;
-    # "No active positions" reads as honest. Strategies that genuinely have
-    # no open positions (idle bot, post-teardown, fresh deploy) hit this
-    # default; the active-position branches below override it.
     primary_risk_label: str = "No active positions"
     primary_risk_value: str = ""
     primary_risk_color: str = "neutral"
@@ -549,6 +592,10 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
     Simple plurality: lending if any SUPPLY/BORROW/REPAY/WITHDRAW;
     LP if any LP_OPEN/LP_CLOSE; perp if any PERP_OPEN/PERP_CLOSE;
     swap-only if only SWAPs; mixed if multiple non-swap families.
+
+    Falls back to ``payload_json["event_type"]`` when the row-level
+    column is missing — same defensive read pattern as
+    ``compute_cost_stack`` / ``compute_reconciliation``.
     """
     has_lending = False
     has_lp = False
@@ -557,7 +604,8 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
     for event in accounting_events:
         et = ""
         if isinstance(event, dict):
-            et = str(event.get("event_type", "")).upper()
+            payload = _safe_payload_loads(event.get("payload_json"))
+            et = str(event.get("event_type") or payload.get("event_type") or "").upper()
         if et in ("SUPPLY", "WITHDRAW", "BORROW", "REPAY", "DELEVERAGE"):
             has_lending = True
         elif et in ("LP_OPEN", "LP_CLOSE"):
@@ -827,31 +875,39 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def build_quant_header(  # noqa: C901
+def compute_pnl_summary(  # noqa: C901
     *,
     portfolio_metrics: Any,
     snapshots: list[Any],
     ledger_entries: list[Any],
     accounting_events: list[dict[str, Any]],
     position_summary: Any | None = None,
-) -> QuantHeader:
-    """Assemble the full Senior-Quant header from on-disk rows.
+) -> PnLSummary:
+    """Wallet-level money trail + cash buffer + primary-risk gauge.
 
     All inputs are already-fetched objects from the StateManager — this
-    function does no I/O. Empty inputs collapse gracefully to a header
+    function does no I/O. Empty inputs collapse gracefully to a summary
     with ``UNAVAILABLE`` confidence and zero-valued tiles, never an
     exception.
+
+    Decomposed from ``build_quant_header`` (VIB-3969) so a PnL consumer
+    never pays the cost of computing G6 reconciliation + 21-cell
+    Accountant Test posture. Backs ``GetPnLSummary``.
     """
-    header = QuantHeader()
+    pnl = PnLSummary()
 
     # ── Latest snapshot first: needed to compute wallet NAV (VIB-3884) ───
     deployed_value_usd = Decimal("0")
     if snapshots:
         latest = snapshots[-1]
-        header.available_cash_usd = _to_decimal(getattr(latest, "available_cash_usd", "0"))
-        confidence = getattr(latest, "value_confidence", None) or "HIGH"
-        header.value_confidence = confidence
-        header.deployed_capital_usd = _to_decimal(getattr(latest, "deployed_capital_usd", "0"))
+        pnl.available_cash_usd = _to_decimal(getattr(latest, "available_cash_usd", "0"))
+        # Empty != zero (CLAUDE.md): an absent value_confidence is unmeasured
+        # — falling back to "HIGH" would falsely upgrade an unsourced
+        # snapshot. Preserve the dataclass default ("UNAVAILABLE") instead.
+        confidence = getattr(latest, "value_confidence", None)
+        if confidence:
+            pnl.value_confidence = confidence
+        pnl.deployed_capital_usd = _to_decimal(getattr(latest, "deployed_capital_usd", "0"))
         deployed_value_usd = _to_decimal(getattr(latest, "total_value_usd", "0"))
         # Open position count from positions_json on snapshot
         positions_json = getattr(latest, "positions_json", None)
@@ -859,7 +915,7 @@ def build_quant_header(  # noqa: C901
             try:
                 positions = json.loads(positions_json)
                 if isinstance(positions, list):
-                    header.open_position_count = len(positions)
+                    pnl.open_position_count = len(positions)
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -875,13 +931,13 @@ def build_quant_header(  # noqa: C901
     if portfolio_metrics is not None:
         deposits = _to_decimal(getattr(portfolio_metrics, "deposits_usd", "0"))
         withdrawals = _to_decimal(getattr(portfolio_metrics, "withdrawals_usd", "0"))
-        header.age_days = _strategy_age_days(portfolio_metrics)
+        pnl.age_days = _strategy_age_days(portfolio_metrics)
 
     if wallet_anchored is not None:
-        header.deployed_usd = wallet_anchored + deposits - withdrawals
+        pnl.deployed_usd = wallet_anchored + deposits - withdrawals
     elif portfolio_metrics is not None:
         initial = _to_decimal(getattr(portfolio_metrics, "initial_value_usd", "0"))
-        header.deployed_usd = initial + deposits - withdrawals
+        pnl.deployed_usd = initial + deposits - withdrawals
 
     # VIB-3884 (Codex F1): the snapshot's ``total_value_usd`` column is
     # *positive position values only* (per VIB-3614 / portfolio_valuer.py
@@ -889,26 +945,26 @@ def build_quant_header(  # noqa: C901
     # The Senior-Quant audience reads "NAV now" as wallet net asset value
     # — what the strategy would mark to market right now if you had to
     # report to an LP. That's ``total_value_usd + available_cash_usd``.
-    wallet_nav = deployed_value_usd + header.available_cash_usd
-    header.nav_usd = wallet_nav
-    header.lifetime_pnl_usd = wallet_nav - header.deployed_usd
-    if header.deployed_usd > Decimal("0"):
-        header.lifetime_pnl_pct = (header.lifetime_pnl_usd / header.deployed_usd) * Decimal("100")
-    header.net_apr_pct = _annualised_return(header.deployed_usd, wallet_nav, header.age_days)
+    wallet_nav = deployed_value_usd + pnl.available_cash_usd
+    pnl.nav_usd = wallet_nav
+    pnl.lifetime_pnl_usd = wallet_nav - pnl.deployed_usd
+    if pnl.deployed_usd > Decimal("0"):
+        pnl.lifetime_pnl_pct = (pnl.lifetime_pnl_usd / pnl.deployed_usd) * Decimal("100")
+    pnl.net_apr_pct = _annualised_return(pnl.deployed_usd, wallet_nav, pnl.age_days)
 
     # VIB-3914: Open exposure must read from accounting_events when the
     # snapshot writer has not summed open-position cost basis (the
     # production failure mode VIB-3883/VIB-3894 were meant to fix). The
     # snapshot value wins when populated; otherwise we reconstruct from
     # the same accounting events the cost stack is computed from.
-    if header.deployed_capital_usd <= Decimal("0"):
+    if pnl.deployed_capital_usd <= Decimal("0"):
         reconstructed = _open_position_cost_basis(accounting_events)
         if reconstructed > Decimal("0"):
-            header.deployed_capital_usd = reconstructed
-            if header.open_position_count == 0:
-                header.open_position_count = 1
+            pnl.deployed_capital_usd = reconstructed
+            if pnl.open_position_count == 0:
+                pnl.open_position_count = 1
 
-    header.max_drawdown_pct, header.current_drawdown_pct = _drawdowns(snapshots)
+    pnl.max_drawdown_pct, pnl.current_drawdown_pct = _drawdowns(snapshots)
 
     # Primary risk gauge — pull from PositionSummary if provided.
     # Contract: never paper over a missing field (Senior-Quant audit). When
@@ -918,19 +974,19 @@ def build_quant_header(  # noqa: C901
     if position_summary is not None:
         if getattr(position_summary, "lp_positions", None) and len(position_summary.lp_positions) > 0:
             in_range = position_summary.lp_positions[0].in_range
-            header.primary_risk_kind = "lp"
-            header.primary_risk_label = "Range"
+            pnl.primary_risk_kind = "lp"
+            pnl.primary_risk_label = "Range"
             if in_range is None:
-                header.primary_risk_value = "in-range pending"
-                header.primary_risk_color = "neutral"
+                pnl.primary_risk_value = "in-range pending"
+                pnl.primary_risk_color = "neutral"
             else:
-                header.primary_risk_value = "in-range YES" if in_range else "in-range NO"
-                header.primary_risk_color = "green" if in_range else "red"
+                pnl.primary_risk_value = "in-range YES" if in_range else "in-range NO"
+                pnl.primary_risk_color = "green" if in_range else "red"
         elif getattr(position_summary, "health_factor", None) is not None:
             hf = position_summary.health_factor
-            header.primary_risk_kind = "lending"
-            header.primary_risk_label = "Health Factor"
-            header.primary_risk_value = f"{hf:.2f}" if hf > 0 else "no debt"
+            pnl.primary_risk_kind = "lending"
+            pnl.primary_risk_label = "Health Factor"
+            pnl.primary_risk_value = f"{hf:.2f}" if hf > 0 else "no debt"
             # VIB-3924 — colour ladder for lending health factor. A neutral
             # HF tile lets an operator drift toward liquidation without
             # warning; pre-VIB-3924 the dashboard rendered HF=1.05 in the
@@ -941,62 +997,112 @@ def build_quant_header(  # noqa: C901
             # banner per VIB-3929 — operators see "beta accounting" before
             # they read the HF tile.
             if hf <= 0:
-                header.primary_risk_color = "neutral"  # no debt
+                pnl.primary_risk_color = "neutral"  # no debt
             elif hf >= Decimal("1.5"):
-                header.primary_risk_color = "green"
+                pnl.primary_risk_color = "green"
             elif hf >= Decimal("1.2"):
-                header.primary_risk_color = "yellow"
+                pnl.primary_risk_color = "yellow"
             else:
-                header.primary_risk_color = "red"
+                pnl.primary_risk_color = "red"
         elif getattr(position_summary, "leverage", None) is not None:
             lev = position_summary.leverage
-            header.primary_risk_kind = "perp"
-            header.primary_risk_label = "Leverage"
-            header.primary_risk_value = f"{lev:.2f}×"
+            pnl.primary_risk_kind = "perp"
+            pnl.primary_risk_label = "Leverage"
+            pnl.primary_risk_value = f"{lev:.2f}×"
             # Same protocol-blindness argument: leverage thresholds depend on
             # market liquidation params. Surface raw leverage; let Tape /
             # primary-risk-detail tile carry the protocol context.
-            header.primary_risk_color = "neutral"
+            pnl.primary_risk_color = "neutral"
 
     # VIB-3914: Fallback when ``position_summary`` is empty (snapshot's
     # positions_json never populated by the writer) but ``accounting_events``
     # show open positions. Prevents the screen from rendering "Positions
     # N/A" in defiance of an open LP / SUPPLY / PERP event on disk.
-    if header.primary_risk_kind == "none" and header.deployed_capital_usd > Decimal("0"):
+    if pnl.primary_risk_kind == "none" and pnl.deployed_capital_usd > Decimal("0"):
         primitive_now = _detect_primitive(accounting_events)
         if primitive_now == "lp":
-            header.primary_risk_kind = "lp"
-            header.primary_risk_label = "Range"
-            header.primary_risk_value = "in-range pending"
-            header.primary_risk_color = "neutral"
+            pnl.primary_risk_kind = "lp"
+            pnl.primary_risk_label = "Range"
+            pnl.primary_risk_value = "in-range pending"
+            pnl.primary_risk_color = "neutral"
         elif primitive_now == "lending":
-            header.primary_risk_kind = "lending"
-            header.primary_risk_label = "Health Factor"
-            header.primary_risk_value = "unknown"
-            header.primary_risk_color = "neutral"
+            pnl.primary_risk_kind = "lending"
+            pnl.primary_risk_label = "Health Factor"
+            pnl.primary_risk_value = "unknown"
+            pnl.primary_risk_color = "neutral"
         elif primitive_now == "perp":
-            header.primary_risk_kind = "perp"
-            header.primary_risk_label = "Leverage"
-            header.primary_risk_value = "unknown"
-            header.primary_risk_color = "neutral"
+            pnl.primary_risk_kind = "perp"
+            pnl.primary_risk_label = "Leverage"
+            pnl.primary_risk_value = "unknown"
+            pnl.primary_risk_color = "neutral"
 
-    header.cost_stack = compute_cost_stack(ledger_entries, accounting_events)
-    header.audit_trail = compute_audit_trail(ledger_entries, accounting_events)
-    header.reconciliation = compute_reconciliation(
-        initial_value_usd=header.deployed_usd,
-        nav_usd=header.nav_usd,
-        cost_stack=header.cost_stack,
+    return pnl
+
+
+def build_quant_header(
+    *,
+    portfolio_metrics: Any,
+    snapshots: list[Any],
+    ledger_entries: list[Any],
+    accounting_events: list[dict[str, Any]],
+    position_summary: Any | None = None,
+) -> QuantHeader:
+    """DEPRECATED (VIB-3969): legacy bundle composer.
+
+    The gateway-side ``GetQuantHeader`` RPC is gone — the operator
+    console reads through the focused trio
+    (``GetPnLSummary`` / ``GetCostStack`` / ``GetAuditPosture``).
+    This Python composer is retained only for the existing
+    ``tests/unit/dashboard/test_quant_header_nav_vib3884.py`` /
+    ``test_quant_aggregations.py`` regression suites that pin the
+    composed shape; new consumers should call ``compute_pnl_summary`` /
+    ``compute_cost_stack`` / ``compute_audit_trail`` /
+    ``compute_reconciliation`` / ``evaluate_posture`` directly.
+    """
+    pnl = compute_pnl_summary(
+        portfolio_metrics=portfolio_metrics,
+        snapshots=snapshots,
+        ledger_entries=ledger_entries,
+        accounting_events=accounting_events,
+        position_summary=position_summary,
+    )
+    cost_stack = compute_cost_stack(ledger_entries, accounting_events)
+    audit_trail = compute_audit_trail(ledger_entries, accounting_events)
+    reconciliation = compute_reconciliation(
+        initial_value_usd=pnl.deployed_usd,
+        nav_usd=pnl.nav_usd,
+        cost_stack=cost_stack,
         accounting_events=accounting_events,
     )
     primitive = _detect_primitive(accounting_events)
-    header.posture = evaluate_posture(
+    posture = evaluate_posture(
         primitive=primitive,
         ledger_entries=ledger_entries,
         accounting_events=accounting_events,
         snapshots=snapshots,
-        audit=header.audit_trail,
-        reconciliation=header.reconciliation,
+        audit=audit_trail,
+        reconciliation=reconciliation,
         portfolio_metrics=portfolio_metrics,
     )
-
-    return header
+    return QuantHeader(
+        deployed_usd=pnl.deployed_usd,
+        nav_usd=pnl.nav_usd,
+        lifetime_pnl_usd=pnl.lifetime_pnl_usd,
+        lifetime_pnl_pct=pnl.lifetime_pnl_pct,
+        net_apr_pct=pnl.net_apr_pct,
+        max_drawdown_pct=pnl.max_drawdown_pct,
+        current_drawdown_pct=pnl.current_drawdown_pct,
+        value_confidence=pnl.value_confidence,
+        age_days=pnl.age_days,
+        deployed_capital_usd=pnl.deployed_capital_usd,
+        available_cash_usd=pnl.available_cash_usd,
+        open_position_count=pnl.open_position_count,
+        primary_risk_label=pnl.primary_risk_label,
+        primary_risk_value=pnl.primary_risk_value,
+        primary_risk_color=pnl.primary_risk_color,
+        primary_risk_kind=pnl.primary_risk_kind,
+        cost_stack=cost_stack,
+        reconciliation=reconciliation,
+        audit_trail=audit_trail,
+        posture=posture,
+    )

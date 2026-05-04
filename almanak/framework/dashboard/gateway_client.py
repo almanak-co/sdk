@@ -120,12 +120,13 @@ class LedgerTradeRecord:
 
 
 @dataclass
-class QuantHeaderInfo:
-    """Senior-Quant header aggregations from the gateway (protobuf-free).
+class PnLSummary:
+    """5-second-eyeball card from ``GetPnLSummary`` (VIB-3969).
 
-    All decimals as strings on the wire; converted to Decimal here so
-    downstream code can format them consistently. Empty strings collapse
-    to ``Decimal("0")``.
+    Wallet-level money trail + cash buffer + primary-risk gauge. The
+    decomposed slice of ``QuantHeaderInfo`` that PnL consumers can pull
+    without paying for G6 reconciliation or 21-cell Accountant Test
+    posture.
     """
 
     deployed_usd: Decimal
@@ -140,10 +141,16 @@ class QuantHeaderInfo:
     deployed_capital_usd: Decimal
     available_cash_usd: Decimal
     open_position_count: int
+    primary_risk_kind: str
     primary_risk_label: str
     primary_risk_value: str
     primary_risk_color: str
-    primary_risk_kind: str
+
+
+@dataclass
+class CostStackInfo:
+    """Life-to-date cost / earn decomposition from ``GetCostStack`` (VIB-3969)."""
+
     cost_gas_usd: Decimal
     cost_protocol_fees_usd: Decimal
     cost_slippage_usd: Decimal
@@ -154,6 +161,18 @@ class QuantHeaderInfo:
     funding_earned_usd: Decimal
     realized_pnl_usd: Decimal
     il_usd: Decimal
+
+
+@dataclass
+class AuditPosture:
+    """Reconciliation + audit-trail completeness + Accountant Test posture
+    from ``GetAuditPosture`` (VIB-3969).
+
+    Server-computed only — the gateway is the single source of truth for
+    G6 math. Clients must NOT recompute G6 from sub-fields, or the
+    dashboard and the accountant test will drift.
+    """
+
     g6_status: str
     g6_wallet_pnl_usd: Decimal
     g6_component_pnl_usd: Decimal
@@ -230,8 +249,8 @@ def _safe_decimal(s: str) -> Decimal:
         return Decimal("0")
 
 
-def _convert_quant_header(proto: gateway_pb2.QuantHeaderInfo) -> QuantHeaderInfo:
-    return QuantHeaderInfo(
+def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
+    return PnLSummary(
         deployed_usd=_safe_decimal(proto.deployed_usd),
         nav_usd=_safe_decimal(proto.nav_usd),
         lifetime_pnl_usd=_safe_decimal(proto.lifetime_pnl_usd),
@@ -244,10 +263,15 @@ def _convert_quant_header(proto: gateway_pb2.QuantHeaderInfo) -> QuantHeaderInfo
         deployed_capital_usd=_safe_decimal(proto.deployed_capital_usd),
         available_cash_usd=_safe_decimal(proto.available_cash_usd),
         open_position_count=proto.open_position_count,
+        primary_risk_kind=proto.primary_risk_kind or "none",
         primary_risk_label=proto.primary_risk_label or "No active positions",  # VIB-3925
         primary_risk_value=proto.primary_risk_value or "",
         primary_risk_color=proto.primary_risk_color or "neutral",
-        primary_risk_kind=proto.primary_risk_kind or "none",
+    )
+
+
+def _convert_cost_stack(proto: gateway_pb2.CostStackInfo) -> CostStackInfo:
+    return CostStackInfo(
         cost_gas_usd=_safe_decimal(proto.cost_gas_usd),
         cost_protocol_fees_usd=_safe_decimal(proto.cost_protocol_fees_usd),
         cost_slippage_usd=_safe_decimal(proto.cost_slippage_usd),
@@ -258,6 +282,11 @@ def _convert_quant_header(proto: gateway_pb2.QuantHeaderInfo) -> QuantHeaderInfo
         funding_earned_usd=_safe_decimal(proto.funding_earned_usd),
         realized_pnl_usd=_safe_decimal(proto.realized_pnl_usd),
         il_usd=_safe_decimal(proto.il_usd),
+    )
+
+
+def _convert_audit_posture(proto: gateway_pb2.AuditPosture) -> AuditPosture:
+    return AuditPosture(
         g6_status=proto.g6_status or "NA",
         g6_wallet_pnl_usd=_safe_decimal(proto.g6_wallet_pnl_usd),
         g6_component_pnl_usd=_safe_decimal(proto.g6_component_pnl_usd),
@@ -748,12 +777,40 @@ class GatewayDashboardClient:
             )
         return records
 
-    def get_quant_header(self, strategy_id: str) -> "QuantHeaderInfo":
-        """Aggregate the Senior-Quant header card via gateway."""
+    def get_pnl_summary(self, strategy_id: str) -> "PnLSummary":
+        """5-second-eyeball card via gateway (VIB-3969)."""
         client = self._ensure_connected()
-        request = gateway_pb2.GetQuantHeaderRequest(strategy_id=strategy_id)
-        response = client.dashboard.GetQuantHeader(request)
-        return _convert_quant_header(response)
+        request = gateway_pb2.GetPnLSummaryRequest(strategy_id=strategy_id)
+        try:
+            response = client.dashboard.GetPnLSummary(request)
+        except grpc.RpcError as e:
+            logger.exception("Failed to get PnL summary")
+            raise GatewayConnectionError(f"Failed to get PnL summary: {e}") from e
+        return _convert_pnl_summary(response)
+
+    def get_cost_stack(self, strategy_id: str) -> "CostStackInfo":
+        """Life-to-date cost / earn decomposition via gateway (VIB-3969)."""
+        client = self._ensure_connected()
+        request = gateway_pb2.GetCostStackRequest(strategy_id=strategy_id)
+        try:
+            response = client.dashboard.GetCostStack(request)
+        except grpc.RpcError as e:
+            logger.exception("Failed to get cost stack")
+            raise GatewayConnectionError(f"Failed to get cost stack: {e}") from e
+        return _convert_cost_stack(response)
+
+    def get_audit_posture(self, strategy_id: str) -> "AuditPosture":
+        """Reconciliation + audit-trail completeness + Accountant Test
+        posture via gateway (VIB-3969). Server-computed only — never
+        reconstruct G6 from sub-fields client-side."""
+        client = self._ensure_connected()
+        request = gateway_pb2.GetAuditPostureRequest(strategy_id=strategy_id)
+        try:
+            response = client.dashboard.GetAuditPosture(request)
+        except grpc.RpcError as e:
+            logger.exception("Failed to get audit posture")
+            raise GatewayConnectionError(f"Failed to get audit posture: {e}") from e
+        return _convert_audit_posture(response)
 
     def get_trade_tape(
         self,

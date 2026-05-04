@@ -296,6 +296,95 @@ class TestStartDashboardBackground:
 
         assert proc is None
 
+    def test_auth_token_is_forwarded_and_overrides_inherited_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Managed-gateway session token must be threaded into the dashboard
+        subprocess as ``ALMANAK_GATEWAY_AUTH_TOKEN``, and any inherited
+        ``GATEWAY_AUTH_TOKEN`` must be stripped so it can't shadow it.
+
+        Regression: on mainnet ``strat run`` rolls a fresh
+        ``session_auth_token = uuid.uuid4().hex`` (VIB-520). If we don't
+        forward it, the subprocess inherits a stale ``GATEWAY_AUTH_TOKEN``
+        from the operator's ``.env`` and every dashboard gRPC call returns
+        UNAUTHENTICATED.
+        """
+        # Simulate a stale token already in the parent env that must NOT win.
+        monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "stale-from-dotenv")
+        monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
+
+        class _FakeSock:
+            def __enter__(self) -> _FakeSock:
+                return self
+
+            def __exit__(self, *a: Any) -> None:
+                pass
+
+            def bind(self, addr: tuple[str, int]) -> None:
+                return None
+
+        captured: dict[str, Any] = {}
+
+        def _popen_factory(cmd: list[str], **kwargs: Any) -> Any:
+            captured["env"] = kwargs["env"]
+            return MagicMock(spec=subprocess.Popen)
+
+        with (
+            patch("socket.socket", return_value=_FakeSock()),
+            patch("subprocess.Popen", side_effect=_popen_factory),
+            patch("importlib.util.find_spec", return_value=MagicMock()),
+        ):
+            runner = CliRunner()
+            with runner.isolation():
+                run_helpers._start_dashboard_background(
+                    port=8501, auth_token="fresh-session-uuid"
+                )
+
+        env = captured["env"]
+        assert env["ALMANAK_GATEWAY_AUTH_TOKEN"] == "fresh-session-uuid"
+        # Inherited GATEWAY_AUTH_TOKEN MUST be stripped — otherwise
+        # ``ALMANAK_GATEWAY_AUTH_TOKEN or GATEWAY_AUTH_TOKEN`` in the
+        # gateway client could pick the stale one.
+        assert "GATEWAY_AUTH_TOKEN" not in env
+
+    def test_no_auth_token_leaves_inherited_env_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backwards compat: when ``auth_token`` is None (e.g. anvil/sepolia
+        managed-gateway path where the token is intentionally None), the
+        helper must not mutate inherited env."""
+        monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "user-supplied")
+        monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "user-supplied-canonical")
+
+        class _FakeSock:
+            def __enter__(self) -> _FakeSock:
+                return self
+
+            def __exit__(self, *a: Any) -> None:
+                pass
+
+            def bind(self, addr: tuple[str, int]) -> None:
+                return None
+
+        captured: dict[str, Any] = {}
+
+        def _popen_factory(cmd: list[str], **kwargs: Any) -> Any:
+            captured["env"] = kwargs["env"]
+            return MagicMock(spec=subprocess.Popen)
+
+        with (
+            patch("socket.socket", return_value=_FakeSock()),
+            patch("subprocess.Popen", side_effect=_popen_factory),
+            patch("importlib.util.find_spec", return_value=MagicMock()),
+        ):
+            runner = CliRunner()
+            with runner.isolation():
+                run_helpers._start_dashboard_background(port=8501)
+
+        env = captured["env"]
+        assert env["GATEWAY_AUTH_TOKEN"] == "user-supplied"
+        assert env["ALMANAK_GATEWAY_AUTH_TOKEN"] == "user-supplied-canonical"
+
 
 # ---------------------------------------------------------------------------
 # _stop_dashboard
@@ -413,6 +502,33 @@ class TestHandleStandaloneDashboard:
 
         assert result is True
         assert stop_calls == [fake_proc]
+
+    def test_auth_token_is_forwarded_to_subprocess_launcher(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``auth_token`` kwarg must reach
+        ``_start_dashboard_background`` so the standalone-dashboard path
+        also gets the managed-gateway session token."""
+        captured: dict[str, Any] = {}
+
+        def _fake_launcher(**kw: Any) -> Any:
+            captured.update(kw)
+            return MagicMock()
+
+        monkeypatch.setattr(run_helpers, "_start_dashboard_background", _fake_launcher)
+
+        runner = CliRunner()
+        with runner.isolation():
+            run_helpers._handle_standalone_dashboard(
+                working_dir=".",
+                dashboard=True,
+                dashboard_port=8501,
+                gateway_host="localhost",
+                gateway_port=50051,
+                auth_token="standalone-session-uuid",
+            )
+
+        assert captured["auth_token"] == "standalone-session-uuid"
 
 
 # ---------------------------------------------------------------------------

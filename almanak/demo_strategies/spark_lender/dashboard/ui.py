@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -27,6 +33,8 @@ def render_custom_dashboard(
     - Protocol utilization rate
     """
     st.title("Spark Lender Strategy Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values
     Decimal(str(strategy_config.get("min_supply_amount", "100")))
@@ -60,6 +68,9 @@ def render_custom_dashboard(
     # Risk Information section
     st.subheader("Risk Information")
     _render_risk_info()
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_supply_position(session_state: dict[str, Any]) -> None:

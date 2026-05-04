@@ -10,6 +10,12 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.dashboard import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
+
 
 def render_custom_dashboard(
     strategy_id: str,
@@ -26,6 +32,8 @@ def render_custom_dashboard(
     - Rebalance history using TimelineEvent model
     """
     st.title("TJ Tight-Range Scalper Dashboard")
+    render_pnl_section(strategy_id)
+
 
     # Extract config values with defaults
     pool = strategy_config.get("pool", "WAVAX/USDC/20")
@@ -124,6 +132,9 @@ def render_custom_dashboard(
     # Rebalance history section
     st.subheader("Rebalance History")
     _render_rebalance_history(api_client, strategy_id)
+
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_price_range_chart(

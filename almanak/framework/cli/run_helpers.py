@@ -2562,6 +2562,7 @@ def _start_dashboard_background(
     port: int,
     gateway_host: str = "127.0.0.1",
     gateway_port: int = 50051,
+    auth_token: str | None = None,
 ) -> Any:
     """Launch the Streamlit dashboard as a background subprocess.
 
@@ -2574,6 +2575,16 @@ def _start_dashboard_background(
         port: The requested dashboard port.
         gateway_host: Gateway host for the dashboard env (GATEWAY_HOST).
         gateway_port: Gateway port for the dashboard env (GATEWAY_PORT).
+        auth_token: Managed-gateway session token, exported in the
+            subprocess env as ``ALMANAK_GATEWAY_AUTH_TOKEN`` so the
+            dashboard's ``GatewayClient`` authenticates against the same
+            ephemeral token the managed gateway is enforcing on mainnet.
+            Without forwarding, the subprocess inherits whatever happens
+            to be in the parent's env (``ALMANAK_GATEWAY_AUTH_TOKEN`` /
+            ``GATEWAY_AUTH_TOKEN`` from a stale ``.env``) — but on
+            mainnet the managed gateway always rolls a fresh
+            ``uuid.uuid4().hex`` (VIB-520), so the inherited value never
+            matches and every dashboard gRPC call returns UNAUTHENTICATED.
 
     Returns:
         A ``subprocess.Popen`` handle, or ``None`` if launch failed.
@@ -2613,10 +2624,19 @@ def _start_dashboard_background(
     project_root = Path(__file__).parent.parent.parent.parent
     dashboard_path = project_root / "almanak" / "framework" / "dashboard" / "app.py"
 
-    # Pass gateway connection info to the dashboard subprocess
+    # Pass gateway connection info to the dashboard subprocess. The managed
+    # gateway rolls a fresh session token on mainnet (run_helpers
+    # session_auth_token = uuid.uuid4().hex, VIB-520) — we MUST forward it
+    # so the dashboard's GatewayClient picks up the same token rather than
+    # whatever a stale .env entry happens to hold (an inherited
+    # GATEWAY_AUTH_TOKEN can otherwise shadow the session token and every
+    # gRPC call returns UNAUTHENTICATED).
     env = os.environ.copy()
     env["GATEWAY_HOST"] = gateway_host
     env["GATEWAY_PORT"] = str(gateway_port)
+    if auth_token:
+        env["ALMANAK_GATEWAY_AUTH_TOKEN"] = auth_token
+        env.pop("GATEWAY_AUTH_TOKEN", None)
 
     try:
         process = subprocess.Popen(
@@ -2672,6 +2692,7 @@ def _handle_standalone_dashboard(
     dashboard_port: int,
     gateway_host: str,
     gateway_port: int,
+    auth_token: str | None = None,
 ) -> bool:
     """Handle the standalone dashboard early-exit branch.
 
@@ -2692,6 +2713,9 @@ def _handle_standalone_dashboard(
         dashboard_port: CLI ``--dashboard-port`` flag.
         gateway_host: Effective gateway host (post-``_setup_gateway``).
         gateway_port: Effective gateway port (post-``_setup_gateway``).
+        auth_token: Managed-gateway session token, forwarded to the
+            dashboard subprocess so it authenticates against the same
+            ephemeral token the managed gateway is enforcing.
 
     Returns:
         ``True`` if the branch handled the request (caller must ``return``),
@@ -2709,6 +2733,7 @@ def _handle_standalone_dashboard(
         port=dashboard_port,
         gateway_host=gateway_host,
         gateway_port=gateway_port,
+        auth_token=auth_token,
     )
     if proc is None:
         sys.exit(1)

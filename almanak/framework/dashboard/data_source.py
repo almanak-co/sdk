@@ -14,8 +14,10 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.dashboard.gateway_client import (
+    AuditPosture,
+    CostStackInfo,
     GatewayConnectionError,
-    QuantHeaderInfo,
+    PnLSummary,
     StrategyDetails,
     StrategySummary,
     TimelineEvent,
@@ -45,9 +47,11 @@ __all__ = [
     "archive_strategy_instance",
     "execute_strategy_action",
     "get_all_strategies",
+    "get_audit_posture",
     "get_available_strategies",
+    "get_cost_stack",
     "get_dashboard_client",
-    "get_quant_header",
+    "get_pnl_summary",
     "get_strategy_details",
     "get_timeline",
     "get_trade_tape",
@@ -413,21 +417,61 @@ def reset_gateway_connection() -> None:
     reset_dashboard_client()
 
 
-def get_quant_header(strategy_id: str) -> QuantHeaderInfo | None:
-    """Fetch the Senior-Quant header card aggregations from the gateway.
+def get_pnl_summary(strategy_id: str) -> PnLSummary | None:
+    """Fetch the 5-second-eyeball PnL card from the gateway (VIB-3969).
 
     Returns None on connection / RPC failure rather than raising — the
-    detail page renders a degraded header rather than a stack trace.
+    dashboard surface follows the project-wide convention that data-load
+    helpers return None on outage so callers can degrade uniformly.
     """
     client = get_dashboard_client()
-    if not client.is_connected:
-        client.connect()
     try:
-        return client.get_quant_header(strategy_id)
-    except GatewayConnectionError:
-        raise
+        if not client.is_connected:
+            client.connect()
+        return client.get_pnl_summary(strategy_id)
+    except GatewayConnectionError as exc:
+        logger.warning("get_pnl_summary failed for %s (gateway down): %s", strategy_id, exc)
+        return None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("get_quant_header failed for %s: %s", strategy_id, exc)
+        logger.warning("get_pnl_summary failed for %s: %s", strategy_id, exc)
+        return None
+
+
+def get_cost_stack(strategy_id: str) -> CostStackInfo | None:
+    """Fetch the life-to-date cost / earn decomposition (VIB-3969).
+
+    Returns None on outage; see ``get_pnl_summary`` for rationale.
+    """
+    client = get_dashboard_client()
+    try:
+        if not client.is_connected:
+            client.connect()
+        return client.get_cost_stack(strategy_id)
+    except GatewayConnectionError as exc:
+        logger.warning("get_cost_stack failed for %s (gateway down): %s", strategy_id, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_cost_stack failed for %s: %s", strategy_id, exc)
+        return None
+
+
+def get_audit_posture(strategy_id: str) -> AuditPosture | None:
+    """Fetch reconciliation + audit-trail completeness + Accountant Test
+    posture from the gateway (VIB-3969). Server-computed only — never
+    reconstruct G6 client-side.
+
+    Returns None on outage; see ``get_pnl_summary`` for rationale.
+    """
+    client = get_dashboard_client()
+    try:
+        if not client.is_connected:
+            client.connect()
+        return client.get_audit_posture(strategy_id)
+    except GatewayConnectionError as exc:
+        logger.warning("get_audit_posture failed for %s (gateway down): %s", strategy_id, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_audit_posture failed for %s: %s", strategy_id, exc)
         return None
 
 

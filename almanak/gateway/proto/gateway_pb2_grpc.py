@@ -2909,10 +2909,20 @@ class DashboardServiceStub(object):
                 request_serializer=gateway__pb2.GetTransactionLedgerRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetTransactionLedgerResponse.FromString,
                 _registered_method=True)
-        self.GetQuantHeader = channel.unary_unary(
-                '/almanak.gateway.proto.DashboardService/GetQuantHeader',
-                request_serializer=gateway__pb2.GetQuantHeaderRequest.SerializeToString,
-                response_deserializer=gateway__pb2.QuantHeaderInfo.FromString,
+        self.GetPnLSummary = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetPnLSummary',
+                request_serializer=gateway__pb2.GetPnLSummaryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PnLSummary.FromString,
+                _registered_method=True)
+        self.GetCostStack = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetCostStack',
+                request_serializer=gateway__pb2.GetCostStackRequest.SerializeToString,
+                response_deserializer=gateway__pb2.CostStackInfo.FromString,
+                _registered_method=True)
+        self.GetAuditPosture = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetAuditPosture',
+                request_serializer=gateway__pb2.GetAuditPostureRequest.SerializeToString,
+                response_deserializer=gateway__pb2.AuditPosture.FromString,
                 _registered_method=True)
         self.GetTradeTape = channel.unary_unary(
                 '/almanak.gateway.proto.DashboardService/GetTradeTape',
@@ -3005,9 +3015,28 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetQuantHeader(self, request, context):
-        """Senior-Quant header aggregations: money trail, cost stack,
-        reconciliation, audit-trail completeness, Accountant posture.
+    def GetPnLSummary(self, request, context):
+        """PnL summary — the 5-second eyeball: am I making or losing money?
+        Reads latest portfolio_snapshots row + portfolio_metrics row.
+        Hot-read; safe to cache aggressively. (VIB-3969)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCostStack(self, request, context):
+        """Cost stack — life-to-date Gas / Fees / Slip / Earn decomposition.
+        Reads transaction_ledger + accounting_events (sum aggregations).
+        Mid-weight; cumulative. (VIB-3969)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAuditPosture(self, request, context):
+        """Audit posture — Reconciliation (G6) + audit-trail completeness +
+        Accountant Test 21-cell matrix. Heavy; cold-read; QA-grade.
+        Server-computed only — never reconstruct G6 client-side. (VIB-3969)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -3079,10 +3108,20 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     request_deserializer=gateway__pb2.GetTransactionLedgerRequest.FromString,
                     response_serializer=gateway__pb2.GetTransactionLedgerResponse.SerializeToString,
             ),
-            'GetQuantHeader': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetQuantHeader,
-                    request_deserializer=gateway__pb2.GetQuantHeaderRequest.FromString,
-                    response_serializer=gateway__pb2.QuantHeaderInfo.SerializeToString,
+            'GetPnLSummary': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPnLSummary,
+                    request_deserializer=gateway__pb2.GetPnLSummaryRequest.FromString,
+                    response_serializer=gateway__pb2.PnLSummary.SerializeToString,
+            ),
+            'GetCostStack': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCostStack,
+                    request_deserializer=gateway__pb2.GetCostStackRequest.FromString,
+                    response_serializer=gateway__pb2.CostStackInfo.SerializeToString,
+            ),
+            'GetAuditPosture': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAuditPosture,
+                    request_deserializer=gateway__pb2.GetAuditPostureRequest.FromString,
+                    response_serializer=gateway__pb2.AuditPosture.SerializeToString,
             ),
             'GetTradeTape': grpc.unary_unary_rpc_method_handler(
                     servicer.GetTradeTape,
@@ -3402,7 +3441,7 @@ class DashboardService(object):
             _registered_method=True)
 
     @staticmethod
-    def GetQuantHeader(request,
+    def GetPnLSummary(request,
             target,
             options=(),
             channel_credentials=None,
@@ -3415,9 +3454,63 @@ class DashboardService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/almanak.gateway.proto.DashboardService/GetQuantHeader',
-            gateway__pb2.GetQuantHeaderRequest.SerializeToString,
-            gateway__pb2.QuantHeaderInfo.FromString,
+            '/almanak.gateway.proto.DashboardService/GetPnLSummary',
+            gateway__pb2.GetPnLSummaryRequest.SerializeToString,
+            gateway__pb2.PnLSummary.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCostStack(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetCostStack',
+            gateway__pb2.GetCostStackRequest.SerializeToString,
+            gateway__pb2.CostStackInfo.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAuditPosture(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetAuditPosture',
+            gateway__pb2.GetAuditPostureRequest.SerializeToString,
+            gateway__pb2.AuditPosture.FromString,
             options,
             channel_credentials,
             insecure,

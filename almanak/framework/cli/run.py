@@ -1286,7 +1286,7 @@ def run(  # noqa: C901
         effective_host,
         gateway_port,
         gateway_network,
-        _session_auth_token,
+        session_auth_token,
         isolated_wallet_address,
         _early_strategy_class,
     ) = _setup_gateway(
@@ -1319,6 +1319,7 @@ def run(  # noqa: C901
         dashboard_port=dashboard_port,
         gateway_host=effective_host,
         gateway_port=gateway_port,
+        auth_token=session_auth_token,
     ):
         return
 
@@ -1329,6 +1330,7 @@ def run(  # noqa: C901
             port=dashboard_port,
             gateway_host=effective_host,
             gateway_port=gateway_port,
+            auth_token=session_auth_token,
         )
         if dashboard_process is not None:
             atexit.register(_stop_dashboard, dashboard_process)
