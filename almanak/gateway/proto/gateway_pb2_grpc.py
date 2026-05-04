@@ -489,6 +489,16 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.SavePositionEventRequest.SerializeToString,
                 response_deserializer=gateway__pb2.SavePositionEventResponse.FromString,
                 _registered_method=True)
+        self.GetPositionHistory = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetPositionHistory',
+                request_serializer=gateway__pb2.GetPositionHistoryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetPositionHistoryResponse.FromString,
+                _registered_method=True)
+        self.UpdatePositionAttribution = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/UpdatePositionAttribution',
+                request_serializer=gateway__pb2.UpdatePositionAttributionRequest.SerializeToString,
+                response_deserializer=gateway__pb2.UpdatePositionAttributionResponse.FromString,
+                _registered_method=True)
         self.GetAccountingEvents = channel.unary_unary(
                 '/almanak.gateway.proto.StateService/GetAccountingEvents',
                 request_serializer=gateway__pb2.GetAccountingEventsRequest.SerializeToString,
@@ -618,6 +628,34 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetPositionHistory(self, request, context):
+        """Read full position lifecycle (VIB-3944).
+        Returns OPEN -> SNAPSHOT* -> CLOSE events in chronological order for a
+        single (deployment_id, position_id). Used by ``pnl_attributor`` to pair
+        a CLOSE with its matching OPEN for FIFO realised-PnL attribution.
+        Read-side fail-quiet: on backend error the gateway returns an empty
+        list rather than raising, so a transient gRPC blip degrades attribution
+        (loud warning in pnl_attributor) instead of halting the runner.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdatePositionAttribution(self, request, context):
+        """Partial-update of attribution_json + attribution_version on a single
+        position_event row (VIB-3944 write-half companion to GetPositionHistory).
+        Without this RPC pnl_attributor.run_attribution_on_close falls back to
+        ``save_position_event`` which is INSERT OR IGNORE and silently NO-OPs
+        because the row already exists, so the computed attribution_json never
+        reaches disk in gateway-sidecar mode. Mirrors the SQLite signature
+        ``update_position_attribution(event_id, attribution_json, attribution_version)``.
+        Non-blocking write: returns success=false on backend error rather than
+        raising — pnl_attributor wraps the call in a logged try/except already.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetAccountingEvents(self, request, context):
         """Read accounting events (VIB-3503 Part 2c).
         Used by FIFO basis store reconstruction at runner startup and by
@@ -730,6 +768,16 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.SavePositionEvent,
                     request_deserializer=gateway__pb2.SavePositionEventRequest.FromString,
                     response_serializer=gateway__pb2.SavePositionEventResponse.SerializeToString,
+            ),
+            'GetPositionHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPositionHistory,
+                    request_deserializer=gateway__pb2.GetPositionHistoryRequest.FromString,
+                    response_serializer=gateway__pb2.GetPositionHistoryResponse.SerializeToString,
+            ),
+            'UpdatePositionAttribution': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdatePositionAttribution,
+                    request_deserializer=gateway__pb2.UpdatePositionAttributionRequest.FromString,
+                    response_serializer=gateway__pb2.UpdatePositionAttributionResponse.SerializeToString,
             ),
             'GetAccountingEvents': grpc.unary_unary_rpc_method_handler(
                     servicer.GetAccountingEvents,
@@ -1068,6 +1116,60 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/SavePositionEvent',
             gateway__pb2.SavePositionEventRequest.SerializeToString,
             gateway__pb2.SavePositionEventResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPositionHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetPositionHistory',
+            gateway__pb2.GetPositionHistoryRequest.SerializeToString,
+            gateway__pb2.GetPositionHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdatePositionAttribution(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/UpdatePositionAttribution',
+            gateway__pb2.UpdatePositionAttributionRequest.SerializeToString,
+            gateway__pb2.UpdatePositionAttributionResponse.FromString,
             options,
             channel_credentials,
             insecure,

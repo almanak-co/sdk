@@ -142,6 +142,60 @@ def _pg_row_to_accounting_event(row: Any) -> gateway_pb2.AccountingEvent:
     )
 
 
+def _position_event_row_to_proto(row: dict[str, Any]) -> gateway_pb2.PositionEventData:
+    """Convert one SQLite ``position_events`` row dict to the proto wire shape (VIB-3944).
+
+    SQLite stores timestamp as an ISO string; the proto carries epoch seconds.
+    Optional integer / boolean fields (``tick_lower``, ``tick_upper``,
+    ``in_range``, ``is_long``) are only set on the proto when the SQLite row
+    has a non-None value, so the wire stays consistent with the SavePositionEvent
+    convention where None == absent.
+    """
+    msg = gateway_pb2.PositionEventData(
+        id=row.get("id") or "",
+        deployment_id=row.get("deployment_id") or "",
+        cycle_id=row.get("cycle_id") or "",
+        execution_mode=row.get("execution_mode") or "",
+        position_id=row.get("position_id") or "",
+        position_type=row.get("position_type") or "",
+        event_type=row.get("event_type") or "",
+        timestamp=_row_timestamp_epoch(row),
+        protocol=row.get("protocol") or "",
+        chain=row.get("chain") or "",
+        token0=row.get("token0") or "",
+        token1=row.get("token1") or "",
+        amount0=row.get("amount0") or "",
+        amount1=row.get("amount1") or "",
+        value_usd=row.get("value_usd") or "",
+        liquidity=row.get("liquidity") or "",
+        fees_token0=row.get("fees_token0") or "",
+        fees_token1=row.get("fees_token1") or "",
+        leverage=row.get("leverage") or "",
+        entry_price=row.get("entry_price") or "",
+        mark_price=row.get("mark_price") or "",
+        unrealized_pnl=row.get("unrealized_pnl") or "",
+        tx_hash=row.get("tx_hash") or "",
+        gas_usd=row.get("gas_usd") or "",
+        ledger_entry_id=row.get("ledger_entry_id") or "",
+        protocol_fees_usd=row.get("protocol_fees_usd") or "",
+        attribution_json=row.get("attribution_json") or "{}",
+        attribution_version=int(row.get("attribution_version") or 0),
+    )
+    tick_lower = row.get("tick_lower")
+    if tick_lower is not None:
+        msg.tick_lower = int(tick_lower)
+    tick_upper = row.get("tick_upper")
+    if tick_upper is not None:
+        msg.tick_upper = int(tick_upper)
+    in_range = row.get("in_range")
+    if in_range is not None:
+        msg.in_range = bool(in_range)
+    is_long = row.get("is_long")
+    if is_long is not None:
+        msg.is_long = bool(is_long)
+    return msg
+
+
 def _sqlite_row_to_accounting_event(row: dict[str, Any]) -> gateway_pb2.AccountingEvent:
     """Convert one SQLite row dict to the proto wire shape.
 
@@ -1657,6 +1711,175 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.SavePositionEventResponse(success=False, error="internal server error")
+
+    async def GetPositionHistory(
+        self,
+        request: gateway_pb2.GetPositionHistoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionHistoryResponse:
+        """Read full lifecycle (OPEN -> SNAPSHOT* -> CLOSE) for a single position (VIB-3944).
+
+        Used by ``pnl_attributor`` to pair a CLOSE with its matching OPEN
+        for FIFO realised-PnL attribution. Without this RPC the attributor
+        crashes with ``AttributeError: 'GatewayStateManager' object has no
+        attribute 'get_position_history'`` whenever a strategy closes a
+        position through the gateway-sidecar architecture.
+
+        Mirrors :meth:`SavePositionEvent` — delegates to the warm backend's
+        ``get_position_history`` method. Hosted mode requires the warm
+        backend to provide the same method (same gap as SavePositionEvent).
+        Read-side fail-quiet: on backend error returns an empty list rather
+        than raising, so a transient gRPC blip degrades attribution (loud
+        warning in pnl_attributor) instead of halting the runner.
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetPositionHistoryResponse(events=[])
+
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.GetPositionHistoryResponse(events=[])
+
+        position_id = request.position_id.strip() if request.position_id else ""
+        if not position_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("position_id is required")
+            return gateway_pb2.GetPositionHistoryResponse(events=[])
+
+        # ``strategy_id`` is validated above so we don't break the wire
+        # contract, but the warm backend's ``get_position_history`` keys on
+        # ``deployment_id`` (the runner-stable id), so we don't pass it
+        # through.  Identity normalisation via ``resolve_agent_id`` stays
+        # consistent with sibling RPCs in case future PG-direct branches
+        # land here.
+        _ = resolve_agent_id(strategy_id)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_position_history"):
+                logger.warning("GetPositionHistory: warm backend does not support get_position_history")
+                return gateway_pb2.GetPositionHistoryResponse(events=[])
+
+            rows = await warm.get_position_history(deployment_id, position_id)
+            events = [_position_event_row_to_proto(r) for r in rows]
+            return gateway_pb2.GetPositionHistoryResponse(events=events)
+        except Exception as e:
+            logger.warning(
+                "GetPositionHistory failed for deployment=%s position=%s: %s",
+                deployment_id,
+                position_id,
+                e,
+            )
+            return gateway_pb2.GetPositionHistoryResponse(events=[])
+
+    async def UpdatePositionAttribution(
+        self,
+        request: gateway_pb2.UpdatePositionAttributionRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.UpdatePositionAttributionResponse:
+        """Partial-update of attribution columns on a position_event row (VIB-3944).
+
+        Companion to ``GetPositionHistory``. Without this RPC,
+        ``pnl_attributor.run_attribution_on_close`` falls back to
+        ``save_position_event`` which is ``INSERT OR IGNORE`` and silently
+        NO-OPs because the row already exists with the same ``id`` —
+        attribution_json never reaches disk in gateway-sidecar mode.
+
+        Mirrors the SQLite signature
+        ``update_position_attribution(event_id, attribution_json, attribution_version)``.
+        Non-blocking write: returns ``success=false`` on backend error rather
+        than raising, since pnl_attributor wraps the call in a logged
+        ``try/except`` already and a transient blip should degrade
+        attribution to a warning, not halt the runner.
+        """
+        event_id = (request.event_id or "").strip()
+        if not event_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("event_id is required")
+            return gateway_pb2.UpdatePositionAttributionResponse(success=False, error="event_id is required")
+
+        try:
+            uuid.UUID(event_id)
+        except ValueError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("event_id must be a valid UUID")
+            return gateway_pb2.UpdatePositionAttributionResponse(success=False, error="event_id must be a valid UUID")
+
+        # CR audit (PR #2018): reject malformed attribution_json at the gateway
+        # boundary so a corrupt payload can't reach the position_events column
+        # and break every downstream consumer that calls
+        # ``json.loads(row["attribution_json"])``.
+        attribution_json = request.attribution_json or "{}"
+        try:
+            json.loads(attribution_json)
+        except (json.JSONDecodeError, TypeError):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("attribution_json must be valid JSON")
+            return gateway_pb2.UpdatePositionAttributionResponse(
+                success=False, error="attribution_json must be valid JSON"
+            )
+
+        # CR audit (PR #2018): if the caller scoped the request with
+        # deployment_id (optional, future-proofing for the hosted PostgresStore
+        # write path where multi-tenant scoping matters), reject blank /
+        # whitespace-only values so the field can't silently degrade. SQLite's
+        # WHERE clause keys on the UUID event_id which is globally unique
+        # by construction, so deployment_id remains a defense-in-depth scope
+        # rather than a query filter today.
+        if request.deployment_id and not request.deployment_id.strip():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id must be non-empty when provided")
+            return gateway_pb2.UpdatePositionAttributionResponse(
+                success=False, error="deployment_id must be non-empty when provided"
+            )
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "update_position_attribution"):
+                error = "warm backend does not support update_position_attribution"
+                logger.warning(
+                    "UpdatePositionAttribution unsupported for event_id=%s: %s",
+                    event_id,
+                    error,
+                )
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.UpdatePositionAttributionResponse(success=False, error=error)
+
+            result = await warm.update_position_attribution(
+                event_id, attribution_json, int(request.attribution_version or 0)
+            )
+            if not result:
+                # Either the row was missing (event_id never INSERTed) or the
+                # WHERE clause matched zero rows. Treat as a soft failure so
+                # the caller can log a warning and the operator can correlate
+                # via grep on event_id.
+                logger.warning(
+                    "UpdatePositionAttribution: no row matched event_id=%s (attribution dropped)",
+                    event_id,
+                )
+                return gateway_pb2.UpdatePositionAttributionResponse(
+                    success=False, error="no position_event row matched event_id"
+                )
+            return gateway_pb2.UpdatePositionAttributionResponse(success=True)
+        except Exception as e:
+            # CR audit (PR #2018): never leak raw backend exception text to
+            # RPC callers — keep diagnostics in logs, return a generic error.
+            logger.warning(
+                "UpdatePositionAttribution failed for event_id=%s: %s",
+                event_id,
+                e,
+            )
+            return gateway_pb2.UpdatePositionAttributionResponse(success=False, error="internal server error")
 
     # =========================================================================
     # Read accounting events RPC (VIB-3503 Part 2c)

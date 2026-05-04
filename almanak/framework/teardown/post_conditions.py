@@ -158,7 +158,7 @@ def _traderjoe_v2_post_condition(
     # (from ``strategy.get_open_positions()``), or anything else with a
     # ``.details`` mapping.
     details = getattr(position, "details", None) or {}
-    pool_address = details.get("pool_address") or details.get("pool") or details.get("pool_addr")
+    pool_address = details.get("pool_address") or details.get("pool_addr") or details.get("pool")
     if not pool_address:
         return ClosureCheckResult(
             closed=False,
@@ -167,6 +167,26 @@ def _traderjoe_v2_post_condition(
             error=(
                 "TraderJoe V2 post-condition needs position.details['pool_address'] "
                 "(or 'pool', 'pool_addr'); none found"
+            ),
+        )
+
+    # VIB-3943: ``details["pool"]`` is dual-purpose across the codebase — some
+    # callers stash the LB pair address there, others stash a symbol triple
+    # like ``"WAVAX/USDC/20"``. Without this hex check the symbol path slips
+    # straight into ``balanceOf`` and web3.py raises ``ValueError: when sending
+    # a str, it must be a hex string``. The on-chain TX already succeeded by
+    # the time we get here, so a verifier crash flips a successful teardown
+    # to a false-positive failure.  Reject non-hex addresses up front so the
+    # operator gets a precise, actionable message instead of a stack trace.
+    if not (isinstance(pool_address, str) and pool_address.startswith("0x") and len(pool_address) == 42):
+        return ClosureCheckResult(
+            closed=False,
+            protocol=protocol,
+            position_id=position_id,
+            error=(
+                f"TraderJoe V2 post-condition: position.details pool_address must be a "
+                f"42-char hex address (got {pool_address!r}). Strategies must populate "
+                "details['pool_address'] with the LB pair contract address, not a symbol."
             ),
         )
 

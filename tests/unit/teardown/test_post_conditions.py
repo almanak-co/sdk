@@ -176,6 +176,24 @@ class TestTraderJoeV2PostCondition:
         assert result.closed is False
         assert "pool_address" in (result.error or "")
 
+    def test_pool_symbol_string_rejected_as_non_hex(self) -> None:
+        """VIB-3943: a symbol like ``WAVAX/USDC/20`` must NOT be fed to balanceOf.
+
+        Before the fix the symbol slipped through the ``details["pool"]`` fallback,
+        web3.py raised ``ValueError: when sending a str, it must be a hex string``,
+        and the runner marked an already-closed teardown as failed.
+        """
+        position = SimpleNamespace(
+            protocol="traderjoe_v2",
+            position_id="tj-symbol",
+            chain="avalanche",
+            details={"pool": "WAVAX/USDC/20"},
+        )
+        result = _traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
+        assert result.closed is False
+        assert "42-char hex address" in (result.error or "")
+        assert "WAVAX/USDC/20" in (result.error or "")
+
     def test_sdk_init_failure_returns_error(self) -> None:
         with patch(
             "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter",

@@ -2435,11 +2435,25 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
 
-    async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
+    async def update_position_attribution(
+        self,
+        event_id: str,
+        attribution_json: str,
+        attribution_version: int,
+        deployment_id: str = "",
+    ) -> bool:
         """Update only the attribution fields of a position event.
 
         Unlike save_position_event (INSERT OR REPLACE), this preserves all
         other stored fields (timestamp, token0/token1, ticks, liquidity, etc.).
+
+        ``deployment_id`` is accepted but currently unused at the WHERE clause
+        because ``id`` is a UUID — globally unique by construction, so a
+        ``WHERE id = ?`` filter is data-layer-safe in the single-tenant SQLite
+        backend. The kwarg exists so the GSM client can forward the caller's
+        deployment_id to the gateway proto request as defense-in-depth wire
+        scope; future hosted PostgresStore implementations may add it to the
+        WHERE clause for multi-tenant scoping.
         """
         if not self._initialized:
             await self.initialize()

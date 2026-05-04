@@ -2619,15 +2619,30 @@ class StateManager:
             identity or "<empty>",
         )
 
-    async def update_position_attribution(self, event_id: str, attribution_json: str, attribution_version: int) -> bool:
-        """Partial update of attribution_json + attribution_version on a PositionEvent."""
+    async def update_position_attribution(
+        self,
+        event_id: str,
+        attribution_json: str,
+        attribution_version: int,
+        deployment_id: str = "",
+    ) -> bool:
+        """Partial update of attribution_json + attribution_version on a PositionEvent.
+
+        ``deployment_id`` is forwarded to the warm backend so the GSM client
+        can pass it through to the gateway proto request as defense-in-depth
+        wire-level scope. SQLite ignores it (UUID event_id is globally
+        unique); see ``SQLiteStore.update_position_attribution`` for the
+        rationale.
+        """
         if not self._initialized:
             await self.initialize()
         if not self._warm or not hasattr(self._warm, "update_position_attribution"):
             return False
         start = time.perf_counter()
         try:
-            result = await self._warm.update_position_attribution(event_id, attribution_json, attribution_version)
+            result = await self._warm.update_position_attribution(
+                event_id, attribution_json, attribution_version, deployment_id=deployment_id
+            )
             latency = (time.perf_counter() - start) * 1000
             ok = bool(result)
             self._record_metrics(

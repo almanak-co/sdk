@@ -139,7 +139,12 @@ class TestUpdatePositionAttribution:
             result = _run(mgr.update_position_attribution("evt-1", '{"v": 1}', 2))
 
         assert result is True
-        warm.update_position_attribution.assert_awaited_once_with("evt-1", '{"v": 1}', 2)
+        # PR #2018 CR audit: deployment_id is plumbed through StateManager so
+        # the GSM client can forward it to the gateway proto request as
+        # wire-level scope. Default empty when caller doesn't pass one.
+        warm.update_position_attribution.assert_awaited_once_with(
+            "evt-1", '{"v": 1}', 2, deployment_id=""
+        )
         assert rec.call_args[0][1] == "update_position_attribution"
         assert rec.call_args[0][3] is True
 

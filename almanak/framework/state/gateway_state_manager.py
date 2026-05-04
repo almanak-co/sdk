@@ -619,6 +619,118 @@ class GatewayStateManager:
                 ) from e
             return False
 
+    async def get_position_history(
+        self,
+        deployment_id: str,
+        position_id: str,
+    ) -> list[dict]:
+        """Fetch full position lifecycle via gateway gRPC (VIB-3944).
+
+        Returns events ordered chronologically (OPEN -> SNAPSHOT* -> CLOSE).
+        Used by ``pnl_attributor.run_attribution_on_close`` and
+        ``recompute_attribution`` to pair a CLOSE event with its matching
+        OPEN for FIFO realised-PnL attribution.
+
+        Read-side fail-quiet: on RPC error returns ``[]`` rather than
+        raising. The caller (pnl_attributor) escalates a missing OPEN to a
+        warning + skipped attribution rather than halting the runner — same
+        contract as the prior in-process StateManager path.
+
+        Args:
+            deployment_id: Strategy deployment identifier (the runner-stable id).
+            position_id: The position to query.
+
+        Returns:
+            List of position event dicts in chronological order. Empty list
+            on RPC failure or when no events exist for the position.
+        """
+        deployment_id = (deployment_id or "").strip()
+        position_id = (position_id or "").strip()
+        if not deployment_id or not position_id:
+            logger.warning(
+                "get_position_history called with empty deployment_id=%r or position_id=%r — returning []",
+                deployment_id,
+                position_id,
+            )
+            return []
+
+        try:
+            request = gateway_pb2.GetPositionHistoryRequest(
+                strategy_id=deployment_id,
+                deployment_id=deployment_id,
+                position_id=position_id,
+            )
+            response = self._client.state.GetPositionHistory(request, timeout=self._timeout)
+            return [_proto_position_event_to_dict(e) for e in response.events]
+        except Exception as e:
+            # Bump from debug to warning (Claude pr-auditor Important #2):
+            # the runner-side caller (pnl_attributor) will degrade to "no
+            # OPEN found" if this returns []; a transient gRPC failure is
+            # therefore invisible at debug level. Warning matches the
+            # server-side log level for symmetry, and matches the
+            # pnl_attributor convention (VIB-3205 audit fix Important #5).
+            logger.warning("GetPositionHistory via gateway failed: %s", e)
+            return []
+
+    async def update_position_attribution(
+        self,
+        event_id: str,
+        attribution_json: str,
+        attribution_version: int,
+        deployment_id: str = "",
+    ) -> bool:
+        """Partial-update of attribution columns via gateway gRPC (VIB-3944).
+
+        Companion to :meth:`get_position_history`. Without this method,
+        ``pnl_attributor.run_attribution_on_close`` falls back to
+        :meth:`save_position_event` which is ``INSERT OR IGNORE`` and
+        silently NO-OPs on the existing row — attribution_json never reaches
+        disk in gateway-sidecar mode.
+
+        Mirrors the SQLite signature so ``hasattr(store,
+        "update_position_attribution")`` resolves True on a GSM-backed
+        runner and the partial-update path is taken instead of the
+        INSERT-OR-IGNORE fallback.
+
+        Non-blocking write: returns False on RPC failure rather than
+        raising. pnl_attributor wraps the call in a logged try/except.
+
+        Args:
+            event_id: UUID of the position_events row to update.
+            attribution_json: Serialized attribution payload (overwrites column).
+            attribution_version: Formula version stamp (``CURRENT_VERSION``).
+
+        Returns:
+            True iff the gateway reports a row was matched and updated.
+        """
+        event_id = (event_id or "").strip()
+        if not event_id:
+            logger.warning("update_position_attribution called with empty event_id — returning False")
+            return False
+
+        try:
+            request = gateway_pb2.UpdatePositionAttributionRequest(
+                event_id=event_id,
+                attribution_json=attribution_json or "{}",
+                attribution_version=int(attribution_version or 0),
+                deployment_id=(deployment_id or "").strip(),
+            )
+            response = self._client.state.UpdatePositionAttribution(request, timeout=self._timeout)
+            if not response.success and response.error:
+                logger.warning(
+                    "UpdatePositionAttribution returned success=False for event_id=%s: %s",
+                    event_id,
+                    response.error,
+                )
+            return bool(response.success)
+        except Exception as e:
+            logger.warning(
+                "UpdatePositionAttribution via gateway failed for event_id=%s: %s",
+                event_id,
+                e,
+            )
+            return False
+
     async def save_position_event(self, event: "PositionEvent") -> bool:
         """Save a position lifecycle event via gateway gRPC → SQLite / PostgreSQL.
 
@@ -936,6 +1048,55 @@ class GatewayStateManager:
             # event list.
             logger.warning("GetAccountingEvents via gateway failed: %s", e)
             return []
+
+
+def _proto_position_event_to_dict(event: "gateway_pb2.PositionEventData") -> dict:
+    """Convert proto PositionEventData -> dict matching SQLite ``position_events`` row shape.
+
+    Mirrors :func:`_proto_event_to_dict` for the position-events table so
+    callers like ``pnl_attributor._pair_close_with_open`` can read both
+    backends identically. Timestamp is converted from epoch seconds to a
+    tz-aware ISO string because SQLiteStore stores ISO strings and
+    ``pnl_attributor`` parses with ``datetime.fromisoformat``.
+    """
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    timestamp_iso = _dt.fromtimestamp(event.timestamp or 0, tz=UTC).isoformat()
+    return {
+        "id": event.id,
+        "deployment_id": event.deployment_id,
+        "cycle_id": event.cycle_id,
+        "execution_mode": event.execution_mode,
+        "position_id": event.position_id,
+        "position_type": event.position_type,
+        "event_type": event.event_type,
+        "timestamp": timestamp_iso,
+        "protocol": event.protocol,
+        "chain": event.chain,
+        "token0": event.token0,
+        "token1": event.token1,
+        "amount0": event.amount0,
+        "amount1": event.amount1,
+        "value_usd": event.value_usd,
+        "tick_lower": event.tick_lower if event.HasField("tick_lower") else None,
+        "tick_upper": event.tick_upper if event.HasField("tick_upper") else None,
+        "liquidity": event.liquidity,
+        "in_range": event.in_range if event.HasField("in_range") else None,
+        "fees_token0": event.fees_token0,
+        "fees_token1": event.fees_token1,
+        "leverage": event.leverage,
+        "entry_price": event.entry_price,
+        "mark_price": event.mark_price,
+        "unrealized_pnl": event.unrealized_pnl,
+        "is_long": event.is_long if event.HasField("is_long") else None,
+        "tx_hash": event.tx_hash,
+        "gas_usd": event.gas_usd,
+        "ledger_entry_id": event.ledger_entry_id,
+        "protocol_fees_usd": event.protocol_fees_usd,
+        "attribution_json": event.attribution_json or "{}",
+        "attribution_version": event.attribution_version,
+    }
 
 
 def _proto_event_to_dict(event: "gateway_pb2.AccountingEvent") -> dict:

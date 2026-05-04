@@ -1027,9 +1027,18 @@ async def run_attribution_on_close(
 
             close_event.attribution_json = attribution
             close_event.attribution_version = CURRENT_VERSION
-            # Use partial update to avoid overwriting stored fields
+            # Use partial update to avoid overwriting stored fields. Pass
+            # deployment_id (CR audit on PR #2018) so the GSM client can
+            # forward it to the gateway proto request as defense-in-depth
+            # wire-level scope; SQLite ignores it because event UUIDs are
+            # globally unique by construction.
             if hasattr(store, "update_position_attribution"):
-                await store.update_position_attribution(close_event.id, attribution, CURRENT_VERSION)
+                await store.update_position_attribution(
+                    close_event.id,
+                    attribution,
+                    CURRENT_VERSION,
+                    deployment_id=getattr(close_event, "deployment_id", "") or "",
+                )
             else:
                 await store.save_position_event(close_event)
             logger.debug(
@@ -1108,9 +1117,18 @@ async def recompute_attribution(
                 except (json.JSONDecodeError, TypeError):
                     # Stored attribution isn't valid JSON — nothing to preserve.
                     pass
-                # Use partial update to avoid wiping stored fields
+                # Use partial update to avoid wiping stored fields. Pass
+                # deployment_id (CR audit on PR #2018) so the GSM client
+                # can forward it to the gateway proto request as wire-level
+                # scope; SQLite ignores it because event UUIDs are globally
+                # unique by construction.
                 if hasattr(store, "update_position_attribution"):
-                    await store.update_position_attribution(close_dict["id"], attribution, version)
+                    await store.update_position_attribution(
+                        close_dict["id"],
+                        attribution,
+                        version,
+                        deployment_id=close_dict.get("deployment_id") or deployment_id,
+                    )
                 else:
                     from .position_events import PositionEvent
 
