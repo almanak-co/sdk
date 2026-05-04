@@ -809,6 +809,30 @@ TRADERJOE_V2: dict[str, dict[str, str]] = {
     },
 }
 
+# TraderJoe V2 LBPair (per-pair) addresses — needed for static permissions on
+# Roles modifier. Each pair is a distinct contract; ``approveForAll`` is called
+# on the pair, not the router. Without this registry, LP_CLOSE compiles fail
+# during synthetic discovery (RPC required to resolve the address) and the
+# Safe is unauthorised when a real strategy tries to remove liquidity. See
+# #1905. A future improvement would be a dynamic LBFactory.getLBPairInformation
+# resolution at manifest-gen time so arbitrary pairs are covered without
+# manual registration.
+#
+# Address verified on-chain via
+# ``LBFactory.getLBPairInformation(WAVAX, USDC, 20)`` against the avalanche
+# C-Chain RPC (LBFactory ``0x8e42f2F4101563bF679975178e880FD87d3eFd4e``).
+TRADERJOE_V2_LBPAIRS: dict[str, list[dict[str, str | int]]] = {
+    "avalanche": [
+        {
+            "tokenX": "WAVAX",
+            "tokenY": "USDC",
+            "bin_step": 20,
+            "address": "0xD446eb1660F766d533BeCeEf890Df7A69d26f7d1",
+        },
+    ],
+}
+
+
 TRADERJOE_V2_TOKENS: dict[str, dict[str, str]] = {
     "avalanche": {
         "AVAX": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",  # Native

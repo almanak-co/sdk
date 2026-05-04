@@ -316,10 +316,6 @@ class TestTraderJoeV2LPCloseIntent:
     because removeLiquidity removes and returns tokens in one step.
     """
 
-    @pytest.mark.xfail(
-        reason="Tracked in #1905 — Zodiac manifest gap on traderjoe_v2 LP_CLOSE (LBPair removeLiquidity target/selector missing)",
-        strict=False,
-    )
     @pytest.mark.asyncio
     @pytest.mark.uses_zodiac(
         protocols=["traderjoe_v2"],

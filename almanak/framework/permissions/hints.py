@@ -20,12 +20,32 @@ class StaticPermissionEntry:
 
     Used when compilation requires external state (GatewayClient, RPC) that
     isn't available during offline permission discovery.
+
+    Attributes:
+        target: Lower-cased contract address the Roles modifier should authorise.
+        label: Human-readable label surfaced in the generated manifest.
+        selectors: ``selector -> human-readable label`` mapping for every
+            function selector this entry authorises on ``target``.
+        send_allowed: Whether the Safe is permitted to send native value to
+            ``target`` for this entry's selectors.
+        intent_types: Optional intent-type allow-list. ``None`` (default)
+            means the entry applies to **every** manifest produced for the
+            owning protocol (backward-compatible behaviour). When set to a
+            ``frozenset`` of intent-type strings (e.g.
+            ``frozenset({"LP_CLOSE"})``), discovery only injects the entry
+            into manifests whose requested intent-type set intersects this
+            allow-list. Use this to keep least-privilege manifests for
+            protocols whose static permissions are only required by certain
+            intent flows (e.g. TraderJoe V2's per-pair ``approveForAll`` is
+            only emitted during LP_CLOSE teardown, so a SWAP-only strategy
+            should not authorise it).
     """
 
     target: str
     label: str
     selectors: dict[str, str] = field(default_factory=dict)  # selector -> label
     send_allowed: bool = False
+    intent_types: frozenset[str] | None = None  # None = all intent types; otherwise filter
 
 
 @dataclass(frozen=True)

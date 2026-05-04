@@ -166,6 +166,14 @@ def discover_permissions(
         hints = get_permission_hints(protocol)
         chain_static = hints.static_permissions.get(chain, [])
         for entry in chain_static:
+            # Skip entries scoped to intent types not present in this request.
+            # ``entry.intent_types is None`` keeps the legacy "applies to all
+            # intent types" behaviour; a non-None value is an allow-list and
+            # must intersect the requested ``intent_types``. This is the
+            # least-privilege filter that prevents e.g. TJv2's LBPair
+            # approveForAll from leaking into SWAP-only manifests.
+            if entry.intent_types is not None and not entry.intent_types.intersection(intent_types):
+                continue
             target = entry.target.lower()
             if target not in targets:
                 targets[target] = _TargetAccumulator(label=entry.label)

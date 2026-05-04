@@ -183,3 +183,119 @@ class TestTraderJoeV2CombinedCoverage:
         assert (_LBROUTER2, selector) in manifest, (
             f"Manifest missing LBRouter2 {label} selector ({selector})"
         )
+
+
+class TestTraderJoeV2LPCloseCoverage:
+    """LP_CLOSE on avalanche must authorise approveForAll on the LBPair (issue #1905).
+
+    LP_CLOSE compiles to two TXs:
+      1. ``LBPair.approveForAll(LBRouter, true)`` — per-pair contract
+      2. ``LBRouter.removeLiquidity(...)`` — single router contract
+
+    The router selector was already in ``static_permissions``, but the LBPair
+    target had nowhere to land — TJv2's per-pair model means the address is
+    dynamic and synthetic discovery couldn't resolve it (the compile path
+    requires a live RPC and bails during permission discovery). Without a
+    static permission for the LBPair, every TJv2 LP_CLOSE intent on
+    avalanche reverted at Zodiac authorisation on TX 1.
+    """
+
+    # WAVAX/USDC binStep=20 LBPair on avalanche, verified on-chain via
+    # LBFactory.getLBPairInformation(WAVAX, USDC, 20).
+    _WAVAX_USDC_BS20_LBPAIR = "0xd446eb1660f766d533beceef890df7a69d26f7d1"
+    # approveForAll(address,bool)
+    _APPROVE_FOR_ALL_SELECTOR = "0xe584b654"
+
+    def test_lp_close_manifest_includes_lbpair_approve_for_all(self) -> None:
+        """The LP_CLOSE manifest must authorise ``approveForAll`` on every
+        registered LBPair on the chain. Regression for #1905.
+        """
+        manifest = _manifest_pairs_for(["LP_CLOSE"])
+        assert (self._WAVAX_USDC_BS20_LBPAIR, self._APPROVE_FOR_ALL_SELECTOR) in manifest, (
+            f"Manifest missing LBPair approveForAll for {self._WAVAX_USDC_BS20_LBPAIR}. "
+            f"Got pairs: {sorted(manifest)}"
+        )
+
+    def test_lp_close_manifest_includes_lbrouter_remove_liquidity(self) -> None:
+        """The LP_CLOSE manifest must also keep authorising ``removeLiquidity``
+        on the LBRouter — that's TX 2 of the bundle.
+        """
+        manifest = _manifest_pairs_for(["LP_CLOSE"])
+        assert (_LBROUTER2, _REMOVE_LIQUIDITY_SELECTOR) in manifest, (
+            "LP_CLOSE manifest missing LBRouter2 removeLiquidity selector"
+        )
+
+
+class TestTraderJoeV2LBPairLeastPrivilegeScoping:
+    """Regression for PR #1923 review (Codex P1 + Gemini medium): LBPair
+    ``approveForAll`` must be scoped to LP_CLOSE-only and must NOT leak into
+    SWAP-only manifests.
+
+    Before this fix, ``static_permissions`` were merged into every manifest
+    regardless of the requested ``intent_types``. The LBPair entry shipped in
+    PR #1905 therefore landed on **every** TJv2 manifest — including SWAP-only
+    strategies that have no LP positions and never need to authorise the
+    LBRouter to pull LB-tokens. ``StaticPermissionEntry.intent_types`` now
+    intent-scopes static permissions; this test pins the SWAP-only case so the
+    over-permission cannot reappear.
+
+    LP_OPEN-only manifests intentionally still include the LBPair entry: the
+    permission generator auto-expands LP_OPEN to include LP_CLOSE for
+    teardown coverage (see ``_expand_intent_types_for_teardown`` in
+    ``permissions/generator.py``), and an LP-providing strategy does need to
+    be able to remove its own liquidity. The over-permission only existed for
+    intent-type sets that don't transitively reach LP_CLOSE (i.e. SWAP-only).
+    """
+
+    # approveForAll(address,bool)
+    _APPROVE_FOR_ALL_SELECTOR = "0xe584b654"
+
+    def test_swap_only_manifest_does_not_authorise_lbpair_approve_for_all(self) -> None:
+        """A SWAP-only TJv2 strategy must NOT have ``approveForAll`` on any
+        LBPair contract. That selector is only needed during LP_CLOSE for the
+        Safe to authorise the LBRouter to pull LB-tokens during
+        ``removeLiquidity``. SWAP intents target the LBRouter directly with
+        ERC-20 approvals on tokenX/tokenY — they never touch LBPair contracts.
+        """
+        manifest = generate_manifest(
+            strategy_name="tjv2-swap-only-least-privilege",
+            chain="avalanche",
+            supported_protocols=["traderjoe_v2"],
+            intent_types=["SWAP"],
+        )
+        lbpair_permissions = [p for p in manifest.permissions if "LBPair" in (p.label or "")]
+        assert len(lbpair_permissions) == 0, (
+            "SWAP-only manifest must not include LBPair targets. Got: "
+            f"{[(p.target, p.label) for p in lbpair_permissions]}"
+        )
+
+        # Belt-and-suspenders: also assert the selector itself is absent on
+        # any target. Even if the label drifts, the selector should never
+        # appear in a SWAP-only manifest.
+        leaked = [
+            (p.target, p.label)
+            for p in manifest.permissions
+            for sel in p.function_selectors
+            if sel.selector.lower() == self._APPROVE_FOR_ALL_SELECTOR
+        ]
+        assert leaked == [], (
+            f"SWAP-only manifest must not include approveForAll on any target. "
+            f"Got: {leaked}"
+        )
+
+    def test_lp_close_only_manifest_still_includes_lbpair_entry(self) -> None:
+        """The LP_CLOSE-only path must continue to include the LBPair entry
+        after intent-type scoping was added to ``StaticPermissionEntry``. This
+        is the positive complement of the SWAP-only negative assertion above.
+        """
+        manifest = generate_manifest(
+            strategy_name="tjv2-lp-close-only",
+            chain="avalanche",
+            supported_protocols=["traderjoe_v2"],
+            intent_types=["LP_CLOSE"],
+        )
+        lbpair_permissions = [p for p in manifest.permissions if "LBPair" in (p.label or "")]
+        assert len(lbpair_permissions) > 0, (
+            "LP_CLOSE-only manifest must include at least one LBPair target so "
+            "the Safe can call approveForAll on the LBPair contract."
+        )
