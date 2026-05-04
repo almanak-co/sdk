@@ -137,6 +137,133 @@ class TestDefaultSwapAdapterFeeSelection:
         assert adapter.last_fee_selection["selected_fee_tier"] == 500
         assert adapter.last_fee_selection["source"] == "heuristic_fallback"
 
+    def test_bridged_usdc_probe_skipped_on_non_bridged_chain(self, monkeypatch) -> None:
+        """VIB-3973: heuristic must NOT probe USDC.e / USDC_BRIDGED on chains
+        that don't have a bridged variant (X-Layer, BSC, Linea, Mantle, 0G,
+        Monad, …). Each phantom probe burns ~15s on the gateway TokenService
+        timeout. Same shape as VIB-3814 (BSC) and VIB-150 (Base).
+        """
+        from almanak.framework.data import tokens as tokens_module
+
+        seen: list[tuple[str, str]] = []
+
+        class _StubResolver:
+            def resolve(self, symbol: str, chain: str, log_errors: bool = True):
+                seen.append((symbol, chain))
+                return None
+
+        monkeypatch.setattr(tokens_module, "get_token_resolver", lambda: _StubResolver())
+
+        wrapped_native_per_chain = {
+            "xlayer": "WOKB",
+            "bsc": "WBNB",
+            "linea": None,  # not in _wrapped_symbols today
+            "mantle": "WMNT",
+            "zerog": "W0G",
+            "monad": "WMON",
+        }
+        for chain, wrapped_native in wrapped_native_per_chain.items():
+            seen.clear()
+            adapter = DefaultSwapAdapter(
+                chain=chain,
+                protocol="uniswap_v3",
+                pool_selection_mode="auto",
+            )
+            adapter._select_fee_tier_heuristic("WETH", "USDC")
+            symbols = {sym for sym, _ in seen}
+            assert "USDC.e" not in symbols, f"USDC.e probed on {chain}"
+            assert "USDC_BRIDGED" not in symbols, f"USDC_BRIDGED probed on {chain}"
+            # Positive assertion: the gating must NOT have widened to drop
+            # USDC or the wrapped-native lookup. Those are still required.
+            assert "USDC" in symbols, f"USDC probe missing on {chain}"
+            if wrapped_native is not None:
+                assert wrapped_native in symbols, f"{wrapped_native} probe missing on {chain}"
+
+    def test_bridged_usdc_probe_runs_on_bridged_chain(self, monkeypatch) -> None:
+        """VIB-3973: the gating must NOT regress the existing probe on
+        chains where the bridged variant DOES exist (Arbitrum, Optimism,
+        Polygon, Avalanche, Berachain). Base is excluded — its bridged
+        variant is USDbC, not USDC.e / USDC_BRIDGED.
+        """
+        from almanak.framework.data import tokens as tokens_module
+
+        seen: list[tuple[str, str]] = []
+
+        class _StubResolver:
+            def resolve(self, symbol: str, chain: str, log_errors: bool = True):
+                seen.append((symbol, chain))
+                return None
+
+        monkeypatch.setattr(tokens_module, "get_token_resolver", lambda: _StubResolver())
+
+        # Base is intentionally NOT in this list — its bridged variant is
+        # USDbC, not USDC.e / USDC_BRIDGED, so probing for USDC.e on Base
+        # is dead work. The probe-allowlist therefore excludes Base.
+        wrapped_native_per_chain = {
+            "arbitrum": "WETH",
+            "optimism": "WETH",
+            "polygon": "WMATIC",
+            "avalanche": "WAVAX",
+            "berachain": "WBERA",
+        }
+        for chain, wrapped_native in wrapped_native_per_chain.items():
+            seen.clear()
+            adapter = DefaultSwapAdapter(
+                chain=chain,
+                protocol="uniswap_v3",
+                pool_selection_mode="auto",
+            )
+            adapter._select_fee_tier_heuristic("WETH", "USDC")
+            symbols = {sym for sym, _ in seen}
+            assert "USDC.e" in symbols, f"USDC.e NOT probed on {chain}"
+            # CodeRabbit: also assert the USDC_BRIDGED fallback fires when
+            # USDC.e returns None (the resolver stub returns None for both),
+            # so the second probe in the ``or`` chain isn't silently dropped
+            # by future refactors.
+            assert "USDC_BRIDGED" in symbols, f"USDC_BRIDGED NOT probed on {chain}"
+            # Positive assertions: USDC and the wrapped native are still probed.
+            assert "USDC" in symbols, f"USDC probe missing on {chain}"
+            assert wrapped_native in symbols, f"{wrapped_native} probe missing on {chain}"
+
+    def test_bridged_usdc_probe_chains_subset_of_chain_bridged_stablecoins(self) -> None:
+        """VIB-3973: ``_BRIDGED_USDC_PROBE_CHAINS`` must be a subset of
+        ``_CHAIN_BRIDGED_STABLECOINS`` — every chain we probe for a bridged
+        USDC must also be a chain we're willing to seed bridged-stablecoin
+        fallback prices for. Catches drift when a chain is added to one
+        table without being added (or considered) for the other.
+        """
+        from almanak.framework.intents.compiler_adapters import _BRIDGED_USDC_PROBE_CHAINS
+        from almanak.framework.runner.runner_teardown import _CHAIN_BRIDGED_STABLECOINS
+
+        missing = _BRIDGED_USDC_PROBE_CHAINS - set(_CHAIN_BRIDGED_STABLECOINS.keys())
+        assert not missing, (
+            f"Chains in _BRIDGED_USDC_PROBE_CHAINS not in _CHAIN_BRIDGED_STABLECOINS: {missing}. "
+            "Add the chain to _CHAIN_BRIDGED_STABLECOINS in runner_teardown.py or remove "
+            "from _BRIDGED_USDC_PROBE_CHAINS in compiler_adapters.py."
+        )
+
+    def test_bridged_usdc_probe_chains_subset_of_chain_wrapped_native(self) -> None:
+        """VIB-3973 (Gemini follow-up on PR #2038): every chain in
+        ``_BRIDGED_USDC_PROBE_CHAINS`` MUST also be in ``_CHAIN_WRAPPED_NATIVE``.
+        Otherwise ``_select_fee_tier_heuristic`` finds USDC + USDC.e on the
+        chain but ``wrapped_native_addr`` is None, so ``is_native_wrapped``
+        is forever False and the heuristic silently returns the default
+        fee tier (3000) instead of the cheaper 500 tier on USDC↔WETH-style
+        pairs. This test catches the original ``berachain`` divergence and
+        any future chain added without its wrapped-native entry.
+        """
+        from almanak.framework.intents.compiler_adapters import (
+            _BRIDGED_USDC_PROBE_CHAINS,
+            _CHAIN_WRAPPED_NATIVE,
+        )
+
+        missing = _BRIDGED_USDC_PROBE_CHAINS - set(_CHAIN_WRAPPED_NATIVE.keys())
+        assert not missing, (
+            f"Chains in _BRIDGED_USDC_PROBE_CHAINS not in _CHAIN_WRAPPED_NATIVE: {missing}. "
+            "Add the chain's wrapped-native symbol to _CHAIN_WRAPPED_NATIVE in "
+            "compiler_adapters.py so the fee-tier heuristic can resolve it."
+        )
+
     def test_fixed_mode_raises_when_protocol_has_no_fee_tiers(self) -> None:
         """Fixed mode should fail deterministically when protocol has no supported tiers."""
         adapter = DefaultSwapAdapter(

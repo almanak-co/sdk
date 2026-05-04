@@ -143,7 +143,14 @@ class DataEnvelope[T]:
 # ---------------------------------------------------------------------------
 
 # Maps uppercase native symbol -> wrapped symbol for canonical resolution.
-# ETH -> WETH, MATIC -> WMATIC, AVAX -> WAVAX, BNB -> WBNB, etc.
+#
+# Must cover every native symbol in
+# ``almanak.gateway.data.balance.web3_provider.NATIVE_TOKEN_SYMBOLS``.
+# Wrapping conventions are NOT mechanically derivable from the native symbol
+# (e.g. ``A0GI -> W0G`` strips the trailing ``GI``, not ``W{native}``), so
+# every chain must be listed explicitly. Callers should treat a missing entry
+# as a configuration bug, not paper over it with a string-prefix fallback
+# (VIB-3970).
 _NATIVE_TO_WRAPPED: dict[str, str] = {
     "ETH": "WETH",
     "MATIC": "WMATIC",
@@ -152,6 +159,11 @@ _NATIVE_TO_WRAPPED: dict[str, str] = {
     "MNT": "WMNT",
     "S": "WS",
     "XPL": "WXPL",
+    "BERA": "WBERA",
+    "MON": "WMON",
+    "OKB": "WOKB",
+    "A0GI": "W0G",
+    "SOL": "WSOL",
 }
 
 

@@ -41,6 +41,56 @@ from .compiler_constants import (
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
 
+# Chains where probing for a bridged USDC variant is meaningful for the
+# fee-tier heuristic. Outside this set the resolver has no entry for
+# ``USDC.e`` / ``USDC_BRIDGED`` and the probe burns ~15s per call against
+# the gateway TokenService timeout (VIB-3973; same shape as VIB-3814,
+# VIB-150). Keep aligned with ``_CHAIN_BRIDGED_STABLECOINS`` in
+# ``almanak/framework/runner/runner_teardown.py`` — that table is the
+# fallback-price truth, this one is the probe-allowlist truth and they
+# both derive from ``almanak/framework/data/tokens/data/symbol_aliases.json``.
+_BRIDGED_USDC_PROBE_CHAINS: frozenset[str] = frozenset(
+    {
+        "arbitrum",  # USDC.e
+        "optimism",  # USDC.e
+        "polygon",  # USDC.e
+        "avalanche",  # USDC.e
+        "berachain",  # USDC.e
+        # Note: Base's bridged variant is USDbC, not USDC.e / USDC_BRIDGED,
+        # so the resolver can't satisfy the probe on Base. Base is excluded
+        # from this set so the probe stays scoped to chains where the
+        # symbols actually resolve. Base remains in
+        # ``_CHAIN_BRIDGED_STABLECOINS`` in ``runner_teardown.py`` (a
+        # separate concern: fallback-price seeding).
+    }
+)
+
+
+# Wrapped-native symbol per chain for the fee-tier heuristic. Module-level
+# (rather than a local dict in ``_select_fee_tier_heuristic``) so the
+# alignment test in ``tests/unit/intents/test_swap_fee_selection.py`` can
+# assert ``_BRIDGED_USDC_PROBE_CHAINS ⊆ _CHAIN_WRAPPED_NATIVE.keys()``.
+# Without that subset, ``is_native_wrapped`` is forever False on the
+# missing chain and the heuristic silently returns the default 3000-fee
+# tier instead of 500 on USDC↔WETH-style pairs.
+_CHAIN_WRAPPED_NATIVE: dict[str, str] = {
+    "ethereum": "WETH",
+    "arbitrum": "WETH",
+    "optimism": "WETH",
+    "base": "WETH",
+    "polygon": "WMATIC",
+    "avalanche": "WAVAX",
+    "plasma": "WXPL",
+    "bsc": "WBNB",
+    "mantle": "WMNT",
+    "sonic": "WS",
+    "xlayer": "WOKB",
+    "monad": "WMON",
+    "zerog": "W0G",
+    "berachain": "WBERA",
+}
+
+
 # =============================================================================
 # Protocol Adapter Protocol
 # =============================================================================
@@ -437,25 +487,18 @@ class DefaultSwapAdapter:
             return address.lower() if isinstance(address, str) else None
 
         usdc_addr = resolve_address("USDC")
-        usdc_bridged = resolve_address("USDC.e", probe=True) or resolve_address("USDC_BRIDGED", probe=True)
+        # VIB-3973: only probe bridged USDC on chains that actually have a
+        # bridged variant. ``probe=True`` only suppresses logs — the
+        # resolver call still pays the ~15s gateway timeout per chain
+        # without any USDC.e / USDC_BRIDGED entry (X-Layer, BSC, Linea,
+        # Mantle, 0G, Monad, …). Skip the probe entirely on those chains.
+        if self.chain in _BRIDGED_USDC_PROBE_CHAINS:
+            usdc_bridged = resolve_address("USDC.e", probe=True) or resolve_address("USDC_BRIDGED", probe=True)
+        else:
+            usdc_bridged = None
 
-        # Only resolve the wrapped native token for the current chain (not all chains)
-        _wrapped_symbols = {
-            "ethereum": "WETH",
-            "arbitrum": "WETH",
-            "optimism": "WETH",
-            "base": "WETH",
-            "polygon": "WMATIC",
-            "avalanche": "WAVAX",
-            "plasma": "WXPL",
-            "bsc": "WBNB",
-            "mantle": "WMNT",
-            "sonic": "WS",
-            "xlayer": "WOKB",
-            "monad": "WMON",
-            "zerog": "W0G",
-        }
-        _wn_symbol = _wrapped_symbols.get(self.chain)
+        # Only resolve the wrapped native token for the current chain (not all chains).
+        _wn_symbol = _CHAIN_WRAPPED_NATIVE.get(self.chain)
         wrapped_native_addr = resolve_address(_wn_symbol) if _wn_symbol else None
 
         is_usdc = bool(usdc_addr and usdc_addr in (from_lower, to_lower))

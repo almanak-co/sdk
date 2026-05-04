@@ -1238,8 +1238,21 @@ def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:
     # Derive native + wrapped token symbols from existing registry maps
     # so new chains are picked up automatically without code changes here.
     native = NATIVE_TOKEN_SYMBOLS.get(chain_key, "ETH") if chain else "ETH"
-    wrapped = _NATIVE_TO_WRAPPED.get(native, f"W{native}")
-    tokens_to_fetch = (native, wrapped)
+    # No string-prefix fallback: chains like 0G break the ``W{native}`` rule
+    # (A0GI -> W0G, not WA0GI) and a phantom symbol burns a 15s gateway
+    # timeout per probe before silently returning None (VIB-3970).
+    wrapped = _NATIVE_TO_WRAPPED.get(native)
+    if wrapped is None:
+        logger.warning(
+            "Wrapped native unknown for chain %s (native=%s); skipping wrapped "
+            "fallback price fetch. Add an entry to _NATIVE_TO_WRAPPED in "
+            "almanak/framework/data/models.py.",
+            chain_key,
+            native,
+        )
+        tokens_to_fetch: tuple[str, ...] = (native,)
+    else:
+        tokens_to_fetch = (native, wrapped)
 
     # Try to get real prices from the market one more time — the gateway
     # may have recovered since the prefetch attempt.

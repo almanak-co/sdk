@@ -7878,6 +7878,12 @@ class IntentCompiler:
         "WOKB": "OKB",
         "WMON": "MON",
         "WBERA": "BERA",
+        # Keep symmetric with ``_NATIVE_TO_WRAPPED`` in
+        # ``almanak/framework/data/models.py`` (VIB-3970): every native added
+        # there should have its inverse here so price-oracle alias expansion
+        # bridges both directions for new chains.
+        "W0G": "A0GI",
+        "WSOL": "SOL",
     }
 
     def _expand_native_aliases_in_price_oracle(self) -> None:

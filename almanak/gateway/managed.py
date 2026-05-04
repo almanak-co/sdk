@@ -193,7 +193,11 @@ class ManagedGateway:
 
     # Chains where free-tier public RPCs lack archive state, causing Anvil fork
     # operations (eth_getStorageAt for ERC-20 approvals, etc.) to fail silently.
-    ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche"})
+    # 0G (rpc.ankr.com/0g_mainnet_evm) and X-Layer (rpc.xlayer.tech) are
+    # non-archive full nodes that aggressively prune state and frequently
+    # return DEADLINE_EXCEEDED — both stall LP teardown / lending repay
+    # mid-run with `missing trie node` (VIB-3971, VIB-3973 Part B).
+    ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche", "zerog", "xlayer"})
 
     def _check_archive_rpc_availability(self) -> None:
         """Warn if any target chain needs archive RPC but only has public RPCs.

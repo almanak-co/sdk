@@ -27,6 +27,16 @@ These must be set before running any strategy.
 
 Any provider works: Infura, QuickNode, self-hosted, Alchemy, etc. `ALCHEMY_API_KEY` is an optional fallback that auto-constructs URLs for all supported chains. If none are set, the gateway falls back to free public RPCs (rate-limited, best-effort).
 
+!!! warning "Some public RPCs are unsuitable as Anvil-fork upstreams"
+    The free public RPCs for **0G** (`https://rpc.ankr.com/0g_mainnet_evm`) and **X-Layer** (`https://rpc.xlayer.tech`) are full nodes that aggressively prune historical state and frequently return `DEADLINE_EXCEEDED` under sustained load. They work for one-off swaps but break Anvil-fork demos that hold positions across blocks (LP teardown, lending repay, etc.) because the LP_CLOSE / REPAY compile path queries storage slots on a block that has already been pruned (`missing trie node` from the upstream).
+
+    For these chains, set a paid archive-capable endpoint:
+
+    ```bash
+    ZEROG_RPC_URL=https://your-archive-0g-endpoint
+    XLAYER_RPC_URL=https://your-archive-xlayer-endpoint
+    ```
+
 !!! warning
     Never commit private keys. Use a dedicated testing wallet for development.
 

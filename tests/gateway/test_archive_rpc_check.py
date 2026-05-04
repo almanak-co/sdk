@@ -91,17 +91,35 @@ class TestArchiveRpcCheck:
         from almanak.gateway.core.settings import GatewaySettings
 
         settings = GatewaySettings(grpc_host="127.0.0.1", grpc_port=50099)
-        gw = ManagedGateway(settings, anvil_chains=["polygon", "ethereum", "avalanche", "arbitrum"])
+        gw = ManagedGateway(
+            settings,
+            anvil_chains=["polygon", "ethereum", "avalanche", "zerog", "xlayer", "arbitrum"],
+        )
         with patch.dict(os.environ, {}, clear=True):
             with caplog.at_level(logging.WARNING):
                 gw._check_archive_rpc_availability()
             assert "polygon" in caplog.text
             assert "ethereum" in caplog.text
             assert "avalanche" in caplog.text
+            # VIB-3971 / VIB-3973: 0G and X-Layer must also warn.
+            assert "zerog" in caplog.text
+            assert "xlayer" in caplog.text
             # arbitrum should NOT appear in warnings
             assert "arbitrum" not in caplog.text
-            assert caplog.text.count("archive-capable RPC") == 3
+            assert caplog.text.count("archive-capable RPC") == 5
 
     def test_archive_chains_constant(self):
-        """Verify the ARCHIVE_RPC_REQUIRED_CHAINS set contains expected chains."""
-        assert ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS == {"polygon", "ethereum", "avalanche"}
+        """Verify the ARCHIVE_RPC_REQUIRED_CHAINS set contains expected chains.
+
+        VIB-3971 / VIB-3973 added zerog and xlayer — their public RPCs
+        (rpc.ankr.com/0g_mainnet_evm, rpc.xlayer.tech) are non-archive
+        full nodes that prune state aggressively and stall LP teardown
+        with `missing trie node`.
+        """
+        assert ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS == {
+            "polygon",
+            "ethereum",
+            "avalanche",
+            "zerog",
+            "xlayer",
+        }
