@@ -211,6 +211,26 @@ def _is_solana_mint(token: str) -> bool:
     return bool(_SOLANA_ADDRESS_RE.match(token))
 
 
+def _normalize_wallet_address(addr: str) -> str:
+    """Return the EIP-55 checksum form of an EVM address; pass other forms through.
+
+    Why: web3.py rejects non-checksum addresses inside ``get_transaction_count``
+    and ``contract.functions.X(...).build_transaction({"from": ...})``. Storing
+    the verbatim string at the IntentCompiler boundary leaks the case-validation
+    burden into every connector SDK and crashes when a wallet's lowercase form
+    is not EIP-55 valid (VIB-3961, prod 2026-05-04 Aerodrome CL LP_OPEN).
+
+    EVM signal is the ``0x`` prefix — Solana base58 pubkeys never start with 0x.
+    A malformed hex address ("0xINVALID") raises ``ValueError`` from web3 here,
+    which is the correct fail-fast behaviour at a system boundary.
+    """
+    if isinstance(addr, str) and addr.startswith("0x"):
+        from web3 import Web3
+
+        return Web3.to_checksum_address(addr)
+    return addr
+
+
 _CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
     "ethereum": frozenset({"ETH"}),
     "arbitrum": frozenset({"ETH"}),
@@ -331,7 +351,11 @@ class IntentCompiler:
             self.chain = resolve_chain_name(chain)
         except (ValueError, ImportError):
             self.chain = chain
-        self.wallet_address = wallet_address
+        # Checksum EVM wallet addresses at the boundary so every downstream
+        # consumer (web3 build_transaction, get_transaction_count, balance
+        # queries, bridge from_address) sees an EIP-55 string. Solana base58
+        # pubkeys do not start with 0x and pass through unchanged.
+        self.wallet_address = _normalize_wallet_address(wallet_address)
         # Normalize protocol alias (e.g., "agni" -> "agni_finance" on mantle)
         from ..connectors.protocol_aliases import normalize_protocol
 
@@ -341,7 +365,14 @@ class IntentCompiler:
         self.rpc_timeout = rpc_timeout
         self._web3: Web3 | None = None
         self._gateway_client = gateway_client
-        self._chain_wallets = chain_wallets
+        # Lowercase chain keys at construction so lookups via ``dest_chain.lower()``
+        # match — otherwise a caller passing e.g. ``{"Base": "0x..."}`` would silently
+        # fall through to ``self.wallet_address`` and misroute a bridge destination.
+        self._chain_wallets = (
+            {k.strip().lower(): _normalize_wallet_address(v) for k, v in chain_wallets.items()}
+            if chain_wallets
+            else None
+        )
 
         # LP slippage configuration (0.99 = 99% default, allows concentrated liquidity flexibility)
         self.default_lp_slippage = min(max(default_lp_slippage, Decimal("0")), Decimal("1"))

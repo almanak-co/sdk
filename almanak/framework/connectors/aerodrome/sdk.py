@@ -583,9 +583,9 @@ class AerodromeSDK:
             amount,
         ).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
                 "gas": AERODROME_GAS_ESTIMATES["approve"],
-                "nonce": web3.eth.get_transaction_count(sender),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
 
@@ -631,8 +631,8 @@ class AerodromeSDK:
             deadline,
         ).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
-                "nonce": web3.eth.get_transaction_count(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
 
@@ -690,8 +690,8 @@ class AerodromeSDK:
             deadline,
         ).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
-                "nonce": web3.eth.get_transaction_count(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
 
@@ -746,8 +746,8 @@ class AerodromeSDK:
             deadline,
         ).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
-                "nonce": web3.eth.get_transaction_count(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
 
@@ -784,10 +784,10 @@ class AerodromeSDK:
 
         tx = weth.functions.deposit().build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
                 "value": amount,
                 "gas": AERODROME_GAS_ESTIMATES["wrap"],
-                "nonce": web3.eth.get_transaction_count(sender),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
 
@@ -821,9 +821,9 @@ class AerodromeSDK:
 
         tx = weth.functions.withdraw(amount).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
                 "gas": AERODROME_GAS_ESTIMATES["unwrap"],
-                "nonce": web3.eth.get_transaction_count(sender),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
 
@@ -1013,9 +1013,9 @@ class AerodromeSDK:
 
         tx = nft.functions.mint(params).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
                 "gas": AERODROME_GAS_ESTIMATES["cl_mint"],
-                "nonce": web3.eth.get_transaction_count(sender),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
         return tx
@@ -1056,9 +1056,9 @@ class AerodromeSDK:
 
         tx = nft.functions.decreaseLiquidity(params).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
                 "gas": AERODROME_GAS_ESTIMATES["cl_decrease_liquidity"],
-                "nonce": web3.eth.get_transaction_count(sender),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
         return tx
@@ -1097,9 +1097,9 @@ class AerodromeSDK:
 
         tx = nft.functions.collect(params).build_transaction(
             {
-                "from": web3.to_checksum_address(sender),
+                "from": (sender_cs := web3.to_checksum_address(sender)),
                 "gas": AERODROME_GAS_ESTIMATES["cl_collect"],
-                "nonce": web3.eth.get_transaction_count(sender),
+                "nonce": web3.eth.get_transaction_count(sender_cs),
             }
         )
         return tx
