@@ -1,13 +1,26 @@
-"""Arbitrum on-chain permission authorisation tests.
+"""Arbitrum on-chain permission authorisation pilot.
 
 Each test here proves that the manifest returned by
 ``almanak.framework.permissions.generator.generate_manifest()`` actually
 authorises — or, in the negative case, is load-bearing enough to block —
-the compiled intent when applied to a real Zodiac Roles Modifier on the
-Anvil fork. Test payloads come from
-``tests/intents/permission_cases/<protocol>.py`` so the declaration stays
-in one place across phases (see
-``docs/internal/zodiac-permission-onchain-coverage-plan.md``).
+a compiled intent when applied to a real Zodiac Roles Modifier on the
+Anvil fork.
+
+Pre-Phase-G.4 the test payloads were sourced from
+``tests/intents/permission_cases/<protocol>.py`` (now retired). Under
+the default-on Zodiac model that supersedes the parallel runtime,
+the canonical authorisation surface is the regular intent-test matrix
+under ``tests/intents/<chain>/`` — every test there runs through Safe +
+Roles + ``execTransactionWithRole`` automatically. This pilot is kept
+as the **known-good anchor**: it deploys Safe + Roles directly and
+exercises ``run_positive_authorisation_case`` /
+``run_negative_authorisation_case`` against a single inline-constructed
+``PermissionTestCase``, so a regression in the harness primitives surfaces
+here even if the fixture path silently changes shape.
+
+Plan doc:
+``docs/internal/zodiac-permission-onchain-coverage-plan.md`` (Phase G.4
+keep list — the pilot is one of the surfaces explicitly retained).
 
 Unlike the 4-layer intent tests (``.claude/rules/intent-tests.md``), these
 verify **authorisation**, not intent semantics — the 4-layer correctness
@@ -38,7 +51,6 @@ from tests.intents._zodiac_helpers import (
     deploy_test_zodiac_roles,
 )
 from tests.intents.conftest import CHAIN_CONFIGS
-from tests.intents.permission_cases.uniswap_v3 import CASES as UNISWAP_V3_CASES
 
 pytestmark = pytest.mark.no_zodiac(reason="Pilot test deploys its own Safe+Roles; conftest fixture would conflict")
 
@@ -46,20 +58,25 @@ CHAIN_NAME = "arbitrum"
 
 
 def _select_case(chain: str, intent_type: str) -> PermissionTestCase:
-    """Pick the single case matching ``(chain, intent_type)`` from the uniswap_v3 registry.
+    """Build the canonical uniswap_v3 case for ``(chain, intent_type)``.
 
-    Fails if zero or >1 match — case registries are expected to be minimal.
+    Pre-Phase-G.4 this read from ``permission_cases/uniswap_v3.py`` (now
+    retired). The pilot only ever needed one case (arbitrum SWAP), so we
+    inline its construction here. Calls for any other ``(chain, intent_type)``
+    combo raise — this fixture is intentionally minimal, not a generic
+    case registry.
     """
-    matches = [
-        c
-        for c in UNISWAP_V3_CASES
-        if c.chain == chain and c.intent_type.upper() == intent_type.upper()
-    ]
-    if len(matches) != 1:
-        raise AssertionError(
-            f"Expected exactly one uniswap_v3 case for ({chain}, {intent_type}), got {len(matches)}"
+    if chain == "arbitrum" and intent_type.upper() == "SWAP":
+        return PermissionTestCase(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            intent_type="SWAP",
+            config={"from_token": "USDC", "to_token": "WETH", "amount": "100"},
         )
-    return matches[0]
+    raise AssertionError(
+        f"Pilot only knows the arbitrum SWAP case; got ({chain!r}, {intent_type!r}). "
+        f"Add the construction inline if you need another."
+    )
 
 
 # =============================================================================
@@ -143,9 +160,7 @@ async def test_zodiac_plumbing_allows_approve_on_wildcarded_usdc(  # noqa: layer
     )
 
     usdc = web3.eth.contract(address=usdc_address, abi=ERC20_APPROVE_ABI)
-    approve_data = bytes.fromhex(
-        usdc.encode_abi("approve", args=[arbitrary_spender, approve_amount])[2:]
-    )
+    approve_data = bytes.fromhex(usdc.encode_abi("approve", args=[arbitrary_spender, approve_amount])[2:])
     roles_c = web3.eth.contract(
         address=Web3.to_checksum_address(roles),
         abi=ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,

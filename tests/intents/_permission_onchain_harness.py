@@ -7,28 +7,29 @@ prove the manifest ``authorises`` the compiled intent end-to-end under
 ``execTransactionWithRole``. The negative counterpart proves the manifest is
 load-bearing — strip a required target, rerun the same intent, expect revert.
 
-This harness is the execution half of the auto-discovery coverage model (plan
-doc: ``docs/internal/zodiac-permission-onchain-coverage-plan.md``). The
-declaration half lives in ``tests/intents/permission_cases/<protocol>.py``;
-the coverage gate that connects the two lives in
-``tests/unit/permissions/test_onchain_case_coverage.py``.
+Phase G.4 retired the per-chain ``test_permission_onchain.py`` runners and
+the parallel ``permission_cases/*.py`` declaration runtime. The
+``run_positive_authorisation_case`` / ``run_negative_authorisation_case``
+helpers below are now consumed only by the arbitrum pilot
+(``tests/intents/arbitrum/test_zodiac_permission_correctness.py``) as the
+known-good anchor independent of the conftest fixture path. Default-on
+Zodiac coverage for every other ``(connector, intent_type)`` flows through
+the regular intent tests under ``tests/intents/<chain>/`` via the
+``ZodiacOrchestrator`` substitution in each chain's conftest. Plan doc:
+``docs/internal/zodiac-permission-onchain-coverage-plan.md``.
 
-Intent-type dispatch covers SWAP, the LEND family
-(SUPPLY/WITHDRAW/BORROW/REPAY), and the LP family (LP_OPEN, LP_CLOSE).
-BRIDGE / VAULT / PERP branches are stubbed with ``NotImplementedError`` —
-they land alongside the connector coverage in later phases.
+Intent-type dispatch in the legacy harness path covers SWAP, the LEND
+family (SUPPLY/WITHDRAW/BORROW/REPAY), and the LP family (LP_OPEN,
+LP_CLOSE). Other intent types route through the default-on path and
+don't exercise this harness.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
-from functools import lru_cache
-from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 import pytest
@@ -79,12 +80,13 @@ _LP_FUNDING_KEYS = ("token0", "token1")
 class SeedingFailed(RuntimeError):
     """Raised when on-chain state setup fails — distinct from authz failure.
 
-    The triage runbook (``docs/internal/permission-onchain-failure-triage.md``)
-    treats these as infrastructure errors, not Zodiac-manifest bugs. A
-    ``SeedingFailed`` in the nightly means the pre-test setup (SUPPLY before
-    WITHDRAW, LP_OPEN before LP_CLOSE, etc.) could not complete — the Zodiac
-    authz assertion has not yet been exercised when this fires, so the failure
-    does NOT indicate a manifest/generator regression.
+    A ``SeedingFailed`` means the pre-test setup (SUPPLY before WITHDRAW,
+    LP_OPEN before LP_CLOSE, ERC-20 prefunding before a negative-path
+    test, etc.) could not complete. The Zodiac authz assertion has not yet
+    been exercised when this fires, so a ``SeedingFailed`` does NOT
+    indicate a manifest/generator regression — treat it as an
+    infrastructure error (Anvil state pruning, storage-slot mismatch,
+    upstream RPC flake) rather than a Zodiac bug.
     """
 
 
@@ -2278,100 +2280,6 @@ def _prefund_for_negative(
         f"Negative path for {it!r} lands in a follow-up phase. "
         "See docs/internal/zodiac-permission-onchain-coverage-plan.md phases B–E."
     )
-
-
-# =============================================================================
-# Case discovery (Phase F)
-# =============================================================================
-
-
-_CASES_DIR = Path(__file__).resolve().parent / "permission_cases"
-
-
-@lru_cache(maxsize=1)
-def _get_case_modules() -> tuple[tuple[str, ModuleType], ...]:
-    """Return ``(protocol_name, module)`` for every ``permission_cases/<proto>.py``.
-
-    Import-by-path mirrors what the coverage gate does in
-    ``tests/unit/permissions/test_onchain_case_coverage.py`` — the two stay in
-    lockstep so runtime discovery and the gate agree on which files count.
-
-    Cached via ``lru_cache`` because ``discover_cases`` / ``discover_negative_cases``
-    are called at collection time by each per-chain runner (7 chains × 2 calls
-    each = 14+ invocations per session), and re-executing every case module on
-    every call is pure waste. Returning a tuple (not a generator) so the
-    cache works.
-    """
-    collected: list[tuple[str, ModuleType]] = []
-    for case_file in sorted(_CASES_DIR.glob("*.py")):
-        if case_file.name == "__init__.py":
-            continue
-        protocol = case_file.stem
-        spec = importlib.util.spec_from_file_location(f"_perm_cases_runtime.{protocol}", case_file)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Failed to load spec for {case_file}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        collected.append((protocol, module))
-    return tuple(collected)
-
-
-def _deferred_intent_types(module) -> frozenset[str]:
-    """Return the uppercase set of intent types this case file defers at runtime."""
-    deferred = getattr(module, "DEFERRED_INTENT_TYPES", ())
-    return frozenset(str(t).upper() for t in deferred)
-
-
-def discover_cases(chain: str) -> list[PermissionTestCase]:
-    """Return active cases for ``chain``, honouring per-file ``DEFERRED_INTENT_TYPES``.
-
-    Filters:
-      - ``case.chain == chain`` (exact match — ``"bsc"`` does not match ``"bnb"``).
-      - ``case.intent_type.upper()`` not in the module's ``DEFERRED_INTENT_TYPES``.
-
-    Sorted deterministically by ``(protocol, intent_type)`` so pytest test
-    IDs stay stable across runs. Returns a flat list; the per-chain runner
-    parametrizes over it directly.
-    """
-    target = chain
-    collected: list[PermissionTestCase] = []
-    for _protocol, module in _get_case_modules():
-        cases = getattr(module, "CASES", None)
-        if not cases:
-            continue
-        deferred = _deferred_intent_types(module)
-        for case in cases:
-            if not isinstance(case, PermissionTestCase):
-                continue
-            if case.chain != target:
-                continue
-            if case.intent_type.upper() in deferred:
-                continue
-            collected.append(case)
-    collected.sort(key=lambda c: (c.protocol, c.intent_type.upper()))
-    return collected
-
-
-def discover_negative_cases(chain: str) -> list[PermissionTestCase]:
-    """Return every active case for ``chain`` — each is a negative-test candidate.
-
-    Previously this helper filtered to cases declaring ``negative_selector``
-    explicitly. That stopped making sense once ``run_negative_authorisation_case``
-    learned to auto-derive a load-bearing selector from the manifest: every
-    active case is now a candidate, and the per-case outcome (run or skip)
-    is decided at execution time by inspecting the generated manifest.
-
-    Static discovery can't predict the introspection outcome without
-    generating the manifest — that would defeat the point of a cheap
-    collection-time helper. So we return all active cases and let the harness
-    ``pytest.skip`` cleanly when no non-approve target exists to strip.
-
-    The per-chain runners now parametrize both positive and negative tests
-    over the same list, which keeps the two paths in lockstep: any case the
-    positive path covers, the negative path either runs or skips with a clear
-    reason. No silent divergence.
-    """
-    return discover_cases(chain)
 
 
 # =============================================================================
