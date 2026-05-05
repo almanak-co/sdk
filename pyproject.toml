@@ -198,11 +198,15 @@ omit = [
 #   2026-05-04 — Phase 0 + 6a (#2039) merged: CI measured 66.69% on the full unit-scope
 #                (152 593 stmts, 22 210 tests passing, 8m02s with COVERAGE_CORE=sysmon).
 #                Bumped to 65 → 1.69 pt buffer for normal noise.
+#   2026-05-05 — Phase 5b (#2051) + Phase 8 (#2063) + framework consolidation (#2066)
+#                merged. Local measurement on b7aec92c: 73.69% on the full unit-scope
+#                (152 674 stmts, 27 939 tests passing, 4m59s with COVERAGE_CORE=sysmon).
+#                Bumped to 72 → 1.69 pt buffer (matches the 2026-05-04 ratchet pattern).
 #
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 65
+fail_under = 72
 show_missing = true
 skip_empty = true
 
