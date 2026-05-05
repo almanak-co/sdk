@@ -217,8 +217,15 @@ class TestSourceHealthMetrics:
 class TestCoinGeckoPriceSourceInit:
     """Tests for CoinGeckoPriceSource initialization."""
 
-    def test_default_initialization(self) -> None:
+    def test_default_initialization(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test default initialization."""
+        # Without an explicit api_key, the constructor falls back to
+        # `_get_gateway_api_key("COINGECKO_API_KEY")`, which checks
+        # `ALMANAK_GATEWAY_COINGECKO_API_KEY` before the bare var. Both can
+        # be set by deployers / CI secrets, so clear both to isolate this
+        # default-state assertion from the runner environment.
+        monkeypatch.delenv("ALMANAK_GATEWAY_COINGECKO_API_KEY", raising=False)
+        monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
         source = CoinGeckoPriceSource()
 
         assert source.source_name == "coingecko"

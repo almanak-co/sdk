@@ -382,8 +382,12 @@ class TestRSIWilderSmoothing:
 class TestCoinGeckoOHLCVProviderInit:
     """Tests for CoinGeckoOHLCVProvider initialization."""
 
-    def test_default_initialization(self) -> None:
+    def test_default_initialization(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test default initialization."""
+        # Without an explicit api_key, the constructor falls back to the
+        # COINGECKO_API_KEY env var; CI sets that secret, so isolate this
+        # default-state assertion from the runner environment.
+        monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
         provider = CoinGeckoOHLCVProvider()
 
         assert provider._api_base == CoinGeckoOHLCVProvider._FREE_API_BASE
