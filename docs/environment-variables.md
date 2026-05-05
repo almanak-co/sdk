@@ -80,6 +80,7 @@ Only needed if your strategy uses these specific protocols.
 | `POLYMARKET_SECRET` | Optional pre-provisioned HMAC secret paired with `POLYMARKET_API_KEY`. |
 | `POLYMARKET_PASSPHRASE` | Optional pre-provisioned API passphrase paired with `POLYMARKET_API_KEY`. |
 | `POLYMARKET_PRIVATE_KEY` | Legacy gateway-only fallback for Polymarket signing. Prefer `ALMANAK_PRIVATE_KEY`; strategy containers should not require this. |
+| `ALMANAK_POLYMARKET_MARKET_CACHE_TTL_SECONDS` | TTL (seconds) for the gateway's bounded LRU cache of Polymarket market metadata used on every BUY/SELL. Default `60`; set to `0` to disable (every order re-reads from Gamma); hard-capped at 86400 (24 h). Read once at gateway startup, so changes require a gateway restart. Lower under incident if you suspect stale tick / min-size metadata. |
 
 Notes:
 - Strategy containers should not need `POLYMARKET_*` secrets.

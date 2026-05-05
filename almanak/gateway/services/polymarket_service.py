@@ -16,8 +16,11 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -39,10 +42,15 @@ from almanak.framework.connectors.polymarket import (
     GammaMarket,
     MarketFilters,
     OrderFilters,
+    PolymarketAPIError,
     PolymarketConfig,
+    PolymarketMinimumOrderError,
     PolymarketSignatureError,
     SignatureType,
     TransactionData,
+)
+from almanak.framework.connectors.polymarket.exceptions import (
+    PolymarketInvalidTickSizeError,
 )
 from almanak.framework.connectors.polymarket.signer import (
     DEFAULT_SIGNER_TIMEOUT_SECONDS,
@@ -88,6 +96,74 @@ PUSD_CACHE_STALE_BLOCKS = 50
 # don't get silently rejected with "max priority fee per gas higher than max
 # fee per gas" or "transaction underpriced".
 POLYGON_MIN_PRIORITY_FEE_WEI = 30 * 10**9  # 30 gwei
+
+# Bounded TTL cache for GammaMarket lookups (issue #1957). Without this, every
+# CreateAndPostOrder pays one Gamma round-trip on the critical path because the
+# V2 build_limit_order path needs the market's tick_size / min_size / neg_risk.
+# 60s is long enough to absorb burst-of-orders for the same token (the common
+# pattern), short enough that Polymarket-admin tick-size updates propagate
+# within ~1 minute. Cap at 512 entries so a long-running gateway never grows
+# unbounded across many tokens.
+POLYMARKET_MARKET_CACHE_TTL_ENV = "ALMANAK_POLYMARKET_MARKET_CACHE_TTL_SECONDS"
+POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS = 60.0
+# Hard ceiling on the configurable TTL. The whole point of this cache is to
+# stay short enough that admin tick-size updates propagate within a minute or
+# two; if you want a longer effective stale window, you almost certainly want
+# a different design (or to disable the cache via TTL=0). Without a ceiling
+# an env-config typo of "inf" / "1e309" / "86400000" silently produces a
+# permanent cache and orders sign at stale precision.
+POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS = 24 * 3600.0
+POLYMARKET_MARKET_CACHE_MAX_ENTRIES = 512
+
+# Upstream order-rejection text patterns that indicate cached market metadata
+# may be stale. The pattern is intentionally tight: it matches the exact
+# CLOB phrasings the connector embeds into PolymarketInvalidTickSizeError /
+# PolymarketMinimumOrderError (see almanak/framework/connectors/polymarket/
+# exceptions.py:99-124), not arbitrary substrings like "min order" that
+# could appear in unrelated PolymarketAPIError flavours and trigger
+# spurious cache eviction.
+_MARKET_SHAPE_ERROR_PATTERN = re.compile(
+    r"(breaks minimum tick size rule"
+    r"|invalid amount for a marketable .* order"
+    r"|order size .* below minimum)",
+    re.IGNORECASE,
+)
+
+
+def _read_market_cache_ttl_seconds() -> float:
+    """Resolve the GammaMarket cache TTL from env. <=0 disables caching.
+
+    Default 60s, hard-capped at ``POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS``.
+    Misconfigured values (non-numeric, NaN, ±Inf) log a warning and fall
+    back to the default rather than failing service startup — the cache is
+    a perf optimisation, not a correctness gate. NaN/Inf get rejected
+    explicitly because ``float("inf")`` and ``float("nan")`` parse
+    silently and would otherwise produce a *permanent* cache (every
+    expiry check returns False), contradicting the design property that
+    admin tick-size updates propagate within ~1 minute.
+    """
+    raw = os.environ.get(POLYMARKET_MARKET_CACHE_TTL_ENV)
+    if not raw:
+        return POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+    try:
+        ttl = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; falling back to default %ss",
+            POLYMARKET_MARKET_CACHE_TTL_ENV,
+            raw,
+            POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
+        )
+        return POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+    if not math.isfinite(ttl):
+        logger.warning(
+            "%s=%r is not a finite number; falling back to default %ss",
+            POLYMARKET_MARKET_CACHE_TTL_ENV,
+            raw,
+            POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
+        )
+        return POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS
+    return max(0.0, min(ttl, POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS))
 
 
 def _resolve_polymarket_zodiac_entry() -> dict | None:
@@ -214,6 +290,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         # servicer = one signer). Reset whenever the cache is invalidated.
         self._cached_pusd_balance: int | None = None
         self._cached_pusd_balance_block: int | None = None
+        # Bounded TTL cache for GammaMarket metadata (issue #1957). Each
+        # CreateAndPostOrder needs the GammaMarket to compile the V2 order
+        # (tick_size + min_size + neg_risk routing); without a cache that's
+        # one Gamma round-trip per order on the critical path. Per-token
+        # asyncio.Locks coalesce concurrent first-fetches onto a single
+        # upstream call.
+        self._market_cache_ttl_seconds: float = _read_market_cache_ttl_seconds()
+        self._market_cache: OrderedDict[str, tuple[GammaMarket, float]] = OrderedDict()
+        self._market_locks: dict[str, asyncio.Lock] = {}
+        self._market_locks_lock = asyncio.Lock()
         # VIB-3710: setup-tx attribution is request-scoped — each
         # ``CreateAndPostOrder`` invocation owns a local
         # ``setup_txs: list[dict[str, Any]]`` that ``_ensure_wallet_ready``
@@ -1079,11 +1165,138 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         V2 ``build_limit_order`` / ``build_market_order`` require a
         ``GammaMarket`` for tick-size + min-size validation AND neg-risk
         exchange routing (``market.neg_risk`` chooses CTFv2 vs NegRisk V2).
+
+        Cached for up to ``ALMANAK_POLYMARKET_MARKET_CACHE_TTL_SECONDS``
+        (default 60s; set to 0 to disable) to absorb burst-of-orders for
+        the same token. The cache is bounded LRU at
+        ``POLYMARKET_MARKET_CACHE_MAX_ENTRIES`` and is defensively
+        invalidated on tick/min-size order rejections from
+        ``CreateAndPostOrder``. Concurrent first-fetches for the same
+        token coalesce on a single Gamma round-trip via per-token
+        ``asyncio.Lock`` (issue #1957).
         """
+        # Fast path: cache hit. Dict reads are atomic under asyncio's
+        # cooperative scheduler so no lock is needed here.
+        cached = self._cache_get_market(token_id)
+        if cached is not None:
+            return cached
+
+        if self._market_cache_ttl_seconds <= 0:
+            return await self._fetch_market_uncached(client, token_id)
+
+        # Slow path: single-flight via per-token lock. The locks dict is
+        # itself bounded — see _acquire_market_lock — to avoid unbounded
+        # growth on a long-lived gateway across many distinct tokens.
+        per_token_lock = await self._acquire_market_lock(token_id)
+        async with per_token_lock:
+            # Double-check after lock acquisition: a peer may have
+            # populated the entry while we were waiting.
+            cached = self._cache_get_market(token_id)
+            if cached is not None:
+                return cached
+            market = await self._fetch_market_uncached(client, token_id)
+            self._cache_put_market(token_id, market)
+            return market
+
+    async def _fetch_market_uncached(self, client: ClobClient, token_id: str) -> GammaMarket:
+        """One Gamma round-trip; the only place the upstream call lives."""
         markets = await asyncio.to_thread(client.get_markets, MarketFilters(clob_token_ids=[token_id], limit=1))
         if not markets:
             raise ValueError(f"No Polymarket market found for token_id={token_id}")
         return markets[0]
+
+    def _cache_get_market(self, token_id: str) -> GammaMarket | None:
+        """Return the cached, non-expired GammaMarket for ``token_id`` or None.
+
+        Lazy expiry: an expired entry is dropped on read; we don't run a
+        sweeper because the LRU cap bounds total memory anyway.
+
+        Single-loop assumption: this method mutates ``_market_cache``
+        (pop on expiry, ``move_to_end`` on hit) without a lock. Safe
+        under asyncio single-loop semantics because no ``await`` runs
+        between read and mutation; do NOT call from a worker thread.
+        """
+        if self._market_cache_ttl_seconds <= 0:
+            return None
+        entry = self._market_cache.get(token_id)
+        if entry is None:
+            return None
+        market, expires_at = entry
+        # monotonic, not wall clock — TTL must survive NTP step.
+        if time.monotonic() >= expires_at:
+            self._market_cache.pop(token_id, None)
+            return None
+        # LRU touch.
+        self._market_cache.move_to_end(token_id)
+        return market
+
+    def _cache_put_market(self, token_id: str, market: GammaMarket) -> None:
+        """Insert into the cache; evict oldest entries when over capacity."""
+        if self._market_cache_ttl_seconds <= 0:
+            return
+        # monotonic, not wall clock — TTL must survive NTP step.
+        expires_at = time.monotonic() + self._market_cache_ttl_seconds
+        self._market_cache[token_id] = (market, expires_at)
+        self._market_cache.move_to_end(token_id)
+        while len(self._market_cache) > POLYMARKET_MARKET_CACHE_MAX_ENTRIES:
+            self._market_cache.popitem(last=False)
+
+    def _invalidate_market_cache(self, token_id: str) -> None:
+        """Drop the cache entry for ``token_id`` so the next read re-fetches.
+
+        Called from ``CreateAndPostOrder`` when an order rejection signals
+        that cached tick/min-size metadata may be stale relative to the
+        upstream's current view. See ``_is_market_shape_error``.
+        """
+        self._market_cache.pop(token_id, None)
+
+    async def _acquire_market_lock(self, token_id: str) -> asyncio.Lock:
+        """Get-or-create a per-token lock for single-flight market fetches.
+
+        Lock entries are bounded by ``POLYMARKET_MARKET_CACHE_MAX_ENTRIES``
+        so a long-running gateway never accumulates locks for tokens it
+        no longer touches. Eviction MUST skip locks that are currently
+        held — popping a held lock breaks single-flight, because the next
+        request for the evicted token would build a brand-new
+        ``asyncio.Lock`` and acquire it without contention while the
+        original holder's upstream call is still in flight, producing
+        two parallel Gamma round-trips for the same token. If every
+        entry is held, we exceed the cap rather than corrupt the
+        single-flight invariant — the dict re-bounds itself naturally
+        on the next call once any holder releases.
+        """
+        async with self._market_locks_lock:
+            lock = self._market_locks.get(token_id)
+            if lock is None:
+                if len(self._market_locks) >= POLYMARKET_MARKET_CACHE_MAX_ENTRIES:
+                    for evict_key in list(self._market_locks.keys()):
+                        if not self._market_locks[evict_key].locked():
+                            self._market_locks.pop(evict_key, None)
+                            break
+                lock = asyncio.Lock()
+                self._market_locks[token_id] = lock
+            return lock
+
+    @staticmethod
+    def _is_market_shape_error(exc: BaseException) -> bool:
+        """True if ``exc`` indicates that cached market metadata is stale.
+
+        Two failure modes warrant cache eviction:
+
+        1. Connector pre-flight failed against *our* cached market —
+           ``PolymarketInvalidTickSizeError`` / ``PolymarketMinimumOrderError``.
+           If the user's order was actually valid, our cache is the lying
+           party.
+        2. Upstream rejected post-submit with a tick / min-size shape
+           error — surfaces as ``PolymarketAPIError``. The connector
+           pre-flight passed (cache said the order was valid) but the
+           CLOB disagreed, so the cache is presumed stale.
+        """
+        if isinstance(exc, PolymarketInvalidTickSizeError | PolymarketMinimumOrderError):
+            return True
+        if isinstance(exc, PolymarketAPIError):
+            return bool(_MARKET_SHAPE_ERROR_PATTERN.search(str(exc)))
+        return False
 
     @staticmethod
     def _required_pusd_units_for_buy(price: str, size: str) -> int:
@@ -1572,16 +1785,26 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 min_pusd = self._required_pusd_units_for_buy(request.price, request.size) if side == "BUY" else 0
                 setup_txs_records = await self._ensure_wallet_ready(min_pusd_units=min_pusd)
 
-                response = await asyncio.to_thread(
-                    client.create_and_post_order,
-                    token_id=request.token_id,
-                    price=price,
-                    size=size,
-                    side=side,
-                    market=market,
-                    time_in_force=request.time_in_force or "GTC",
-                    expiration=request.expiration if request.expiration > 0 else 0,
-                )
+                # Defensive cache eviction (issue #1957) is scoped to the
+                # upstream order call ONLY — wider scoping would let an
+                # unrelated PolymarketAPIError from approvals / wraps
+                # whose message coincidentally matched the shape regex
+                # evict a perfectly fresh cache entry.
+                try:
+                    response = await asyncio.to_thread(
+                        client.create_and_post_order,
+                        token_id=request.token_id,
+                        price=price,
+                        size=size,
+                        side=side,
+                        market=market,
+                        time_in_force=request.time_in_force or "GTC",
+                        expiration=request.expiration if request.expiration > 0 else 0,
+                    )
+                except Exception as order_exc:
+                    if self._is_market_shape_error(order_exc):
+                        self._invalidate_market_cache(request.token_id)
+                    raise
             finally:
                 client.close()
             # VIB-3710: setup_txs_records is the request-scoped list owned by
@@ -1626,6 +1849,9 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             # confirmed before this exception are local to this call only.
             return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
         except Exception as e:
+            # Cache eviction for shape errors happens at the upstream call
+            # site (see the inner try around create_and_post_order); this
+            # outer handler only translates the exception to a response.
             logger.exception("Failed to create order through gateway Polymarket client")
             return gateway_pb2.PolymarketOrderResponse(success=False, error=str(e))
 
