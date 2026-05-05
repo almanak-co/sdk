@@ -520,6 +520,14 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         the most recent derive+create attempt. The strategy container has no
         view of the gateway's stdout, so without this embedding the operator
         sees a bare "could not be derived" with no breadcrumb to act on.
+
+        ONLY use this for endpoints that genuinely require L2 (HMAC-API-key)
+        auth at the upstream layer — e.g. order placement/cancel, ``/data/orders``,
+        ``/data/trades``, ``/balance-allowance``. For Polymarket Data API and
+        Gamma reads (positions, market metadata, prices, orderbook) the
+        upstream is public; route those through ``_build_public_client``
+        instead so credential derivation is not on the critical path
+        (VIB-3769).
         """
         if not self._credentials_available:
             ok = await self._ensure_credentials()
@@ -527,6 +535,36 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
                 reason = self._last_credentials_failure or "unknown reason (gateway logs may have detail)"
                 raise ValueError(f"Polymarket API credentials could not be derived in gateway: {reason}")
         return self._build_client()
+
+    def _build_public_client(self) -> ClobClient:
+        """Build a CLOB client for public Polymarket Data API / Gamma reads.
+
+        These endpoints (``/positions``, ``/markets``, ``/book``, ``/price``,
+        ``/midpoint``, ``/tick-size``, ``/prices-history``) accept a wallet
+        address as a query parameter but do NOT require L2 (HMAC-API-key)
+        signing — the upstream ClobClient calls ``_get_data_api`` /
+        ``_get_gamma`` / ``self._get(..., authenticated=False)``.
+
+        Routing public reads through ``_build_authenticated_client`` was
+        wasted work and a fragile dependency on credential derivation
+        succeeding (VIB-3769): a wallet that has never registered Polymarket
+        API keys would 401 on derive even though the read-only endpoint it
+        intended to hit is public. ``_build_public_client`` skips the
+        ``_ensure_credentials`` step entirely.
+
+        ``require_signer=False`` is required: a market-data-only gateway with
+        no Polymarket signer wired must still be able to serve these
+        endpoints. ``ClobClient`` carries ``signer=None`` and any signed call
+        raises ``PolymarketSignatureError`` — so this client cannot be
+        accidentally used for write paths.
+
+        Some public Data API calls (e.g. ``get_positions``) key by wallet
+        and the caller must guarantee a wallet is configured — that check
+        belongs to the RPC handler (only some public endpoints need it),
+        not here. Token-id-keyed reads such as ``get_price_history`` and
+        ``get_orderbook`` do not need a wallet at all.
+        """
+        return self._build_client(require_signer=False)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -2098,9 +2136,21 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         _request: gateway_pb2.PolymarketGetPositionsRequest,
         _context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PolymarketPositionsResponse:
-        """Get positions for the wallet."""
+        """Get positions for the wallet.
+
+        Polymarket's Data API ``/positions`` endpoint is public and keyed by
+        wallet — ``ClobClient.get_positions`` calls ``_get_data_api`` which
+        sends ``authenticated=False``. Use the public client to skip L2
+        credential derivation, which was previously a fragile blocker for any
+        wallet that had not registered Polymarket API keys (VIB-3769).
+        """
+        if not self._wallet_address:
+            return gateway_pb2.PolymarketPositionsResponse(
+                success=False,
+                error="Polymarket wallet address is not configured on the gateway",
+            )
         try:
-            client = await self._build_authenticated_client()
+            client = self._build_public_client()
             try:
                 data = await asyncio.to_thread(client.get_positions)
             finally:
@@ -2290,7 +2340,7 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             )
 
         try:
-            client = self._build_client(require_signer=False)
+            client = self._build_public_client()
             try:
                 history = await asyncio.to_thread(
                     client.get_price_history,
