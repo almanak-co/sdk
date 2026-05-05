@@ -208,6 +208,100 @@ class TestTraderJoeV2PostCondition:
         assert result.closed is False
         assert "boom" in (result.error or "")
 
+    def test_skips_token_position_type_without_failing_closed(self) -> None:
+        """VIB-3974: A ``PositionType.TOKEN`` position with
+        ``protocol='traderjoe_v2'`` (e.g. S-008 RSI flipper on Avalanche
+        reporting a residual base-token balance like WAVAX with no
+        ``pool_address``) must NOT be routed through the LB-pair closure
+        check. Pre-fix, the hook fell through to the missing-pool_address
+        branch and fail-closed every swap-only TraderJoe V2 teardown.
+        Mirrors the Uniswap V3 non-LP gate.
+        """
+        # Pre-empt any SDK init by ensuring the adapter is never constructed.
+        with patch(
+            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+        ) as adapter_cls:
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="s008_rsi_token_0",
+                chain="avalanche",
+                position_type=SimpleNamespace(value="TOKEN"),
+                details={"asset": "WAVAX", "balance": "1000000000000000000"},
+            )
+            result = _traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+            )
+
+        # Hook reports closed=True with a residual note explaining it
+        # deferred — verifier moves on to the next position.
+        assert result.closed is True
+        assert result.error is None
+        assert "skipped_reason" in result.residual
+        assert "TOKEN" in result.residual["skipped_reason"]
+        # Adapter MUST NOT have been constructed — that's the whole point
+        # of gating before SDK init.
+        adapter_cls.assert_not_called()
+
+    def test_lp_position_still_gated_through_strong_mode(self) -> None:
+        """Regression guard: a ``PositionType.LP`` position still flows
+        through the existing LB-pair balance check. The non-LP gate must
+        not short-circuit real LP teardowns.
+        """
+        sdk = MagicMock()
+        sdk.get_position_balances_for_ids.return_value = {}
+        with patch(
+            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+        ) as adapter_cls:
+            adapter_cls.return_value.sdk = sdk
+
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-v2-lp",
+                chain="avalanche",
+                position_type=SimpleNamespace(value="LP"),
+                details={"pool_address": POOL, "bin_ids": [10, 11, 12]},
+            )
+            result = _traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+
+        assert result.closed is True
+        assert "skipped_reason" not in result.residual
+        sdk.get_position_balances_for_ids.assert_called_once_with(
+            POOL, WALLET, [10, 11, 12]
+        )
+
+    def test_lp_position_with_residual_still_fails_closure(self) -> None:
+        """Regression guard: an LP position with residual liquidity must
+        still report closed=False. The non-LP gate must not weaken the
+        LP path.
+        """
+        sdk = MagicMock()
+        sdk.get_position_balances_for_ids.return_value = {10: 7777}
+        with patch(
+            "almanak.framework.connectors.traderjoe_v2.TraderJoeV2Adapter"
+        ) as adapter_cls:
+            adapter_cls.return_value.sdk = sdk
+
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-v2-lp",
+                chain="avalanche",
+                position_type=SimpleNamespace(value="LP"),
+                details={"pool_address": POOL, "bin_ids": [10]},
+            )
+            result = _traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+
+        assert result.closed is False
+        assert result.residual["bin_balances"] == {10: 7777}
+
     def test_balance_query_failure_returns_error(self) -> None:
         sdk = MagicMock()
         sdk.get_position_balances_for_ids.side_effect = RuntimeError("rpc-down")

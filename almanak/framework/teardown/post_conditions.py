@@ -154,6 +154,34 @@ def _traderjoe_v2_post_condition(
     protocol = "traderjoe_v2"
     position_id = getattr(position, "position_id", "") or ""
 
+    # Gate by position type: ``protocol="traderjoe_v2"`` is shared between
+    # LP positions (``PositionType.LP`` — the LB pair / bin-balances shape
+    # this hook verifies) and TOKEN positions reported by swap-only
+    # strategies (e.g. S-008 RSI flipper on Avalanche, which surfaces
+    # ``PositionType.TOKEN`` with ``details={"asset": "WAVAX", "balance": ...}``
+    # and no ``pool_address``). The LB-pair-shaped check must NOT run on
+    # TOKEN positions — doing so fail-closes every swap-only TraderJoe V2
+    # teardown on the missing-pool_address branch (VIB-3974). Mirror the
+    # Uniswap V3 hook's gate: treat non-LP positions as "outside this
+    # hook's scope" — closed=True with a residual note so the verifier
+    # moves on. Balance-zero verification for TOKEN positions is the
+    # strategy's ``get_open_positions()`` contract, not this hook's
+    # responsibility.
+    position_type_raw = getattr(position, "position_type", None)
+    position_type_value = (getattr(position_type_raw, "value", None) or str(position_type_raw or "")).upper()
+    if position_type_value and position_type_value != "LP":
+        return ClosureCheckResult(
+            closed=True,
+            protocol=protocol,
+            position_id=position_id,
+            residual={
+                "skipped_reason": (
+                    f"TraderJoe V2 post-condition only verifies LP LB-pair positions; "
+                    f"position_type={position_type_value!r} is outside scope"
+                ),
+            },
+        )
+
     # Pull pool + bin metadata. ``position`` is a teardown ``PositionInfo``
     # (from ``strategy.get_open_positions()``), or anything else with a
     # ``.details`` mapping.
