@@ -7,6 +7,8 @@ managed gateway + Anvil when no gateway is already running.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from collections.abc import Generator
 from dataclasses import dataclass
 
@@ -76,29 +78,50 @@ def nightly_gateway_runtime() -> Generator[NightlyGatewayRuntime, None, None]:
     startup_timeout = float(os.getenv("MARKET_CONTRACT_GATEWAY_STARTUP_TIMEOUT", "120"))
     ready_timeout = float(os.getenv("MARKET_CONTRACT_GATEWAY_READY_TIMEOUT", "180"))
 
-    settings = GatewaySettings(
-        grpc_host=host,
-        grpc_port=selected_port,
-        network="anvil",
-        chains=[chain],
-        metrics_enabled=False,
-        audit_enabled=False,
-        allow_insecure=True,
-        log_level="warning",
-    )
-    gateway = ManagedGateway(settings=settings, anvil_chains=[chain])
-    gateway.start(timeout=startup_timeout)
-
-    if not _wait_for_gateway_ready(host=host, port=selected_port, wait_timeout=ready_timeout):
-        gateway.stop(timeout=10.0)
-        raise RuntimeError(f"Managed gateway failed readiness at {host}:{selected_port}")
-
+    # VIB-3996 / VIB-3835: ManagedGateway.start() acquires a flock on the
+    # local SQLite DB resolved by `local_paths._resolve_db_path(strict=True)`.
+    # That resolver requires either ALMANAK_STATE_DB, ALMANAK_STRATEGY_FOLDER,
+    # or a strategy folder in cwd (config.json / strategy.py). The nightly
+    # Market Data API Contract harness is not a strategy — it only queries
+    # gateway market data — and runs inside `tests/visual/nightly/`, which
+    # is intentionally not a strategy folder. Without an explicit ALMANAK_STATE_DB,
+    # gateway startup raises LocalPathError before the test body ever runs.
+    #
+    # Provide a per-session tmp DB path. This preserves the folder-scoped
+    # invariant (the flock still enforces 1:1 against this explicit path) and
+    # is opt-in via env var — we don't weaken `_resolve_db_path(strict=True)`.
+    nightly_db_dir = tempfile.mkdtemp(prefix="market_data_api_contract_")
+    nightly_db_path = os.path.join(nightly_db_dir, "almanak_state.db")
+    old_state_db = os.environ.get("ALMANAK_STATE_DB")
     old_host = os.environ.get("GATEWAY_HOST")
     old_port = os.environ.get("GATEWAY_PORT")
-    os.environ["GATEWAY_HOST"] = host
-    os.environ["GATEWAY_PORT"] = str(selected_port)
+    os.environ["ALMANAK_STATE_DB"] = nightly_db_path
 
+    gateway: ManagedGateway | None = None
+    host_set = False
+    port_set = False
     try:
+        settings = GatewaySettings(
+            grpc_host=host,
+            grpc_port=selected_port,
+            network="anvil",
+            chains=[chain],
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            log_level="warning",
+        )
+        gateway = ManagedGateway(settings=settings, anvil_chains=[chain])
+        gateway.start(timeout=startup_timeout)
+
+        if not _wait_for_gateway_ready(host=host, port=selected_port, wait_timeout=ready_timeout):
+            raise RuntimeError(f"Managed gateway failed readiness at {host}:{selected_port}")
+
+        os.environ["GATEWAY_HOST"] = host
+        host_set = True
+        os.environ["GATEWAY_PORT"] = str(selected_port)
+        port_set = True
+
         runtime = NightlyGatewayRuntime(
             host=host,
             port=selected_port,
@@ -107,12 +130,23 @@ def nightly_gateway_runtime() -> Generator[NightlyGatewayRuntime, None, None]:
         )
         yield runtime
     finally:
-        gateway.stop(timeout=10.0)
-        if old_host is None:
-            os.environ.pop("GATEWAY_HOST", None)
+        if gateway is not None:
+            try:
+                gateway.stop(timeout=10.0)
+            except Exception:  # noqa: BLE001 - cleanup must continue even if stop fails
+                pass
+        if host_set:
+            if old_host is None:
+                os.environ.pop("GATEWAY_HOST", None)
+            else:
+                os.environ["GATEWAY_HOST"] = old_host
+        if port_set:
+            if old_port is None:
+                os.environ.pop("GATEWAY_PORT", None)
+            else:
+                os.environ["GATEWAY_PORT"] = old_port
+        if old_state_db is None:
+            os.environ.pop("ALMANAK_STATE_DB", None)
         else:
-            os.environ["GATEWAY_HOST"] = old_host
-        if old_port is None:
-            os.environ.pop("GATEWAY_PORT", None)
-        else:
-            os.environ["GATEWAY_PORT"] = old_port
+            os.environ["ALMANAK_STATE_DB"] = old_state_db
+        shutil.rmtree(nightly_db_dir, ignore_errors=True)
