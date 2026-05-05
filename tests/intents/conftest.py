@@ -255,7 +255,7 @@ CHAIN_CONFIGS = {
     "mantle": {
         "rpc_url": "https://rpc.mantle.xyz",
         "chain_id": 5000,
-        "alchemy_key": None,  # No Alchemy support, uses public RPC
+        "alchemy_key": "mantle",  # Alchemy mainnet supported (mantle-mainnet.g.alchemy.com)
         "tokens": {
             "WMNT": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
             "USDC": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",
@@ -297,7 +297,7 @@ CHAIN_CONFIGS = {
     "xlayer": {
         "rpc_url": "https://rpc.xlayer.tech",
         "chain_id": 196,
-        "alchemy_key": None,  # No Alchemy support, uses public RPC
+        "alchemy_key": "xlayer",  # Alchemy mainnet supported (xlayer-mainnet.g.alchemy.com)
         "tokens": {
             "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
             "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",

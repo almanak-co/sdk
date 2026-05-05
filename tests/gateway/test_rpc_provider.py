@@ -150,6 +150,39 @@ class TestGetRpcUrl:
             assert "alchemy.com" in url
             assert "test-alchemy-key" in url
 
+    def test_alchemy_route_for_mantle(self):
+        """mantle resolves to mantle-mainnet.g.alchemy.com when an Alchemy key is set."""
+        with patch.dict(os.environ, {"ALCHEMY_API_KEY": "test-alchemy-key"}, clear=False):
+            for var in ("MANTLE_RPC_URL", "ALMANAK_MANTLE_RPC_URL", "RPC_URL", "ALMANAK_RPC_URL"):
+                os.environ.pop(var, None)
+            url = get_rpc_url("mantle")
+        assert "mantle-mainnet.g.alchemy.com" in url
+        assert "test-alchemy-key" in url
+
+    def test_alchemy_route_for_xlayer(self):
+        """xlayer resolves to xlayer-mainnet.g.alchemy.com when an Alchemy key is set."""
+        with patch.dict(os.environ, {"ALCHEMY_API_KEY": "test-alchemy-key"}, clear=False):
+            for var in ("XLAYER_RPC_URL", "ALMANAK_XLAYER_RPC_URL", "RPC_URL", "ALMANAK_RPC_URL"):
+                os.environ.pop(var, None)
+            url = get_rpc_url("xlayer")
+        assert "xlayer-mainnet.g.alchemy.com" in url
+        assert "test-alchemy-key" in url
+
+    def test_builtin_chains_register_xlayer_alchemy_prefix(self):
+        """xlayer's alchemy_prefix is wired both via config/rpc_defaults.json and the
+        in-process _BUILTIN_CHAINS fallback, so deployments without the JSON config still
+        route through Alchemy. Mantle has the same wiring; included for parity."""
+        from almanak.gateway.utils.rpc_provider import _BUILTIN_CHAINS, ALCHEMY_CHAIN_KEYS
+
+        # _BUILTIN_CHAINS is the in-process fallback used when config/rpc_defaults.json
+        # isn't on disk (e.g. wheel-installed package without the repo root checkout).
+        assert _BUILTIN_CHAINS["xlayer"]["alchemy_prefix"] == "xlayer"
+        assert _BUILTIN_CHAINS["mantle"]["alchemy_prefix"] == "mantle"
+        # ALCHEMY_CHAIN_KEYS is built from the loaded chains dict (config file when
+        # present, _BUILTIN_CHAINS otherwise) — it must contain both either way.
+        assert ALCHEMY_CHAIN_KEYS.get("xlayer") == "xlayer"
+        assert ALCHEMY_CHAIN_KEYS.get("mantle") == "mantle"
+
     def test_anvil_mode_ignores_custom_url(self):
         """Anvil network always returns localhost regardless of custom URL."""
         with patch.dict(os.environ, {"RPC_URL": "https://custom-rpc"}):
