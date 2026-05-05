@@ -42,11 +42,15 @@ def test_private_key():
 
 
 @pytest.fixture
-def config(test_wallet_address, test_private_key):
-    """Create test configuration."""
+def config(test_wallet_address, test_private_key):  # noqa: ARG001 — kept for fixture compatibility
+    """Create test configuration.
+
+    After issue #1961 ``PolymarketConfig`` carries no signing credentials.
+    The ``test_private_key`` fixture is left wired so SDK tests that need a
+    signer can call :func:`make_local_signer` themselves.
+    """
     return PolymarketConfig(
         wallet_address=test_wallet_address,
-        private_key=SecretStr(test_private_key),
         signature_type=SignatureType.EOA,
     )
 
@@ -69,7 +73,6 @@ def config_with_credentials(config, credentials):
     """Create configuration with pre-existing credentials."""
     return PolymarketConfig(
         wallet_address=config.wallet_address,
-        private_key=config.private_key,
         signature_type=config.signature_type,
         api_credentials=credentials,
     )

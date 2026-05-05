@@ -33,11 +33,16 @@ from almanak.framework.connectors.polymarket.exceptions import (
     PolymarketAPIError,
     PolymarketAuthenticationError,
     PolymarketRateLimitError,
+    PolymarketSignatureError,
 )
 from almanak.framework.connectors.polymarket.models import (
     CLOB_AUTH_DOMAIN,
     CLOB_AUTH_MESSAGE,
     CLOB_AUTH_TYPES,
+)
+from almanak.framework.connectors.polymarket.signer import (
+    make_local_signer,
+    make_remote_signer,
 )
 
 # =============================================================================
@@ -45,11 +50,103 @@ from almanak.framework.connectors.polymarket.models import (
 # =============================================================================
 
 
+# Deterministic test key shared across all fixtures + the module-level
+# ``_make_clob_client`` helper. Tests construct ``ClobClient`` via the helper
+# so the signer is injected once — keeps the diff for issue #1961 minimal
+# without sprinkling ``signer=`` across hundreds of call sites.
+_TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+
 @pytest.fixture
 def test_account():
     """Create a test Ethereum account."""
     # Use a deterministic account for testing
-    return Account.from_key("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    return Account.from_key(_TEST_PRIVATE_KEY)
+
+
+def _make_clob_client(config: PolymarketConfig, *args, **kwargs) -> ClobClient:
+    """Build a ClobClient for tests with a default local Signer.
+
+    Tests that need read-only mode (``signer=None``) or a remote signer pass
+    ``signer=`` explicitly and that overrides this default.
+    """
+    kwargs.setdefault("signer", make_local_signer(_TEST_PRIVATE_KEY))
+    return ClobClient(config, *args, **kwargs)
+
+
+# =============================================================================
+# Read-only mode (signer=None) — issue #1961
+# =============================================================================
+
+
+class TestReadOnlyMode:
+    """``ClobClient(config, signer=None)`` — public endpoints work; signing
+    paths raise :class:`PolymarketSignatureError`. The whole point of issue
+    #1961 is that a strategy that grabs the connector directly cannot sign
+    without explicitly handing it a Signer."""
+
+    def test_build_l1_headers_raises_without_signer(self, config):
+        client = ClobClient(config, signer=None)
+        with pytest.raises(PolymarketSignatureError, match="read-only mode"):
+            client._build_l1_headers()
+
+    def test_sign_order_raises_without_signer(self, config_with_credentials):
+        from almanak.framework.connectors.polymarket.models import LimitOrderParams
+
+        client = ClobClient(config_with_credentials, signer=None)
+        # build_limit_order is a pure helper that does not sign — it should
+        # still work even in read-only mode. Only the explicit ``sign_order``
+        # call raises.
+        params = LimitOrderParams(
+            token_id="12345",
+            side="BUY",
+            price=Decimal("0.50"),
+            size=Decimal("10"),
+        )
+        market = _make_test_market(neg_risk=False)
+        unsigned = client.build_limit_order(params, market=market)
+        with pytest.raises(PolymarketSignatureError, match="read-only mode"):
+            client.sign_order(unsigned)
+
+    def test_default_signer_is_none(self, config):
+        """Constructing ``ClobClient`` without ``signer=`` defaults to read-only.
+        A regression that defaulted to "local mode if env happens to have a
+        key" would re-create the leak issue #1961 closes."""
+        client = ClobClient(config)
+        assert client._signer is None
+
+
+class TestPolymarketConfigRejectsLegacySignerKwargs:
+    """Pydantic ``extra='forbid'`` makes the #1961 hard break fail fast.
+
+    The credential fields (``private_key``, ``signer_service_url``,
+    ``signer_service_jwt``) were removed in #1961. With Pydantic's default
+    ``extra='ignore'``, a stale call site that still passes them would
+    silently produce a credentials-free config and the break would only
+    surface as a runtime ``PolymarketSignatureError`` on the first signing
+    call — i.e. a runtime outage instead of an immediate migration error.
+    These tests pin the fail-fast behaviour.
+    """
+
+    @pytest.mark.parametrize(
+        "field_name, value",
+        [
+            ("private_key", SecretStr("0x" + "0" * 64)),
+            ("signer_service_url", "https://signer.example.com"),
+            ("signer_service_jwt", SecretStr("jwt-token")),
+        ],
+    )
+    def test_legacy_signer_kwarg_raises(self, test_account, field_name, value):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            PolymarketConfig(wallet_address=test_account.address, **{field_name: value})
+
+    def test_unknown_kwarg_raises(self, test_account):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            PolymarketConfig(wallet_address=test_account.address, totally_unknown_field=42)
 
 
 @pytest.fixture
@@ -57,9 +154,14 @@ def config(test_account):
     """Create test configuration."""
     return PolymarketConfig(
         wallet_address=test_account.address,
-        private_key=SecretStr(test_account.key.hex()),
         signature_type=SignatureType.EOA,
     )
+
+
+@pytest.fixture
+def signer(test_account):
+    """Create a local Signer bound to the test account."""
+    return make_local_signer(test_account.key.hex())
 
 
 @pytest.fixture
@@ -79,7 +181,6 @@ def config_with_credentials(config, credentials):
     """Create configuration with pre-existing credentials."""
     return PolymarketConfig(
         wallet_address=config.wallet_address,
-        private_key=config.private_key,
         signature_type=config.signature_type,
         api_credentials=credentials,
     )
@@ -101,7 +202,7 @@ class TestL1Authentication:
 
     def test_build_l1_headers_contains_required_fields(self, config):
         """L1 headers should contain all required fields."""
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         assert "POLY_ADDRESS" in headers
@@ -111,7 +212,7 @@ class TestL1Authentication:
 
     def test_build_l1_headers_wallet_address(self, config):
         """L1 headers should contain correct wallet address."""
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         assert headers["POLY_ADDRESS"] == config.wallet_address
@@ -122,7 +223,7 @@ class TestL1Authentication:
         Regression: VIB-3013. Polymarket's GET /auth/derive-api-key rejects
         signatures without the `0x` prefix with `400 "Could not derive api key!"`.
         """
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         signature = headers["POLY_SIGNATURE"]
@@ -133,7 +234,7 @@ class TestL1Authentication:
 
     def test_build_l1_headers_timestamp_is_recent(self, config):
         """L1 timestamp should be recent."""
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         timestamp = int(headers["POLY_TIMESTAMP"])
@@ -144,14 +245,14 @@ class TestL1Authentication:
 
     def test_build_l1_headers_nonce_default(self, config):
         """L1 nonce should default to 0."""
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         assert headers["POLY_NONCE"] == "0"
 
     def test_build_l1_headers_custom_nonce(self, config):
         """L1 nonce should accept custom value."""
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers(nonce=42)
 
         assert headers["POLY_NONCE"] == "42"
@@ -160,7 +261,7 @@ class TestL1Authentication:
         """Signature should be recoverable to the original address."""
         from eth_account.messages import encode_typed_data
 
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         timestamp = headers["POLY_TIMESTAMP"]
@@ -203,7 +304,7 @@ class TestL2Authentication:
 
     def test_build_l2_headers_contains_required_fields(self, config_with_credentials):
         """L2 headers should contain all required fields."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         headers = client._build_l2_headers("GET", "/test")
 
         assert "POLY_ADDRESS" in headers
@@ -214,14 +315,14 @@ class TestL2Authentication:
 
     def test_build_l2_headers_api_key(self, config_with_credentials):
         """L2 headers should contain correct API key."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         headers = client._build_l2_headers("GET", "/test")
 
         assert headers["POLY_API_KEY"] == "test_api_key"
 
     def test_build_l2_headers_passphrase(self, config_with_credentials):
         """L2 headers should contain correct passphrase."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         headers = client._build_l2_headers("GET", "/test")
 
         assert headers["POLY_PASSPHRASE"] == "test_passphrase"
@@ -232,7 +333,7 @@ class TestL2Authentication:
         Polymarket API secrets are URL-safe base64 (`-` / `_`) and the server
         verifies URL-safe encoding on the signature too.
         """
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         headers = client._build_l2_headers("GET", "/test")
 
         signature = headers["POLY_SIGNATURE"]
@@ -245,7 +346,7 @@ class TestL2Authentication:
 
     def test_build_l2_signature_reproducible(self, config_with_credentials):
         """L2 signature should be reproducible with same inputs."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
 
         # Get the timestamp from first call
         with patch("time.time", return_value=1704067200):  # Fixed timestamp
@@ -256,7 +357,7 @@ class TestL2Authentication:
 
     def test_build_l2_signature_includes_body(self, config_with_credentials):
         """L2 signature should include request body."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
 
         with patch("time.time", return_value=1704067200):
             headers_no_body = client._build_l2_headers("POST", "/order", "")
@@ -266,7 +367,7 @@ class TestL2Authentication:
 
     def test_build_l2_signature_manual_verification(self, config_with_credentials, credentials):
         """Manually verify L2 signature computation."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
 
         timestamp = "1704067200"
         method = "GET"
@@ -310,7 +411,7 @@ class TestCredentialManagement:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.post.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
         credentials = client.create_api_credentials()
 
         assert credentials.api_key == "new_api_key"
@@ -329,7 +430,7 @@ class TestCredentialManagement:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.post.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         with pytest.raises(PolymarketAuthenticationError):
             client.create_api_credentials()
@@ -347,14 +448,14 @@ class TestCredentialManagement:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.get.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
         credentials = client.derive_api_credentials()
 
         assert credentials.api_key == "derived_api_key"
 
     def test_get_or_create_credentials_uses_existing(self, config_with_credentials):
         """Should return existing credentials if available."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         credentials = client.get_or_create_credentials()
 
         assert credentials.api_key == "test_api_key"
@@ -372,7 +473,7 @@ class TestCredentialManagement:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.get.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
         credentials = client.get_or_create_credentials()
 
         # Should have called derive (GET), not create (POST)
@@ -599,11 +700,10 @@ class TestSignatureTypes:
         """EOA signature type should work correctly."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             signature_type=SignatureType.EOA,
         )
 
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         headers = client._build_l1_headers()
 
         # Should still produce valid signature ("0x" + 65-byte hex = 132 chars)
@@ -634,7 +734,7 @@ class TestErrorHandling:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         with pytest.raises(PolymarketRateLimitError) as exc_info:
             client._request("GET", "https://clob.polymarket.com/test")
@@ -653,7 +753,7 @@ class TestErrorHandling:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         with pytest.raises(PolymarketAPIError) as exc_info:
             client._request("GET", "https://clob.polymarket.com/test")
@@ -671,7 +771,7 @@ class TestCaching:
 
     def test_cache_set_and_get(self, config_with_credentials):
         """Should cache and retrieve values."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
 
         client._set_cached("test_key", {"data": "value"}, ttl=60)
         result = client._get_cached("test_key")
@@ -680,7 +780,7 @@ class TestCaching:
 
     def test_cache_expiration(self, config_with_credentials):
         """Should return None for expired cache."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
 
         # Set with very short TTL
         client._set_cached("test_key", {"data": "value"}, ttl=0)
@@ -693,7 +793,7 @@ class TestCaching:
 
     def test_cache_miss(self, config_with_credentials):
         """Should return None for missing cache key."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         result = client._get_cached("nonexistent_key")
         assert result is None
 
@@ -740,7 +840,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         markets = client.get_markets()
 
         assert len(markets) == 1
@@ -764,7 +864,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         filters = MarketFilters(active=True, closed=False, limit=50)
         client.get_markets(filters=filters)
 
@@ -800,7 +900,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         market = client.get_market("12345")
 
         assert market.id == "12345"
@@ -831,7 +931,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         # First call should hit API
         market1 = client.get_market("12345")
@@ -870,7 +970,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         orderbook = client.get_orderbook("token123")
 
         assert len(orderbook.bids) == 3
@@ -897,7 +997,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         # First call hits API, second uses cache
         client.get_orderbook("token123")
@@ -922,7 +1022,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = [bid_response, ask_response]
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         price = client.get_price("token123")
 
         assert price.bid == Decimal("0.64")
@@ -952,7 +1052,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = [bid_response, ask_response]
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         price = client.get_price("token123")
 
         assert price.bid == Decimal("0.64")
@@ -974,7 +1074,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = [bid_response, ask_response]
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         client.get_price("token123")
         client.get_price("token123")
@@ -994,7 +1094,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         midpoint = client.get_midpoint("token123")
 
         assert midpoint == Decimal("0.65")
@@ -1011,7 +1111,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         tick_size = client.get_tick_size("token123")
 
         assert tick_size == Decimal("0.01")
@@ -1043,7 +1143,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         market = client.get_market_by_slug("test-market")
 
         assert market is not None
@@ -1059,7 +1159,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         market = client.get_market_by_slug("nonexistent-slug")
 
         assert market is None
@@ -1074,7 +1174,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.health_check() is True
 
     def test_health_check_failure(self, config_with_credentials):
@@ -1082,7 +1182,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = Exception("Connection failed")
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.health_check() is False
 
     def test_get_server_time_raw_int_v2(self, config_with_credentials):
@@ -1100,7 +1200,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.get_server_time() == 1777384897
 
     def test_get_server_time_dict_shape_back_compat(self, config_with_credentials):
@@ -1118,7 +1218,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.get_server_time() == 1704067200
 
     def test_get_server_time_unexpected_shape_falls_back_to_local_clock(self, config_with_credentials):
@@ -1138,7 +1238,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         before = int(_time.time())
         result = client.get_server_time()
         after = int(_time.time()) + 1
@@ -1162,7 +1262,7 @@ class TestMarketData:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = [rate_limit_response, success_response]
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         # Should succeed after retry
         with patch("time.sleep"):  # Don't actually sleep in tests
@@ -1213,7 +1313,7 @@ class TestPositions:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         positions = client.get_positions()
 
         assert len(positions) == 2
@@ -1248,7 +1348,7 @@ class TestPositions:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_positions()
 
         # Verify request was made with config wallet address
@@ -1266,7 +1366,7 @@ class TestPositions:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         custom_wallet = "0x1234567890123456789012345678901234567890"
         client.get_positions(wallet=custom_wallet)
 
@@ -1287,7 +1387,7 @@ class TestPositions:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         filters = PositionFilters(market="0xmarket123", outcome="YES")
         client.get_positions(filters=filters)
 
@@ -1307,7 +1407,7 @@ class TestPositions:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         positions = client.get_positions()
 
         assert positions == []
@@ -1339,7 +1439,7 @@ class TestPositions:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         positions = client.get_positions()
 
         # Should still return the valid position
@@ -1385,7 +1485,7 @@ class TestTrades:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         trades = client.get_trades()
 
         assert len(trades) == 2
@@ -1420,7 +1520,7 @@ class TestTrades:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         after_date = datetime(2025, 1, 1, tzinfo=UTC)
         filters = TradeFilters(market="0xmarket123", after=after_date, limit=50)
@@ -1443,7 +1543,7 @@ class TestTrades:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         trades = client.get_trades()
 
         assert trades == []
@@ -1467,7 +1567,7 @@ class TestBalanceAllowance:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         balance = client.get_balance_allowance(asset_type="COLLATERAL")
 
         assert balance.balance == Decimal("1000.50")
@@ -1488,7 +1588,7 @@ class TestBalanceAllowance:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         balance = client.get_balance_allowance(asset_type="CONDITIONAL", token_id="token123")
 
         assert balance.balance == Decimal("500.0")
@@ -1514,7 +1614,6 @@ class TestConfigurableUrls:
 
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
         )
 
         assert config.data_api_base_url == DATA_API_BASE_URL
@@ -1525,7 +1624,6 @@ class TestConfigurableUrls:
         custom_url = "https://my-proxy.example.com/data"
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             data_api_base_url=custom_url,
         )
 
@@ -1578,7 +1676,6 @@ class TestConfigurableUrls:
         custom_url = "https://custom-data-api.example.com"
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             data_api_base_url=custom_url,
         )
 
@@ -1591,7 +1688,7 @@ class TestConfigurableUrls:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         # Call _get_data_api and verify the URL
         client._get_data_api("/positions", params={"user": "0x123"})
@@ -1806,13 +1903,12 @@ class TestClobClientRateLimiting:
         """ClobClient should initialize rate limiter from config."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             rate_limit_requests_per_second=50.0,
             rate_limit_enabled=True,
         )
 
         mock_http = MagicMock(spec=httpx.Client)
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         assert client.rate_limiter is not None
         assert client.rate_limiter.rate == 50.0
@@ -1822,13 +1918,12 @@ class TestClobClientRateLimiting:
         """ClobClient should respect rate_limit_enabled=False."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             rate_limit_requests_per_second=30.0,
             rate_limit_enabled=False,
         )
 
         mock_http = MagicMock(spec=httpx.Client)
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         assert client.rate_limiter.enabled is False
 
@@ -1838,12 +1933,11 @@ class TestClobClientRateLimiting:
 
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
         )
 
         custom_limiter = TokenBucketRateLimiter(rate_per_second=100.0, enabled=False)
         mock_http = MagicMock(spec=httpx.Client)
-        client = ClobClient(config, http_client=mock_http, rate_limiter=custom_limiter)
+        client = _make_clob_client(config, http_client=mock_http, rate_limiter=custom_limiter)
 
         assert client.rate_limiter is custom_limiter
         assert client.rate_limiter.rate == 100.0
@@ -1865,7 +1959,7 @@ class TestClobClientRateLimiting:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http, rate_limiter=mock_limiter)
+        client = _make_clob_client(config, http_client=mock_http, rate_limiter=mock_limiter)
 
         # Make a request
         client._get("/test")
@@ -1888,7 +1982,7 @@ class TestClobClientRateLimiting:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http, rate_limiter=mock_limiter)
+        client = _make_clob_client(config, http_client=mock_http, rate_limiter=mock_limiter)
 
         # Make multiple requests
         for _ in range(5):
@@ -1912,7 +2006,7 @@ class TestClobClientRateLimiting:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http, rate_limiter=mock_limiter)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http, rate_limiter=mock_limiter)
 
         # Make different types of requests
         client._get("/test")
@@ -1926,7 +2020,6 @@ class TestClobClientRateLimiting:
         """Real rate limiter should throttle rapid requests."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             rate_limit_requests_per_second=10.0,  # 10 req/s = 100ms between requests when exhausted
             rate_limit_enabled=True,
         )
@@ -1939,7 +2032,7 @@ class TestClobClientRateLimiting:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         # Make more requests than the bucket can hold
         start = time.time()
@@ -1954,7 +2047,6 @@ class TestClobClientRateLimiting:
         """Disabled rate limiter should allow rapid requests without delay."""
         config = PolymarketConfig(
             wallet_address=test_account.address,
-            private_key=SecretStr(test_account.key.hex()),
             rate_limit_requests_per_second=1.0,  # Very slow limit
             rate_limit_enabled=False,  # But disabled
         )
@@ -1967,7 +2059,7 @@ class TestClobClientRateLimiting:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         # Make many requests rapidly
         start = time.time()
@@ -1981,7 +2073,7 @@ class TestClobClientRateLimiting:
     def test_rate_limiter_accessible_via_property(self, config):
         """Rate limiter should be accessible via property for runtime config."""
         mock_http = MagicMock(spec=httpx.Client)
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
 
         # Access rate limiter
         limiter = client.rate_limiter
@@ -1996,7 +2088,6 @@ class TestClobClientRateLimiting:
         """PolymarketConfig.rate_limit_enabled should default to True."""
         config = PolymarketConfig(
             wallet_address="0x0000000000000000000000000000000000000001",
-            private_key=SecretStr("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
         )
 
         assert config.rate_limit_enabled is True
@@ -2005,7 +2096,6 @@ class TestClobClientRateLimiting:
         """PolymarketConfig.rate_limit_requests_per_second should default to 30.0."""
         config = PolymarketConfig(
             wallet_address="0x0000000000000000000000000000000000000001",
-            private_key=SecretStr("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
         )
 
         assert config.rate_limit_requests_per_second == 30.0
@@ -2054,7 +2144,7 @@ class TestV2OrderSigning:
             build_ctf_exchange_domain,
         )
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="12345",
             side="BUY",
@@ -2095,7 +2185,7 @@ class TestV2OrderSigning:
             LimitOrderParams,
         )
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="99",
             side="BUY",
@@ -2112,7 +2202,7 @@ class TestV2OrderSigning:
         """V2 signed struct: 11 fields, includes timestamp/metadata/builder, drops V1 fields."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="1", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         market = _make_test_market(neg_risk=False)
         unsigned = client.build_limit_order(params, market=market)
@@ -2146,7 +2236,7 @@ class TestV2OrderSigning:
         """SignedOrder.to_api_payload() must produce the V2 envelope shape."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="42", side="SELL", price=Decimal("0.75"), size=Decimal("100"))
         market = _make_test_market(neg_risk=False)
         signed = client.create_and_sign_limit_order(params, market=market)
@@ -2172,7 +2262,7 @@ class TestV2OrderSigning:
         silently route to CTFv2 in V1; V2 fails fast instead."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="1", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
 
         with pytest.raises(ValueError, match="requires a GammaMarket"):
@@ -2183,7 +2273,7 @@ class TestV2OrderSigning:
         as limit orders (validation + neg-risk routing)."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(token_id="1", side="BUY", amount=Decimal("100"))
 
         with pytest.raises(ValueError, match="requires a GammaMarket"):
@@ -2202,7 +2292,7 @@ class TestV2OrderSigning:
             MarketOrderParams,
         )
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(token_id="42", side="BUY", amount=Decimal("100"), worst_price=Decimal("0.70"))
         market = _make_test_market(neg_risk=True)
 
@@ -2221,7 +2311,7 @@ class TestV2OrderSigning:
             build_ctf_exchange_domain,
         )
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(token_id="99", side="BUY", amount=Decimal("100"), worst_price=Decimal("0.70"))
         market = _make_test_market(neg_risk=True)
 
@@ -2291,7 +2381,7 @@ class TestV2OrderBuilding:
         """V2 BUY limit: maker = pUSD-out, taker = shares-in, ratio == price."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="19045189272319329424023217822141741659150265216200539353252147725932663608488",
             side="BUY",
@@ -2314,7 +2404,7 @@ class TestV2OrderBuilding:
         """V2 SELL limit: maker = shares-out, taker = pUSD-in."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="19045189272319329424023217822141741659150265216200539353252147725932663608488",
             side="SELL",
@@ -2335,7 +2425,7 @@ class TestV2OrderBuilding:
         creation time, not the expiry."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         expiration = int(time.time()) + 3600  # 1 hour out
         params = LimitOrderParams(
             token_id="123",
@@ -2356,7 +2446,7 @@ class TestV2OrderBuilding:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidPriceError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="123",
             side="BUY",
@@ -2374,7 +2464,7 @@ class TestV2OrderBuilding:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidPriceError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="123",
             side="SELL",
@@ -2391,7 +2481,7 @@ class TestV2OrderBuilding:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="123",
             side="BUY",
@@ -2408,7 +2498,7 @@ class TestV2OrderBuilding:
         """V2 market BUY: maker pUSD snapped to keep ratio == worst_price."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
             token_id="123456789",
             side="BUY",
@@ -2430,7 +2520,7 @@ class TestV2OrderBuilding:
         """V2 market SELL: maker shares-out, taker pUSD-in at worst_price."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
             token_id="123456789",
             side="SELL",
@@ -2449,7 +2539,7 @@ class TestV2OrderBuilding:
         """No worst_price on a BUY → use MAX_PRICE (0.99) as the implied price."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
             token_id="123456789",
             side="BUY",
@@ -2466,7 +2556,7 @@ class TestV2OrderBuilding:
         """No worst_price on a SELL → use MIN_PRICE (0.01)."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
             token_id="123456789",
             side="SELL",
@@ -2483,7 +2573,7 @@ class TestV2OrderBuilding:
         """Builder accepts a None worst_price by defaulting to MAX/MIN_PRICE."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
         params = MarketOrderParams(token_id="123456789", side="BUY", amount=Decimal("100"))
         order = client.build_market_order(params, market=market)
@@ -2493,7 +2583,7 @@ class TestV2OrderBuilding:
         """Salt must vary across orders to prevent replay collisions."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="123",
             side="BUY",
@@ -2511,7 +2601,7 @@ class TestV2OrderBuilding:
         nonce. Confirm it is set to *now* in milliseconds."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(
             token_id="1",
             side="BUY",
@@ -2530,7 +2620,7 @@ class TestV2OrderBuilding:
         """Market orders should not carry GTD; api_expiration must be 0."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market()
         params = MarketOrderParams(
             token_id="1",
@@ -2545,7 +2635,7 @@ class TestV2OrderBuilding:
         """Metadata is BYTES32_ZERO; builder is the configured builder_code."""
         from almanak.framework.connectors.polymarket.models import BYTES32_ZERO, LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market()
         params = LimitOrderParams(token_id="1", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
 
@@ -2561,7 +2651,7 @@ class TestV2OrderSigningAdditional:
         """Signature must be `0x`-prefixed 65-byte hex (132 chars)."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         market = _make_market()
 
@@ -2577,7 +2667,7 @@ class TestV2OrderSigningAdditional:
         """Convenience helper builds + signs a limit order in one call."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         market = _make_market()
 
@@ -2591,7 +2681,7 @@ class TestV2OrderSigningAdditional:
         """Convenience helper builds + signs a market order in one call."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = MarketOrderParams(
             token_id="123",
             side="SELL",
@@ -2634,7 +2724,7 @@ class TestV2OrderSubmission:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         signed = client.create_and_sign_limit_order(params, market=_make_market())
 
@@ -2664,7 +2754,7 @@ class TestV2OrderSubmission:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         signed = client.create_and_sign_limit_order(params, market=_make_market())
 
@@ -2684,7 +2774,7 @@ class TestV2OrderSubmission:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         result = client.cancel_order("0x123abc")
 
         assert result is True
@@ -2701,7 +2791,7 @@ class TestV2OrderSubmission:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.cancel_orders(["0x123", "0x456", "0x789"]) is True
 
     def test_cancel_all_orders(self, config_with_credentials):
@@ -2714,7 +2804,7 @@ class TestV2OrderSubmission:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.cancel_all_orders() is True
 
     def test_get_open_orders(self, config_with_credentials):
@@ -2749,7 +2839,7 @@ class TestV2OrderSubmission:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.return_value = mock_response
 
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         orders = client.get_open_orders()
 
         assert len(orders) == 2
@@ -2768,7 +2858,7 @@ class TestV2OrderPayload:
         """to_struct() produces the V2 EIP-712 11-field message."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         market = _make_market()
 
@@ -2794,7 +2884,7 @@ class TestV2OrderPayload:
         signature inside `order` with `0x` prefix; api_expiration as `expiration`."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="SELL", price=Decimal("0.75"), size=Decimal("100"))
         market = _make_market()
 
@@ -2828,7 +2918,7 @@ class TestV2OrderPayload:
         """BUY intent must serialize to "side": "BUY" (string), not 0."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         market = _make_market()
 
@@ -2842,7 +2932,7 @@ class TestV2OrderPayload:
         """Defense in depth: signature without `0x` is auto-prefixed in payload."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams, SignedOrder
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         params = LimitOrderParams(token_id="12345", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
         market = _make_market()
 
@@ -2856,7 +2946,7 @@ class TestV2OrderPayload:
         """api_expiration set on UnsignedOrder serializes to `expiration` on the wire."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         expiration = int(time.time()) + 7200
         params = LimitOrderParams(
             token_id="1",
@@ -2880,7 +2970,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         """No market → DEFAULT_MIN_ORDER_SIZE (5)."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
             client._validate_size(Decimal("4"))
         assert exc_info.value.size == "4"
@@ -2890,7 +2980,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         """market.order_min_size overrides the default."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="10")
 
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -2903,7 +2993,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         """An explicit min_size beats the market value."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
 
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -2915,7 +3005,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="15")
 
         params = LimitOrderParams(token_id="123456789", side="BUY", price=Decimal("0.50"), size=Decimal("10"))
@@ -2927,7 +3017,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         """At-or-above the market minimum, build_limit_order succeeds."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="15")
         params = LimitOrderParams(token_id="123456789", side="BUY", price=Decimal("0.50"), size=Decimal("15"))
         order = client.build_limit_order(params, market=market)
@@ -2938,7 +3028,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="20")
         params = MarketOrderParams(
             token_id="123456789",
@@ -2955,7 +3045,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="25")
         params = MarketOrderParams(
             token_id="123456789",
@@ -2972,7 +3062,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="50")
         params = LimitOrderParams(token_id="123456789", side="BUY", price=Decimal("0.50"), size=Decimal("30"))
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -2984,7 +3074,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="100")
         params = MarketOrderParams(
             token_id="123456789",
@@ -3011,7 +3101,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size=min_size)
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=invalid_size)
         with pytest.raises(PolymarketMinimumOrderError):
@@ -3022,7 +3112,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="42.5")
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.50"), size=Decimal("40"))
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -3034,7 +3124,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         """The $1 USD floor on BUYs uses ``$``-prefixed values for clarity."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
             client._validate_order_value_usd(Decimal("0.30"))
         assert exc_info.value.size == "$0.30"
@@ -3042,7 +3132,7 @@ class TestV2MarketSpecificMinimumOrderSize:
 
     def test_validate_order_value_usd_at_floor(self, config_with_credentials):
         """At or above $1 → no raise."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         client._validate_order_value_usd(Decimal("1.00"))
         client._validate_order_value_usd(Decimal("1.01"))
 
@@ -3051,7 +3141,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
         params = LimitOrderParams(token_id="123", side="BUY", price=Decimal("0.06"), size=Decimal("5"))
         with pytest.raises(PolymarketMinimumOrderError) as exc_info:
@@ -3062,7 +3152,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         """SELL maker is shares; the $1 floor must NOT fire."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
         params = LimitOrderParams(token_id="123", side="SELL", price=Decimal("0.06"), size=Decimal("5"))
         client.build_limit_order(params, market=market)
@@ -3072,7 +3162,7 @@ class TestV2MarketSpecificMinimumOrderSize:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(order_min_size="5")
         params = MarketOrderParams(
             token_id="123",
@@ -3090,7 +3180,7 @@ class TestV2TickSizeValidation:
 
     def test_validate_tick_size_valid_price(self, config_with_credentials):
         """Default (0.01) tick: 0.50, 0.01, 0.99, 0.33 all valid."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         client._validate_tick_size(Decimal("0.50"))
         client._validate_tick_size(Decimal("0.01"))
         client._validate_tick_size(Decimal("0.99"))
@@ -3100,7 +3190,7 @@ class TestV2TickSizeValidation:
         """Default tick: 0.505 fails."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
             client._validate_tick_size(Decimal("0.505"))
         assert exc_info.value.price == "0.505"
@@ -3111,7 +3201,7 @@ class TestV2TickSizeValidation:
         """market.order_price_min_tick_size is used when provided."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
         client._validate_tick_size(Decimal("0.505"), market=market)
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
@@ -3122,7 +3212,7 @@ class TestV2TickSizeValidation:
         """Explicit tick_size kwarg wins over market.order_price_min_tick_size."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
             client._validate_tick_size(Decimal("0.505"), tick_size=Decimal("0.01"), market=market)
@@ -3130,31 +3220,31 @@ class TestV2TickSizeValidation:
 
     def test_round_to_tick_size_buy_floors(self, config_with_credentials):
         """BUY rounds DOWN to avoid overpaying."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         assert client._round_to_tick_size(Decimal("0.655"), Decimal("0.01"), "BUY") == Decimal("0.65")
         assert client._round_to_tick_size(Decimal("0.659"), Decimal("0.01"), "BUY") == Decimal("0.65")
 
     def test_round_to_tick_size_sell_ceils(self, config_with_credentials):
         """SELL rounds UP to avoid underselling."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         assert client._round_to_tick_size(Decimal("0.651"), Decimal("0.01"), "SELL") == Decimal("0.66")
         assert client._round_to_tick_size(Decimal("0.655"), Decimal("0.01"), "SELL") == Decimal("0.66")
 
     def test_round_to_tick_size_exact_value(self, config_with_credentials):
         """Already-on-tick price stays the same on both sides."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         assert client._round_to_tick_size(Decimal("0.65"), Decimal("0.01"), "BUY") == Decimal("0.65")
         assert client._round_to_tick_size(Decimal("0.65"), Decimal("0.01"), "SELL") == Decimal("0.65")
 
     def test_round_to_tick_size_clamps_to_valid_range(self, config_with_credentials):
         """Rounding clamps to MIN_PRICE / MAX_PRICE (0.01 / 0.99)."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         assert client._round_to_tick_size(Decimal("0.005"), Decimal("0.01"), "BUY") == Decimal("0.01")
         assert client._round_to_tick_size(Decimal("0.995"), Decimal("0.01"), "SELL") == Decimal("0.99")
 
     def test_round_price_to_tick_public_method(self, config_with_credentials):
         """Public alias uses market tick-size by default."""
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
         assert client.round_price_to_tick(Decimal("0.655"), "BUY", market=market) == Decimal("0.65")
         assert client.round_price_to_tick(Decimal("0.651"), "SELL", market=market) == Decimal("0.66")
@@ -3164,7 +3254,7 @@ class TestV2TickSizeValidation:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
         params = LimitOrderParams(token_id="123456789", side="BUY", price=Decimal("0.655"), size=Decimal("100"))
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
@@ -3176,7 +3266,7 @@ class TestV2TickSizeValidation:
         """On-tick price passes."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
         params = LimitOrderParams(token_id="123456789", side="BUY", price=Decimal("0.65"), size=Decimal("100"))
         order = client.build_limit_order(params, market=market)
@@ -3187,7 +3277,7 @@ class TestV2TickSizeValidation:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
         params = MarketOrderParams(
             token_id="123456789",
@@ -3214,7 +3304,7 @@ class TestV2TickSizeValidation:
         """Tick sizes 0.1, 0.01, 0.001 — all enforced."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size=tick_size)
         if should_pass:
             client._validate_tick_size(price, market=market)
@@ -3226,7 +3316,7 @@ class TestV2TickSizeValidation:
         """Error carries the nearest valid price (helpful for callers)."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(PolymarketInvalidTickSizeError) as exc_info:
             client._validate_tick_size(Decimal("0.654"), tick_size=Decimal("0.01"))
         assert exc_info.value.nearest_valid is not None
@@ -3236,7 +3326,7 @@ class TestV2TickSizeValidation:
         """0.0001 tick: 0.5001 valid, 0.50015 invalid."""
         from almanak.framework.connectors.polymarket.exceptions import PolymarketInvalidTickSizeError
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.0001")
         client._validate_tick_size(Decimal("0.5001"), market=market)
         with pytest.raises(PolymarketInvalidTickSizeError):
@@ -3263,7 +3353,7 @@ class TestV2RatioPreservation:
         """Market BUY: maker/taker == price exactly, on the shares-step grid."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size=tick)
         params = MarketOrderParams(
             token_id="123",
@@ -3283,7 +3373,7 @@ class TestV2RatioPreservation:
         """0.001 tick: 81.481 shares @ 0.99 — pre-fix ratio drifted off-tick."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
         params = MarketOrderParams(
             token_id="123",
@@ -3305,7 +3395,7 @@ class TestV2RatioPreservation:
         """Limit BUY/SELL: ratio == price for both sides."""
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size=tick)
         for side in ("BUY", "SELL"):
             params = LimitOrderParams(
@@ -3326,7 +3416,7 @@ class TestV2RatioPreservation:
         """Market SELL: taker/maker == worst_price exactly."""
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.001")
         params = MarketOrderParams(
             token_id="123",
@@ -3343,7 +3433,7 @@ class TestV2RatioPreservation:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01")
         params = MarketOrderParams(
             token_id="123",
@@ -3364,7 +3454,7 @@ class TestV2RatioPreservation:
         from almanak.framework.connectors.polymarket.exceptions import PolymarketMinimumOrderError
         from almanak.framework.connectors.polymarket.models import MarketOrderParams
 
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _make_market(tick_size="0.01", order_min_size="0.1")
         params = MarketOrderParams(
             token_id="123",
@@ -3379,18 +3469,19 @@ class TestV2RatioPreservation:
 class TestV2OrderSigningRemote:
     """V2 signing via the Almanak Signer Service (platform mode).
 
-    With ``signer_service_url`` + ``signer_service_jwt`` set on the config and
-    no ``private_key``, both ``_build_l1_headers`` and ``sign_order`` must
-    delegate to ``/sign/hash`` and the resulting signature must reassemble to
-    ``0x<r><s><v>`` from the service's ethers-v6 ``Signature.toJSON()`` shape.
+    With a remote :class:`Signer` (built via :func:`make_remote_signer`)
+    injected into ``ClobClient``, both ``_build_l1_headers`` and
+    ``sign_order`` must delegate to ``/sign/hash`` and the resulting
+    signature must reassemble to ``0x<r><s><v>`` from the service's
+    ethers-v6 ``Signature.toJSON()`` shape. After issue #1961 the
+    signer-service URL/JWT live on the Signer closure, not on
+    ``PolymarketConfig``.
     """
 
     @pytest.fixture
     def remote_config(self, test_account):
         return PolymarketConfig(
             wallet_address=test_account.address,
-            signer_service_url="https://signer.example.com",
-            signer_service_jwt=SecretStr("jwt-token"),
             signature_type=SignatureType.POLY_GNOSIS_SAFE,
             funder_address="0x1234567890123456789012345678901234567890",
         )
@@ -3407,11 +3498,22 @@ class TestV2OrderSigningRemote:
         response.text = ""
         return response
 
+    @staticmethod
+    def _make_remote_signer_for(test_account, mock_http):
+        """Build a remote :class:`Signer` whose HTTP client is the mock."""
+        return make_remote_signer(
+            eoa_address=test_account.address,
+            signer_service_url="https://signer.example.com",
+            signer_service_jwt="jwt-token",
+            http_client=mock_http,
+        )
+
     def test_l1_headers_use_remote_signer(self, remote_config, test_account):
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.post.return_value = self._make_signer_response("ab" * 32, "cd" * 32, 27)
 
-        client = ClobClient(remote_config, http_client=mock_http)
+        remote_signer = self._make_remote_signer_for(test_account, mock_http)
+        client = _make_clob_client(remote_config, http_client=mock_http, signer=remote_signer)
         headers = client._build_l1_headers()
 
         assert mock_http.post.called
@@ -3438,13 +3540,14 @@ class TestV2OrderSigningRemote:
         assert headers["POLY_ADDRESS"] == test_account.address
         assert headers["POLY_SIGNATURE"] == "0x" + "ab" * 32 + "cd" * 32 + "1b"
 
-    def test_sign_order_uses_remote_signer(self, remote_config):
+    def test_sign_order_uses_remote_signer(self, remote_config, test_account):
         from almanak.framework.connectors.polymarket.models import LimitOrderParams
 
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.post.return_value = self._make_signer_response("11" * 32, "22" * 32, 28)
 
-        client = ClobClient(remote_config, http_client=mock_http)
+        remote_signer = self._make_remote_signer_for(test_account, mock_http)
+        client = _make_clob_client(remote_config, http_client=mock_http, signer=remote_signer)
         params = LimitOrderParams(
             token_id="12345",
             side="BUY",

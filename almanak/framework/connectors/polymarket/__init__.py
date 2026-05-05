@@ -184,6 +184,12 @@ from .signals import (
     aggregate_signals,
     combine_with_market_price,
 )
+from .signer import (
+    Signer,
+    make_local_signer,
+    make_remote_signer,
+    signer_from_env,
+)
 
 # Export List Organization:
 #
@@ -255,6 +261,11 @@ __all__ = [
     # Credentials & Config
     "ApiCredentials",
     "PolymarketConfig",
+    # Signer
+    "Signer",
+    "make_local_signer",
+    "make_remote_signer",
+    "signer_from_env",
     # Enums
     "SignatureType",
     "OrderSide",

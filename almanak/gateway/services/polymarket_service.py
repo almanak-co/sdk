@@ -25,6 +25,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 import grpc
+import httpx
 from eth_account import Account
 from pydantic import SecretStr
 
@@ -44,9 +45,11 @@ from almanak.framework.connectors.polymarket import (
     TransactionData,
 )
 from almanak.framework.connectors.polymarket.signer import (
+    DEFAULT_SIGNER_TIMEOUT_SECONDS,
+    Signer,
     build_clob_auth_typed_data,
-    sign_typed_data_local,
-    sign_typed_data_remote,
+    make_local_signer,
+    make_remote_signer,
 )
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -270,6 +273,19 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         self._available = bool(self._wallet_address) and (bool(self._private_key) or has_remote_signer)
         self._credentials_available = bool(self._api_key and self._api_secret and self._api_passphrase)
 
+        # Build the EIP-712 signer once. The connector's ``ClobClient`` and
+        # the gateway's own ``_build_l1_headers`` both invoke it — one
+        # callable, two callers. ``None`` when no signing material is wired
+        # (read-only deployment / public RPC paths only). See issue #1961.
+        # The remote-signer path holds a persistent ``httpx.Client`` so
+        # ``/sign/hash`` calls reuse the underlying TCP/TLS connection across
+        # signatures (order signing + L1 auth are hot paths under sustained
+        # trading traffic — building a fresh client per signature would
+        # regress connection reuse). Built lazily inside ``_build_signer``
+        # and torn down in ``close()``.
+        self._signer_http_client: httpx.Client | None = None
+        self._signer: Signer | None = self._build_signer()
+
         # Last-known reason credential derivation failed. Surfaced verbatim in
         # the error returned to the strategy so an operator debugging from
         # strategy-side logs (no gateway-container access) can act on the real
@@ -330,6 +346,30 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             return self.settings.safe_address
         return self._wallet_address
 
+    def _build_signer(self) -> Signer | None:
+        """Build the EIP-712 :class:`Signer` from the parsed identity.
+
+        Returns ``None`` when the gateway has no signing material wired
+        (read-only / market-data-only deployment). The single Signer is
+        shared between this service's ``_build_l1_headers`` and the
+        ``ClobClient`` it constructs in ``_build_client`` — one callable,
+        two callers, no credential leakage onto ``PolymarketConfig``.
+        """
+        if self._private_key:
+            return make_local_signer(self._private_key)
+        if self._signer_service_url and self._signer_service_jwt and self._wallet_address:
+            # Persistent httpx.Client — reuse the connection across every
+            # signature (one TCP/TLS handshake per gateway lifetime, not
+            # per order). Closed in ``close()``.
+            self._signer_http_client = httpx.Client(timeout=DEFAULT_SIGNER_TIMEOUT_SECONDS)
+            return make_remote_signer(
+                eoa_address=self._wallet_address,
+                signer_service_url=self._signer_service_url,
+                signer_service_jwt=self._signer_service_jwt,
+                http_client=self._signer_http_client,
+            )
+        return None
+
     def _build_client(self, *, require_signer: bool = True) -> ClobClient:
         """Build a ``ClobClient`` for use by an RPC handler.
 
@@ -343,17 +383,14 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         ``require_signer=False`` is for read-only public RPCs like
         ``GetPriceHistory`` and may be invoked on a gateway that has no
         Polymarket signer configured at all (e.g. a market-data-only deploy).
-        Public endpoints don't read ``wallet_address`` / ``private_key`` from
-        the config, so we pass placeholder values that satisfy
-        ``PolymarketConfig``'s required-field validators without enabling any
-        signing path.
+        Public endpoints don't read signing material; the returned
+        ``ClobClient`` carries ``signer=None`` (an explicit read-only signal
+        — any signing-required call raises ``PolymarketSignatureError``).
         """
-        has_remote_signer = bool(self._signer_service_url) and bool(self._signer_service_jwt)
-
         if require_signer:
             if not self._available or not self._wallet_address:
                 raise ValueError("Polymarket signing identity is not configured in the gateway")
-            if not self._private_key and not has_remote_signer:
+            if self._signer is None:
                 raise ValueError(
                     "Polymarket signing identity requires either a local private key or "
                     "signer_service_url + signer_service_jwt (platform mode)"
@@ -370,30 +407,17 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         # Placeholder wallet only used in the ``require_signer=False`` path
         # when the gateway has no real Polymarket signer wired. ClobClient
         # never reads it for the public endpoints (``get_price_history``,
-        # ``get_orderbook``, ``get_market``); any signed call on the returned
-        # client would produce an obviously-invalid signature, which is the
-        # desired fail-loud behavior if a caller mis-routes a signed RPC here.
+        # ``get_orderbook``, ``get_market``); any signed call on this client
+        # raises ``PolymarketSignatureError`` because ``signer=None``.
         wallet = self._wallet_address or "0x" + "0" * 40
 
-        config_kwargs: dict = {
-            "wallet_address": wallet,
-            "signature_type": self._signature_type,
-            "funder_address": self._funder_address if self._funder_address != self._wallet_address else None,
-            "api_credentials": api_credentials,
-        }
-        if self._private_key:
-            config_kwargs["private_key"] = SecretStr(self._private_key)
-        elif has_remote_signer:
-            config_kwargs["signer_service_url"] = self._signer_service_url
-            config_kwargs["signer_service_jwt"] = SecretStr(self._signer_service_jwt)  # type: ignore[arg-type]
-        else:
-            # No real signer — only reachable via ``require_signer=False``.
-            # The placeholder key satisfies ``PolymarketConfig``'s validator
-            # but is never used by the public endpoints.
-            config_kwargs["private_key"] = SecretStr("0x" + "0" * 64)
-
-        config = PolymarketConfig(**config_kwargs)
-        return ClobClient(config)
+        config = PolymarketConfig(
+            wallet_address=wallet,
+            signature_type=self._signature_type,
+            funder_address=self._funder_address if self._funder_address != self._wallet_address else None,
+            api_credentials=api_credentials,
+        )
+        return ClobClient(config, signer=self._signer)
 
     async def _build_authenticated_client(self) -> ClobClient:
         """Build a CLOB client with stable gateway-owned API credentials.
@@ -429,10 +453,16 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
         return self._http_session
 
     async def close(self) -> None:
-        """Close HTTP session."""
+        """Close HTTP sessions."""
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None
+        # Tear down the persistent signer-service client so the gateway
+        # exits cleanly. Sync ``httpx.Client.close`` is fine on the loop —
+        # it just closes the underlying connection pool.
+        if self._signer_http_client is not None:
+            self._signer_http_client.close()
+            self._signer_http_client = None
 
     # =========================================================================
     # L1 Authentication (EIP-712)
@@ -441,29 +471,21 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
     def _build_l1_headers(self, nonce: int = 0) -> dict[str, str]:
         """Build L1 authentication headers using EIP-712 signing.
 
-        Local-key mode: signs in-process via ``sign_typed_data_local``.
-        Platform mode: delegates to the Almanak Signer Service ``/sign/hash``
-        via ``sign_typed_data_remote``. Both paths return ``0x``-prefixed
-        65-byte hex (Polymarket's /auth endpoints reject unprefixed sigs).
+        Delegates to ``self._signer`` — the same callable injected into
+        ``ClobClient`` via ``_build_client``. Local-key mode signs in-process;
+        platform mode POSTs the digest to the Almanak Signer Service's
+        ``/sign/hash`` endpoint. Both paths return ``0x``-prefixed 65-byte hex
+        (Polymarket's /auth endpoints reject unprefixed sigs).
         """
         if not self._wallet_address:
             raise ValueError("Polymarket signing identity is not configured in the gateway")
-        timestamp = str(int(time.time()))
-        typed_data = build_clob_auth_typed_data(self._wallet_address, timestamp, nonce)
-
-        if self._private_key:
-            sig_hex = sign_typed_data_local(typed_data, self._private_key)
-        elif self._signer_service_url and self._signer_service_jwt:
-            sig_hex = sign_typed_data_remote(
-                typed_data,
-                eoa_address=self._wallet_address,
-                signer_service_url=self._signer_service_url,
-                signer_service_jwt=self._signer_service_jwt,
-            )
-        else:
+        if self._signer is None:
             raise ValueError(
                 "Polymarket L1 signing requires either a local private key or signer_service_url + signer_service_jwt"
             )
+        timestamp = str(int(time.time()))
+        typed_data = build_clob_auth_typed_data(self._wallet_address, timestamp, nonce)
+        sig_hex = self._signer(typed_data)
 
         return {
             "POLY_ADDRESS": self._wallet_address,

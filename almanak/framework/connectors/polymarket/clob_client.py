@@ -42,6 +42,7 @@ from .exceptions import (
     PolymarketInvalidTickSizeError,
     PolymarketMinimumOrderError,
     PolymarketRateLimitError,
+    PolymarketSignatureError,
 )
 from .models import (
     BYTES32_ZERO,
@@ -74,7 +75,7 @@ from .models import (
     UnsignedOrder,
     build_ctf_exchange_domain,
 )
-from .signer import build_clob_auth_typed_data, sign_typed_data_local, sign_typed_data_remote
+from .signer import Signer, build_clob_auth_typed_data
 
 logger = structlog.get_logger(__name__)
 
@@ -249,19 +250,31 @@ class ClobClient:
         config: PolymarketConfig,
         http_client: httpx.Client | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
+        *,
+        signer: Signer | None = None,
     ):
         """Initialize CLOB client.
 
         Args:
-            config: Polymarket configuration with wallet and keys
-            http_client: Optional HTTP client for testing
+            config: Polymarket configuration (public/inert addresses + URLs).
+                Carries no signing credentials — see issue #1961.
+            http_client: Optional HTTP client for testing.
             rate_limiter: Optional rate limiter for testing. If not provided,
-                         creates one based on config settings.
+                creates one based on config settings.
+            signer: EIP-712 signer callable. ``None`` puts the client in
+                read-only mode — public endpoints (markets, orderbooks, prices)
+                still work, but any signing-required call (``_build_l1_headers``,
+                ``sign_order``, ``create_api_credentials``,
+                ``derive_api_credentials``) raises
+                :class:`PolymarketSignatureError`. Build via
+                :func:`make_local_signer`, :func:`make_remote_signer`, or
+                :func:`signer_from_env`.
         """
         self.config = config
         self.credentials = config.api_credentials
         self._http = http_client or httpx.Client(timeout=30.0)
         self._cache: dict[str, tuple[Any, float]] = {}
+        self._signer = signer
 
         # Initialize rate limiter
         if rate_limiter is not None:
@@ -276,6 +289,7 @@ class ClobClient:
             "ClobClient initialized",
             wallet=config.wallet_address,
             has_credentials=self.credentials is not None,
+            has_signer=self._signer is not None,
             rate_limit_enabled=self._rate_limiter.enabled,
             rate_limit_rps=self._rate_limiter.rate,
         )
@@ -299,26 +313,21 @@ class ClobClient:
     # L1 Authentication (EIP-712)
     # =========================================================================
 
-    def _sign_typed_data(self, typed_data: dict) -> str:
-        """Sign EIP-712 typed data using whichever signer the config selects.
+    def _require_signer(self) -> Signer:
+        """Return the configured :class:`Signer` or raise.
 
-        Local mode: ``Account.sign_message`` with ``config.private_key``.
-        Remote mode: POST the digest to the Almanak Signer Service ``/sign/hash``
-        endpoint with the JWT bearer token. ``config.wallet_address`` is the
-        EOA whose key the service holds.
-
-        Returns ``0x``-prefixed 65-byte signature hex (``r||s||v``).
+        ``signer=None`` is the explicit read-only signal at construction time.
+        Any signing-required path funnels through this helper so the failure
+        mode is uniform — a single typed exception, not a confusing
+        ``AttributeError`` from a None call.
         """
-        if self.config.private_key is not None:
-            return sign_typed_data_local(typed_data, self.config.private_key.get_secret_value())
-        # Remote mode — config validator guarantees both URL and JWT are set.
-        return sign_typed_data_remote(
-            typed_data,
-            eoa_address=self.config.wallet_address,
-            signer_service_url=self.config.signer_service_url,  # type: ignore[arg-type]
-            signer_service_jwt=self.config.signer_service_jwt.get_secret_value(),  # type: ignore[union-attr]
-            http_client=self._http,
-        )
+        if self._signer is None:
+            raise PolymarketSignatureError(
+                "ClobClient has no signer configured — read-only mode. "
+                "Pass signer=make_local_signer(...) / make_remote_signer(...) / signer_from_env() "
+                "to ClobClient(...) for signing-required operations."
+            )
+        return self._signer
 
     def _build_l1_headers(self, nonce: int = 0) -> dict[str, str]:
         """Build L1 authentication headers using EIP-712 signing.
@@ -329,10 +338,11 @@ class ClobClient:
         Returns:
             Headers dict with POLY_ADDRESS, POLY_SIGNATURE, POLY_TIMESTAMP, POLY_NONCE
         """
+        signer = self._require_signer()
         timestamp = str(int(time.time()))
         wallet = self.config.wallet_address
         typed_data = build_clob_auth_typed_data(wallet, timestamp, nonce)
-        sig_hex = self._sign_typed_data(typed_data)
+        sig_hex = signer(typed_data)
         return {
             "POLY_ADDRESS": wallet,
             "POLY_SIGNATURE": sig_hex,
@@ -1502,6 +1512,8 @@ class ClobClient:
             >>> signed = client.sign_order(unsigned)
             >>> response = client.submit_order(signed)
         """
+        signer = self._require_signer()
+
         # Build EIP-712 typed data — V2 domain's verifyingContract is per-order
         # (CTF V2 vs NegRisk V2), driven by UnsignedOrder.exchange_address.
         typed_data = {
@@ -1519,8 +1531,7 @@ class ClobClient:
             "message": order.to_struct(),
         }
 
-        # Local or remote signing depending on config — see _sign_typed_data.
-        sig_hex = self._sign_typed_data(typed_data)
+        sig_hex = signer(typed_data)
 
         logger.debug(
             "Order signed",

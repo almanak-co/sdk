@@ -35,7 +35,7 @@ from decimal import Decimal
 from enum import Enum, StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -227,15 +227,23 @@ class ApiCredentials(BaseModel):
 class PolymarketConfig(BaseModel):
     """Configuration for Polymarket connector.
 
-    This configuration supports both L1 (EIP-712 signing) and L2 (HMAC API) authentication
-    for Polymarket's hybrid CLOB + on-chain architecture.
+    Carries only public/inert addresses + URL overrides. Signing material
+    (private key, signer service URL/JWT) is **not** part of this config —
+    it lives in a :class:`Signer` callable injected into ``ClobClient``.
+    See issue #1961 for the rationale (the gateway is the security boundary;
+    a strategy that grabs the connector directly must not be one mistake away
+    from holding signer credentials).
+
+    L2 (HMAC) API credentials remain on the config because they are derived
+    via L1 signing once and are wallet-scoped — the strategy container never
+    sees them today (only the gateway calls ``derive_api_credentials``).
 
     Credential Management:
         Polymarket uses a two-tier authentication system:
 
         **L1 Authentication (Wallet Signing)**:
             - Used for: Creating/deriving API credentials, signing on-chain transactions
-            - Requires: wallet_address and private_key
+            - Requires: a :class:`Signer` callable injected into ``ClobClient``
             - No expiration: Wallet keys don't expire
 
         **L2 Authentication (HMAC API)**:
@@ -252,7 +260,7 @@ class PolymarketConfig(BaseModel):
 
         **Renewal Process**:
             When credentials expire, you must:
-            1. Use ClobClient with a valid wallet to call create_api_credentials()
+            1. Use ClobClient with a valid Signer to call create_api_credentials()
                or derive_api_credentials()
             2. Update environment variables with new credentials
             3. Restart the application or reload configuration
@@ -270,7 +278,11 @@ class PolymarketConfig(BaseModel):
     Environment Variables:
         Required for wallet operations:
             - POLYMARKET_WALLET_ADDRESS: Wallet address for signing and transactions
+
+        Used by ``signer_from_env`` (NOT this config):
             - POLYMARKET_PRIVATE_KEY: Private key for EIP-712 signing (0x prefixed hex)
+            - ALMANAK_SIGNER_SERVICE_URL: Almanak Signer Service base URL (platform mode)
+            - ALMANAK_SIGNER_SERVICE_JWT: JWT for the Almanak Signer Service (platform mode)
 
         Required for trading operations (L2 auth):
             - POLYMARKET_API_KEY: API key from credential creation/derivation
@@ -284,58 +296,61 @@ class PolymarketConfig(BaseModel):
             - POLYMARKET_DATA_API_URL: Override data_api_base_url
 
     Example:
-        # Basic configuration (wallet only, for read operations and credential creation)
-        config = PolymarketConfig(
-            wallet_address="0x...",
-            private_key=SecretStr("0x..."),
+        from almanak.framework.connectors.polymarket import (
+            ClobClient,
+            PolymarketConfig,
         )
+        from almanak.framework.connectors.polymarket.signer import (
+            make_local_signer,
+            signer_from_env,
+        )
+
+        # Basic configuration (config + signer composed separately)
+        config = PolymarketConfig(wallet_address="0x...")
+        signer = make_local_signer("0x...")  # private key never reaches config
+        client = ClobClient(config, signer=signer)
 
         # Full configuration with API credentials (for trading)
         config = PolymarketConfig(
             wallet_address="0x...",
-            private_key=SecretStr("0x..."),
             api_credentials=ApiCredentials(
                 api_key="your-api-key",
                 secret=SecretStr("your-base64-secret"),
                 passphrase=SecretStr("your-passphrase"),
             ),
         )
+        client = ClobClient(config, signer=make_local_signer("0x..."))
 
         # Load from environment
         config = PolymarketConfig.from_env()
+        signer = signer_from_env()  # may be None (read-only mode)
         creds = ApiCredentials.from_env()
         config.api_credentials = creds
+        client = ClobClient(config, signer=signer)
+
+        # Read-only client (no signer)
+        config = PolymarketConfig(wallet_address="0x...")
+        client = ClobClient(config)  # signing-required calls raise PolymarketSignatureError
 
         # With custom URLs (for proxies or testing)
         config = PolymarketConfig(
             wallet_address="0x...",
-            private_key=SecretStr("0x..."),
             data_api_base_url="https://my-proxy.example.com/data",
         )
     """
 
+    # Reject legacy signer kwargs (`private_key`, `signer_service_url`,
+    # `signer_service_jwt`) loud at construction. Pydantic's default
+    # ``extra='ignore'`` would silently drop them and the resulting
+    # credentials-free config would only surface the break later as a
+    # runtime ``PolymarketSignatureError`` on the first signing call.
+    # ``extra='forbid'`` makes the hard break in #1961 fail-fast.
+    model_config = ConfigDict(extra="forbid")
+
     chain: str = Field(default="polygon", description="Chain identifier")
     wallet_address: str = Field(description="User wallet address (or trading EOA in remote-signing mode)")
-    # Local-signing path. Optional when the remote signer service is configured —
-    # the platform mode keeps the trading EOA's private key in the Almanak Signer
-    # Service GCS bucket and never ships it to the gateway.
-    private_key: SecretStr | None = Field(
-        default=None, description="Private key for local signing (None when using remote signer)"
-    )
     signature_type: SignatureType = Field(default=SignatureType.EOA, description="Signature type for authentication")
     funder_address: str | None = Field(default=None, description="Funder address for proxy wallets")
-    # Remote-signing path (Almanak platform). When set, signing is delegated to the
-    # Almanak Signer Service via POST {signer_service_url}/sign/hash with a JWT
-    # bearer token. wallet_address must be the EOA whose key the service holds
-    # (the trading EOA from the platform's polymarket_zodiac wallet entry).
-    signer_service_url: str | None = Field(
-        default=None,
-        description="Almanak Signer Service base URL. When set, signing is delegated to /sign/hash.",
-    )
-    signer_service_jwt: SecretStr | None = Field(
-        default=None,
-        description="JWT for the Almanak Signer Service. Required when signer_service_url is set.",
-    )
     rpc_url: str | None = Field(default=None, description="RPC endpoint for Polygon")
     clob_base_url: str = Field(default=CLOB_BASE_URL, description="CLOB API base URL")
     gamma_base_url: str = Field(default=GAMMA_BASE_URL, description="Gamma Markets API base URL")
@@ -393,32 +408,10 @@ class PolymarketConfig(BaseModel):
 
         return Web3.to_checksum_address(v)
 
-    @model_validator(mode="after")
-    def _require_signing_capability(self) -> "PolymarketConfig":
-        """Either a local private key OR a complete remote-signer config must be present.
-
-        Remote-signer mode requires both ``signer_service_url`` and
-        ``signer_service_jwt``. ``wallet_address`` is the trading EOA in remote
-        mode (the address whose key the Signer Service holds).
-        """
-        has_local_key = self.private_key is not None
-        has_remote_signer = bool(self.signer_service_url) and bool(self.signer_service_jwt)
-        if not has_local_key and not has_remote_signer:
-            raise ValueError(
-                "PolymarketConfig requires either private_key (local signing) or "
-                "signer_service_url + signer_service_jwt (remote signing via Almanak Signer Service)"
-            )
-        if self.signer_service_url and not self.signer_service_jwt:
-            raise ValueError("PolymarketConfig.signer_service_jwt is required when signer_service_url is set")
-        if self.signer_service_jwt and not self.signer_service_url:
-            raise ValueError("PolymarketConfig.signer_service_url is required when signer_service_jwt is set")
-        return self
-
     @classmethod
     def from_env(
         cls,
         wallet_env: str = "POLYMARKET_WALLET_ADDRESS",
-        private_key_env: str = "POLYMARKET_PRIVATE_KEY",
         rpc_env: str = "POLYGON_RPC_URL",
         clob_url_env: str = "POLYMARKET_CLOB_URL",
         gamma_url_env: str = "POLYMARKET_GAMMA_URL",
@@ -426,18 +419,30 @@ class PolymarketConfig(BaseModel):
     ) -> "PolymarketConfig":
         """Load configuration from environment variables.
 
+        Builds a credentials-free ``PolymarketConfig``. Pair with
+        :func:`almanak.framework.connectors.polymarket.signer.signer_from_env`
+        to produce a :class:`Signer` for the same env, then::
+
+            config = PolymarketConfig.from_env()
+            signer = signer_from_env()
+            client = ClobClient(config, signer=signer)
+
         Required Environment Variables:
-            - POLYMARKET_WALLET_ADDRESS: Wallet address
-            - POLYMARKET_PRIVATE_KEY: Private key for signing
+            - POLYMARKET_WALLET_ADDRESS: Wallet address (signer EOA or trading EOA)
 
         Optional Environment Variables:
             - POLYGON_RPC_URL: RPC endpoint for Polygon
             - POLYMARKET_CLOB_URL: Override CLOB API base URL
             - POLYMARKET_GAMMA_URL: Override Gamma Markets API base URL
             - POLYMARKET_DATA_API_URL: Override Data API base URL
+
+        Note: ``POLYMARKET_PRIVATE_KEY`` / ``ALMANAK_SIGNER_SERVICE_URL`` /
+        ``ALMANAK_SIGNER_SERVICE_JWT`` are read by ``signer_from_env`` — never
+        by this method. Keeping the credential read out of the config builder
+        is what stops a strategy that grabs the connector directly from
+        having a path to signer material (issue #1961).
         """
         wallet = os.environ.get(wallet_env)
-        private_key = os.environ.get(private_key_env)
         rpc_url = os.environ.get(rpc_env)
         clob_url = os.environ.get(clob_url_env)
         gamma_url = os.environ.get(gamma_url_env)
@@ -445,13 +450,10 @@ class PolymarketConfig(BaseModel):
 
         if not wallet:
             raise ValueError(f"Environment variable {wallet_env} not set")
-        if not private_key:
-            raise ValueError(f"Environment variable {private_key_env} not set")
 
         # Build config with optional URL overrides
         config_kwargs: dict[str, Any] = {
             "wallet_address": wallet,
-            "private_key": SecretStr(private_key),
             "rpc_url": rpc_url,
         }
         if clob_url:

@@ -1147,18 +1147,65 @@ class TestPlatformModeInit:
         with pytest.raises(ValueError, match="must be a JSON object keyed by chain"):
             PolymarketServiceServicer(s)
 
-    def test_build_client_passes_remote_signer_to_polymarket_config(self, monkeypatch):
+    def test_build_client_injects_remote_signer(self, monkeypatch):
+        """Platform mode: ``_build_client`` injects a Signer that routes to
+        ``/sign/hash``; the config carries no credentials. Verifies the
+        post-#1961 boundary — credentials are on the closure, not the config.
+        """
         monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
         servicer = PolymarketServiceServicer(_platform_settings())
         client = servicer._build_client()
         cfg = client.config
-        assert cfg.private_key is None
-        assert cfg.signer_service_url == "https://signer.example.com"
-        assert cfg.signer_service_jwt is not None
-        assert cfg.signer_service_jwt.get_secret_value() == "jwt"
+        # Config is credentials-free.
+        assert not hasattr(cfg, "private_key")
+        assert not hasattr(cfg, "signer_service_url")
+        assert not hasattr(cfg, "signer_service_jwt")
+        # Signer is wired and is the same callable the servicer holds.
+        assert client._signer is not None
+        assert client._signer is servicer._signer
         # wallet_address = trading EOA (signer); funder_address = polymarket safe (maker)
         assert cfg.wallet_address.lower() == TRADING_EOA.lower()
         assert cfg.funder_address is not None and cfg.funder_address.lower() == POLYMARKET_SAFE.lower()
+
+    def test_build_signer_holds_persistent_http_client(self, monkeypatch):
+        """Platform-mode signer reuses one ``httpx.Client`` across every
+        ``/sign/hash`` call. Building a fresh client per signature would
+        regress connection reuse and add TLS/socket churn to the order-
+        signing + L1 auth hot paths.
+        """
+        import httpx
+
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        servicer = PolymarketServiceServicer(_platform_settings())
+        # The persistent client must exist and be live for the signer's lifetime.
+        assert isinstance(servicer._signer_http_client, httpx.Client)
+        assert not servicer._signer_http_client.is_closed
+
+    def test_close_releases_persistent_signer_client(self, monkeypatch):
+        """``close()`` tears down the signer-service client so the gateway
+        exits cleanly. Otherwise the connection pool would leak across
+        gateway restarts in long-running test runners."""
+        import asyncio
+
+        monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
+        servicer = PolymarketServiceServicer(_platform_settings())
+        client = servicer._signer_http_client
+        assert client is not None and not client.is_closed
+        asyncio.run(servicer.close())
+        assert client.is_closed
+        assert servicer._signer_http_client is None
+
+    def test_local_mode_does_not_build_signer_http_client(self, monkeypatch):
+        """Local-key mode has no network calls in the signing path —
+        ``_signer_http_client`` stays ``None``. Avoids allocating an
+        unused connection pool for EOA / dev deployments."""
+        monkeypatch.delenv("ALMANAK_GATEWAY_WALLETS", raising=False)
+        s = _platform_settings()
+        s.private_key = TEST_PRIVATE_KEY
+        s.eoa_address = TEST_WALLET
+        servicer = PolymarketServiceServicer(s)
+        assert servicer._signer is not None  # local signer wired
+        assert servicer._signer_http_client is None  # no http client allocated
 
 
 class TestEnsureWalletReadySkippedInPlatformMode:
@@ -1183,32 +1230,32 @@ class TestEnsureWalletReadySkippedInPlatformMode:
         monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", _gateway_wallets_json())
         servicer = PolymarketServiceServicer(_platform_settings())
 
-        # Patch the signer module's httpx.Client to intercept the POST.
-        # The remote signer creates its own client when http_client=None — patch
-        # the module-level httpx.Client constructor for that test path.
-        with patch("almanak.framework.connectors.polymarket.signer.httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {
-                "signed_transactions": [
-                    {"_type": "signature", "r": "0x" + "aa" * 32, "s": "0x" + "bb" * 32, "v": 27, "networkV": None}
-                ]
-            }
-            mock_response.text = ""
-            mock_client.post.return_value = mock_response
-            mock_client_cls.return_value = mock_client
+        # The servicer holds a persistent ``httpx.Client`` bound to the
+        # signer factory's closure (so all signatures reuse the underlying
+        # connection). Stub ``.post`` on that exact instance — patching the
+        # constructor wouldn't take effect because the client was already
+        # built during ``__init__``.
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "signed_transactions": [
+                {"_type": "signature", "r": "0x" + "aa" * 32, "s": "0x" + "bb" * 32, "v": 27, "networkV": None}
+            ]
+        }
+        mock_response.text = ""
+        assert servicer._signer_http_client is not None
+        servicer._signer_http_client.post = MagicMock(return_value=mock_response)  # type: ignore[method-assign]
 
-            headers = servicer._build_l1_headers(nonce=0)
+        headers = servicer._build_l1_headers(nonce=0)
 
-            mock_client.post.assert_called_once()
-            url = mock_client.post.call_args.args[0]
-            assert url.endswith("/sign/hash")
-            body = mock_client.post.call_args.kwargs["json"]
-            assert body["eoa_address"] == TRADING_EOA
-            assert body["signing_type"] == "EVM"
-            assert headers["POLY_ADDRESS"] == TRADING_EOA
-            assert headers["POLY_SIGNATURE"] == "0x" + "aa" * 32 + "bb" * 32 + "1b"
+        servicer._signer_http_client.post.assert_called_once()
+        url = servicer._signer_http_client.post.call_args.args[0]
+        assert url.endswith("/sign/hash")
+        body = servicer._signer_http_client.post.call_args.kwargs["json"]
+        assert body["eoa_address"] == TRADING_EOA
+        assert body["signing_type"] == "EVM"
+        assert headers["POLY_ADDRESS"] == TRADING_EOA
+        assert headers["POLY_SIGNATURE"] == "0x" + "aa" * 32 + "bb" * 32 + "1b"
 
 
 # =============================================================================

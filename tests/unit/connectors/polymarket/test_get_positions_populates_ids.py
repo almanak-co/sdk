@@ -37,7 +37,6 @@ def config_with_credentials() -> PolymarketConfig:
     secret = base64.b64encode(b"test_secret_key_123").decode()
     return PolymarketConfig(
         wallet_address=account.address,
-        private_key=SecretStr(account.key.hex()),
         signature_type=SignatureType.EOA,
         api_credentials=ApiCredentials(
             api_key="test_api_key",

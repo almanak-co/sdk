@@ -78,10 +78,9 @@ def test_wallet() -> str:
 
 
 @pytest.fixture
-def config(test_private_key: str, test_wallet: str) -> PolymarketConfig:
+def config(test_private_key: str, test_wallet: str) -> PolymarketConfig:  # noqa: ARG001
     return PolymarketConfig(
         wallet_address=test_wallet,
-        private_key=SecretStr(test_private_key),
         signature_type=SignatureType.EOA,
     )
 

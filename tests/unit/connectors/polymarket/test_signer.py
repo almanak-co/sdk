@@ -18,9 +18,13 @@ from eth_account.messages import encode_typed_data
 from almanak.framework.connectors.polymarket.exceptions import PolymarketSignatureError
 from almanak.framework.connectors.polymarket.signer import (
     SIGN_HASH_PATH,
+    Signer,
     build_clob_auth_typed_data,
+    make_local_signer,
+    make_remote_signer,
     sign_typed_data_local,
     sign_typed_data_remote,
+    signer_from_env,
 )
 
 
@@ -335,3 +339,153 @@ class TestSignTypedDataRemoteErrors:
         client.post.return_value = response
         with pytest.raises(PolymarketSignatureError, match="non-JSON"):
             sign_typed_data_remote(sample_typed_data, "0xabc", "https://signer.example.com", "jwt", http_client=client)
+
+
+# =============================================================================
+# Factories — make_local_signer / make_remote_signer (issue #1961)
+# =============================================================================
+
+
+class TestMakeLocalSigner:
+    """``make_local_signer`` returns a Signer-shaped callable that wraps
+    ``sign_typed_data_local`` with the captured private key."""
+
+    def test_returns_callable_satisfying_signer_protocol(self, test_account):
+        signer = make_local_signer(test_account.key.hex())
+        # Signer is a structural Protocol; callability with the right shape
+        # is what matters. The round-trip below is the load-bearing
+        # assertion that the wired signature actually matches the EOA.
+        assert callable(signer)
+        # Reference Signer to keep the Protocol import live + give an
+        # at-a-glance hint that the factory is meant to satisfy it.
+        _: Signer = signer  # type: ignore[assignment]
+
+    def test_signature_recovers_to_signer(self, sample_typed_data, test_account):
+        signer = make_local_signer(test_account.key.hex())
+        sig_hex = signer(sample_typed_data)
+        signable = encode_typed_data(full_message=sample_typed_data)
+        recovered = Account.recover_message(signable, signature=sig_hex)
+        assert recovered == test_account.address
+
+    def test_factory_matches_underlying_primitive(self, sample_typed_data, test_account):
+        """The factory's output must be byte-identical to calling the
+        primitive directly — the factory is a closure, not a behaviour
+        change. A regression that adds preprocessing here would change the
+        recovered EOA and break Polymarket auth."""
+        signer = make_local_signer(test_account.key.hex())
+        from_factory = signer(sample_typed_data)
+        from_primitive = sign_typed_data_local(sample_typed_data, test_account.key.hex())
+        assert from_factory == from_primitive
+
+
+class TestMakeRemoteSigner:
+    """``make_remote_signer`` wraps ``sign_typed_data_remote`` with captured
+    eoa/url/jwt + an optional reused HTTP client."""
+
+    def test_calls_remote_primitive_with_captured_args(self, sample_typed_data, test_account):
+        client = MagicMock(spec=httpx.Client)
+        client.post.return_value = _make_mock_response(
+            200,
+            {
+                "signed_transactions": [
+                    {"_type": "signature", "r": "0x" + "ab" * 32, "s": "0x" + "cd" * 32, "v": 27, "networkV": None}
+                ]
+            },
+        )
+        signer = make_remote_signer(
+            eoa_address=test_account.address,
+            signer_service_url="https://signer.example.com",
+            signer_service_jwt="jwt-token",
+            http_client=client,
+        )
+        sig = signer(sample_typed_data)
+
+        assert client.post.call_count == 1
+        body = client.post.call_args.kwargs["json"]
+        # eoa_address propagated from factory
+        assert body["eoa_address"] == test_account.address
+        # JWT propagated from factory
+        assert client.post.call_args.kwargs["headers"]["Authorization"] == "Bearer jwt-token"
+        # URL propagated from factory
+        assert client.post.call_args.args[0].startswith("https://signer.example.com")
+        # Reassembled signature shape
+        assert sig.startswith("0x")
+        assert len(sig) == 2 + 65 * 2
+
+    def test_reuses_http_client_across_calls(self, sample_typed_data, test_account):
+        """A single ``http_client`` passed to the factory must be reused on
+        every signer call — that's the whole point of the optional kwarg
+        (amortises TLS handshake in hot paths)."""
+        client = MagicMock(spec=httpx.Client)
+        client.post.return_value = _make_mock_response(
+            200,
+            {
+                "signed_transactions": [
+                    {"_type": "signature", "r": "0x" + "11" * 32, "s": "0x" + "22" * 32, "v": 28, "networkV": None}
+                ]
+            },
+        )
+        signer = make_remote_signer(
+            eoa_address=test_account.address,
+            signer_service_url="https://signer.example.com",
+            signer_service_jwt="jwt",
+            http_client=client,
+        )
+        signer(sample_typed_data)
+        signer(sample_typed_data)
+        assert client.post.call_count == 2
+        # The client we passed should NOT be closed by the signer — closure
+        # ownership stays with the caller. ``close`` is never invoked.
+        client.close.assert_not_called()
+
+
+# =============================================================================
+# signer_from_env — environment-variable composition (issue #1961)
+# =============================================================================
+
+
+class TestSignerFromEnv:
+    """``signer_from_env`` builds a Signer from POLYMARKET_PRIVATE_KEY (local)
+    or ALMANAK_SIGNER_SERVICE_URL+JWT+POLYMARKET_WALLET_ADDRESS (remote), or
+    returns ``None`` when neither path is configured."""
+
+    def test_local_wins_when_private_key_set(self, monkeypatch, test_account, sample_typed_data):
+        monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", test_account.key.hex())
+        # Even with remote envs ALSO set, local mode wins — trading EOA in
+        # process is the unambiguous choice when the key is available.
+        monkeypatch.setenv("ALMANAK_SIGNER_SERVICE_URL", "https://signer.example.com")
+        monkeypatch.setenv("ALMANAK_SIGNER_SERVICE_JWT", "jwt")
+        monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", test_account.address)
+
+        signer = signer_from_env()
+        assert signer is not None
+        sig_hex = signer(sample_typed_data)
+        signable = encode_typed_data(full_message=sample_typed_data)
+        assert Account.recover_message(signable, signature=sig_hex) == test_account.address
+
+    def test_remote_when_only_remote_envs_set(self, monkeypatch, test_account):
+        monkeypatch.delenv("POLYMARKET_PRIVATE_KEY", raising=False)
+        monkeypatch.setenv("ALMANAK_SIGNER_SERVICE_URL", "https://signer.example.com")
+        monkeypatch.setenv("ALMANAK_SIGNER_SERVICE_JWT", "jwt-token")
+        monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", test_account.address)
+
+        signer = signer_from_env()
+        assert signer is not None  # remote signer is callable even before first call
+
+    def test_none_when_nothing_configured(self, monkeypatch):
+        monkeypatch.delenv("POLYMARKET_PRIVATE_KEY", raising=False)
+        monkeypatch.delenv("ALMANAK_SIGNER_SERVICE_URL", raising=False)
+        monkeypatch.delenv("ALMANAK_SIGNER_SERVICE_JWT", raising=False)
+        monkeypatch.delenv("POLYMARKET_WALLET_ADDRESS", raising=False)
+        assert signer_from_env() is None
+
+    def test_none_when_remote_partially_configured(self, monkeypatch, test_account):
+        """Either all three remote envs are present or remote mode does NOT
+        engage — a partial config is the same as no config (returns None)
+        rather than a half-built Signer that raises at first use."""
+        monkeypatch.delenv("POLYMARKET_PRIVATE_KEY", raising=False)
+        # Missing JWT
+        monkeypatch.setenv("ALMANAK_SIGNER_SERVICE_URL", "https://signer.example.com")
+        monkeypatch.delenv("ALMANAK_SIGNER_SERVICE_JWT", raising=False)
+        monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", test_account.address)
+        assert signer_from_env() is None

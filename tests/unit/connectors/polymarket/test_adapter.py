@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
 
 from almanak.framework.connectors.polymarket import (
     GammaMarket,
@@ -93,11 +92,15 @@ def test_wallet():
 
 
 @pytest.fixture
-def config(test_private_key, test_wallet):
-    """Create test configuration."""
+def config(test_private_key, test_wallet):  # noqa: ARG001 — test_private_key kept for backward-compatible fixture wiring
+    """Create test configuration.
+
+    After issue #1961 the config carries no private key. Tests that need a
+    signing-capable ``ClobClient`` build a Signer separately via
+    :func:`make_local_signer`.
+    """
     return PolymarketConfig(
         wallet_address=test_wallet,
-        private_key=SecretStr(test_private_key),
         signature_type=SignatureType.EOA,
     )
 

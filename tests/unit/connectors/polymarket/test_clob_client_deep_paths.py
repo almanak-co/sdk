@@ -65,6 +65,7 @@ from almanak.framework.connectors.polymarket.models import (
     TradeFilters,
     UnsignedOrder,
 )
+from almanak.framework.connectors.polymarket.signer import make_local_signer
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +73,16 @@ from almanak.framework.connectors.polymarket.models import (
 # ---------------------------------------------------------------------------
 
 
+# Deterministic test key shared across fixtures + the module-level
+# ``_make_clob_client`` helper. After issue #1961 ``PolymarketConfig`` no longer
+# carries credential fields, so the signer is injected at the ``ClobClient``
+# call site via this helper.
+_TEST_PRIVATE_KEY = "0x" + "11" * 32
+
+
 @pytest.fixture
 def test_account():
-    return Account.from_key("0x" + "11" * 32)
+    return Account.from_key(_TEST_PRIVATE_KEY)
 
 
 @pytest.fixture
@@ -91,7 +99,6 @@ def credentials():
 def config(test_account):
     return PolymarketConfig(
         wallet_address=test_account.address,
-        private_key=SecretStr(test_account.key.hex()),
         signature_type=SignatureType.EOA,
     )
 
@@ -100,10 +107,19 @@ def config(test_account):
 def config_with_credentials(test_account, credentials):
     return PolymarketConfig(
         wallet_address=test_account.address,
-        private_key=SecretStr(test_account.key.hex()),
         signature_type=SignatureType.EOA,
         api_credentials=credentials,
     )
+
+
+def _make_clob_client(config: PolymarketConfig, *args, **kwargs) -> ClobClient:
+    """Build a ``ClobClient`` with a default local Signer for tests.
+
+    Tests that need read-only mode (``signer=None``) or a remote signer pass
+    ``signer=`` explicitly and that overrides this default.
+    """
+    kwargs.setdefault("signer", make_local_signer(_TEST_PRIVATE_KEY))
+    return ClobClient(config, *args, **kwargs)
 
 
 def _make_response(payload, status_code: int = 200):
@@ -197,13 +213,13 @@ def _gamma_market(*, neg_risk: bool = False, tick: str = "0.01", min_size: str =
 class TestContextManagerAndClose:
     def test_close_delegates_to_http(self, config_with_credentials):
         mock_http = MagicMock(spec=httpx.Client)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.close()
         mock_http.close.assert_called_once()
 
     def test_context_manager_closes_on_exit(self, config_with_credentials):
         mock_http = MagicMock(spec=httpx.Client)
-        with ClobClient(config_with_credentials, http_client=mock_http) as client:
+        with _make_clob_client(config_with_credentials, http_client=mock_http) as client:
             assert client.config is config_with_credentials
         mock_http.close.assert_called_once()
 
@@ -224,7 +240,7 @@ class TestCredentialsFallbackPaths:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.get.return_value = bad
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
         with pytest.raises(PolymarketAuthenticationError):
             client.derive_api_credentials()
 
@@ -249,7 +265,7 @@ class TestCredentialsFallbackPaths:
         mock_http.get.return_value = bad
         mock_http.post.return_value = good
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
         creds = client.get_or_create_credentials()
         assert creds.api_key == "fresh-api"
         mock_http.get.assert_called_once()
@@ -266,7 +282,7 @@ class TestCredentialsFallbackPaths:
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.get.return_value = good
 
-        client = ClobClient(config, http_client=mock_http)
+        client = _make_clob_client(config, http_client=mock_http)
         assert client.credentials is None
         creds = client._ensure_credentials()
         assert creds.api_key == "lazy-key"
@@ -280,7 +296,7 @@ class TestCredentialsFallbackPaths:
 
 class TestCalculateBackoffDelay:
     def test_exponential_backoff_grows_with_retry_count(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with patch("almanak.framework.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
             d0 = client._calculate_backoff_delay(retry_count=0)
             d1 = client._calculate_backoff_delay(retry_count=1)
@@ -290,13 +306,13 @@ class TestCalculateBackoffDelay:
         assert d2 > d1
 
     def test_exponential_backoff_caps_at_max(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with patch("almanak.framework.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
             d = client._calculate_backoff_delay(retry_count=20)
         assert d == client.config.max_retry_delay
 
     def test_retry_after_path_clamps_to_max(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with patch("almanak.framework.connectors.polymarket.clob_client.random.uniform", return_value=0.0):
             d = client._calculate_backoff_delay(retry_count=0, retry_after=999_999)
         assert d == client.config.max_retry_delay
@@ -309,7 +325,7 @@ class TestCalculateBackoffDelay:
 
 class TestSubmitOrder:
     def test_submit_order_without_credentials_raises(self, config):
-        client = ClobClient(config)
+        client = _make_clob_client(config)
         unsigned = UnsignedOrder(
             salt=1,
             maker=config.wallet_address,
@@ -337,7 +353,7 @@ class TestSubmitOrder:
             "transactionsHashes": [],
         }
         mock_http = _make_http(request_payloads=payload)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         wire = {
             "order": {"tokenId": "123"},
@@ -353,7 +369,7 @@ class TestSubmitOrder:
 class TestCancelHelpers:
     def test_cancel_order_uses_delete_with_body(self, config_with_credentials):
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         assert client.cancel_order("o-123") is True
         kwargs = mock_http.request.call_args.kwargs
@@ -363,7 +379,7 @@ class TestCancelHelpers:
 
     def test_cancel_orders_passes_list_body(self, config_with_credentials):
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         assert client.cancel_orders(["a", "b", "c"]) is True
         body = mock_http.request.call_args.kwargs["content"]
@@ -371,7 +387,7 @@ class TestCancelHelpers:
 
     def test_cancel_all_orders_calls_endpoint(self, config_with_credentials):
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         assert client.cancel_all_orders() is True
         kwargs = mock_http.request.call_args.kwargs
@@ -399,7 +415,7 @@ class TestGetOrder:
             }
         ]
         mock_http = _make_http(request_payloads=open_payload)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         order = client.get_order("ord-A")
         assert order is not None
@@ -423,7 +439,7 @@ class TestGetOrder:
             ],  # /data/orders?orderID=
         ]
         mock_http = _make_http(request_payloads=responses)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         order = client.get_order("ord-X")
         assert order is not None
@@ -433,14 +449,14 @@ class TestGetOrder:
     def test_get_order_returns_none_when_not_found(self, config_with_credentials):
         # Both calls return empty lists.
         mock_http = _make_http(request_payloads=[[], []])
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         assert client.get_order("missing") is None
 
     def test_get_order_swallows_exception_returns_none(self, config_with_credentials):
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = RuntimeError("boom")
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         assert client.get_order("anything") is None
 
@@ -469,7 +485,7 @@ class TestGetOpenOrders:
             "count": 1,
         }
         mock_http = _make_http(request_payloads=envelope)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         orders = client.get_open_orders(filters=OrderFilters(market="tok", limit=50))
         assert len(orders) == 1
         assert orders[0].order_id == "ord-1"
@@ -480,7 +496,7 @@ class TestGetOpenOrders:
 
     def test_unexpected_shape_returns_empty_list(self, config_with_credentials):
         mock_http = _make_http(request_payloads={"unexpected": "shape"})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.get_open_orders() == []
 
     def test_iso_string_created_at_parsed(self, config_with_credentials):
@@ -497,7 +513,7 @@ class TestGetOpenOrders:
                 }
             ]
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         orders = client.get_open_orders()
         assert orders[0].created_at is not None
         assert orders[0].created_at.year == 2024
@@ -515,7 +531,7 @@ class TestGetOpenOrders:
                 }
             ]
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         orders = client.get_open_orders()
         assert orders[0].created_at is None
 
@@ -542,7 +558,7 @@ class TestGetOpenOrders:
                 },
             ]
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         orders = client.get_open_orders()
         assert len(orders) == 1
         assert orders[0].order_id == "ord-good"
@@ -558,7 +574,7 @@ class TestGetTrades:
         from datetime import datetime, timezone
 
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         before = datetime(2024, 1, 1, tzinfo=timezone.utc)
         after = datetime(2024, 6, 1, tzinfo=timezone.utc)
         client.get_trades(filters=TradeFilters(market="tok", before=before, after=after, limit=50))
@@ -589,7 +605,7 @@ class TestGetTrades:
                 },
             ]
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         trades = client.get_trades()
         assert len(trades) == 1
         assert trades[0].id == "ok"
@@ -626,7 +642,7 @@ class TestGetPositionsParseSkip:
                 },
             ]
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         positions = client.get_positions()
         assert len(positions) == 1
         assert positions[0].outcome == "NO"
@@ -640,7 +656,7 @@ class TestGetPositionsParseSkip:
 class TestGetMarketByConditionId:
     def test_empty_condition_id_returns_none_without_call(self, config_with_credentials):
         mock_http = MagicMock(spec=httpx.Client)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         assert client.get_market_by_condition_id("") is None
         mock_http.request.assert_not_called()
@@ -650,7 +666,7 @@ class TestGetMarketByConditionId:
         # (NOT_FOUND); set its TTL to the past so the eviction branch fires.
         cid = "0xdeadbeef"
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client._cache[f"market_by_cid:{cid}"] = (client._MARKET_NOT_FOUND, 0.0)
 
         assert client.get_market_by_condition_id(cid) is None
@@ -668,7 +684,7 @@ class TestGetMarketByConditionId:
 class TestGetMarketsFilters:
     def test_all_filters_propagate(self, config_with_credentials):
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
         client.get_markets(
             MarketFilters(
@@ -717,7 +733,7 @@ class TestGetMarketsFilters:
                 {"slug": "no-id"},
             ]
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         markets = client.get_markets()
         assert len(markets) == 1
         assert markets[0].id == "good"
@@ -730,7 +746,7 @@ class TestGetMarketsFilters:
 
 class TestValidationEdges:
     def test_validate_tick_size_zero_tick_short_circuits(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         # Control: a positive tick rejects a non-tick-aligned price.
         with pytest.raises(PolymarketInvalidTickSizeError):
             client._validate_tick_size(Decimal("0.123"), tick_size=Decimal("0.01"))
@@ -739,12 +755,12 @@ class TestValidationEdges:
         assert result is None
 
     def test_round_to_tick_size_zero_tick_returns_input(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         out = client._round_to_tick_size(Decimal("0.55"), Decimal("0"), "BUY")
         assert out == Decimal("0.55")
 
     def test_round_price_to_tick_uses_market_tick_when_no_explicit(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _gamma_market(tick="0.01")
         rounded = client.round_price_to_tick(Decimal("0.655"), "BUY", market=market)
         assert rounded == Decimal("0.65")
@@ -770,18 +786,18 @@ class TestValidationEdges:
 
 class TestGetPriceHistory:
     def test_interval_and_range_are_mutually_exclusive(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(ValueError, match="Cannot specify both"):
             client.get_price_history("tok", interval="1d", start_ts=1, end_ts=2)
 
     def test_partial_range_raises(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(ValueError, match="must be specified together"):
             client.get_price_history("tok", start_ts=1)
 
     def test_interval_string_passthrough(self, config_with_credentials):
         mock_http = _make_http(request_payloads={"history": []})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_price_history("tok", interval="1h")
         params = mock_http.request.call_args.kwargs["params"]
         assert params["market"] == "tok"
@@ -789,7 +805,7 @@ class TestGetPriceHistory:
 
     def test_interval_enum_normalized_to_value(self, config_with_credentials):
         mock_http = _make_http(request_payloads={"history": []})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_price_history("tok", interval=PriceHistoryInterval.ONE_HOUR)
         params = mock_http.request.call_args.kwargs["params"]
         assert params["interval"] == "1h"
@@ -798,7 +814,7 @@ class TestGetPriceHistory:
         mock_http = _make_http(
             request_payloads={"history": [{"t": 1_700_000_000, "p": "0.55"}]}
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         result = client.get_price_history("tok", start_ts=1_700_000_000, end_ts=1_700_000_300, fidelity=5)
         params = mock_http.request.call_args.kwargs["params"]
         assert params["startTs"] == 1_700_000_000
@@ -811,7 +827,7 @@ class TestGetPriceHistory:
 
     def test_cache_hit_skips_http_on_second_call(self, config_with_credentials):
         mock_http = _make_http(request_payloads={"history": []})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_price_history("tok", interval="1d")
         client.get_price_history("tok", interval="1d")
         # Only one underlying request.
@@ -826,7 +842,7 @@ class TestGetPriceHistory:
 class TestGetTradeTape:
     def test_default_limit_capped_at_500(self, config_with_credentials):
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_trade_tape(token_id=None, limit=10_000)
         params = mock_http.request.call_args.kwargs["params"]
         assert params["limit"] == 500
@@ -834,7 +850,7 @@ class TestGetTradeTape:
 
     def test_token_id_added_to_params(self, config_with_credentials):
         mock_http = _make_http(request_payloads={})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         client.get_trade_tape(token_id="tok-123", limit=50)
         params = mock_http.request.call_args.kwargs["params"]
         assert params["market"] == "tok-123"
@@ -852,7 +868,7 @@ class TestGetTradeTape:
             }
         ]
         mock_http = _make_http(request_payloads=payload)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         trades = client.get_trade_tape(token_id="tok", limit=10)
         assert len(trades) == 1
         assert trades[0].price == Decimal("0.55")
@@ -865,14 +881,14 @@ class TestGetTradeTape:
             {"id": "bad", "price": "x", "size": "y"},
         ]
         mock_http = _make_http(request_payloads=payload)
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         trades = client.get_trade_tape()
         assert len(trades) == 1
         assert trades[0].id == "good"
 
     def test_non_list_response_yields_empty(self, config_with_credentials):
         mock_http = _make_http(request_payloads={"unexpected": True})
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         assert client.get_trade_tape() == []
 
 
@@ -893,7 +909,7 @@ class TestCreateAndPostOrder:
                 "takingAmount": "20000000",
             }
         )
-        client = ClobClient(config_with_credentials, http_client=mock_http)
+        client = _make_clob_client(config_with_credentials, http_client=mock_http)
         market = _gamma_market(tick="0.001", min_size="5")
 
         resp = client.create_and_post_order(
@@ -914,7 +930,7 @@ class TestCreateAndPostOrder:
 
     def test_glue_propagates_order_type_via_oid(self, config_with_credentials):
         # Confirm OrderType validation: invalid string raises.
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         with pytest.raises(ValueError):
             client.create_and_post_order(
                 token_id="123",
@@ -927,7 +943,7 @@ class TestCreateAndPostOrder:
 
     def test_create_and_sign_market_order_returns_signed(self, config_with_credentials):
         # Cover the create_and_sign_market_order one-liner.
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _gamma_market(tick="0.001", min_size="5")
         params = MarketOrderParams(
             token_id="123",
@@ -940,7 +956,7 @@ class TestCreateAndPostOrder:
         assert signed.signature.startswith("0x")
 
     def test_create_and_sign_limit_order_returns_signed(self, config_with_credentials):
-        client = ClobClient(config_with_credentials)
+        client = _make_clob_client(config_with_credentials)
         market = _gamma_market(tick="0.001", min_size="5")
         params = LimitOrderParams(
             token_id="123",

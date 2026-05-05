@@ -29,7 +29,6 @@ import subprocess
 from decimal import Decimal
 
 import pytest
-from pydantic import SecretStr
 
 from tests.conftest_gateway import AnvilFixture
 
@@ -183,7 +182,6 @@ def polymarket_config():
 
     return PolymarketConfig(
         wallet_address=TEST_WALLET,
-        private_key=SecretStr(TEST_PRIVATE_KEY),
         rate_limit_enabled=False,
     )
 
@@ -192,8 +190,9 @@ def polymarket_config():
 def clob_client(polymarket_config):
     """V2 CLOB client (defaults to clob.polymarket.com post-cutover)."""
     from almanak.framework.connectors.polymarket import ClobClient
+    from almanak.framework.connectors.polymarket.signer import make_local_signer
 
-    return ClobClient(polymarket_config)
+    return ClobClient(polymarket_config, signer=make_local_signer(TEST_PRIVATE_KEY))
 
 
 # =============================================================================

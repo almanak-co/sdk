@@ -52,6 +52,7 @@ from .models import (
     MarketFilters,
     PolymarketConfig,
 )
+from .signer import Signer
 
 logger = structlog.get_logger(__name__)
 
@@ -98,20 +99,25 @@ class PolymarketSDK:
         self,
         config: PolymarketConfig,
         web3: Any | None = None,
+        *,
+        signer: Signer | None = None,
     ) -> None:
         """Initialize Polymarket SDK.
 
         Args:
-            config: Polymarket configuration with wallet and keys
+            config: Polymarket configuration (public/inert addresses + URLs).
             web3: Optional Web3 instance for on-chain operations.
-                  Required for allowance checking and CTF operations.
+                Required for allowance checking and CTF operations.
+            signer: Optional EIP-712 :class:`Signer`. ``None`` puts the
+                underlying ``ClobClient`` in read-only mode (signing-required
+                calls raise :class:`PolymarketSignatureError`). See issue #1961.
         """
         self.config = config
         self.web3 = web3
         self._credentials: ApiCredentials | None = config.api_credentials
 
         # Initialize CLOB client
-        self.clob = ClobClient(config)
+        self.clob = ClobClient(config, signer=signer)
 
         # Initialize CTF SDK
         self.ctf = CtfSDK()
@@ -120,6 +126,7 @@ class PolymarketSDK:
             "PolymarketSDK initialized",
             wallet=config.wallet_address,
             has_credentials=self._credentials is not None,
+            has_signer=signer is not None,
             has_web3=web3 is not None,
         )
 
