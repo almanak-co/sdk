@@ -574,8 +574,13 @@ message GetAccountingEventsResponse {
 }
 
 // Accounting outbox messages — mirrors the accounting_outbox table in
-// metrics-database (PR #24). PG primary key is ledger_entry_id; the proto
-// also exposes it as "id" so drain_one stays compatible with the SQLite path.
+// metrics-database (PR #24). The request carries BOTH keys explicitly:
+// `outbox_id` (SQLite UUID idempotency key, INSERT OR IGNORE) and
+// `ledger_entry_id` (PG primary key, FK to transaction_ledger). There is no
+// `id` field on this request — typed callers must pass `outbox_id=` and
+// `ledger_entry_id=` by name. The unified `id` alias lives only on the
+// returned `OutboxEntry` (= ledger_entry_id on PG, UUID on SQLite) so
+// drain_one stays compatible across backends.
 message SaveOutboxEntryRequest {
   string outbox_id = 1;        // UUID (INSERT OR IGNORE; ignored on PG where PK = ledger_entry_id)
   string deployment_id = 2;
