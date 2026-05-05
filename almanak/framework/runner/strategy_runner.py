@@ -1689,7 +1689,9 @@ class StrategyRunner:
                 condition, raise CriticalCallbackError instead.
             max_iterations: Maximum number of iterations to run. None means run indefinitely.
         """
-        interval = interval_seconds or self.config.default_interval_seconds
+        # Explicit None check, not `or`: a caller passing 0 means "no inter-iteration
+        # delay", and `0 or default` would silently fall back to default_interval_seconds.
+        interval = self.config.default_interval_seconds if interval_seconds is None else interval_seconds
         strategy_id = strategy.strategy_id
 
         max_iter_msg = f", max_iterations={max_iterations}" if max_iterations else ""

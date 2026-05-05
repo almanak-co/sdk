@@ -532,7 +532,7 @@ class TestStuckDetectorWiring:
 
         strategy = _FailThenSucceed(n_fails=2)
 
-        await runner.run_loop(strategy, max_iterations=3)
+        await runner.run_loop(strategy, interval_seconds=0, max_iterations=3)
 
         # Expected sequence of writes: startup RUNNING, ERROR (after 2nd fail), RUNNING (recovery)
         assert "ERROR" in states_written, f"ERROR not written; saw {states_written}"
@@ -588,7 +588,7 @@ class TestStuckDetectorWiring:
                 return MockMarketSnapshot(chain=self._chain, wallet_address=self._wallet_address)
 
         strategy = _FailThenSucceed()
-        await runner.run_loop(strategy, max_iterations=2)
+        await runner.run_loop(strategy, interval_seconds=0, max_iterations=2)
 
         # Only the startup RUNNING write should be present — no recovery write and no ERROR write
         # (we stayed below max_consecutive_errors).
@@ -675,7 +675,7 @@ class TestStuckDetectorWiring:
         runner._first_error_at = datetime.now(UTC) - timedelta(minutes=15)
 
         # Should not raise - alert generation is non-fatal, loop continues
-        await runner.run_loop(strategy, max_iterations=2)
+        await runner.run_loop(strategy, interval_seconds=0, max_iterations=2)
         assert strategy.decide_call_count == 2
 
 

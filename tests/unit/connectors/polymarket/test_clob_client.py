@@ -736,7 +736,9 @@ class TestErrorHandling:
 
         client = _make_clob_client(config_with_credentials, http_client=mock_http)
 
-        with pytest.raises(PolymarketRateLimitError) as exc_info:
+        # Patch time.sleep so the retry-backoff loop (Retry-After: 60s × max_retries)
+        # doesn't burn ~90s of real wall-clock waiting on mocked retries.
+        with patch("time.sleep"), pytest.raises(PolymarketRateLimitError) as exc_info:
             client._request("GET", "https://clob.polymarket.com/test")
 
         assert exc_info.value.retry_after == 60
