@@ -3,6 +3,15 @@
 Public exports for dashboard data access, rendering, and PM integration.
 External consumers (PM dashboard, custom UIs) should import from here.
 
+The streamlit-using ``render_*_section`` helpers are resolved lazily via
+:pep:`562` ``__getattr__`` so that gateway-side consumers — which import
+``almanak.framework.dashboard.quant_aggregations`` to build PnL / cost-stack
+RPC responses — do not transitively pay the cost of loading ``streamlit`` at
+package init. The gateway image strips ``streamlit`` (see
+``deploy/docker/strip-list-gateway.txt``); an eager re-export here would
+``ModuleNotFoundError`` on every dashboard RPC in production (VIB-4048).
+Regression guard: ``tests/gateway/test_imports_lean.py``.
+
 For strategy authors writing a ``dashboard/ui.py`` for their strategy,
 the recommended convention is to frame ``render_custom_dashboard()``
 with three section helpers (VIB-3969) so accounting is visually QA'able
@@ -27,6 +36,9 @@ Usage::
     )
 """
 
+from typing import TYPE_CHECKING
+
+from almanak._lazy import LazySpec, build_lazy_module_dispatch
 from almanak.framework.dashboard.adapters import (
     render_strategy_detail,
     render_strategy_timeline,
@@ -51,11 +63,26 @@ from almanak.framework.dashboard.gateway_client import (
     TimelineEvent,
 )
 from almanak.framework.dashboard.models import Strategy
-from almanak.framework.dashboard.sections import (
-    render_cost_stack_section,
-    render_pnl_section,
-    render_trade_tape_section,
-)
+
+if TYPE_CHECKING:
+    from almanak.framework.dashboard.sections import (
+        render_cost_stack_section,
+        render_pnl_section,
+        render_trade_tape_section,
+    )
+
+# Submodules whose import drags in streamlit. Resolved lazily so the
+# package init stays streamlit-free; the gateway sidecar image (which
+# strips streamlit) can call into other submodules of this package
+# without tripping ModuleNotFoundError.
+_LAZY_IMPORTS: dict[str, LazySpec] = {
+    "render_cost_stack_section": ".sections",
+    "render_pnl_section": ".sections",
+    "render_trade_tape_section": ".sections",
+}
+
+__getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())
+
 
 __all__ = [
     # Focused gateway data slices (VIB-3969)
@@ -76,7 +103,7 @@ __all__ = [
     "StrategySummary",
     "TimelineEvent",
     "TradeRecord",
-    # Custom-dashboard section helpers
+    # Custom-dashboard section helpers (lazy — pull streamlit on first access)
     "render_cost_stack_section",
     "render_pnl_section",
     # PM integration

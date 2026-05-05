@@ -11,6 +11,8 @@ specific command by name, which still works through the lazy dispatch.
 
 from typing import TYPE_CHECKING
 
+from almanak._lazy import LazySpec, build_lazy_module_dispatch
+
 if TYPE_CHECKING:
     from .backtest import backtest
     from .check import check
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
 
 
 # Maps each public name to (relative submodule, attribute name on that submodule).
-_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+_LAZY_IMPORTS: dict[str, LazySpec] = {
     "backtest": (".backtest", "backtest"),
     "check": (".check", "check"),
     "demo": (".demo", "demo"),
@@ -44,18 +46,4 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
 
 __all__ = [*sorted(_LAZY_IMPORTS)]
 
-
-def __getattr__(name: str) -> object:
-    import importlib
-
-    if name in _LAZY_IMPORTS:
-        rel_module, attr_name = _LAZY_IMPORTS[name]
-        module = importlib.import_module(rel_module, package=__name__)
-        attr = getattr(module, attr_name)
-        globals()[name] = attr
-        return attr
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(set(__all__) | set(globals()))
+__getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())

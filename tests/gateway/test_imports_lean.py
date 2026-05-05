@@ -131,3 +131,100 @@ def test_gateway_import_does_not_pull_heavy_modules() -> None:
             *failures,
         ]
         raise AssertionError("\n".join(msg_lines))
+
+
+def _import_gateway_with_dashboard_handler_lazies_in_subprocess() -> set[str]:
+    """Import the gateway server, then trigger the function-scope lazy imports
+    that ``DashboardServiceServicer.GetPnLSummary`` / ``GetCostStack`` /
+    ``GetAuditPosture`` perform at runtime.
+
+    Function-scope imports still execute the parent package's ``__init__.py``
+    the first time they fire, so a barrel re-export inside
+    ``almanak/framework/dashboard/__init__.py`` that pulls a streamlit-using
+    submodule will surface here even though the server-startup import path
+    (covered by ``test_gateway_import_does_not_pull_heavy_modules``) stays
+    clean. This is the path that broke production in 2.15.1-rc12 (VIB-4048).
+    """
+    script = textwrap.dedent(
+        """
+        import json
+        import sys
+        # Step 1: server startup — same as the lean-import baseline test.
+        import almanak.gateway.server  # noqa: F401
+        # Step 2: replicate the function-scope lazy imports inside the
+        # DashboardServiceServicer handlers in
+        # almanak/gateway/services/dashboard_service.py. Keep this list in
+        # sync with the handlers' ``from almanak.framework.dashboard...``
+        # imports — if a handler grows a new lazy import, add it here.
+        from almanak.framework.dashboard.quant_aggregations import (  # noqa: F401
+            _detect_primitive,
+            compute_audit_trail,
+            compute_cost_stack,
+            compute_pnl_summary,
+            compute_reconciliation,
+            evaluate_posture,
+        )
+        sys.stdout.write(json.dumps(sorted(sys.modules)))
+        """
+    )
+    env = os.environ.copy()
+    env["ALMANAK_STRATEGIES_DIR"] = "/nonexistent_strategies_dir_for_lean_import_test"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    import json
+
+    return set(json.loads(result.stdout))
+
+
+# UI third-party packages forbidden on the gateway runtime path. Pulled out of
+# ``_FORBIDDEN_THIRD_PARTY`` so the runtime-path test can apply a tighter
+# subset (e.g. pandas IS allowed at runtime via numerical helpers) without
+# loosening the startup-path guarantees above.
+_FORBIDDEN_UI_AT_RUNTIME = (
+    "streamlit",
+    "plotly",
+    "altair",
+    "pydeck",
+)
+
+
+def test_gateway_dashboard_handler_lazies_do_not_pull_streamlit() -> None:
+    """Regression guard for VIB-4048.
+
+    ``2.15.1-rc12`` shipped with an eager ``from .sections import
+    render_pnl_section`` in ``almanak/framework/dashboard/__init__.py``.
+    The gateway's function-scope ``from almanak.framework.dashboard
+    .quant_aggregations import compute_pnl_summary`` ran the package init,
+    which loaded ``sections``, which imported ``streamlit``, which
+    ``ModuleNotFoundError``'d in the deployed image (streamlit is in
+    ``strip-list-gateway.txt``). Every ``GetPnLSummary`` / ``GetCostStack``
+    RPC failed in production while the existing
+    ``test_gateway_import_does_not_pull_heavy_modules`` test stayed green
+    because the server-startup path never traversed
+    ``framework.dashboard``. This test simulates the runtime trigger so
+    the same class of regression fails in CI before reaching production.
+    """
+    loaded = _import_gateway_with_dashboard_handler_lazies_in_subprocess()
+    failures = _check_absent(loaded, _FORBIDDEN_UI_AT_RUNTIME, "third-party (runtime path)")
+
+    if failures:
+        msg_lines = [
+            "Triggering the gateway's dashboard-handler lazy imports pulled",
+            "in UI modules the gateway sidecar image strips. The most likely",
+            "culprit is a new module-level streamlit/plotly import reachable",
+            "from almanak/framework/dashboard/__init__.py — either via a new",
+            "eager re-export in the package barrel, or via a streamlit-free",
+            "submodule that grew a transitive UI dependency.",
+            "",
+            "Fix: keep streamlit-using names in the _LAZY_IMPORTS map in",
+            "almanak/framework/dashboard/__init__.py, behind PEP 562",
+            "__getattr__ resolution.",
+            "",
+            *failures,
+        ]
+        raise AssertionError("\n".join(msg_lines))

@@ -52,6 +52,8 @@ attribute access and is cached on the module's ``globals()``.
 
 from typing import TYPE_CHECKING
 
+from almanak._lazy import LazySpec, build_lazy_module_dispatch
+
 # The click group object itself is cheap (it's a LazyBacktestGroup
 # instance). Subcommand modules are loaded on first lookup.
 from .group import backtest as backtest
@@ -167,7 +169,7 @@ if TYPE_CHECKING:
 # Maps each public re-exported name to (absolute submodule, attribute on
 # that submodule). Absolute paths avoid leading-dot ambiguity and let
 # ``importlib.import_module(rel_module)`` work without a ``package=`` arg.
-_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+_LAZY_IMPORTS: dict[str, LazySpec] = {
     # almanak.framework.backtesting (top-level re-exports) ------------------
     "BacktestResult": ("almanak.framework.backtesting", "BacktestResult"),
     "CoinGeckoDataProvider": ("almanak.framework.backtesting", "CoinGeckoDataProvider"),
@@ -267,21 +269,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
 
 __all__ = ["backtest", *sorted(name for name in _LAZY_IMPORTS if not name.startswith("_"))]
 
-
-def __getattr__(name: str) -> object:
-    import importlib
-
-    if name in _LAZY_IMPORTS:
-        module_path, attr_name = _LAZY_IMPORTS[name]
-        module = importlib.import_module(module_path)
-        attr = getattr(module, attr_name)
-        globals()[name] = attr
-        return attr
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(set(__all__) | set(_LAZY_IMPORTS) | set(globals()))
+__getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())
 
 
 # For `python -m almanak.framework.cli.backtest`, see __main__.py

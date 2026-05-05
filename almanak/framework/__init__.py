@@ -10,6 +10,8 @@ module's ``globals()``.
 
 from typing import TYPE_CHECKING
 
+from almanak._lazy import LazySpec, build_lazy_module_dispatch
+
 if TYPE_CHECKING:
     from .alerting import (
         AlertManager,
@@ -188,7 +190,7 @@ if TYPE_CHECKING:
 
 # Maps each public name to the relative module path that supplies it. The map
 # is the single source of truth; ``__all__`` is derived from its keys.
-_LAZY_IMPORTS: dict[str, str] = {
+_LAZY_IMPORTS: dict[str, LazySpec] = {
     # alerting
     "AlertManager": ".alerting",
     "AlertSendResult": ".alerting",
@@ -363,17 +365,4 @@ _LAZY_IMPORTS: dict[str, str] = {
 
 __all__ = [*sorted(_LAZY_IMPORTS)]
 
-
-def __getattr__(name: str) -> object:
-    import importlib
-
-    if name in _LAZY_IMPORTS:
-        module = importlib.import_module(_LAZY_IMPORTS[name], package=__name__)
-        attr = getattr(module, name)
-        globals()[name] = attr
-        return attr
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(set(__all__) | set(globals()))
+__getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())

@@ -24,6 +24,8 @@ Available Connectors:
 
 from typing import TYPE_CHECKING
 
+from almanak._lazy import LazySpec, build_lazy_module_dispatch
+
 if TYPE_CHECKING:
     from .aave_v3 import (
         AAVE_STABLE_RATE_MODE,
@@ -602,7 +604,7 @@ if TYPE_CHECKING:
 # Maps each public name to (relative subpackage, attribute name on that subpackage).
 # Generated to mirror the original eager re-export surface; keep in sync with
 # subpackage ``__init__.py`` when names are added or renamed.
-_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+_LAZY_IMPORTS: dict[str, LazySpec] = {
     # .aave_v3
     "AAVE_DEFAULT_GAS_ESTIMATES": (".aave_v3", "DEFAULT_GAS_ESTIMATES"),
     "AAVE_EVENT_TOPICS": (".aave_v3", "EVENT_TOPICS"),
@@ -956,18 +958,4 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
 
 __all__ = [*sorted(_LAZY_IMPORTS)]
 
-
-def __getattr__(name: str) -> object:
-    import importlib
-
-    if name in _LAZY_IMPORTS:
-        rel_module, attr_name = _LAZY_IMPORTS[name]
-        module = importlib.import_module(rel_module, package=__name__)
-        attr = getattr(module, attr_name)
-        globals()[name] = attr
-        return attr
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(set(__all__) | set(globals()))
+__getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())
