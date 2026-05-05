@@ -64,7 +64,29 @@ class PredictionExitConditions:
     """Exit if price rises above this threshold."""
 
     exit_before_resolution_hours: int | None = None
-    """Exit N hours before market resolution to avoid binary risk."""
+    """Exit N hours before market resolution to avoid binary risk.
+
+    For sub-hour granularity (e.g. 5-minute prediction markets), use
+    ``exit_before_resolution_seconds`` instead. The minimum representable
+    value here is 1 hour, which fires immediately on entry for
+    short-horizon markets and defeats the purpose of the field.
+
+    **Precedence**: when both ``exit_before_resolution_seconds`` and
+    ``exit_before_resolution_hours`` are set on the same instance,
+    ``exit_before_resolution_seconds`` wins. The hours value is silently
+    ignored for that position. Mixing the two on one instance is
+    discouraged — pick the unit that matches your market horizon.
+    """
+
+    exit_before_resolution_seconds: int | None = None
+    """Exit N seconds before market resolution to avoid binary risk.
+
+    Use this for sub-hour markets (e.g. ``btc-updown-5m``) where
+    ``exit_before_resolution_hours`` cannot represent the desired pre-close
+    timeout. Both fields can coexist on the dataclass for backward
+    compatibility, but ``exit_before_resolution_seconds`` takes precedence
+    when both are non-None on the same instance — see precedence note on
+    ``exit_before_resolution_hours``. VIB-3771."""
 
     trailing_stop_pct: Decimal | None = None
     """Trailing stop percentage (e.g., 0.10 for 10% trailing stop)."""
@@ -75,12 +97,44 @@ class PredictionExitConditions:
     min_liquidity_usd: Decimal | None = None
     """Minimum orderbook depth required for exit."""
 
+    def __post_init__(self) -> None:
+        """Validate field values.
+
+        Negative pre-close timeouts are nonsensical (would exit *after*
+        resolution) and almost always indicate a config typo, so we reject
+        them at construction time rather than silently masking with
+        clamping at evaluation time. Zero is permitted and means "exit
+        at resolution" (degenerate but well-defined).
+        """
+        if self.exit_before_resolution_hours is not None and self.exit_before_resolution_hours < 0:
+            raise ValueError(f"exit_before_resolution_hours must be >= 0, got {self.exit_before_resolution_hours}")
+        if self.exit_before_resolution_seconds is not None and self.exit_before_resolution_seconds < 0:
+            raise ValueError(f"exit_before_resolution_seconds must be >= 0, got {self.exit_before_resolution_seconds}")
+
+    def effective_exit_before_resolution_seconds(self) -> int | None:
+        """Resolve the effective pre-close timeout in seconds.
+
+        Precedence on a single instance:
+            1. ``exit_before_resolution_seconds`` if set (wins over hours).
+            2. ``exit_before_resolution_hours * 3600`` if set.
+            3. ``None`` if neither is set.
+
+        Strategy-level defaults are applied separately by the monitor —
+        this method only resolves the per-instance value.
+        """
+        if self.exit_before_resolution_seconds is not None:
+            return self.exit_before_resolution_seconds
+        if self.exit_before_resolution_hours is not None:
+            return self.exit_before_resolution_hours * 3600
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "stop_loss_price": str(self.stop_loss_price) if self.stop_loss_price else None,
             "take_profit_price": str(self.take_profit_price) if self.take_profit_price else None,
             "exit_before_resolution_hours": self.exit_before_resolution_hours,
+            "exit_before_resolution_seconds": self.exit_before_resolution_seconds,
             "trailing_stop_pct": str(self.trailing_stop_pct) if self.trailing_stop_pct else None,
             "max_spread_pct": str(self.max_spread_pct) if self.max_spread_pct else None,
             "min_liquidity_usd": str(self.min_liquidity_usd) if self.min_liquidity_usd else None,
@@ -303,6 +357,7 @@ class PredictionPositionMonitor:
         emit_events: bool = True,
         event_callback: EventCallback | None = None,
         default_exit_before_resolution_hours: int | None = None,
+        default_exit_before_resolution_seconds: int | None = None,
         allow_partial_exits: bool = True,
     ) -> None:
         """Initialize the position monitor.
@@ -313,17 +368,36 @@ class PredictionPositionMonitor:
             emit_events: Whether to emit timeline events.
             event_callback: Optional callback for events.
             default_exit_before_resolution_hours: Strategy-level default for
-                exit_before_resolution_hours. Applied to positions that don't
-                have their own exit conditions or don't specify this value.
+                ``exit_before_resolution_hours``. Applied to positions whose
+                exit_conditions don't resolve to a per-instance value (i.e.
+                neither ``exit_before_resolution_seconds`` nor
+                ``exit_before_resolution_hours`` is set on the position).
+            default_exit_before_resolution_seconds: Strategy-level default for
+                sub-hour markets. Takes precedence over
+                ``default_exit_before_resolution_hours`` when both are set.
+                VIB-3771.
             allow_partial_exits: If True, generate partial sell intents when
                 orderbook liquidity is insufficient for the full position.
                 Defaults to True.
+
+        Raises:
+            ValueError: If either default is negative.
         """
+        if default_exit_before_resolution_hours is not None and default_exit_before_resolution_hours < 0:
+            raise ValueError(
+                f"default_exit_before_resolution_hours must be >= 0, got {default_exit_before_resolution_hours}"
+            )
+        if default_exit_before_resolution_seconds is not None and default_exit_before_resolution_seconds < 0:
+            raise ValueError(
+                f"default_exit_before_resolution_seconds must be >= 0, got {default_exit_before_resolution_seconds}"
+            )
+
         self.strategy_id = strategy_id
         self.check_interval = check_interval
         self.emit_events = emit_events
         self.event_callback = event_callback
         self.default_exit_before_resolution_hours = default_exit_before_resolution_hours
+        self.default_exit_before_resolution_seconds = default_exit_before_resolution_seconds
         self.allow_partial_exits = allow_partial_exits
 
         # Monitored positions keyed by market_id
@@ -607,6 +681,30 @@ class PredictionPositionMonitor:
 
         return MonitoringResult(position=position)
 
+    def _resolve_exit_before_seconds(self, position: MonitoredPosition) -> int | None:
+        """Resolve the effective pre-close timeout (in seconds) for a position.
+
+        Precedence (highest first):
+            1. Position-level ``exit_before_resolution_seconds``.
+            2. Position-level ``exit_before_resolution_hours`` (× 3600).
+            3. Strategy-level ``default_exit_before_resolution_seconds``.
+            4. Strategy-level ``default_exit_before_resolution_hours`` (× 3600).
+            5. ``None`` (feature disabled for this position).
+
+        Position-level wins over strategy-level. Within each tier, seconds
+        wins over hours. VIB-3771.
+        """
+        if position.exit_conditions is not None:
+            position_seconds = position.exit_conditions.effective_exit_before_resolution_seconds()
+            if position_seconds is not None:
+                return position_seconds
+
+        if self.default_exit_before_resolution_seconds is not None:
+            return self.default_exit_before_resolution_seconds
+        if self.default_exit_before_resolution_hours is not None:
+            return self.default_exit_before_resolution_hours * 3600
+        return None
+
     def _check_resolution_approaching(
         self,
         position: MonitoredPosition,
@@ -614,19 +712,16 @@ class PredictionPositionMonitor:
     ) -> MonitoringResult:
         """Check if market resolution is approaching.
 
-        Uses position-level exit_before_resolution_hours if set,
-        otherwise falls back to the strategy-level default.
+        Computes the effective pre-close timeout in seconds using the
+        precedence rules in :meth:`_resolve_exit_before_seconds`. Sub-hour
+        markets (e.g. ``btc-updown-5m``) use
+        ``exit_before_resolution_seconds``; legacy strategies setting
+        ``exit_before_resolution_hours`` continue to work unchanged.
+        VIB-3771.
         """
-        # Get exit hours from position conditions or strategy default
-        exit_hours = None
-        if position.exit_conditions is not None:
-            exit_hours = position.exit_conditions.exit_before_resolution_hours
+        exit_seconds = self._resolve_exit_before_seconds(position)
 
-        # Fall back to strategy-level default
-        if exit_hours is None:
-            exit_hours = self.default_exit_before_resolution_hours
-
-        if exit_hours is None:
+        if exit_seconds is None:
             return MonitoringResult(position=position)
 
         market_end = snapshot.market_end_date or position.market_end_date
@@ -635,17 +730,22 @@ class PredictionPositionMonitor:
 
         now = datetime.now(UTC)
         time_until_end = market_end - now
-        hours_until_end = time_until_end.total_seconds() / 3600
+        seconds_until_end = time_until_end.total_seconds()
 
-        if hours_until_end <= exit_hours:
+        if seconds_until_end <= exit_seconds:
             return MonitoringResult(
                 position=position,
                 event=PredictionEvent.RESOLUTION_APPROACHING,
                 triggered=True,
                 details={
                     "market_end_date": market_end.isoformat(),
-                    "hours_until_end": hours_until_end,
-                    "exit_before_hours": exit_hours,
+                    "seconds_until_end": seconds_until_end,
+                    "hours_until_end": seconds_until_end / 3600,
+                    "exit_before_seconds": exit_seconds,
+                    # Backward-compat: keep integer hours for whole-hour
+                    # thresholds (legacy consumers expected `int`); fall back
+                    # to float for sub-hour seconds (VIB-3771).
+                    "exit_before_hours": (exit_seconds // 3600 if exit_seconds % 3600 == 0 else exit_seconds / 3600),
                     "current_price": str(snapshot.current_price),
                 },
                 suggested_action="SELL",

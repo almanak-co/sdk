@@ -150,6 +150,7 @@ class PredictionBuyIntent(AlmanakImmutableModel):
                 stop_loss_price=Decimal(ec_data["stop_loss_price"]) if ec_data.get("stop_loss_price") else None,
                 take_profit_price=Decimal(ec_data["take_profit_price"]) if ec_data.get("take_profit_price") else None,
                 exit_before_resolution_hours=ec_data.get("exit_before_resolution_hours"),
+                exit_before_resolution_seconds=ec_data.get("exit_before_resolution_seconds"),
                 trailing_stop_pct=Decimal(ec_data["trailing_stop_pct"]) if ec_data.get("trailing_stop_pct") else None,
                 max_spread_pct=Decimal(ec_data["max_spread_pct"]) if ec_data.get("max_spread_pct") else None,
                 min_liquidity_usd=Decimal(ec_data["min_liquidity_usd"]) if ec_data.get("min_liquidity_usd") else None,

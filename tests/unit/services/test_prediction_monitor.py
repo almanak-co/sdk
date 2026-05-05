@@ -1597,3 +1597,260 @@ class TestStrategyLevelDefaults:
         # Should NOT trigger for RESOLUTION_APPROACHING
         # (might trigger other conditions, so just check this specific one)
         assert result.event != PredictionEvent.RESOLUTION_APPROACHING
+
+
+# =============================================================================
+# Test exit_before_resolution_seconds (VIB-3771)
+# =============================================================================
+
+
+class TestExitBeforeResolutionSeconds:
+    """Tests for sub-hour pre-close timeouts (VIB-3771).
+
+    The legacy ``exit_before_resolution_hours`` field has a minimum
+    representable value of 1 hour, which fires immediately on entry for
+    short-horizon markets (e.g. ``btc-updown-5m``). VIB-3771 adds a
+    seconds-granularity field while preserving full backward compatibility.
+    """
+
+    def _make_position(
+        self,
+        exit_conditions: PredictionExitConditions | None,
+    ) -> MonitoredPosition:
+        return MonitoredPosition(
+            market_id="test-market",
+            condition_id="0x1234",
+            token_id="12345",
+            outcome="YES",
+            size=Decimal("100"),
+            entry_price=Decimal("0.65"),
+            entry_time=datetime.now(UTC),
+            exit_conditions=exit_conditions,
+        )
+
+    def test_effective_seconds_neither_set(self) -> None:
+        """Neither field set -> None."""
+        ec = PredictionExitConditions()
+        assert ec.effective_exit_before_resolution_seconds() is None
+
+    def test_effective_seconds_hours_only(self) -> None:
+        """hours=2 -> 7200 seconds."""
+        ec = PredictionExitConditions(exit_before_resolution_hours=2)
+        assert ec.effective_exit_before_resolution_seconds() == 7200
+
+    def test_effective_seconds_seconds_only(self) -> None:
+        """seconds=60 -> 60."""
+        ec = PredictionExitConditions(exit_before_resolution_seconds=60)
+        assert ec.effective_exit_before_resolution_seconds() == 60
+
+    def test_effective_seconds_both_set_seconds_wins(self) -> None:
+        """Both set: seconds takes precedence over hours."""
+        ec = PredictionExitConditions(
+            exit_before_resolution_hours=24,
+            exit_before_resolution_seconds=60,
+        )
+        # Seconds wins -- 60 seconds, not 24 * 3600.
+        assert ec.effective_exit_before_resolution_seconds() == 60
+
+    def test_zero_seconds_is_valid(self) -> None:
+        """Zero is a degenerate but well-defined value (exit at resolution)."""
+        ec = PredictionExitConditions(exit_before_resolution_seconds=0)
+        assert ec.effective_exit_before_resolution_seconds() == 0
+
+    def test_zero_hours_is_valid(self) -> None:
+        """Zero hours is also valid."""
+        ec = PredictionExitConditions(exit_before_resolution_hours=0)
+        assert ec.effective_exit_before_resolution_seconds() == 0
+
+    def test_negative_seconds_rejected(self) -> None:
+        """Negative seconds is a config typo -- reject at construction."""
+        with pytest.raises(ValueError, match="exit_before_resolution_seconds"):
+            PredictionExitConditions(exit_before_resolution_seconds=-1)
+
+    def test_negative_hours_rejected(self) -> None:
+        """Negative hours is a config typo -- reject at construction."""
+        with pytest.raises(ValueError, match="exit_before_resolution_hours"):
+            PredictionExitConditions(exit_before_resolution_hours=-5)
+
+    def test_to_dict_includes_seconds(self) -> None:
+        """Serialization must include the new field."""
+        ec = PredictionExitConditions(exit_before_resolution_seconds=300)
+        data = ec.to_dict()
+        assert data["exit_before_resolution_seconds"] == 300
+        assert data["exit_before_resolution_hours"] is None
+
+    def test_to_dict_seconds_none_when_unset(self) -> None:
+        """Field absent -> None in dict (not missing key)."""
+        ec = PredictionExitConditions(exit_before_resolution_hours=24)
+        data = ec.to_dict()
+        assert data["exit_before_resolution_hours"] == 24
+        assert data["exit_before_resolution_seconds"] is None
+
+    def test_seconds_triggers_for_sub_hour_market(self) -> None:
+        """The motivating case: a 5-minute market with a 60s pre-close exit.
+
+        Without seconds-granularity, ``exit_before_resolution_hours=1``
+        fires immediately on entry (5 minutes < 1 hour) and defeats the
+        purpose of the field. Seconds=60 triggers correctly only when
+        market is within 60s of close.
+        """
+        monitor = PredictionPositionMonitor(strategy_id="t", emit_events=False)
+        position = self._make_position(
+            PredictionExitConditions(exit_before_resolution_seconds=60)
+        )
+
+        # 5 minutes from close -- should NOT trigger (5min > 60s).
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.event != PredictionEvent.RESOLUTION_APPROACHING
+
+        # 30 seconds from close -- SHOULD trigger.
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(seconds=30),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.triggered is True
+        assert result.event == PredictionEvent.RESOLUTION_APPROACHING
+        assert result.details["exit_before_seconds"] == 60
+
+    def test_legacy_hours_path_still_works(self) -> None:
+        """Backward compat: pure-hours strategies behave unchanged."""
+        monitor = PredictionPositionMonitor(strategy_id="t", emit_events=False)
+        position = self._make_position(
+            PredictionExitConditions(exit_before_resolution_hours=24)
+        )
+
+        # 12 hours away -> trigger.
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(hours=12),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.triggered is True
+        assert result.event == PredictionEvent.RESOLUTION_APPROACHING
+        # Legacy detail key preserved (now derived from seconds).
+        # Backward-compat: whole-hour thresholds still surface as `int`,
+        # not `float`, so consumers comparing against integer hour budgets
+        # behave identically to the pre-VIB-3771 implementation.
+        assert result.details["exit_before_hours"] == 24
+        assert isinstance(result.details["exit_before_hours"], int)
+        assert result.details["exit_before_seconds"] == 24 * 3600
+
+    def test_sub_hour_exit_before_hours_is_float(self) -> None:
+        """Sub-hour thresholds surface as float on the legacy hours key."""
+        monitor = PredictionPositionMonitor(strategy_id="t", emit_events=False)
+        position = self._make_position(
+            PredictionExitConditions(exit_before_resolution_seconds=300)
+        )
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(seconds=60),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.triggered is True
+        assert result.details["exit_before_seconds"] == 300
+        # Non-whole-hour threshold: emit as float so the value is lossless.
+        assert isinstance(result.details["exit_before_hours"], float)
+        assert result.details["exit_before_hours"] == pytest.approx(300 / 3600)
+
+    def test_position_seconds_overrides_strategy_default_hours(self) -> None:
+        """Position seconds beats strategy hours default."""
+        monitor = PredictionPositionMonitor(
+            strategy_id="t",
+            emit_events=False,
+            default_exit_before_resolution_hours=24,
+        )
+        position = self._make_position(
+            PredictionExitConditions(exit_before_resolution_seconds=60)
+        )
+
+        # 1 hour from close -- with strategy default of 24h this would
+        # trigger; with the position's 60s override it must NOT.
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(hours=1),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.event != PredictionEvent.RESOLUTION_APPROACHING
+
+    def test_strategy_default_seconds(self) -> None:
+        """Strategy-level seconds default applies when position has none."""
+        monitor = PredictionPositionMonitor(
+            strategy_id="t",
+            emit_events=False,
+            default_exit_before_resolution_seconds=120,
+        )
+        position = self._make_position(exit_conditions=None)
+
+        # 60s away -- within 120s default, should trigger.
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(seconds=60),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.triggered is True
+        assert result.event == PredictionEvent.RESOLUTION_APPROACHING
+        assert result.details["exit_before_seconds"] == 120
+
+    def test_strategy_default_seconds_beats_strategy_default_hours(self) -> None:
+        """When both strategy-level defaults are set, seconds wins."""
+        monitor = PredictionPositionMonitor(
+            strategy_id="t",
+            emit_events=False,
+            default_exit_before_resolution_hours=24,
+            default_exit_before_resolution_seconds=60,
+        )
+        position = self._make_position(exit_conditions=None)
+
+        # 1 hour from close -- 24h default would trigger; 60s default
+        # should NOT.
+        snapshot = PositionSnapshot(
+            market_id="test-market",
+            current_price=Decimal("0.70"),
+            market_end_date=datetime.now(UTC) + timedelta(hours=1),
+        )
+        result = monitor.check_position(position, snapshot)
+        assert result.event != PredictionEvent.RESOLUTION_APPROACHING
+
+    def test_negative_strategy_defaults_rejected(self) -> None:
+        """Negative strategy-level defaults are rejected at construction."""
+        with pytest.raises(ValueError, match="default_exit_before_resolution_hours"):
+            PredictionPositionMonitor(default_exit_before_resolution_hours=-1)
+        with pytest.raises(
+            ValueError, match="default_exit_before_resolution_seconds"
+        ):
+            PredictionPositionMonitor(default_exit_before_resolution_seconds=-1)
+
+    def test_intent_serialization_round_trip_with_seconds(self) -> None:
+        """The intent (de)serializer must preserve the new field."""
+        from almanak.framework.intents.prediction_intents import PredictionBuyIntent
+
+        intent = PredictionBuyIntent(
+            market_id="test-market",
+            outcome="YES",
+            amount_usd=Decimal("10"),
+            exit_conditions=PredictionExitConditions(
+                exit_before_resolution_seconds=60,
+                exit_before_resolution_hours=24,  # Both set; seconds wins.
+            ),
+            protocol="polymarket",
+        )
+        data = intent.serialize()
+        restored = PredictionBuyIntent.deserialize(data)
+        assert restored.exit_conditions is not None
+        assert restored.exit_conditions.exit_before_resolution_seconds == 60
+        assert restored.exit_conditions.exit_before_resolution_hours == 24
+        assert (
+            restored.exit_conditions.effective_exit_before_resolution_seconds()
+            == 60
+        )
