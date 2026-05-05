@@ -341,8 +341,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # Serialize state dict to JSON bytes
             state_bytes = json.dumps(state.state).encode("utf-8")
 
-            # Convert StateTier enum to string for protobuf
-            loaded_from_str = state.loaded_from.name if state.loaded_from else "warm"
+            # Convert StateTier enum to lowercase string for protobuf (matches
+            # the gateway.proto:236 contract — "hot"/"warm"). The fallback also
+            # uses lowercase so the wire value is consistent regardless of
+            # whether state.loaded_from was set or None (issue #2053).
+            loaded_from_str = state.loaded_from.name.lower() if state.loaded_from else "warm"
 
             return gateway_pb2.StateData(
                 strategy_id=state.strategy_id,

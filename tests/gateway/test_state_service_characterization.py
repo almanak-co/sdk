@@ -105,12 +105,9 @@ def _make_state_data_obj(
     """Build a StateData-shaped object the way StateManager.load_state returns.
 
     ``loaded_from`` defaults to the real :class:`StateTier` enum so the
-    serialiser hits production's ``state.loaded_from.name`` path. Note that
-    this returns the enum's *uppercase* member name (``"WARM"``/``"HOT"``),
-    while the proto comment for ``loaded_from`` advertises lowercase
-    (``"hot"``, ``"warm"``). The tests assert the actual production output;
-    aligning the proto-contract casing is tracked separately and is out of
-    scope for this characterization PR.
+    serialiser hits production's ``state.loaded_from.name.lower()`` path,
+    which the wire contract (``gateway.proto:236``) defines as lowercase
+    ``"hot"`` / ``"warm"`` (issue #2053).
     """
     return SimpleNamespace(
         strategy_id=strategy_id,
@@ -169,13 +166,22 @@ class TestLoadState:
         assert json.loads(response.data.decode()) == {"counter": 7, "name": "alice"}
         assert response.schema_version == 2
         assert response.checksum == "deadbeef"
-        # ``StateTier.WARM.name`` → ``"WARM"`` (uppercase). Proto comment
-        # advertises lowercase ``"hot"``/``"warm"``; that mismatch is a
-        # production concern tracked separately.
-        assert response.loaded_from == "WARM"
+        # Wire contract is lowercase ("hot"/"warm") per gateway.proto:236;
+        # both the enum branch and the None fallback now agree (issue #2053).
+        assert response.loaded_from == "warm"
         assert response.created_at == int(datetime(2026, 5, 4, 12, 0, tzinfo=UTC).timestamp())
         assert response.updated_at > 0  # set to "now" by the servicer
         assert_set_code_not_called(context)
+
+    @pytest.mark.asyncio
+    async def test_loaded_from_hot_lowercased_on_wire(self, service, state_manager, context):
+        # Mirrors the WARM happy-path assertion to lock down the second
+        # StateTier member as well (issue #2053). Cheap guard against a
+        # future enum rename that would silently change the wire value.
+        state_manager.load_state.return_value = _make_state_data_obj(loaded_from=StateTier.HOT)
+        request = gateway_pb2.LoadStateRequest(strategy_id="strat-1")
+        response = await service.LoadState(request, context)
+        assert response.loaded_from == "hot"
 
     @pytest.mark.asyncio
     async def test_loaded_from_falls_back_to_warm_when_none(
