@@ -167,7 +167,12 @@ addopts = "-n auto"
 source = ["almanak"]
 omit = [
     "almanak/gateway/proto/*_pb2*.py",
-    "almanak/**/tests/*",
+    # `almanak/**/tests/*` was previously here to exclude inline pytest test
+    # files that lived alongside framework code. After #2066 those files all
+    # moved into `tests/unit/`, so the only remaining matches were production
+    # library modules under `almanak/framework/data/qa/tests/` (cex_historical,
+    # dex_historical, rsi, etc., used by `data/qa/runner.py`) — they belong in
+    # the coverage denominator, so the rule has been removed.
     "almanak/**/test_*.py",
     # Phase 0 (2026-05-04): exclude non-production surfaces from the coverage denominator.
     # Rationale lives in docs/internal/coverage-improvement-plan.md §8 Phase 0.
@@ -271,13 +276,13 @@ module = [
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# In-tree test files (intentionally pass wrong types for testing)
+# In-tree test/library code where mypy would otherwise complain.
+# After #2066 lifted every inline `tests/` directory into the central
+# `tests/unit/` tree, the only remaining match is `data/qa/*` which holds
+# both the QA test-definition library modules (cex_historical, cex_spot,
+# dex_historical, dex_spot, rsi) and the reporting layer.
 [[tool.mypy.overrides]]
 module = [
-    "almanak.framework.*.tests.*",
-    "almanak.framework.*.*.tests.*",
-    "almanak.framework.*.*.*.tests.*",
-    "almanak.framework.execution.config_tests.*",
     "almanak.framework.data.qa.*",
 ]
 ignore_errors = true
