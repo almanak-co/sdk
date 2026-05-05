@@ -131,23 +131,37 @@ class TestUniswapV3SwapIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Parse receipts (Layer 3) - assert decoded swap amounts > 0
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+
+        parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_amount_in = Decimal("0")
+        decoded_amount_out = Decimal("0")
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
-            # Parse swap receipt
             if tx_result.receipt:
-                from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
-
-                parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-
-                if parse_result.success and parse_result.swap_result:
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                if parse_result.swap_result:
                     print(f"  Amount in:  {parse_result.swap_result.amount_in_decimal}")
                     print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
                     print(f"  Price:      {parse_result.swap_result.effective_price}")
+                    if parse_result.swap_result.amount_in_decimal > decoded_amount_in:
+                        decoded_amount_in = parse_result.swap_result.amount_in_decimal
+                    if parse_result.swap_result.amount_out_decimal > decoded_amount_out:
+                        decoded_amount_out = parse_result.swap_result.amount_out_decimal
+
+        assert decoded_amount_in > 0, (
+            "Layer 3: UniswapV3ReceiptParser must decode amount_in > 0 from the swap receipt"
+        )
+        assert decoded_amount_out > 0, (
+            "Layer 3: UniswapV3ReceiptParser must decode amount_out > 0 from the swap receipt"
+        )
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
@@ -221,6 +235,31 @@ class TestUniswapV3SwapIntent:
         # Execute
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success
+
+        # Layer 3: parse receipts and assert decoded swap amounts > 0
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+
+        parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_amount_in = Decimal("0")
+        decoded_amount_out = Decimal("0")
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                if parse_result.swap_result:
+                    if parse_result.swap_result.amount_in_decimal > decoded_amount_in:
+                        decoded_amount_in = parse_result.swap_result.amount_in_decimal
+                    if parse_result.swap_result.amount_out_decimal > decoded_amount_out:
+                        decoded_amount_out = parse_result.swap_result.amount_out_decimal
+
+        assert decoded_amount_in > 0, (
+            "Layer 3: UniswapV3ReceiptParser must decode amount_in > 0 from the swap receipt"
+        )
+        assert decoded_amount_out > 0, (
+            "Layer 3: UniswapV3ReceiptParser must decode amount_out > 0 from the swap receipt"
+        )
 
         # Verify
         weth_after = get_token_balance(web3, token_in, funded_wallet)

@@ -180,20 +180,29 @@ class TestAaveV3SupplyIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Parse receipts (Layer 3) - assert decoded Supply amount > 0
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_supply_amount = Decimal("0")
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                parser = AaveV3ReceiptParser()
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                for supply_event in parse_result.supplies:
+                    print(f"  Supply amount:  {supply_event.amount}")
+                    print(f"  Reserve: {supply_event.reserve}")
+                    if supply_event.amount > decoded_supply_amount:
+                        decoded_supply_amount = supply_event.amount
 
-                if parse_result.success and parse_result.supplies:
-                    for supply_event in parse_result.supplies:
-                        print(f"  Supply amount:  {supply_event.amount}")
-                        print(f"  Reserve: {supply_event.reserve}")
+        assert decoded_supply_amount > 0, (
+            "Layer 3: AaveV3ReceiptParser must decode at least one Supply event "
+            "with amount > 0 from the supply transaction receipts"
+        )
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -290,6 +299,24 @@ class TestAaveV3SupplyIntent:
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3: parse receipts and assert decoded Withdraw amount > 0
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_withdraw_amount = Decimal("0")
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                for w in parse_result.withdraws:
+                    if w.amount > decoded_withdraw_amount:
+                        decoded_withdraw_amount = w.amount
+
+        assert decoded_withdraw_amount > 0, (
+            "Layer 3: AaveV3ReceiptParser must decode at least one Withdraw event "
+            "with amount > 0 from the withdraw transaction receipts"
+        )
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -476,25 +503,31 @@ class TestAaveV3BorrowIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Parse receipts (Layer 3) - assert decoded Borrow amount > 0
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_borrow_amount = Decimal("0")
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                parser = AaveV3ReceiptParser()
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                for supply_event in parse_result.supplies:
+                    print(f"  Supply (collateral): {supply_event.amount}")
+                for borrow_event in parse_result.borrows:
+                    print(f"  Borrow amount: {borrow_event.amount}")
+                    print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
+                    if borrow_event.amount > decoded_borrow_amount:
+                        decoded_borrow_amount = borrow_event.amount
 
-                if parse_result.success:
-                    if parse_result.supplies:
-                        for supply_event in parse_result.supplies:
-                            print(f"  Supply (collateral): {supply_event.amount}")
-
-                    if parse_result.borrows:
-                        for borrow_event in parse_result.borrows:
-                            print(f"  Borrow amount: {borrow_event.amount}")
-                            print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
+        assert decoded_borrow_amount > 0, (
+            "Layer 3: AaveV3ReceiptParser must decode at least one Borrow event "
+            "with amount > 0 from the borrow transaction receipts"
+        )
 
         # Verify balance changes
         wsteth_after = get_token_balance(web3, wsteth, funded_wallet)
@@ -607,6 +640,24 @@ class TestAaveV3BorrowIntent:
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3: parse receipts and assert decoded Repay amount > 0
+        parser = AaveV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_repay_amount = Decimal("0")
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                for r in parse_result.repays:
+                    if r.amount > decoded_repay_amount:
+                        decoded_repay_amount = r.amount
+
+        assert decoded_repay_amount > 0, (
+            "Layer 3: AaveV3ReceiptParser must decode at least one Repay event "
+            "with amount > 0 from the repay transaction receipts"
+        )
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)

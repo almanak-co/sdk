@@ -352,16 +352,33 @@ class TestUniswapV3LPCloseIntent:
         assert execution_result.success, f"LP Close execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions")
 
-        # 5. Parse receipts
+        # 5. Parse receipts (Layer 3) - assert decoded LP-close amount > 0
         parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        decoded_lp_close: int = 0
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
-                lp_close_data = parser.extract_lp_close_data(tx_result.receipt.to_dict())
+                receipt_dict = tx_result.receipt.to_dict()
+                parse_result = parser.parse_receipt(receipt_dict)
+                assert parse_result.success, (
+                    f"Receipt parser failed on tx {tx_result.tx_hash}: {parse_result.error}"
+                )
+                lp_close_data = parser.extract_lp_close_data(receipt_dict)
                 if lp_close_data:
                     print(
                         f"  LP Close data: amount0_collected={lp_close_data.amount0_collected}, "
                         f"amount1_collected={lp_close_data.amount1_collected}"
                     )
+                    decoded_lp_close = max(
+                        decoded_lp_close,
+                        lp_close_data.amount0_collected,
+                        lp_close_data.amount1_collected,
+                    )
+
+        assert decoded_lp_close > 0, (
+            "Layer 3: UniswapV3ReceiptParser.extract_lp_close_data() must decode "
+            "a Collect event with amount0_collected or amount1_collected > 0 from "
+            "the LP close transaction receipts"
+        )
 
         # 6. Verify tokens returned
         usdt_after_close = get_token_balance(web3, usdt_addr, funded_wallet)
