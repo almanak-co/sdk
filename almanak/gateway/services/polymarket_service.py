@@ -1080,19 +1080,45 @@ class PolymarketServiceServicer(gateway_pb2_grpc.PolymarketServiceServicer):
             pusd_balance = await self._get_pusd_balance_cached(ctf, web3, wallet, min_pusd_units)
             if pusd_balance < min_pusd_units:
                 deficit = min_pusd_units - pusd_balance
-                source_balance = await asyncio.to_thread(ctf.get_source_asset_balance, wallet, web3)
+                # VIB-3770: read both source-asset balances and pick the one
+                # that actually covers the deficit. The legacy single-asset
+                # path (``ctf.get_source_asset_balance``) silently failed for
+                # users who funded native USDC instead of USDC.e.
+                allowance_status = await asyncio.to_thread(ctf.check_allowances, wallet, web3)
+                source_to_wrap = ctf.select_source_for_wrap(deficit, allowance_status)
+                # The picked source's balance is what matters — quote it in
+                # the error so the user can see exactly which token is short.
+                if source_to_wrap.lower() == ctf.native_usdc.lower():
+                    source_balance = allowance_status.native_usdc_balance
+                    source_label = "native USDC"
+                else:
+                    source_balance = allowance_status.source_asset_balance
+                    source_label = "USDC.e"
                 if source_balance < deficit:
                     raise ValueError(
-                        f"Insufficient source asset for wrap: need {deficit / 10**6:.4f} more "
-                        f"(have {source_balance / 10**6:.4f} {ctf.source_asset[:10]}..., "
+                        f"Insufficient source asset for wrap: need {deficit / 10**6:.4f} more pUSD "
+                        f"(have {allowance_status.source_asset_balance / 10**6:.4f} USDC.e, "
+                        f"{allowance_status.native_usdc_balance / 10**6:.4f} native USDC, "
                         f"pUSD {pusd_balance / 10**6:.4f}); fund the wallet."
                     )
+                # If the picked source is native USDC and it isn't approved
+                # yet, emit the approval here. ``ensure_allowances`` skips
+                # native USDC approval for wallets that didn't hold any at
+                # check time, so a wallet that just received native USDC
+                # mid-process needs the approval issued lazily.
+                if (
+                    source_to_wrap.lower() == ctf.native_usdc.lower()
+                    and not allowance_status.native_usdc_approved_onramp
+                ):
+                    approve_tx = ctf.build_approve_collateral_tx(ctf.native_usdc, ctf.collateral_onramp, wallet)
+                    await self._sign_and_submit_setup_tx(approve_tx, setup_txs)
                 logger.info(
-                    "Wrapping %.4f source-asset → pUSD to cover order (current pUSD: %.4f)",
+                    "Wrapping %.4f %s → pUSD to cover order (current pUSD: %.4f)",
                     deficit / 10**6,
+                    source_label,
                     pusd_balance / 10**6,
                 )
-                wrap_tx = ctf.build_wrap_to_pusd_tx(wallet, deficit)
+                wrap_tx = ctf.build_wrap_to_pusd_tx(wallet, deficit, source_asset=source_to_wrap)
                 await self._sign_and_submit_setup_tx(wrap_tx, setup_txs)
                 # Optimistic cache update — receipt confirmed the wrap landed
                 # (``_sign_and_submit_setup_tx`` raises on revert), so the new

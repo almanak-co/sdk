@@ -76,15 +76,23 @@ class _CtfStub:
         approval_txs: list[TransactionData] | None = None,
         pusd_balance_seq: list[int] | None = None,
         source_balance: int = 10_000_000_000,
+        native_usdc_balance: int = 0,
         source_asset: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        native_usdc: str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        collateral_onramp: str = "0x93070a847efEf7F70739046A929D47a521F5B8ee",
     ) -> None:
         self._approval_txs = approval_txs or []
         self._pusd_balance_seq = list(pusd_balance_seq or [0])
         self._source_balance = source_balance
+        self._native_usdc_balance = native_usdc_balance
         self.source_asset = source_asset
+        self.native_usdc = native_usdc
+        self.collateral_onramp = collateral_onramp
         self.get_pusd_balance_calls = 0
+        # VIB-3770: wrap_calls tracks (amount, source) pairs.
         self.wrap_calls: list[int] = []
         self.ensure_allowances_calls = 0
+        self._approve_calls: list[tuple[str, str]] = []
 
     def ensure_allowances(self, _wallet: str, _web3) -> list[TransactionData]:
         self.ensure_allowances_calls += 1
@@ -100,7 +108,44 @@ class _CtfStub:
     def get_source_asset_balance(self, _wallet: str, _web3) -> int:
         return self._source_balance
 
-    def build_wrap_to_pusd_tx(self, _wallet: str, amount: int) -> TransactionData:
+    def check_allowances(self, _wallet: str, _web3):  # noqa: ANN201
+        from almanak.framework.connectors.polymarket.ctf_sdk import (
+            MAX_UINT256,
+            AllowanceStatus,
+        )
+
+        return AllowanceStatus(
+            source_asset_balance=self._source_balance,
+            pusd_balance=0,
+            source_asset_allowance_onramp=MAX_UINT256,
+            pusd_allowance_ctf_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_adapter=MAX_UINT256,
+            ctf_approved_for_ctf_exchange=True,
+            ctf_approved_for_neg_risk_adapter=True,
+            native_usdc_balance=self._native_usdc_balance,
+            native_usdc_allowance_onramp=MAX_UINT256 if self._native_usdc_balance > 0 else 0,
+        )
+
+    def select_source_for_wrap(self, deficit: int, status) -> str:
+        if status.source_asset_balance >= deficit:
+            return self.source_asset
+        if status.native_usdc_balance >= deficit:
+            return self.native_usdc
+        if status.native_usdc_balance > status.source_asset_balance:
+            return self.native_usdc
+        return self.source_asset
+
+    def build_approve_collateral_tx(self, asset: str, spender: str, sender: str) -> TransactionData:  # noqa: ARG002
+        self._approve_calls.append((asset, spender))
+        return TransactionData(to=asset, data="0x", gas_estimate=80_000, description="approve")
+
+    def build_wrap_to_pusd_tx(
+        self,
+        _wallet: str,
+        amount: int,
+        source_asset: str | None = None,  # noqa: ARG002
+    ) -> TransactionData:
         self.wrap_calls.append(amount)
         return TransactionData(
             to="0xWrap",

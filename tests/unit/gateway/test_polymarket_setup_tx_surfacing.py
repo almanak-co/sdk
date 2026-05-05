@@ -101,6 +101,8 @@ class _CtfStub:
         self._approval_txs = approval_txs
         self._pusd_balance = pusd_balance
         self.source_asset = "0x" + "11" * 20
+        self.native_usdc = "0x" + "33" * 20
+        self.collateral_onramp = "0x" + "44" * 20
 
     def ensure_allowances(self, _wallet: str, _web3: Any) -> list[TransactionData]:
         return list(self._approval_txs)
@@ -111,7 +113,37 @@ class _CtfStub:
     def get_source_asset_balance(self, _wallet: str, _web3: Any) -> int:
         return 10_000_000_000
 
-    def build_wrap_to_pusd_tx(self, _wallet: str, amount: int) -> TransactionData:
+    def check_allowances(self, _wallet: str, _web3: Any):  # noqa: ANN201
+        from almanak.framework.connectors.polymarket.ctf_sdk import (
+            MAX_UINT256,
+            AllowanceStatus,
+        )
+
+        return AllowanceStatus(
+            source_asset_balance=10_000_000_000,
+            pusd_balance=self._pusd_balance,
+            source_asset_allowance_onramp=MAX_UINT256,
+            pusd_allowance_ctf_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_adapter=MAX_UINT256,
+            ctf_approved_for_ctf_exchange=True,
+            ctf_approved_for_neg_risk_adapter=True,
+            native_usdc_balance=0,
+            native_usdc_allowance_onramp=0,
+        )
+
+    def select_source_for_wrap(self, _deficit: int, _status: Any) -> str:
+        return self.source_asset
+
+    def build_approve_collateral_tx(self, asset: str, _spender: str, _sender: str) -> TransactionData:
+        return TransactionData(to=asset, data="0x", gas_estimate=80_000, description="approve")
+
+    def build_wrap_to_pusd_tx(
+        self,
+        _wallet: str,
+        amount: int,
+        source_asset: str | None = None,  # noqa: ARG002
+    ) -> TransactionData:
         return TransactionData(
             to="0x" + "22" * 20,
             data="0x",

@@ -62,6 +62,7 @@ from .ctf_sdk import (
     MAX_UINT256,
     ZERO_BYTES32,
     AllowanceStatus,
+    CollateralBreakdown,
     CtfSDK,
     ResolutionStatus,
     TransactionData,
@@ -227,6 +228,7 @@ __all__ = [
     # CTF SDK Types
     "TransactionData",
     "AllowanceStatus",
+    "CollateralBreakdown",
     "ResolutionStatus",
     # CTF SDK Constants
     "MAX_UINT256",

@@ -95,8 +95,10 @@ class TestRequiredPusdUnitsForBuy:
 class _FakeCtfSDK:
     """Hand-rolled fake — easier to read than wiring six MagicMock chains.
 
-    Tracks call counts on ensure_allowances/get_pusd_balance/get_source_asset_balance
-    /build_wrap_to_pusd_tx so tests can assert exact behavior.
+    Tracks call counts on ensure_allowances/get_pusd_balance/check_allowances
+    /build_wrap_to_pusd_tx so tests can assert exact behavior. VIB-3770: the
+    wrap path now consults ``check_allowances`` + ``select_source_for_wrap``
+    for dynamic source-asset selection (USDC.e vs native USDC).
     """
 
     def __init__(
@@ -105,14 +107,21 @@ class _FakeCtfSDK:
         approval_txs: list[TransactionData] | None = None,
         pusd_balances: list[int] | None = None,
         source_balance: int = 10_000_000_000,
+        native_usdc_balance: int = 0,
         source_asset: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        native_usdc: str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        collateral_onramp: str = "0x93070a847efEf7F70739046A929D47a521F5B8ee",
     ) -> None:
         self._approval_txs = approval_txs or []
         self._pusd_balances = list(pusd_balances or [0])
         self._source_balance = source_balance
+        self._native_usdc_balance = native_usdc_balance
         self.source_asset = source_asset
+        self.native_usdc = native_usdc
+        self.collateral_onramp = collateral_onramp
         self.ensure_allowances_calls = 0
-        self.wrap_calls: list[int] = []  # amounts requested
+        self.wrap_calls: list[tuple[int, str]] = []  # (amount, source_asset)
+        self.approval_calls: list[tuple[str, str]] = []  # (asset, spender)
 
     def ensure_allowances(self, wallet: str, web3) -> list[TransactionData]:  # noqa: ARG002
         self.ensure_allowances_calls += 1
@@ -128,8 +137,46 @@ class _FakeCtfSDK:
     def get_source_asset_balance(self, wallet: str, web3) -> int:  # noqa: ARG002
         return self._source_balance
 
-    def build_wrap_to_pusd_tx(self, wallet: str, amount: int) -> TransactionData:  # noqa: ARG002
-        self.wrap_calls.append(amount)
+    def check_allowances(self, wallet: str, web3):  # noqa: ARG002, ANN201
+        from almanak.framework.connectors.polymarket.ctf_sdk import (
+            MAX_UINT256,
+            AllowanceStatus,
+        )
+
+        return AllowanceStatus(
+            source_asset_balance=self._source_balance,
+            pusd_balance=0,
+            source_asset_allowance_onramp=MAX_UINT256,
+            pusd_allowance_ctf_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_exchange=MAX_UINT256,
+            pusd_allowance_neg_risk_adapter=MAX_UINT256,
+            ctf_approved_for_ctf_exchange=True,
+            ctf_approved_for_neg_risk_adapter=True,
+            native_usdc_balance=self._native_usdc_balance,
+            native_usdc_allowance_onramp=MAX_UINT256 if self._native_usdc_balance > 0 else 0,
+        )
+
+    def select_source_for_wrap(self, deficit: int, status) -> str:
+        # Mirror the production rule so tests exercise dispatch, not policy.
+        if status.source_asset_balance >= deficit:
+            return self.source_asset
+        if status.native_usdc_balance >= deficit:
+            return self.native_usdc
+        if status.native_usdc_balance > status.source_asset_balance:
+            return self.native_usdc
+        return self.source_asset
+
+    def build_approve_collateral_tx(self, asset: str, spender: str, sender: str) -> TransactionData:  # noqa: ARG002
+        self.approval_calls.append((asset, spender))
+        return TransactionData(to=asset, data="0x", gas_estimate=80_000, description=f"approve {asset[:10]}")
+
+    def build_wrap_to_pusd_tx(  # noqa: D401
+        self,
+        wallet: str,  # noqa: ARG002
+        amount: int,
+        source_asset: str | None = None,
+    ) -> TransactionData:
+        self.wrap_calls.append((amount, source_asset or self.source_asset))
         return TransactionData(to="0xWrap", data="0x", gas_estimate=150_000, description=f"wrap {amount}")
 
 
@@ -174,7 +221,7 @@ class TestEnsureWalletReady:
 
         await servicer._ensure_wallet_ready(min_pusd_units=5_000_000)
 
-        assert ctf.wrap_calls == [3_000_000]  # exact deficit
+        assert ctf.wrap_calls == [(3_000_000, ctf.source_asset)]  # exact deficit, USDC.e
         assert servicer._sign_and_submit_setup_tx.await_count == 1
 
     @pytest.mark.asyncio
@@ -200,6 +247,93 @@ class TestEnsureWalletReady:
         # tx signing, so the strategy gets a fast-fail and doesn't burn gas.
         assert servicer._sign_and_submit_setup_tx.await_count == 0
         assert ctf.wrap_calls == []
+
+    @pytest.mark.asyncio
+    async def test_buy_wraps_from_native_usdc_when_usdce_dust(
+        self, servicer: PolymarketServiceServicer
+    ) -> None:
+        """VIB-3770: wallet funded with native USDC instead of USDC.e.
+
+        Pre-VIB-3770 this hit the hardcoded USDC.e source-asset path and
+        raised "Insufficient source asset" even though the wallet had
+        plenty of native USDC. The fix: ``select_source_for_wrap`` picks
+        native USDC and the wrap targets it.
+        """
+        ctf = _FakeCtfSDK(
+            approval_txs=[],
+            pusd_balances=[2_000_000],  # 2 pUSD held; need 5
+            source_balance=80_000,  # 0.08 USDC.e dust — can't cover deficit of 3
+            native_usdc_balance=11_000_000,  # 11 native USDC — covers cleanly
+        )
+        servicer._ctf_sdk = ctf
+        servicer._polygon_web3 = MagicMock()
+        servicer._sign_and_submit_setup_tx = AsyncMock(return_value="0xhash")
+
+        await servicer._ensure_wallet_ready(min_pusd_units=5_000_000)
+
+        assert ctf.wrap_calls == [(3_000_000, ctf.native_usdc)]
+        assert servicer._sign_and_submit_setup_tx.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_buy_with_native_usdc_emits_lazy_approval(
+        self, servicer: PolymarketServiceServicer
+    ) -> None:
+        """VIB-3770: when the picked source is native USDC and its onramp
+        approval isn't in place, ``_ensure_wallet_ready`` emits the approval
+        before the wrap. ``ensure_allowances`` only emits the native approval
+        for wallets that *held* native USDC at the time of the first order;
+        a wallet that just received native USDC must get the approval here.
+        """
+        # Override check_allowances so native_balance>0 but approval==0,
+        # exercising the lazy-approval branch.
+        ctf = _FakeCtfSDK(
+            approval_txs=[],
+            pusd_balances=[0],  # need full 5
+            source_balance=80_000,  # USDC.e dust
+            native_usdc_balance=11_000_000,
+        )
+        # Override to return zero approval for native USDC.
+        from almanak.framework.connectors.polymarket.ctf_sdk import (
+            MAX_UINT256,
+            AllowanceStatus,
+        )
+
+        def _check(_w: str, _web3) -> AllowanceStatus:
+            return AllowanceStatus(
+                source_asset_balance=80_000,
+                pusd_balance=0,
+                source_asset_allowance_onramp=MAX_UINT256,
+                pusd_allowance_ctf_exchange=MAX_UINT256,
+                pusd_allowance_neg_risk_exchange=MAX_UINT256,
+                pusd_allowance_neg_risk_adapter=MAX_UINT256,
+                ctf_approved_for_ctf_exchange=True,
+                ctf_approved_for_neg_risk_adapter=True,
+                native_usdc_balance=11_000_000,
+                native_usdc_allowance_onramp=0,  # NOT yet approved
+            )
+
+        ctf.check_allowances = _check  # type: ignore[method-assign]
+        servicer._ctf_sdk = ctf
+        servicer._polygon_web3 = MagicMock()
+        servicer._sign_and_submit_setup_tx = AsyncMock(return_value="0xhash")
+
+        await servicer._ensure_wallet_ready(min_pusd_units=5_000_000)
+
+        # Two setup txs submitted: native-USDC → Onramp approval, then wrap.
+        # Order matters — the wrap will revert if the approval hasn't already
+        # landed on-chain — so assert submission sequence explicitly, not just
+        # that both tx kinds were built.
+        assert servicer._sign_and_submit_setup_tx.await_count == 2
+        first_tx = servicer._sign_and_submit_setup_tx.await_args_list[0].args[0]
+        second_tx = servicer._sign_and_submit_setup_tx.await_args_list[1].args[0]
+        assert first_tx.description.startswith("approve"), (
+            f"approval must be submitted first, got {first_tx.description!r}"
+        )
+        assert second_tx.description.startswith("wrap "), (
+            f"wrap must be submitted second, got {second_tx.description!r}"
+        )
+        assert ctf.approval_calls == [(ctf.native_usdc, ctf.collateral_onramp)]
+        assert ctf.wrap_calls == [(5_000_000, ctf.native_usdc)]
 
     @pytest.mark.asyncio
     async def test_concurrent_first_orders_coalesce_under_lock(
@@ -1296,7 +1430,7 @@ class _AuthFakeResponse:
         else:
             self._body_text = json.dumps(json_payload)
 
-    async def __aenter__(self) -> "_AuthFakeResponse":
+    async def __aenter__(self) -> _AuthFakeResponse:
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:

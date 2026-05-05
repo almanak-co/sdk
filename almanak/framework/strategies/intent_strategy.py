@@ -1254,8 +1254,10 @@ class MarketSnapshot:
                 When set, resolves generic symbols to the protocol's preferred
                 variant via ``PROTOCOL_TOKEN_VARIANTS`` (e.g.,
                 ``balance("USDC", protocol="polymarket")`` on Polygon returns
-                the USDC.e balance, which is what Polymarket actually settles
-                in). When unset, returns the balance for the symbol as given.
+                the pUSD balance — the V2 spendable trading collateral
+                wrapped from USDC.e or native USDC at the on-chain Onramp.
+                See VIB-3770). When unset, returns the balance for the
+                symbol as given.
 
         Returns:
             TokenBalance with current balance

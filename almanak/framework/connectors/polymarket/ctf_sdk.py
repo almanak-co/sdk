@@ -60,6 +60,7 @@ from .models import (
     NEG_RISK_EXCHANGE_V2,
     POLYGON_CHAIN_ID,
     PUSD,
+    USDC_NATIVE_POLYGON,
     USDCE_POLYGON,
 )
 
@@ -153,22 +154,30 @@ class AllowanceStatus:
     """Status of token allowances for Polymarket V2 trading.
 
     V2 collateral pivot: spending collateral is pUSD (minted via the
-    CollateralOnramp from a source asset like USDC.e). Six approvals are
-    required for both binary CTF and neg-risk markets to work:
+    CollateralOnramp from a source asset — USDC.e or native USDC). The
+    approval set is:
 
-      Source asset:
-        1. source_asset → CollateralOnramp  (so we can wrap → pUSD)
+      Source assets (only the wallet's funded source assets are approved
+      lazily — we don't burn gas approving an asset the wallet has never
+      held):
+        - configured ``source_asset`` (default USDC.e) → CollateralOnramp
+        - native USDC → CollateralOnramp (when wallet holds native USDC)
 
       pUSD spend (the BUY-side leg — Polymarket V2 pulls pUSD from the maker
       via these contracts on order fill):
-        2. pUSD → CTF Exchange V2           (binary YES/NO market BUYs)
-        3. pUSD → NegRisk Exchange V2       (neg-risk order matching)
-        4. pUSD → NegRisk Adapter           (neg-risk split/merge — the adapter
+        - pUSD → CTF Exchange V2           (binary YES/NO market BUYs)
+        - pUSD → NegRisk Exchange V2       (neg-risk order matching)
+        - pUSD → NegRisk Adapter           (neg-risk split/merge — the adapter
                                              is the actual spender on fills)
 
       CTF (ERC-1155) operator (the SELL-side leg — V2 exchanges pull shares):
-        5. CTF.setApprovalForAll(CTF Exchange V2)
-        6. CTF.setApprovalForAll(NegRisk Adapter)
+        - CTF.setApprovalForAll(CTF Exchange V2)
+        - CTF.setApprovalForAll(NegRisk Adapter)
+
+    VIB-3770: ``native_usdc_balance`` / ``native_usdc_allowance_onramp`` were
+    added so a wallet funded with native Circle USDC instead of USDC.e (the
+    Polymarket UI now accepts both as deposit) can wrap to pUSD without the
+    user manually swapping first.
     """
 
     source_asset_balance: int
@@ -179,6 +188,9 @@ class AllowanceStatus:
     pusd_allowance_neg_risk_adapter: int
     ctf_approved_for_ctf_exchange: bool
     ctf_approved_for_neg_risk_adapter: bool
+    # VIB-3770: native USDC tracked alongside the bridged USDC.e source asset.
+    native_usdc_balance: int = 0
+    native_usdc_allowance_onramp: int = 0
 
     @property
     def source_asset_approved_onramp(self) -> bool:
@@ -187,6 +199,11 @@ class AllowanceStatus:
         Sufficiency rather than non-zero — see ``SUFFICIENT_ALLOWANCE_THRESHOLD``.
         """
         return self.source_asset_allowance_onramp >= SUFFICIENT_ALLOWANCE_THRESHOLD
+
+    @property
+    def native_usdc_approved_onramp(self) -> bool:
+        """Whether native Circle USDC is approved for the Onramp (sufficiency)."""
+        return self.native_usdc_allowance_onramp >= SUFFICIENT_ALLOWANCE_THRESHOLD
 
     @property
     def pusd_approved_ctf_exchange(self) -> bool:
@@ -214,6 +231,47 @@ class AllowanceStatus:
             and self.ctf_approved_for_ctf_exchange
             and self.ctf_approved_for_neg_risk_adapter
         )
+
+
+@dataclass(frozen=True)
+class CollateralBreakdown:
+    """Per-asset on-chain balance breakdown for Polymarket V2 collateral.
+
+    VIB-3770: surfaces every source the gateway will consider for wrap →
+    pUSD plus the spendable pUSD. Used by:
+
+    - ``CtfSDK.select_source_for_wrap`` to pick a wrap input that actually
+      has the on-chain balance to cover a BUY's pUSD deficit.
+    - The ``almanak ax balance --protocol polymarket`` UX: shows pUSD,
+      USDC.e, native USDC, and the total spendable collateral side-by-side
+      so users see exactly what's usable.
+
+    Attributes:
+        pusd: pUSD balance (the spendable trading collateral) in 6-dp units.
+        usdce: Bridged USDC.e balance (legacy source asset) in 6-dp units.
+        usdc_native: Native Circle USDC balance in 6-dp units.
+        pusd_address: pUSD contract address (Polygon).
+        usdce_address: USDC.e contract address (Polygon).
+        usdc_native_address: Native USDC contract address (Polygon).
+    """
+
+    pusd: int
+    usdce: int
+    usdc_native: int
+    pusd_address: str
+    usdce_address: str
+    usdc_native_address: str
+
+    @property
+    def total_spendable(self) -> int:
+        """pUSD + every wrappable source asset, in 6-dp units.
+
+        This is the amount the wallet can ultimately bring to bear on a
+        Polymarket BUY (pUSD spends directly; USDC.e / native USDC become
+        pUSD via a single Onramp wrap). Treats the three at parity because
+        the Onramp enforces 1:1.
+        """
+        return self.pusd + self.usdce + self.usdc_native
 
 
 @dataclass
@@ -288,6 +346,7 @@ class CtfSDK:
         collateral_onramp: str = COLLATERAL_ONRAMP,
         collateral_offramp: str = COLLATERAL_OFFRAMP,
         source_asset: str = USDCE_POLYGON,
+        native_usdc: str = USDC_NATIVE_POLYGON,
     ) -> None:
         """Initialize the CTF SDK.
 
@@ -300,8 +359,13 @@ class CtfSDK:
             pusd: pUSD collateral token (V2). Approved to V2 exchanges.
             collateral_onramp: CollateralOnramp contract for wrapping source asset → pUSD.
             collateral_offramp: CollateralOfframp contract for unwrapping pUSD → source asset.
-            source_asset: The user's source-of-funds token (USDC.e by default; switch to
-                native USDC after Polymarket flips the Onramp pause). Approved to the Onramp.
+            source_asset: The user's primary source-of-funds token (USDC.e by default).
+                Approved to the Onramp eagerly during ``ensure_allowances``.
+            native_usdc: Secondary source-of-funds token (native Circle USDC). VIB-3770:
+                tracked so a wallet funded with native USDC instead of USDC.e can still
+                wrap to pUSD. The native-USDC → Onramp approval is emitted *only* when
+                the wallet actually holds native USDC, so we don't burn gas approving
+                an asset the user has never funded.
         """
         self.chain_id = chain_id
         self.ctf_exchange = Web3.to_checksum_address(ctf_exchange)
@@ -312,6 +376,7 @@ class CtfSDK:
         self.collateral_onramp = Web3.to_checksum_address(collateral_onramp)
         self.collateral_offramp = Web3.to_checksum_address(collateral_offramp)
         self.source_asset = Web3.to_checksum_address(source_asset)
+        self.native_usdc = Web3.to_checksum_address(native_usdc)
         # Load ABIs
         self._abi_dir = os.path.join(os.path.dirname(__file__), "abis")
         self._erc20_abi = self._load_abi("erc20")
@@ -463,15 +528,17 @@ class CtfSDK:
     def check_allowances(self, wallet: str, web3: Any) -> AllowanceStatus:
         """Check all relevant V2 token allowances.
 
-        Queries the source-asset → Onramp leg, the pUSD → exchange legs, and
-        the CTF (ERC-1155) operator approvals needed to trade on Polymarket V2.
+        Queries the source-asset → Onramp leg (both USDC.e and native USDC),
+        the pUSD → exchange legs, and the CTF (ERC-1155) operator approvals
+        needed to trade on Polymarket V2.
 
         Args:
             wallet: Wallet address to check.
             web3: Web3 instance.
 
         Returns:
-            AllowanceStatus with V2 allowance information.
+            AllowanceStatus with V2 allowance information, including the
+            secondary native-USDC source asset (VIB-3770).
         """
         wallet = Web3.to_checksum_address(wallet)
 
@@ -496,6 +563,25 @@ class CtfSDK:
         ctf_approved_exchange = ctf_contract.functions.isApprovedForAll(wallet, self.ctf_exchange).call()
         ctf_approved_adapter = ctf_contract.functions.isApprovedForAll(wallet, self.neg_risk_adapter).call()
 
+        # VIB-3770: native USDC tracked as a secondary source asset.
+        # Skipped when the SDK is configured with native USDC AS the primary
+        # source_asset (would just re-read the same contract). Failures here
+        # are non-fatal — fall back to zeros so a transient Polygon RPC blip
+        # doesn't break the whole approval read for a USDC.e-only wallet.
+        native_balance = 0
+        native_allowance_onramp = 0
+        if self.native_usdc.lower() != self.source_asset.lower():
+            try:
+                native_contract = web3.eth.contract(address=self.native_usdc, abi=self._erc20_abi)
+                native_balance = native_contract.functions.balanceOf(wallet).call()
+                native_allowance_onramp = native_contract.functions.allowance(wallet, self.collateral_onramp).call()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Native USDC allowance read failed for %s; treating as 0 (VIB-3770): %s",
+                    wallet,
+                    exc,
+                )
+
         return AllowanceStatus(
             source_asset_balance=source_balance,
             pusd_balance=pusd_balance,
@@ -505,10 +591,12 @@ class CtfSDK:
             pusd_allowance_neg_risk_adapter=pusd_allowance_neg_risk_adapter,
             ctf_approved_for_ctf_exchange=ctf_approved_exchange,
             ctf_approved_for_neg_risk_adapter=ctf_approved_adapter,
+            native_usdc_balance=native_balance,
+            native_usdc_allowance_onramp=native_allowance_onramp,
         )
 
     def ensure_allowances(self, wallet: str, web3: Any) -> list[TransactionData]:
-        """Build the idempotent V2 6-tx approval set.
+        """Build the idempotent V2 approval set.
 
         Emits only the approvals the wallet doesn't already have. Order:
             1. source_asset → CollateralOnramp     (so user can wrap to pUSD)
@@ -519,6 +607,11 @@ class CtfSDK:
                                                     on fill, not the exchange)
             5. CTF.setApprovalForAll(CTF Exchange V2)  (binary SELLs pull shares)
             6. CTF.setApprovalForAll(NegRisk Adapter)  (neg-risk SELLs / merge)
+            7. native USDC → CollateralOnramp     (VIB-3770: ONLY when the wallet
+                                                    actually holds native USDC —
+                                                    otherwise we burn ~58k gas
+                                                    approving an asset the user
+                                                    has never funded)
 
         Returns:
             List of TransactionData for any approvals that aren't already in place.
@@ -544,7 +637,103 @@ class CtfSDK:
         if not status.ctf_approved_for_neg_risk_adapter:
             transactions.append(self.build_approve_conditional_tokens_tx(self.neg_risk_adapter, True, wallet))
 
+        # VIB-3770: native USDC approval only if the wallet holds any.
+        # Demand-driven so a USDC.e-only wallet keeps the same 6-tx footprint
+        # it had pre-VIB-3770; a native-USDC-only wallet adds exactly one tx.
+        # ``self.native_usdc != self.source_asset`` guards the edge case where
+        # a future deploy reconfigures native USDC AS the primary source_asset
+        # (then leg #1 already covered it).
+        if (
+            self.native_usdc.lower() != self.source_asset.lower()
+            and status.native_usdc_balance > 0
+            and not status.native_usdc_approved_onramp
+        ):
+            transactions.append(self.build_approve_collateral_tx(self.native_usdc, self.collateral_onramp, wallet))
+
         return transactions
+
+    def get_collateral_breakdown(self, wallet: str, web3: Any) -> CollateralBreakdown:
+        """Read the wallet's full collateral breakdown (VIB-3770).
+
+        Three ``balanceOf`` calls — one each for pUSD, the canonical
+        bridged USDC.e bucket, and native Circle USDC — keyed off the
+        canonical token addresses (not ``self.source_asset``). Pinning the
+        ``usdce`` slot to ``USDCE_POLYGON`` keeps the breakdown
+        self-consistent if a future deploy ever reconfigures
+        ``source_asset`` to the native USDC address: the CLI/UX
+        ("how much USDC.e do I have? how much native USDC?") still maps
+        each on-chain pile to the right semantic bucket, instead of
+        silently lumping native USDC under ``usdce`` and zeroing
+        ``usdc_native``.
+
+        Used by the gateway to decide whether a wrap is needed (and from
+        which source) and by ``almanak ax balance --protocol polymarket``
+        for the user-facing breakdown.
+        """
+        wallet = Web3.to_checksum_address(wallet)
+        usdce_address = Web3.to_checksum_address(USDCE_POLYGON)
+        pusd_contract = web3.eth.contract(address=self.pusd, abi=self._erc20_abi)
+        usdce_contract = web3.eth.contract(address=usdce_address, abi=self._erc20_abi)
+        pusd_bal = pusd_contract.functions.balanceOf(wallet).call()
+        usdce_bal = usdce_contract.functions.balanceOf(wallet).call()
+        # Read native USDC unless it collides with the canonical USDC.e
+        # address (would just re-read the same contract). Failures fall
+        # back to 0 so a transient Polygon RPC blip doesn't break the
+        # whole breakdown for a USDC.e-only wallet.
+        usdc_native_bal = 0
+        if self.native_usdc.lower() != usdce_address.lower():
+            try:
+                native_contract = web3.eth.contract(address=self.native_usdc, abi=self._erc20_abi)
+                usdc_native_bal = native_contract.functions.balanceOf(wallet).call()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Native USDC balance read failed for %s; reporting 0 (VIB-3770): %s",
+                    wallet,
+                    exc,
+                )
+        return CollateralBreakdown(
+            pusd=pusd_bal,
+            usdce=usdce_bal,
+            usdc_native=usdc_native_bal,
+            pusd_address=self.pusd,
+            usdce_address=usdce_address,
+            usdc_native_address=self.native_usdc,
+        )
+
+    def select_source_for_wrap(self, deficit: int, status: AllowanceStatus) -> str:
+        """Pick the source asset to wrap into pUSD given a deficit.
+
+        VIB-3770: when a BUY needs more pUSD than the wallet holds, the
+        gateway must wrap from one of the user's source assets. Earlier
+        builds hardcoded USDC.e; users funding native USDC instead saw the
+        wrap fail with "Insufficient source asset for wrap" even though
+        their wallet was funded.
+
+        Selection rule:
+
+        1. Prefer the configured ``source_asset`` (USDC.e by default) when
+           it covers the deficit on its own. This is the path Polymarket's
+           Onramp has been live on the longest.
+        2. Otherwise pick native USDC if it covers the deficit.
+        3. Otherwise pick whichever has the larger balance — the gateway's
+           higher-level deficit check will surface the "insufficient" error
+           with the more accurate per-asset numbers.
+
+        Returns:
+            The chosen source asset address (checksummed).
+        """
+        usdce_balance = status.source_asset_balance
+        native_balance = status.native_usdc_balance
+
+        if usdce_balance >= deficit:
+            return self.source_asset
+        if native_balance >= deficit and self.native_usdc.lower() != self.source_asset.lower():
+            return self.native_usdc
+        # Neither covers solo — pick the larger pile so the wrap at least
+        # consumes the most-funded asset before bubbling the shortfall.
+        if native_balance > usdce_balance and self.native_usdc.lower() != self.source_asset.lower():
+            return self.native_usdc
+        return self.source_asset
 
     # =========================================================================
     # Token Balances
@@ -840,6 +1029,7 @@ __all__ = [
     "CtfSDK",
     "TransactionData",
     "AllowanceStatus",
+    "CollateralBreakdown",
     "ResolutionStatus",
     "MAX_UINT256",
     "SUFFICIENT_ALLOWANCE_THRESHOLD",
