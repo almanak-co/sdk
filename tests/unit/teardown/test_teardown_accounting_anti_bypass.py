@@ -27,6 +27,32 @@ ROOT = Path(__file__).resolve().parents[3]
 TEARDOWN_MANAGER = ROOT / "almanak" / "framework" / "teardown" / "teardown_manager.py"
 RUNNER_TEARDOWN = ROOT / "almanak" / "framework" / "runner" / "runner_teardown.py"
 CLI_TEARDOWN = ROOT / "almanak" / "framework" / "cli" / "teardown.py"
+# PR #2093: execute_teardown was refactored from a 880-LOC click body
+# (CC=89) into a thin orchestrator that delegates to typed helpers in
+# teardown_helpers.py. The TeardownManager construction, the
+# capture_snapshot bracket calls, and the cycle-id dual-swap all moved
+# into ``run_teardown_with_brackets`` (and the manager construction
+# also touches ``build_teardown_machinery``). The CLI-execute lane is
+# now this set of functions; the AST guards walk all of them as one
+# logical scope.
+CLI_TEARDOWN_HELPERS = ROOT / "almanak" / "framework" / "cli" / "teardown_helpers.py"
+# (file, function_name) pairs covering the CLI-execute lane.
+CLI_EXECUTE_LANE: tuple[tuple[Path, str], ...] = (
+    (CLI_TEARDOWN, "execute_teardown"),
+    (CLI_TEARDOWN_HELPERS, "build_teardown_machinery"),
+    (CLI_TEARDOWN_HELPERS, "run_teardown_with_brackets"),
+)
+
+
+def _walk_cli_execute_lane():
+    """Yield every AST node reachable from any function in the CLI-execute
+    lane, plus a path-name tag for error messages."""
+    for path, fn_name in CLI_EXECUTE_LANE:
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src, filename=str(path))
+        fn = _find_function(tree, fn_name)
+        for sub in ast.walk(fn):
+            yield sub, path.name, fn_name
 
 
 # ---------------------------------------------------------------------------
@@ -96,17 +122,15 @@ def test_t14_orchestrator_execute_followed_by_commit_in_source_order():
     src = TEARDOWN_MANAGER.read_text(encoding="utf-8")
     lines = src.splitlines()
 
-    execute_lines = [
-        i
-        for i, line in enumerate(lines)
-        if re.search(r"self\.orchestrator\.execute\b", line)
-    ]
+    # Match both `.execute` and `.execute_bundle` so the source-order
+    # check stays in sync with the paired-with-commit AST guard above —
+    # which already inspects both forms (CR feedback PR #2093).
+    execute_lines = [i for i, line in enumerate(lines) if re.search(r"self\.orchestrator\.execute(?:_bundle)?\b", line)]
     commit_lines = [i for i, line in enumerate(lines) if "runner_helpers.commit" in line]
 
     assert execute_lines, "Expected at least one orchestrator.execute call in teardown_manager.py"
     assert commit_lines, (
-        "Expected at least one runner_helpers.commit call in teardown_manager.py "
-        "(VIB-3773 wiring missing)."
+        "Expected at least one runner_helpers.commit call in teardown_manager.py (VIB-3773 wiring missing)."
     )
 
     # The first commit must appear AFTER the first execute (we scan top-down).
@@ -151,8 +175,7 @@ def test_t15_execute_teardown_via_manager_has_snapshot_brackets():
         "did the manager wiring move? Update this guard."
     )
     assert capture_calls >= 2, (
-        f"execute_teardown_via_manager must call capture_snapshot at least "
-        f"twice (pre + post). Found {capture_calls}."
+        f"execute_teardown_via_manager must call capture_snapshot at least twice (pre + post). Found {capture_calls}."
     )
 
 
@@ -170,10 +193,7 @@ def test_t15_execute_teardown_via_manager_swaps_both_cycle_id_surfaces():
         # ``runner._last_cycle_id = ...``
         if isinstance(sub, ast.Assign):
             for tgt in sub.targets:
-                if (
-                    isinstance(tgt, ast.Attribute)
-                    and tgt.attr == "_last_cycle_id"
-                ):
+                if isinstance(tgt, ast.Attribute) and tgt.attr == "_last_cycle_id":
                     sets_last_cycle = True
         # ``set_cycle_id(...)``
         if isinstance(sub, ast.Call):
@@ -211,13 +231,9 @@ def test_t15_execute_teardown_inline_swaps_both_cycle_id_surfaces():
                 sets_ctx_cycle = True
 
     assert sets_last_cycle, (
-        "execute_teardown_inline does not assign runner._last_cycle_id — "
-        "P1-4 dual-swap requirement."
+        "execute_teardown_inline does not assign runner._last_cycle_id — P1-4 dual-swap requirement."
     )
-    assert sets_ctx_cycle, (
-        "execute_teardown_inline does not call set_cycle_id — "
-        "P1-4 dual-swap requirement."
-    )
+    assert sets_ctx_cycle, "execute_teardown_inline does not call set_cycle_id — P1-4 dual-swap requirement."
 
 
 # ---------------------------------------------------------------------------
@@ -232,45 +248,41 @@ def test_t_3839_cli_execute_teardown_constructs_manager_with_runner_helpers():
     position_events / portfolio_snapshots / portfolio_metrics /
     accounting_events — the same silent-failure class VIB-3773 closed for
     the runner-loop lane.
+
+    PR #2093: the execute lane is now split across cli/teardown.py and
+    cli/teardown_helpers.py. The construction may live in either file —
+    the lane is the union ``CLI_EXECUTE_LANE``.
     """
-    src = CLI_TEARDOWN.read_text(encoding="utf-8")
-    tree = ast.parse(src, filename=str(CLI_TEARDOWN))
-
-    fn = _find_function(tree, "execute_teardown")
-
-    # Walk every TeardownManager(...) call inside execute_teardown's body
-    # and confirm it carries a runner_helpers= keyword argument.
-    offending_lines: list[int] = []
+    offending: list[tuple[str, int]] = []
     found_any_construction = False
-    for sub in ast.walk(fn):
+    for sub, file_name, _fn_name in _walk_cli_execute_lane():
         if isinstance(sub, ast.Call):
             f = sub.func
-            is_teardown_manager_ctor = (
-                (isinstance(f, ast.Name) and f.id == "TeardownManager")
-                or (isinstance(f, ast.Attribute) and f.attr == "TeardownManager")
+            is_teardown_manager_ctor = (isinstance(f, ast.Name) and f.id == "TeardownManager") or (
+                isinstance(f, ast.Attribute) and f.attr == "TeardownManager"
             )
             if not is_teardown_manager_ctor:
                 continue
             found_any_construction = True
             kwarg_names = {kw.arg for kw in sub.keywords if kw.arg}
             if "runner_helpers" not in kwarg_names:
-                offending_lines.append(getattr(sub, "lineno", -1))
+                offending.append((file_name, getattr(sub, "lineno", -1)))
 
     assert found_any_construction, (
-        "execute_teardown no longer constructs TeardownManager — "
-        "did the wiring move? Update this guard."
+        "execute_teardown lane no longer constructs TeardownManager anywhere "
+        "in CLI_EXECUTE_LANE — did the wiring move again? Update CLI_EXECUTE_LANE."
     )
-    assert not offending_lines, (
+    assert not offending, (
         f"VIB-3839 anti-bypass guard tripped: TeardownManager constructed at "
-        f"line(s) {offending_lines} in cli/teardown.py:execute_teardown without "
-        "runner_helpers=. Every CLI-driven teardown intent must drive the "
-        "commit pipeline (enrich → ledger → outbox+fire → sidecar). See "
-        "blueprint 27-accounting.md and CLAUDE.md §Teardown lane accounting boundary."
+        f"{offending} without runner_helpers=. Every CLI-driven teardown intent "
+        "must drive the commit pipeline (enrich → ledger → outbox+fire → "
+        "sidecar). See blueprint 27-accounting.md and CLAUDE.md §Teardown lane "
+        "accounting boundary."
     )
 
 
 def test_t_3839_cli_execute_teardown_brackets_with_capture_snapshot():
-    """``execute_teardown`` must call ``runner_helpers.capture_snapshot``
+    """The CLI execute lane must call ``runner_helpers.capture_snapshot``
     (or a hoisted local that aliases it) at least twice — once before the
     manager runs and once after — so portfolio_snapshots /
     portfolio_metrics rows mark the teardown's start/end.
@@ -280,12 +292,8 @@ def test_t_3839_cli_execute_teardown_brackets_with_capture_snapshot():
     capture_snapshot`` followed by two calls satisfies the guard the same
     way as two ``runner_helpers.capture_snapshot(...)`` invocations.
     """
-    src = CLI_TEARDOWN.read_text(encoding="utf-8")
-    tree = ast.parse(src, filename=str(CLI_TEARDOWN))
-    fn = _find_function(tree, "execute_teardown")
-
     call_sites = 0
-    for sub in ast.walk(fn):
+    for sub, _file_name, _fn_name in _walk_cli_execute_lane():
         if not isinstance(sub, ast.Call):
             continue
         f = sub.func
@@ -297,24 +305,21 @@ def test_t_3839_cli_execute_teardown_brackets_with_capture_snapshot():
             call_sites += 1
 
     assert call_sites >= 2, (
-        "VIB-3839 anti-bypass: cli/teardown.py:execute_teardown must call "
+        "VIB-3839 anti-bypass: the CLI execute lane (cli/teardown.py + "
+        "cli/teardown_helpers.py per CLI_EXECUTE_LANE) must call "
         f"capture_snapshot at least twice (pre + post). Found {call_sites}."
     )
 
 
 def test_t_3839_cli_execute_teardown_swaps_both_cycle_id_surfaces():
-    """``execute_teardown`` must mutate ``runner._last_cycle_id`` AND call
+    """The CLI execute lane must mutate ``runner._last_cycle_id`` AND call
     ``set_cycle_id`` — same dual-swap requirement as the runner-loop lane
     (P1-4). Without this, snapshot/metrics rows would land with the
     iteration's cycle id, splitting attribution across two cycle ids.
     """
-    src = CLI_TEARDOWN.read_text(encoding="utf-8")
-    tree = ast.parse(src, filename=str(CLI_TEARDOWN))
-    fn = _find_function(tree, "execute_teardown")
-
     sets_last_cycle = False
     sets_ctx_cycle = False
-    for sub in ast.walk(fn):
+    for sub, _file_name, _fn_name in _walk_cli_execute_lane():
         if isinstance(sub, ast.Assign):
             for tgt in sub.targets:
                 if isinstance(tgt, ast.Attribute) and tgt.attr == "_last_cycle_id":
@@ -325,10 +330,10 @@ def test_t_3839_cli_execute_teardown_swaps_both_cycle_id_surfaces():
                 sets_ctx_cycle = True
 
     assert sets_last_cycle, (
-        "cli/teardown.py:execute_teardown does not assign runner._last_cycle_id — "
+        "CLI execute lane (CLI_EXECUTE_LANE) does not assign runner._last_cycle_id — "
         "P1-4 dual-swap requirement (snapshot/metrics rows would carry stale cycle id)."
     )
     assert sets_ctx_cycle, (
-        "cli/teardown.py:execute_teardown does not call set_cycle_id — "
+        "CLI execute lane (CLI_EXECUTE_LANE) does not call set_cycle_id — "
         "P1-4 dual-swap requirement (ContextVar surface unstamped)."
     )
