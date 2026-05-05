@@ -174,6 +174,124 @@ class TestFunctionCoverage:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# _find_allowlist_reason()
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestBuildAllowlistMap:
+    """Pinned because the allowlist is the gate's only escape hatch — getting
+    the placement semantics wrong either lets every PR bypass the gate or
+    blocks even correctly-allowlisted code. Uses ast.parse to handle multi-
+    line decorators that line-by-line scanning would mis-classify as 'real
+    code' and abort on."""
+
+    def test_directly_above_def(self):
+        src = "# crap-allowlist: legacy state machine, see ADR-0042\ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {("f", 2): "legacy state machine, see ADR-0042"}
+
+    def test_through_blank_line(self):
+        src = "# crap-allowlist: documented reason\n\ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {("f", 3): "documented reason"}
+
+    def test_through_single_line_decorator(self):
+        src = "# crap-allowlist: tested manually via Anvil\n@pytest.fixture\ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {("f", 3): "tested manually via Anvil"}
+
+    def test_through_multiline_decorator(self):
+        """Regression for codex review on PR #2078: line-based scan saw the
+        `)` continuation of a wrapped @parametrize call as 'real code' and
+        aborted before reaching the allowlist comment, which would have
+        blocked legitimate escape-hatch use once the gate becomes required."""
+        src = (
+            "# crap-allowlist: per-protocol coverage matrix lives here, can't decompose\n"
+            "@pytest.mark.parametrize(\n"
+            '    "chain,protocol",\n'
+            '    [("ethereum", "uniswap_v3"), ("base", "aerodrome")],\n'
+            ")\n"
+            "def f():\n"
+            "    return 1\n"
+        )
+        assert plugin._build_allowlist_map(src) == {
+            ("f", 6): "per-protocol coverage matrix lives here, can't decompose"
+        }
+
+    def test_through_blanks_and_decorators(self):
+        src = "# crap-allowlist: domain-irreducible complexity\n\n@cached\n@retry(3)\ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {("f", 5): "domain-irreducible complexity"}
+
+    def test_allowlist_within_contiguous_comment_block_binds(self):
+        """The allowlist comment can sit anywhere within the contiguous
+        comment/blank/decorator block above the def — intervening unrelated
+        doc comments do NOT invalidate it. This matches how people actually
+        edit code: someone adding a doc comment shouldn't accidentally
+        remove a year-old allowlist. Closest-to-def allowlist wins if there
+        are multiple."""
+        src = (
+            "# crap-allowlist: state machine, see ADR-0042\n"
+            "# Updated 2026-Q2 to handle partial fills.\n"
+            "def f():\n"
+            "    return 1\n"
+        )
+        assert plugin._build_allowlist_map(src) == {("f", 3): "state machine, see ADR-0042"}
+
+    def test_empty_reason_returns_no_entry(self):
+        # Empty reason after the colon — refuse, no allowlist. Map omits f.
+        src = "# crap-allowlist:    \ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {}
+
+    def test_no_comment_returns_empty(self):
+        src = "def f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {}
+
+    def test_comment_separated_by_code_returns_empty(self):
+        # Comment exists but isn't in the contiguous "above-def" zone.
+        src = "# crap-allowlist: looks valid but not for f\nx = 1\ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {}
+
+    def test_case_insensitive(self):
+        src = "# CRAP-ALLOWLIST: shouting also works\ndef f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {("f", 2): "shouting also works"}
+
+    def test_lookback_window_bounded(self):
+        # Allowlist comment 12 lines above the def — outside the 10-line window.
+        src = "# crap-allowlist: too far away to be ours\n" + "\n" * 12 + "def f():\n    return 1\n"
+        # def is on line 14
+        assert plugin._build_allowlist_map(src) == {}
+
+    def test_def_at_top_of_file(self):
+        # No lines above to scan — returns empty gracefully.
+        src = "def f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {}
+
+    def test_async_function(self):
+        """AsyncFunctionDef nodes must also pick up allowlist comments."""
+        src = "# crap-allowlist: async dispatcher, awaits N protocol calls in parallel\nasync def f():\n    return 1\n"
+        assert plugin._build_allowlist_map(src) == {("f", 2): "async dispatcher, awaits N protocol calls in parallel"}
+
+    def test_class_method(self):
+        """Methods inside a class are FunctionDef nodes too. Allowlist applies
+        per-method using the method's own def lineno."""
+        src = (
+            "class Foo:\n"
+            "    # crap-allowlist: state machine on Foo, intentional\n"
+            "    def bad_method(self):\n"
+            "        return 1\n"
+        )
+        assert plugin._build_allowlist_map(src) == {("bad_method", 3): "state machine on Foo, intentional"}
+
+    def test_syntax_error_returns_empty(self):
+        """Uncompilable file → no allowlist info. Plugin stays quiet rather
+        than crashing the CI run."""
+        assert plugin._build_allowlist_map("def broken(:\n") == {}
+
+    def test_multiple_functions_independent(self):
+        """Each function gets its own entry; allowlist on one doesn't apply
+        to the other."""
+        src = "# crap-allowlist: only for f\ndef f():\n    return 1\n\ndef g():\n    return 2\n"
+        assert plugin._build_allowlist_map(src) == {("f", 2): "only for f"}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # CrapReporter.violations() — the load-bearing path
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -326,6 +444,61 @@ class TestCrapReporterViolations:
         reporter = self._make_reporter(tmp_path, threshold=10_000)
         self._seed_uncovered(reporter, target)
         assert reporter.violations(str(target)) == []
+
+    def test_allowlisted_function_suppresses_violations_and_logs_reason(self, tmp_path: Path, capsys):
+        """End-to-end allowlist: function above threshold + valid allowlist
+        comment → zero Violations + one stderr audit line carrying the reason."""
+        pkg = tmp_path / "almanak"
+        pkg.mkdir()
+        target = pkg / "bad.py"
+        # Prepend the allowlist comment to the high-CRAP fixture.
+        original = "def bad(x, y, z):"
+        _write_high_crap_module(target)
+        body = target.read_text()
+        target.write_text(f"# crap-allowlist: domain-irreducible state machine, see ADR-0042\n{body}")
+        # Sanity: original fixture still has the def.
+        assert original in body
+        reporter = self._make_reporter(tmp_path)
+        self._seed_uncovered(reporter, target)
+        assert reporter.violations(str(target)) == []
+        captured = capsys.readouterr()
+        # Audit line must surface the reason and the function identity so
+        # reviewers / governance can grep the CI logs.
+        assert "crap-allowlist:" in captured.err
+        assert "bad" in captured.err
+        assert "domain-irreducible state machine" in captured.err
+        assert "ADR-0042" in captured.err
+
+    def test_allowlist_with_empty_reason_does_not_suppress(self, tmp_path: Path, capsys):
+        """A bare `# crap-allowlist:` (no reason) is rejected — the comment
+        is treated as if it weren't there. This is the discipline lever:
+        forces authors to articulate why they're bypassing the gate."""
+        pkg = tmp_path / "almanak"
+        pkg.mkdir()
+        target = pkg / "bad.py"
+        _write_high_crap_module(target)
+        body = target.read_text()
+        target.write_text(f"# crap-allowlist:    \n{body}")
+        reporter = self._make_reporter(tmp_path)
+        self._seed_uncovered(reporter, target)
+        assert reporter.violations(str(target)) != []
+        # No audit line — empty-reason isn't a valid allowlist.
+        captured = capsys.readouterr()
+        assert "crap-allowlist:" not in captured.err
+
+    def test_violation_message_mentions_allowlist_syntax(self, tmp_path: Path):
+        """When the gate fires, the message must tell the author exactly what
+        the escape hatch is. Pinning the literal so we don't drift away from
+        the docstring example again."""
+        pkg = tmp_path / "almanak"
+        pkg.mkdir()
+        target = pkg / "bad.py"
+        _write_high_crap_module(target)
+        reporter = self._make_reporter(tmp_path)
+        self._seed_uncovered(reporter, target)
+        violations = reporter.violations(str(target))
+        assert violations
+        assert "# crap-allowlist:" in violations[0].message
 
     def test_missing_coverage_data_returns_empty_with_warning(self, tmp_path: Path, capsys):
         """When .coverage is absent (local invocation outside the Makefile
