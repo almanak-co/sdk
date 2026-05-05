@@ -1061,6 +1061,35 @@ class TestExtractSwapAmounts:
         with patch.object(parser, "parse_receipt", side_effect=Exception("boom")):
             assert parser.extract_swap_amounts({"logs": []}) is None
 
+    def test_transfer_topic_uppercase_prefix_still_extracts_tokens(self):
+        # Regression for issue #2065 (Transfer-loop site): the
+        # _extract_swap_tokens_from_transfers path also normalizes topic
+        # case, so an uppercase '0X' Transfer topic must still be
+        # recognised and yield the correct token_in / token_out addresses.
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        upper_transfer = "0X" + EVENT_TOPICS["Transfer"][2:].upper()
+        # Hand-crafted Transfer logs with an uppercase '0X' prefix on topic[0].
+        logs = [
+            {
+                "address": USDC_ARB,
+                "topics": [upper_transfer, _pad_addr(WALLET), _pad_addr(POOL_ADDRESS)],
+                "data": "0x" + _enc_uint(1000 * 10**6),
+                "logIndex": 0,
+            },
+            _make_swap_log(amount0=1000 * 10**6, amount1=-3 * 10**17, log_index=1),
+            {
+                "address": WETH_ARB,
+                "topics": [upper_transfer, _pad_addr(POOL_ADDRESS), _pad_addr(WALLET)],
+                "data": "0x" + _enc_uint(3 * 10**17),
+                "logIndex": 2,
+            },
+        ]
+        token_in, token_out, amt_in, amt_out = parser._extract_swap_tokens_from_transfers(_make_receipt(logs))
+        assert token_in.lower() == USDC_ARB.lower()
+        assert token_out.lower() == WETH_ARB.lower()
+        assert amt_in == 1000 * 10**6
+        assert amt_out == 3 * 10**17
+
 
 # --------------------------------------------------------------------------
 # is_sushiswap_event / get_event_type
@@ -1086,10 +1115,30 @@ class TestIsSushiswapEvent:
         assert parser.is_sushiswap_event(no_prefix) is True
 
     def test_uppercase_with_prefix(self):
-        # is_sushiswap_event lowercases after prefix check; mixed-case body still matches.
+        # Mixed-case body with lowercase '0x' prefix matches.
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         mixed = "0x" + EVENT_TOPICS["Swap"][2:].upper()
         assert parser.is_sushiswap_event(mixed) is True
+
+    def test_uppercase_0x_prefix(self):
+        # Regression for issue #2065: uppercase '0X' prefix must not be
+        # treated as missing-prefix and double-prefixed into '0x0x...'.
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        upper_prefix = "0X" + EVENT_TOPICS["Swap"][2:]
+        assert parser.is_sushiswap_event(upper_prefix) is True
+
+    def test_fully_uppercase(self):
+        # Whole topic uppercased, including the '0X' prefix.
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        assert parser.is_sushiswap_event(EVENT_TOPICS["Swap"].upper()) is True
+
+    def test_bytes_topic_with_uppercase_hex_input(self):
+        # Pin the contract that bytes inputs come back as lowercase hex
+        # regardless of how the caller staged them. Constructing from an
+        # uppercase hex string still yields the same lowercase '0x...'.
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        upper_hex = EVENT_TOPICS["Swap"][2:].upper()
+        assert parser.is_sushiswap_event(bytes.fromhex(upper_hex)) is True
 
 
 class TestGetEventType:
@@ -1109,6 +1158,17 @@ class TestGetEventType:
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
         no_prefix = EVENT_TOPICS["Burn"][2:]
         assert parser.get_event_type(no_prefix) == SushiSwapV3EventType.BURN
+
+    def test_uppercase_0x_prefix(self):
+        # Regression for issue #2065: uppercase '0X' prefix must resolve
+        # to the correct event type, not UNKNOWN.
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        upper_prefix = "0X" + EVENT_TOPICS["Mint"][2:]
+        assert parser.get_event_type(upper_prefix) == SushiSwapV3EventType.MINT
+
+    def test_fully_uppercase(self):
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        assert parser.get_event_type(EVENT_TOPICS["Burn"].upper()) == SushiSwapV3EventType.BURN
 
 
 # --------------------------------------------------------------------------

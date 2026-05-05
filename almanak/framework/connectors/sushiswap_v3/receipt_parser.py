@@ -66,6 +66,26 @@ EVENT_TOPICS: dict[str, str] = {
     "Approval": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
 }
 
+
+def _normalize_topic(topic: str | bytes) -> str:
+    """Normalize an event topic to a lowercase '0x'-prefixed hex string.
+
+    For string inputs, lowercases before checking the '0x' prefix so an
+    uppercase '0X' isn't treated as missing-prefix and double-prefixed into
+    a malformed '0x0x...' value. Bytes inputs go through ``bytes.hex()``,
+    which is always lowercase, so the lowercase + prefix invariant holds
+    without an explicit case fold.
+
+    Structural normalization only -- does not validate that the body is hex.
+    """
+    if isinstance(topic, bytes):
+        return "0x" + topic.hex()
+    topic = str(topic).lower()
+    if not topic.startswith("0x"):
+        topic = "0x" + topic
+    return topic
+
+
 # SushiSwap V3 NonfungiblePositionManager addresses per chain
 POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "ethereum": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
@@ -1144,12 +1164,10 @@ class SushiSwapV3ReceiptParser:
             if not topics or len(topics) < 3:
                 continue
 
-            topic0 = HexDecoder.normalize_hex(topics[0])
-            if not topic0:
+            if not topics[0]:
                 continue
-            if not topic0.startswith("0x"):
-                topic0 = "0x" + topic0
-            if topic0.lower() != transfer_topic:
+            topic0 = _normalize_topic(topics[0])
+            if topic0 != transfer_topic:
                 continue
 
             log_from = HexDecoder.topic_to_address(topics[1])
@@ -1415,14 +1433,7 @@ class SushiSwapV3ReceiptParser:
         Returns:
             True if topic is a known SushiSwap V3 event
         """
-        if isinstance(topic, bytes):
-            topic = "0x" + topic.hex()
-        else:
-            topic = str(topic)
-        if not topic.startswith("0x"):
-            topic = "0x" + topic
-        topic = topic.lower()
-        return self.registry.is_known_event(topic)
+        return self.registry.is_known_event(_normalize_topic(topic))
 
     def get_event_type(self, topic: str | bytes) -> SushiSwapV3EventType:
         """Get the event type for a topic.
@@ -1433,14 +1444,7 @@ class SushiSwapV3ReceiptParser:
         Returns:
             Event type or UNKNOWN
         """
-        if isinstance(topic, bytes):
-            topic = "0x" + topic.hex()
-        else:
-            topic = str(topic)
-        if not topic.startswith("0x"):
-            topic = "0x" + topic
-        topic = topic.lower()
-        return self.registry.get_event_type_from_topic(topic) or SushiSwapV3EventType.UNKNOWN
+        return self.registry.get_event_type_from_topic(_normalize_topic(topic)) or SushiSwapV3EventType.UNKNOWN
 
 
 __all__ = [
