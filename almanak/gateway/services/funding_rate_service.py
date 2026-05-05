@@ -510,7 +510,9 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
 
             rate_a, rate_b = await asyncio.gather(rate_a_future, rate_b_future)
 
-            # Calculate spread
+            # Wire spread is absolute; SDK callers compute signed spread
+            # locally from venue_a_rate and venue_b_rate to preserve the
+            # historical wire convention for any out-of-repo consumer.
             spread_hourly = abs(rate_a.rate_hourly - rate_b.rate_hourly)
             spread_annualized = spread_hourly * Decimal(str(HOURS_PER_YEAR))
 

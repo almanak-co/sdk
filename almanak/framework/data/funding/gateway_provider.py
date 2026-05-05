@@ -1,8 +1,8 @@
-"""Gateway-backed Funding Rate Provider.
+"""Gateway-backed funding rate provider.
 
-This module provides a gateway-backed implementation of funding rate fetching
-for perpetual venues (GMX V2, Hyperliquid). All API calls go through the
-gateway sidecar, keeping credentials secure.
+Routes all funding rate requests through the gateway sidecar's
+:class:`FundingRateService` (see ``almanak/gateway/services/funding_rate_service.py``)
+so the strategy container has zero network egress for funding data.
 
 Example:
     from almanak.framework.data.funding import GatewayFundingRateProvider, Venue
@@ -11,23 +11,33 @@ Example:
     with GatewayClient() as gateway:
         provider = GatewayFundingRateProvider(gateway_client=gateway)
 
-        # Get GMX V2 funding rate for ETH
         rate = await provider.get_funding_rate(Venue.GMX_V2, "ETH-USD")
-
-        # Get funding rate spread between venues
         spread = await provider.get_funding_rate_spread(
-            "ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID
+            "ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID,
         )
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import TYPE_CHECKING
+
+from .models import (
+    DEFAULT_CACHE_TTL_SECONDS,
+    HOURS_PER_YEAR,
+    SUPPORTED_MARKETS,
+    SUPPORTED_VENUES,
+    FundingRate,
+    FundingRateSpread,
+    FundingRateUnavailableError,
+    MarketNotSupportedError,
+    Venue,
+    VenueNotSupportedError,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -35,174 +45,82 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Exceptions
-# =============================================================================
+def _normalize_venue(venue: Venue | str) -> str:
+    """Coerce Venue/str to a lowercase string and validate."""
+    venue_str = venue.value if isinstance(venue, Venue) else str(venue).lower()
+    if venue_str not in SUPPORTED_VENUES:
+        raise VenueNotSupportedError(venue_str)
+    return venue_str
 
 
-class FundingRateError(Exception):
-    """Raised when funding rate operations fail."""
-
-
-# =============================================================================
-# Constants
-# =============================================================================
-
-HOURS_PER_YEAR = 8760
-# Use shorter TTL for live funding rates (they can go stale quickly)
-DEFAULT_CACHE_TTL_SECONDS = 10.0
-
-
-class Venue(StrEnum):
-    """Supported perpetual venues."""
-
-    GMX_V2 = "gmx_v2"
-    HYPERLIQUID = "hyperliquid"
-
-
-SUPPORTED_VENUES: list[str] = [v.value for v in Venue]
-
-
-# =============================================================================
-# Data Models
-# =============================================================================
-
-
-@dataclass
-class FundingRate:
-    """Funding rate data for a perpetual market.
-
-    Attributes:
-        venue: Venue identifier (e.g., "gmx_v2", "hyperliquid")
-        market: Market symbol (e.g., "ETH-USD")
-        rate_hourly: Hourly funding rate as a decimal
-        rate_8h: 8-hour funding rate
-        rate_annualized: Annualized funding rate
-        next_funding_time: Next funding settlement time
-        open_interest_long: Total long open interest in USD
-        open_interest_short: Total short open interest in USD
-        mark_price: Current mark price
-        index_price: Current index price
-        is_live_data: Whether data is from live source (vs defaults)
-    """
-
-    venue: str
-    market: str
-    rate_hourly: Decimal
-    rate_8h: Decimal
-    rate_annualized: Decimal
-    next_funding_time: datetime
-    open_interest_long: Decimal
-    open_interest_short: Decimal
-    mark_price: Decimal
-    index_price: Decimal
-    is_live_data: bool = True
-
-
-@dataclass
-class FundingRateSpread:
-    """Funding rate spread between two venues.
-
-    Attributes:
-        market: Market symbol
-        venue_a: First venue
-        venue_b: Second venue
-        spread_hourly: Absolute spread in hourly rate
-        spread_annualized: Annualized spread
-        rate_a: Rate from first venue
-        rate_b: Rate from second venue
-    """
-
-    market: str
-    venue_a: str
-    venue_b: str
-    spread_hourly: Decimal
-    spread_annualized: Decimal
-    rate_a: FundingRate
-    rate_b: FundingRate
-
-
-# =============================================================================
-# Gateway Provider
-# =============================================================================
+def _validate_market(venue: str, market: str) -> str:
+    """Coerce market to upper-case and validate against the venue."""
+    market_upper = market.upper()
+    if market_upper not in SUPPORTED_MARKETS.get(venue, []):
+        raise MarketNotSupportedError(market_upper, venue)
+    return market_upper
 
 
 class GatewayFundingRateProvider:
-    """Gateway-backed funding rate provider.
+    """Funding rate provider that delegates to the gateway sidecar.
 
-    All funding rate requests are proxied through the gateway, which handles:
-    - API credentials
-    - RPC connections
-    - Rate limiting
-    - Caching
-
-    Example:
-        with GatewayClient() as gateway:
-            provider = GatewayFundingRateProvider(gateway_client=gateway)
-
-            # Get single rate
-            rate = await provider.get_funding_rate(Venue.GMX_V2, "ETH-USD")
-
-            # Get spread
-            spread = await provider.get_funding_rate_spread(
-                "ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID
-            )
+    The gateway owns all network egress (Hyperliquid HTTP, GMX V2 RPC),
+    credential storage, SSL configuration, and rate limiting. Strategy
+    code calls this provider over the in-cluster gRPC channel only.
     """
 
     def __init__(
         self,
-        gateway_client: "GatewayClient",
+        gateway_client: GatewayClient,
         chain: str = "arbitrum",
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
     ) -> None:
-        """Initialize the gateway-backed funding rate provider.
-
-        Args:
-            gateway_client: Connected GatewayClient instance
-            chain: Chain for on-chain venues (default: arbitrum)
-            cache_ttl_seconds: Local cache TTL in seconds
-        """
         self._gateway_client = gateway_client
         self._chain = chain.lower()
         self._cache_ttl_seconds = cache_ttl_seconds
 
-        # Local rate cache: venue -> market -> (rate, timestamp)
+        # venue -> market -> (rate, monotonic_timestamp)
         self._cache: dict[str, dict[str, tuple[FundingRate, float]]] = {}
 
         logger.info(
-            "GatewayFundingRateProvider initialized (chain=%s, cache_ttl=%s)",
-            chain,
+            "GatewayFundingRateProvider initialized (chain=%s, cache_ttl=%ss)",
+            self._chain,
             cache_ttl_seconds,
         )
 
+    @property
+    def chain(self) -> str:
+        return self._chain
+
     def _get_cached_rate(self, venue: str, market: str) -> FundingRate | None:
-        """Get cached rate if still valid."""
         venue_cache = self._cache.get(venue, {})
         if market in venue_cache:
-            rate, timestamp = venue_cache[market]
-            if time.time() - timestamp < self._cache_ttl_seconds:
+            rate, ts = venue_cache[market]
+            if time.monotonic() - ts < self._cache_ttl_seconds:
                 return rate
         return None
 
     def _set_cached_rate(self, venue: str, market: str, rate: FundingRate) -> None:
-        """Cache a funding rate."""
-        if venue not in self._cache:
-            self._cache[venue] = {}
-        self._cache[venue][market] = (rate, time.time())
+        self._cache.setdefault(venue, {})[market] = (rate, time.monotonic())
 
     def _response_to_funding_rate(self, response) -> FundingRate:
-        """Convert gateway FundingRateResponse to FundingRate dataclass."""
+        """Convert a gRPC FundingRateResponse to :class:`FundingRate`."""
+        rate_hourly = Decimal(response.rate_hourly)
+        next_funding = (
+            datetime.fromtimestamp(response.next_funding_time, tz=UTC) if response.next_funding_time else None
+        )
         return FundingRate(
             venue=response.venue,
             market=response.market,
-            rate_hourly=Decimal(response.rate_hourly),
+            rate_hourly=rate_hourly,
             rate_8h=Decimal(response.rate_8h),
             rate_annualized=Decimal(response.rate_annualized),
-            next_funding_time=datetime.fromtimestamp(response.next_funding_time, tz=UTC),
-            open_interest_long=Decimal(response.open_interest_long),
-            open_interest_short=Decimal(response.open_interest_short),
-            mark_price=Decimal(response.mark_price),
-            index_price=Decimal(response.index_price),
+            next_funding_time=next_funding,
+            # Proto strings default to "" when unset; treat that as missing.
+            open_interest_long=Decimal(response.open_interest_long) if response.open_interest_long != "" else None,
+            open_interest_short=Decimal(response.open_interest_short) if response.open_interest_short != "" else None,
+            mark_price=Decimal(response.mark_price) if response.mark_price != "" else None,
+            index_price=Decimal(response.index_price) if response.index_price != "" else None,
             is_live_data=response.is_live_data,
         )
 
@@ -211,49 +129,42 @@ class GatewayFundingRateProvider:
         venue: Venue | str,
         market: str,
     ) -> FundingRate:
-        """Get funding rate for a market on a specific venue.
-
-        Args:
-            venue: Venue (e.g., Venue.GMX_V2 or "gmx_v2")
-            market: Market symbol (e.g., "ETH-USD")
-
-        Returns:
-            FundingRate with current funding data
+        """Get the current funding rate for ``venue``/``market``.
 
         Raises:
-            ValueError: If venue is not supported or request fails
+            VenueNotSupportedError: ``venue`` is not in ``SUPPORTED_VENUES``.
+            MarketNotSupportedError: ``market`` is not in ``SUPPORTED_MARKETS[venue]``.
+            FundingRateUnavailableError: the gateway returned an error.
         """
-        venue_str = venue.value if isinstance(venue, Venue) else venue.lower()
-        market = market.upper()
+        venue_str = _normalize_venue(venue)
+        market_str = _validate_market(venue_str, market)
 
-        # Check cache first
-        cached = self._get_cached_rate(venue_str, market)
+        cached = self._get_cached_rate(venue_str, market_str)
         if cached is not None:
             return cached
 
-        # Fetch from gateway
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.FundingRateRequest(
             venue=venue_str,
-            market=market,
+            market=market_str,
             chain=self._chain,
         )
 
-        response = await asyncio.to_thread(
-            self._gateway_client.funding_rate.GetFundingRate,
-            request,
-            timeout=self._gateway_client.config.timeout,
-        )
+        try:
+            response = await asyncio.to_thread(
+                self._gateway_client.funding_rate.GetFundingRate,
+                request,
+                timeout=self._gateway_client.config.timeout,
+            )
+        except Exception as exc:
+            raise FundingRateUnavailableError(venue_str, market_str, str(exc)) from exc
 
         if not response.success:
-            raise FundingRateError(f"Failed to get funding rate: {response.error}")
+            raise FundingRateUnavailableError(venue_str, market_str, response.error or "gateway returned success=False")
 
         rate = self._response_to_funding_rate(response)
-
-        # Cache the result
-        self._set_cached_rate(venue_str, market, rate)
-
+        self._set_cached_rate(venue_str, market_str, rate)
         return rate
 
     async def get_funding_rate_spread(
@@ -262,54 +173,55 @@ class GatewayFundingRateProvider:
         venue_a: Venue | str,
         venue_b: Venue | str,
     ) -> FundingRateSpread:
-        """Get funding rate spread between two venues.
+        """Get the funding rate spread between ``venue_a`` and ``venue_b``.
 
-        Useful for funding rate arbitrage strategies.
-
-        Args:
-            market: Market symbol (e.g., "ETH-USD")
-            venue_a: First venue
-            venue_b: Second venue
-
-        Returns:
-            FundingRateSpread with spread and individual rates
-
-        Raises:
-            ValueError: If request fails
+        Issues a single ``GetFundingRateSpread`` RPC so the gateway can
+        fetch both rates concurrently. The signed ``spread_8h`` is computed
+        locally from ``venue_a_rate.rate_hourly - venue_b_rate.rate_hourly``
+        because the wire ``spread_hourly`` field is absolute by historical
+        convention and we need sign for ``recommended_direction``.
         """
-        venue_a_str = venue_a.value if isinstance(venue_a, Venue) else venue_a.lower()
-        venue_b_str = venue_b.value if isinstance(venue_b, Venue) else venue_b.lower()
-        market = market.upper()
+        venue_a_str = _normalize_venue(venue_a)
+        venue_b_str = _normalize_venue(venue_b)
+        market_str = _validate_market(venue_a_str, market)
+        _validate_market(venue_b_str, market_str)
 
         from almanak.gateway.proto import gateway_pb2
 
         request = gateway_pb2.FundingRateSpreadRequest(
-            market=market,
+            market=market_str,
             venue_a=venue_a_str,
             venue_b=venue_b_str,
             chain=self._chain,
         )
 
-        response = await asyncio.to_thread(
-            self._gateway_client.funding_rate.GetFundingRateSpread,
-            request,
-            timeout=self._gateway_client.config.timeout,
-        )
+        try:
+            response = await asyncio.to_thread(
+                self._gateway_client.funding_rate.GetFundingRateSpread,
+                request,
+                timeout=self._gateway_client.config.timeout,
+            )
+        except Exception as exc:
+            raise FundingRateUnavailableError(f"{venue_a_str}/{venue_b_str}", market_str, str(exc)) from exc
 
         if not response.success:
-            raise FundingRateError(f"Failed to get funding rate spread: {response.error}")
+            raise FundingRateUnavailableError(
+                f"{venue_a_str}/{venue_b_str}",
+                market_str,
+                response.error or "gateway returned success=False",
+            )
 
         rate_a = self._response_to_funding_rate(response.venue_a_rate)
         rate_b = self._response_to_funding_rate(response.venue_b_rate)
-
+        spread_hourly = rate_a.rate_hourly - rate_b.rate_hourly
         return FundingRateSpread(
-            market=market,
+            market=market_str,
             venue_a=venue_a_str,
             venue_b=venue_b_str,
-            spread_hourly=Decimal(response.spread_hourly),
-            spread_annualized=Decimal(response.spread_annualized),
             rate_a=rate_a,
             rate_b=rate_b,
+            spread_8h=spread_hourly * Decimal("8"),
+            spread_annualized=spread_hourly * Decimal(str(HOURS_PER_YEAR)),
         )
 
     async def get_rates_for_market(
@@ -317,42 +229,26 @@ class GatewayFundingRateProvider:
         market: str,
         venues: list[Venue | str] | None = None,
     ) -> dict[str, FundingRate]:
-        """Get funding rates for a market across multiple venues.
-
-        Args:
-            market: Market symbol (e.g., "ETH-USD")
-            venues: Venues to query (default: all supported)
-
-        Returns:
-            Dictionary mapping venue -> FundingRate
-        """
+        """Fetch ``market`` funding rates across multiple venues concurrently."""
         if venues is None:
             venues = list(Venue)
 
-        # Fetch all rates concurrently
         tasks = [self.get_funding_rate(venue, market) for venue in venues]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         rates: dict[str, FundingRate] = {}
         for venue, result in zip(venues, results, strict=False):
-            venue_str = venue.value if isinstance(venue, Venue) else venue.lower()
-            if isinstance(result, Exception):
+            venue_str = venue.value if isinstance(venue, Venue) else str(venue).lower()
+            if isinstance(result, BaseException):
                 logger.warning("Failed to get rate for %s/%s: %s", venue_str, market, result)
             else:
-                rates[venue_str] = result  # type: ignore[assignment]
-
+                rates[venue_str] = result
         return rates
 
     def clear_cache(self) -> None:
-        """Clear the local rate cache."""
         self._cache.clear()
 
 
 __all__ = [
-    "FundingRate",
-    "FundingRateError",
-    "FundingRateSpread",
     "GatewayFundingRateProvider",
-    "SUPPORTED_VENUES",
-    "Venue",
 ]

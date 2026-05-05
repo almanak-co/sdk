@@ -321,7 +321,7 @@ if TYPE_CHECKING:
 
     from .defi.gas import GasOracle, GasPrice
     from .defi.pools import PoolReserves, UniswapV3PoolReader
-    from .funding import FundingRate, FundingRateProvider, FundingRateSpread
+    from .funding import FundingRate, FundingRateSpread, GatewayFundingRateProvider
     from .health import HealthReport
     from .indicators.atr import ATRCalculator
     from .indicators.base import BollingerBandsResult, MACDResult, StochasticResult
@@ -679,7 +679,7 @@ class MarketSnapshot:
         gas_oracle: Optional["GasOracle"] = None,
         pool_reader: Optional["UniswapV3PoolReader"] = None,
         rate_monitor: Optional["RateMonitor"] = None,
-        funding_rate_provider: Optional["FundingRateProvider"] = None,
+        funding_rate_provider: Optional["GatewayFundingRateProvider"] = None,
         multi_dex_service: Optional["MultiDexPriceService"] = None,
         il_calculator: Optional["ILCalculator"] = None,
         prediction_provider: Optional["PredictionMarketDataProvider"] = None,
@@ -714,7 +714,7 @@ class MarketSnapshot:
             gas_oracle: GasOracle implementation for gas price data
             pool_reader: UniswapV3PoolReader for DEX pool data
             rate_monitor: RateMonitor for lending protocol rates
-            funding_rate_provider: FundingRateProvider for perpetual funding rates
+            funding_rate_provider: GatewayFundingRateProvider for perpetual funding rates
             multi_dex_service: MultiDexPriceService for cross-DEX price comparison
             il_calculator: ILCalculator for impermanent loss calculations
             prediction_provider: PredictionMarketDataProvider for prediction market data

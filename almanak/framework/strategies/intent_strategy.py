@@ -314,7 +314,7 @@ class MarketSnapshot:
             indicator_provider: IndicatorProvider for calculator-backed TA indicators
             multi_dex_service: MultiDexService for cross-DEX price comparison
             rate_monitor: RateMonitor instance for lending rate queries
-            funding_rate_provider: FundingRateProvider for perpetual funding rate queries
+            funding_rate_provider: GatewayFundingRateProvider for perpetual funding rate queries
             gateway_client: Connected GatewayClient for gateway-routed on-chain reads
                 (used by position_health and other methods that need eth_call).
             default_timeframe: Default OHLCV timeframe from strategy config (e.g., "15m", "1h").

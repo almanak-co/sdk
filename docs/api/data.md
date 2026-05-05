@@ -95,9 +95,9 @@ The primary data interface passed to `decide()`. Provides lazy access to prices,
     options:
       show_root_heading: true
 
-### FundingRateProvider
+### GatewayFundingRateProvider
 
-::: almanak.framework.data.FundingRateProvider
+::: almanak.framework.data.GatewayFundingRateProvider
     options:
       show_root_heading: true
 

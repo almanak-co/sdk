@@ -456,12 +456,13 @@ class DataModuleDemo:
         try:
             from almanak.framework.data.funding import (
                 SUPPORTED_MARKETS,
-                FundingRateProvider,
+                GatewayFundingRateProvider,
                 Venue,
             )
+            from almanak.framework.gateway_client import GatewayClient
 
-            provider = FundingRateProvider()
-            try:
+            with GatewayClient() as client:
+                provider = GatewayFundingRateProvider(gateway_client=client)
                 markets = ["ETH-USD", "BTC-USD"]
                 venues = [Venue.GMX_V2, Venue.HYPERLIQUID]
 
@@ -482,7 +483,6 @@ class DataModuleDemo:
                             except Exception as e:
                                 print(f"  {market:<12} {venue.value:<12} ERROR: {e}")
 
-                # Funding rate spread
                 print_subheader("Cross-Venue Spread Analysis")
                 try:
                     spread = await provider.get_funding_rate_spread("ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID)
@@ -495,8 +495,6 @@ class DataModuleDemo:
                     print(f"  Spread calculation error: {e}")
 
                 self.results["funding_rates"] = {"completed": True}
-            finally:
-                await provider.close()
 
         except ImportError as e:
             print(f"  [SKIP] Funding rate provider not available: {e}")
