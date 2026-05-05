@@ -358,6 +358,22 @@ class TestParseReceiptBranches:
         assert out.transaction_success is False
         assert out.error == "Transaction reverted"
 
+    def test_failed_tx_with_empty_logs_reports_revert(self) -> None:
+        """Regression for issue #2064: early-revert receipt (status=0, logs=[])
+        must surface the revert via ``error``."""
+        parser = UniswapV3ReceiptParser(chain="arbitrum")
+        out = parser.parse_receipt(
+            {
+                "logs": [],
+                "status": 0,
+                "transactionHash": "0xabc",
+                "blockNumber": 1,
+            }
+        )
+        assert out.success is True
+        assert out.transaction_success is False
+        assert out.error == "Transaction reverted"
+
     def test_bytes_tx_hash_normalized(self) -> None:
         parser = UniswapV3ReceiptParser(chain="arbitrum")
         out = parser.parse_receipt(

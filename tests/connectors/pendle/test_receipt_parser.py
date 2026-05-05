@@ -199,14 +199,18 @@ class TestBasicParsing:
         assert len(result.events) == 0
 
     def test_parse_failed_transaction(self, parser):
-        """Parser should handle failed transaction."""
+        """Parser should handle failed transaction.
+
+        Regression for issue #2064: even when logs=[] (early revert), the
+        parser must surface the revert via ``error`` instead of silently
+        returning a successful empty-receipt result.
+        """
         receipt = create_mock_receipt(status=0)
         result = parser.parse_receipt(receipt)
 
         assert result.success is True
         assert result.transaction_success is False
-        # Note: When there are no logs, the parser returns early
-        # The error message is only set when there are logs but tx failed
+        assert result.error == "Transaction reverted"
 
     def test_extract_transaction_hash(self, parser):
         """Parser should extract transaction hash."""

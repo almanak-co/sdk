@@ -322,11 +322,19 @@ class TestParseReceipt:
 
     def test_failed_transaction(self):
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")
-        # Failed tx must have logs to reach the not-tx_success branch
         result = parser.parse_receipt(_make_receipt([_make_swap_log()], success=False))
         assert result.success is True
         assert result.transaction_success is False
         assert "reverted" in (result.error or "").lower()
+
+    def test_failed_transaction_with_empty_logs(self):
+        """Regression for issue #2064: early-revert receipt (status=0, logs=[])
+        must surface the revert via ``error``."""
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        result = parser.parse_receipt(_make_receipt([], success=False))
+        assert result.success is True
+        assert result.transaction_success is False
+        assert result.error == "Transaction reverted"
 
     def test_hex_status(self):
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")

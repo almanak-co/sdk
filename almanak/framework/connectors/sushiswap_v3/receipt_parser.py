@@ -510,15 +510,9 @@ class SushiSwapV3ReceiptParser:
                 status = int(status, 16) if status.startswith("0x") else int(status)
             tx_success = status == 1
 
-            if not logs:
-                return ParseResult(
-                    success=True,
-                    transaction_hash=tx_hash,
-                    block_number=block_number,
-                    transaction_success=tx_success,
-                )
-
-            # Handle failed transactions
+            # Reverts must be reported before the empty-logs short-circuit,
+            # otherwise an early-revert receipt (status=0, logs=[]) would be
+            # silently surfaced as a successful empty receipt (issue #2064).
             if not tx_success:
                 return ParseResult(
                     success=True,
@@ -526,6 +520,14 @@ class SushiSwapV3ReceiptParser:
                     block_number=block_number,
                     transaction_success=False,
                     error="Transaction reverted",
+                )
+
+            if not logs:
+                return ParseResult(
+                    success=True,
+                    transaction_hash=tx_hash,
+                    block_number=block_number,
+                    transaction_success=tx_success,
                 )
 
             events: list[SushiSwapV3Event] = []

@@ -241,6 +241,25 @@ class TestCurveReceiptParser:
         assert result.transaction_success is False
         assert result.error == "Transaction reverted"
 
+    def test_failed_transaction_with_empty_logs(self):
+        """Regression for issue #2064: early-revert receipt (status=0, logs=[])
+        must surface the revert via ``error``."""
+        parser = CurveReceiptParser()
+
+        receipt = {
+            "transactionHash": "0x111",
+            "blockNumber": 12350,
+            "status": 0,
+            "logs": [],
+            "gasUsed": 50000,
+        }
+
+        result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert result.transaction_success is False
+        assert result.error == "Transaction reverted"
+
     def test_empty_logs(self):
         """Test parsing receipt with no logs."""
         parser = CurveReceiptParser()

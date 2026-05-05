@@ -208,6 +208,7 @@ class TestSwapEventData:
         assert result["amount1_out"] == "500"
         assert result["token0_is_input"] is True
 
+
 # =============================================================================
 # Receipt Parsing Tests
 # =============================================================================
@@ -243,12 +244,7 @@ class TestReceiptParsing:
         assert len(result.events) == 0
 
     def test_parse_failed_transaction(self, parser: AerodromeReceiptParser) -> None:
-        """Test parsing failed transaction.
-
-        Note: receipt must include at least one log because parse_receipt
-        short-circuits on empty logs BEFORE checking the failed-tx branch
-        that emits ``Transaction reverted``.
-        """
+        """Failed tx with logs surfaces the revert as ``error``."""
         receipt = {
             "transactionHash": "0x1234",
             "blockNumber": 12345,
@@ -268,6 +264,29 @@ class TestReceiptParsing:
         assert result.success is True
         assert result.transaction_success is False
         assert result.error == "Transaction reverted"
+
+    def test_parse_failed_transaction_with_empty_logs(self, parser: AerodromeReceiptParser) -> None:
+        """Regression for issue #2064.
+
+        An early-revert receipt (status=0, logs=[]) must report the revert
+        via ``error``. Previously the empty-logs short-circuit ran before
+        the failed-tx branch and silently surfaced the revert as a normal
+        empty-receipt success.
+        """
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 12345,
+            "status": 0,
+            "logs": [],
+        }
+
+        result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert result.transaction_success is False
+        assert result.error == "Transaction reverted"
+        assert result.transaction_hash == "0x1234"
+        assert result.block_number == 12345
 
     def test_parse_swap_receipt(self, parser: AerodromeReceiptParser) -> None:
         """Test parsing swap receipt with mock data."""
