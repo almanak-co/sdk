@@ -223,6 +223,125 @@ def get_block_explorer_url(chain: str, tx_hash: str) -> str:
     return f"{base_url}{tx_hash}"
 
 
+# ---------------------------------------------------------------------------
+# Sub-tx (multi-tx bundle) helpers — VIB-4046
+#
+# ``transaction_ledger.extracted_data_json.all_tx_results`` is a populated
+# array of ``{tx_hash, gas_used, success}`` per sub-tx for every multi-tx
+# intent (see ``almanak/framework/observability/ledger.py``). The dashboard
+# surfaces it directly: a count badge per row, an expander listing every
+# sub-tx, and a smarter headline link that points at the action tx instead
+# of the trailing approval.
+#
+# ERC-20 approval selector — emitted twice for every "amount=full" repay
+# flow (approve → action → reset to 0), and once for every first-touch
+# token before any swap/supply/borrow.
+APPROVE_SELECTOR = "0x095ea7b3"
+
+# Selector → human label. Subset chosen to cover the demo-strategy bundle
+# patterns from VIB-4046's audit (lending, swap, LP). Unknown selectors
+# fall through to the raw hex; that's fine — it's still useful diagnostic
+# information in the expander.
+_SELECTOR_LABELS: dict[str, str] = {
+    APPROVE_SELECTOR: "approve",
+    "0x617ba037": "supply",
+    "0x69328dec": "withdraw",
+    "0xa415bcad": "borrow",
+    "0x573ade81": "repay",
+    "0x04e45aaf": "exactInputSingle (R02)",
+    "0x414bf389": "exactInputSingle (R01)",
+    "0xb858183f": "exactInput",
+    "0x5ae401dc": "multicall (R02)",
+    "0xac9650d8": "multicall",
+    "0x5a3b74b9": "setUserUseReserveAsCollateral",
+}
+
+# Gas-band heuristic for approval detection when ``function_selector`` is
+# not populated on a sub-tx. ERC-20 approve costs ~46k (slot-create) /
+# ~28k (slot-reset). 50k clears those bands without overlapping the
+# cheapest real action seen in the demo suite (Aave V3
+# ``setUserUseReserveAsCollateral`` ~50–70k). Heuristic only fires as a
+# fallback — selector-based detection always wins when the field is
+# present.
+_APPROVAL_GAS_CEIL = 50_000
+
+
+def decode_selector(selector: str | None) -> str:
+    """Return a human label for a 4-byte function selector.
+
+    ``selector`` is an ``0x``-prefixed 10-char hex string. Unknown
+    selectors return the **normalized** form (lowercased, ``0x``-
+    prefixed) so downstream tooling that joins on selector strings
+    sees a consistent shape. ``None`` / empty returns ``""``.
+    """
+    if not selector:
+        return ""
+    s = selector.lower()
+    if not s.startswith("0x"):
+        s = "0x" + s
+    return _SELECTOR_LABELS.get(s, s)
+
+
+def is_approval_tx(sub_tx: dict) -> bool:
+    """Return True if ``sub_tx`` is an ERC-20 ``approve`` call.
+
+    Selector-first: when ``function_selector`` is populated on the sub-tx
+    record, the answer is exact. When it isn't (today's
+    ``all_tx_results`` shape — see VIB-4046 §"Adding function_selector"
+    discussion), fall back to a tight gas-band heuristic. ERC-20
+    ``approve`` lands at ~46k (slot-create) / ~28k (slot-reset). The
+    50k ceiling is chosen to clear those bands without overlapping
+    real action calls — Aave V3 ``setUserUseReserveAsCollateral``
+    measures ~50–70k, the lowest-cost action leg in the demo suite,
+    and we want it OUT of the approval bucket.
+
+    False-negative risk: a real approve metered above 50k on an unusual
+    chain would be tagged as an action and shown in the default view.
+    That is the safer failure mode (operator sees too much, not too
+    little). False positives are eliminated by construction.
+    """
+    if not isinstance(sub_tx, dict):
+        return False
+    selector = sub_tx.get("function_selector")
+    if selector:
+        return str(selector).lower() == APPROVE_SELECTOR
+    gas_used = sub_tx.get("gas_used") or 0
+    try:
+        gas_int = int(gas_used)
+    except (TypeError, ValueError):
+        return False
+    return 0 < gas_int <= _APPROVAL_GAS_CEIL
+
+
+def pick_action_tx(
+    all_tx_results: list[dict] | None,
+    intent_type: str = "",  # noqa: ARG001 — reserved for future receipt-event
+    #                                       gating; signature stays stable.
+) -> dict | None:
+    """Pick the action tx from a multi-tx bundle.
+
+    Order of preference (VIB-4046, refined for failure-investigation):
+
+    1. The **last non-approval** sub-tx — regardless of success. When
+       an action reverts but a trailing reset-approve succeeds, the
+       operator clicking the headline link wants to land on the
+       failure, not the bookkeeping reset.
+    2. The last successful sub-tx (all-approvals defensive case).
+    3. The last entry (today's behavior — final fallback).
+
+    Returns ``None`` only when the input is empty / None.
+    """
+    if not all_tx_results:
+        return None
+    non_approval = [tx for tx in all_tx_results if not is_approval_tx(tx)]
+    if non_approval:
+        return non_approval[-1]
+    successful = [tx for tx in all_tx_results if tx.get("success", True)]
+    if successful:
+        return successful[-1]
+    return all_tx_results[-1]
+
+
 def get_event_type_category(event_type: TimelineEventType, description: str | None = None) -> str:
     """Categorize event type for color coding.
 

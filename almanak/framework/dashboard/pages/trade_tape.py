@@ -29,10 +29,13 @@ import streamlit as st
 from almanak.framework.dashboard.gateway_client import TradeTapeRow
 from almanak.framework.dashboard.theme import get_chain_color
 from almanak.framework.dashboard.utils import (
+    decode_selector,
     format_chain_badge,
     format_token_amount,
     format_usd,
     get_block_explorer_url,
+    is_approval_tx,
+    pick_action_tx,
 )
 
 
@@ -113,7 +116,7 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
     st.markdown(f"**{len(response.rows)} intent(s)** · newest first · click any row for the receipt-parsed expander.")
 
     # Top-level filters
-    col1, col2, col3 = st.columns([2, 2, 2])
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
     with col1:
         intent_types = sorted({row.intent_type for row in response.rows if row.intent_type})
         selected_intents = st.multiselect(
@@ -133,6 +136,21 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
             "Confidence",
             ["All", "HIGH only", "Include ESTIMATED/STALE", "UNAVAILABLE only"],
             key=f"tape_confidence_{strategy_id}",
+        )
+    with col4:
+        # VIB-4046 — approvals are noise for the operator-facing read of
+        # the tape. Default off; flip on when auditing a bundle end-to-end.
+        # Only affects the sub-tx expander; CSV export is always full
+        # (per the ticket — spreadsheet auditors need every row).
+        show_approvals = st.toggle(
+            "Show approvals",
+            value=False,
+            key=f"tape_show_approvals_{strategy_id}",
+            help=(
+                "When off, ERC-20 approve sub-txs are hidden from the per-intent "
+                "expander and the count badge shows e.g. '1 of 3 (2 approvals hidden)'. "
+                "The CSV export is unaffected — it always emits one row per sub-tx."
+            ),
         )
 
     rows = [r for r in response.rows if r.intent_type in selected_intents]
@@ -171,11 +189,20 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
                 unsafe_allow_html=True,
             )
             last_date = date_str
-        _render_tape_row(row)
+        _render_tape_row(row, show_approvals=show_approvals)
 
 
 def _render_csv_export(rows: list[TradeTapeRow], strategy_id: str) -> None:
-    """VIB-3928 — render a single download button for the filtered tape."""
+    """Render a single download button for the filtered tape.
+
+    VIB-3928 — original ask was a one-row-per-intent dump.
+    VIB-4046 — switched to one row per *sub-tx* with a ``parent_intent_id``
+    column joining back to the parent ledger row's ``id``. Single-tx
+    intents (no ``all_tx_results``) still emit one row each — they
+    are simply degenerate bundles. Approvals are always exported even
+    when the dashboard's "Show approvals" toggle is off, so spreadsheet
+    auditors get the full picture (per ticket).
+    """
     import csv as _csv
     import io
 
@@ -184,9 +211,17 @@ def _render_csv_export(rows: list[TradeTapeRow], strategy_id: str) -> None:
     writer.writerow(
         [
             "timestamp",
+            "parent_intent_id",
             "cycle_id",
             "intent_type",
-            "success",
+            "sub_tx_index",
+            "sub_tx_count",
+            "is_action_tx",
+            "is_approval",
+            "function_selector",
+            "function_label",
+            "tx_success",
+            "intent_success",
             "chain",
             "protocol",
             "token_in",
@@ -197,8 +232,9 @@ def _render_csv_export(rows: list[TradeTapeRow], strategy_id: str) -> None:
             "amount_out_usd",
             "effective_price",
             "slippage_bps",
-            "gas_used",
-            "gas_usd",
+            "tx_gas_used",
+            "intent_gas_used",
+            "intent_gas_usd",
             "tx_hash",
             "confidence",
             "oracle_source",
@@ -206,56 +242,148 @@ def _render_csv_export(rows: list[TradeTapeRow], strategy_id: str) -> None:
             "primary_risk_metric",
         ]
     )
+
+    sub_tx_count = 0
     for r in rows:
-        writer.writerow(
-            [
-                r.timestamp.isoformat() if r.timestamp else "",
-                r.cycle_id or "",
-                r.intent_type or "",
-                "1" if r.success else "0",
-                r.chain or "",
-                r.protocol or "",
-                r.token_in or "",
-                str(r.amount_in or ""),
-                str(r.amount_in_usd or ""),
-                r.token_out or "",
-                str(r.amount_out or ""),
-                str(r.amount_out_usd or ""),
-                str(r.effective_price or ""),
-                str(r.slippage_bps or ""),
-                str(r.gas_used or ""),
-                str(r.gas_usd or ""),
-                r.tx_hash or "",
-                r.confidence or "",
-                getattr(r, "oracle_source", "") or "",
-                getattr(r, "position_id", "") or "",
-                getattr(r, "primary_risk_metric", "") or "",
-            ]
-        )
+        sub_txs = _get_all_tx_results(r)
+        # Single-tx intents (no ``all_tx_results``) are exported as a
+        # one-leg bundle so the schema is uniform.
+        legs = sub_txs if sub_txs else [{"tx_hash": r.tx_hash, "gas_used": r.gas_used or 0, "success": r.success}]
+        action = pick_action_tx(sub_txs, r.intent_type) if len(sub_txs) > 1 else None
+        action_hash = (action or {}).get("tx_hash") if action else (r.tx_hash or "")
+
+        for idx, tx in enumerate(legs, start=1):
+            tx_hash = tx.get("tx_hash") or ""
+            tx_success = tx.get("success", True)
+            tx_gas = _coerce_gas(tx.get("gas_used"))
+            selector = tx.get("function_selector") or ""
+            # Single-leg bundle (synthesized OR a real one-entry
+            # ``all_tx_results``): the only leg IS the action by
+            # definition. Force ``is_approval=False`` too — otherwise a
+            # single-tx supply on a low-gas L2 (e.g. ~70k Aave supply)
+            # would be flagged ``is_action=1`` AND ``is_approval=1``,
+            # silently dropping the row from any spreadsheet filter
+            # that selects on ``is_approval=0`` to find actions.
+            is_single_leg = len(legs) == 1
+            is_action = True if is_single_leg else (bool(action_hash) and tx_hash == action_hash)
+            is_approval = False if is_single_leg else is_approval_tx(tx)
+            sub_tx_count += 1
+            writer.writerow(
+                [
+                    r.timestamp.isoformat() if r.timestamp else "",
+                    r.id or "",
+                    r.cycle_id or "",
+                    r.intent_type or "",
+                    idx,
+                    len(legs),
+                    "1" if is_action else "0",
+                    "1" if is_approval else "0",
+                    selector,
+                    decode_selector(selector) if selector else "",
+                    "1" if tx_success else "0",
+                    "1" if r.success else "0",
+                    r.chain or "",
+                    r.protocol or "",
+                    r.token_in or "",
+                    str(r.amount_in or ""),
+                    str(r.amount_in_usd or ""),
+                    r.token_out or "",
+                    str(r.amount_out or ""),
+                    str(r.amount_out_usd or ""),
+                    str(r.effective_price or ""),
+                    str(r.slippage_bps or ""),
+                    str(tx_gas),
+                    str(r.gas_used or ""),
+                    str(r.gas_usd or ""),
+                    tx_hash,
+                    r.confidence or "",
+                    getattr(r, "oracle_source", "") or "",
+                    getattr(r, "position_id", "") or "",
+                    getattr(r, "primary_risk_metric", "") or "",
+                ]
+            )
 
     csv_bytes = buf.getvalue().encode("utf-8")
     fname = f"trade_tape_{strategy_id[:32]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     st.download_button(
-        label=f"⬇️ Export {len(rows)} row(s) as CSV",
+        label=f"⬇️ Export {sub_tx_count} sub-tx row(s) from {len(rows)} intent(s) as CSV",
         data=csv_bytes,
         file_name=fname,
         mime="text/csv",
         key=f"tape_csv_{strategy_id}",
         help=(
-            "Joined trade-tape view: transaction_ledger × accounting_events × "
-            "position_events. Filtered rows only. Honest empty cells where "
-            "data is unavailable (per CONF / VIB-3886)."
+            "Trade-tape export: one row per on-chain sub-tx, joined back to "
+            "the parent intent via parent_intent_id. Always full (approvals "
+            "included) regardless of the 'Show approvals' UI toggle — "
+            "spreadsheet auditors need every leg."
         ),
     )
 
 
-def _render_tape_row(row: TradeTapeRow) -> None:
+def _coerce_gas(value: object) -> int:
+    """Coerce a sub-tx ``gas_used`` field to int, returning 0 on garbage.
+
+    Receipt-parser bugs / schema-version skew can land non-numeric
+    values in ``all_tx_results[*].gas_used``. The dashboard renders
+    inside a Streamlit page; an uncaught ``int(...)`` ValueError on
+    one bad row deletes the whole tape — exactly the failure surface
+    the operator is here to investigate. Fail closed to 0 instead.
+    """
+    if value is None:
+        return 0
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_extracted_data(row: TradeTapeRow) -> dict[str, Any]:
+    """Decode ``extracted_data_json`` for a row, or ``{}`` on any failure.
+
+    Centralises the parse so callers (headline-link picker, expander
+    sub-tx renderer, CSV export) all see the same dict and don't drift.
+    """
+    if not row.extracted_data_json:
+        return {}
+    try:
+        data = json.loads(row.extracted_data_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _get_all_tx_results(row: TradeTapeRow) -> list[dict]:
+    """Pull the ``all_tx_results`` array off a row, defensively.
+
+    Single-tx intents (and pre-VIB-3886 rows) have no ``all_tx_results``
+    — we surface the row exactly as today (no badge, no expander).
+    """
+    data = _parse_extracted_data(row)
+    txs = data.get("all_tx_results")
+    if not isinstance(txs, list):
+        return []
+    return [tx for tx in txs if isinstance(tx, dict)]
+
+
+def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     """Render a single tape row with its receipt-parsed expander."""
     icon = _INTENT_ICONS.get(row.intent_type, "•")
     chain_color = get_chain_color(row.chain) if row.chain else "#888888"
     chain_badge = format_chain_badge(row.chain, chain_color) if row.chain else ""
     success_marker = "<span style='color:#00c853;'>✓</span>" if row.success else "<span style='color:#f44336;'>✗</span>"
     confidence_color, confidence_label = _CONFIDENCE_BADGES.get(row.confidence, ("#888888", _e(row.confidence) or ""))
+
+    # VIB-4046 — multi-tx bundle awareness. ``all_tx_results`` is already
+    # populated by ``observability.ledger._build_extracted_data_json``
+    # for every multi-tx intent; the ledger row's ``tx_hash`` is the
+    # last tx, which is frequently a trailing approval-reset rather
+    # than the action. The headline link picks the action tx; the
+    # expander surfaces the full bundle.
+    sub_txs = _get_all_tx_results(row)
+    is_bundle = len(sub_txs) > 1
+    action_tx = pick_action_tx(sub_txs, row.intent_type) if is_bundle else None
+    headline_hash = (action_tx or {}).get("tx_hash") or row.tx_hash
+    approvals_hidden = sum(1 for tx in sub_txs if is_approval_tx(tx)) if is_bundle else 0
 
     # Direction line: token_in → token_out (when applicable).
     # VIB-3890: ``format_token_amount`` normalises raw on-chain integers
@@ -285,14 +413,34 @@ def _render_tape_row(row: TradeTapeRow) -> None:
     cost_line = " · ".join(cost_bits) if cost_bits else ""
 
     # tx hash link — escape href + add rel="noopener noreferrer" so the
-    # block-explorer link can't be hijacked into a same-origin window
+    # block-explorer link can't be hijacked into a same-origin window.
+    # ``headline_hash`` already accounts for multi-tx bundles (action tx
+    # picked above, today's last-tx behavior preserved for single-tx).
     tx_link = ""
-    if row.tx_hash:
-        url = get_block_explorer_url(row.chain or "ethereum", row.tx_hash)
+    if headline_hash:
+        url = get_block_explorer_url(row.chain or "ethereum", headline_hash)
         tx_link = (
             f"<a href='{_e(url)}' target='_blank' rel='noopener noreferrer' "
             f"style='color:#2196f3;text-decoration:none;font-family:monospace;font-size:0.85rem;'>"
-            f"{_e(_short_hash(row.tx_hash))} ↗</a>"
+            f"{_e(_short_hash(headline_hash))} ↗</a>"
+        )
+
+    # Count badge: "3 txs" by default; "1 of 3 (2 approvals hidden)"
+    # when the toggle hides approvals from the expander. Single-tx
+    # intents render exactly as today — no badge.
+    count_badge = ""
+    if is_bundle:
+        if not show_approvals and approvals_hidden:
+            visible = len(sub_txs) - approvals_hidden
+            label = (
+                f"{visible} of {len(sub_txs)} "
+                f"({approvals_hidden} approval{'s' if approvals_hidden != 1 else ''} hidden)"
+            )
+        else:
+            label = f"{len(sub_txs)} txs"
+        count_badge = (
+            f"<span style='background:#1f3a5f;color:#90caf9;border-radius:4px;"
+            f"padding:1px 6px;font-size:0.72rem;margin-left:0.5rem;'>{_e(label)}</span>"
         )
 
     # Time
@@ -337,6 +485,7 @@ def _render_tape_row(row: TradeTapeRow) -> None:
                 {_e(row.protocol)}
               </span>
               {confidence_chip}
+              {count_badge}
             </div>
             <div style="color:#888;font-size:0.82rem;">{_e(time_str)}</div>
           </div>
@@ -361,27 +510,28 @@ def _render_tape_row(row: TradeTapeRow) -> None:
         f"▸ details · cycle `{row.cycle_id[:16]}…`" if row.cycle_id else "▸ details",
         expanded=False,
     ):
-        _render_expander_blocks(row)
+        _render_expander_blocks(row, sub_txs=sub_txs, show_approvals=show_approvals)
 
 
-def _render_expander_blocks(row: TradeTapeRow) -> None:
-    """Render the four sub-blocks of the trade tape expander."""
+def _render_expander_blocks(
+    row: TradeTapeRow,
+    *,
+    sub_txs: list[dict],
+    show_approvals: bool,
+) -> None:
+    """Render the sub-blocks of the trade tape expander."""
+    # Block 0 — Sub-transactions (VIB-4046). For multi-tx bundles
+    # surface every leg above the existing receipt-parsed kv block.
+    # Single-tx intents skip this block entirely.
+    if len(sub_txs) > 1:
+        _render_sub_tx_block(row, sub_txs, show_approvals=show_approvals)
+
     block_col1, block_col2 = st.columns(2)
 
-    # Block 1 — Receipt-parsed extracted data (left column, top)
+    # Block 1 — Receipt-parsed extracted data (left column, top).
     with block_col1:
         st.markdown("**Receipt-parsed data**")
-        if row.extracted_data_json:
-            try:
-                data = json.loads(row.extracted_data_json)
-                _render_kv_block(data, prefix="extracted_data")
-            except (json.JSONDecodeError, TypeError):
-                st.code(row.extracted_data_json or "—", language="text")
-        else:
-            st.markdown(
-                "<div style='color:#666;font-style:italic;'>no receipt-parsed data on this row</div>",
-                unsafe_allow_html=True,
-            )
+        _render_receipt_block(row.extracted_data_json)
 
     # Block 2 — Oracle quotes used (right column, top)
     with block_col2:
@@ -451,6 +601,85 @@ def _render_expander_blocks(row: TradeTapeRow) -> None:
             _render_kv_block(pe, prefix="position_event")
         except (json.JSONDecodeError, TypeError):
             st.code(row.position_event_json, language="json")
+
+
+def _render_sub_tx_block(
+    row: TradeTapeRow,
+    sub_txs: list[dict],
+    *,
+    show_approvals: bool,
+) -> None:
+    """Render the sub-transaction breakdown for a multi-tx bundle (VIB-4046).
+
+    One row per sub-tx with: explorer link, gas, status, and a
+    selector-decoded label. When ``show_approvals`` is False, ERC-20
+    ``approve`` sub-txs are filtered out and a "(N hidden)" hint is
+    shown so the operator knows the table is incomplete by choice.
+    """
+    visible = sub_txs if show_approvals else [tx for tx in sub_txs if not is_approval_tx(tx)]
+    hidden = len(sub_txs) - len(visible)
+
+    header = f"**Sub-transactions** &nbsp;<span style='color:#888;font-weight:normal;'>{len(visible)} of {len(sub_txs)}"
+    if hidden:
+        header += f" &middot; {hidden} approval{'s' if hidden != 1 else ''} hidden — toggle 'Show approvals' to expand"
+    header += "</span>"
+    st.markdown(header, unsafe_allow_html=True)
+
+    if not visible:
+        st.markdown(
+            "<div style='color:#666;font-style:italic;font-size:0.84rem;'>"
+            "All sub-txs are approvals — toggle 'Show approvals' to see them.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    table_rows = []
+    chain = row.chain or "ethereum"
+    for idx, tx in enumerate(sub_txs, start=1):
+        if not show_approvals and is_approval_tx(tx):
+            continue
+        tx_hash = tx.get("tx_hash") or ""
+        gas_used = _coerce_gas(tx.get("gas_used"))
+        success = tx.get("success", True)
+        selector = tx.get("function_selector") or ""
+        label = decode_selector(selector) if selector else ("approve" if is_approval_tx(tx) else "action")
+
+        link_html = "—"
+        if tx_hash:
+            url = get_block_explorer_url(chain, tx_hash)
+            link_html = (
+                f"<a href='{_e(url)}' target='_blank' rel='noopener noreferrer' "
+                f"style='color:#2196f3;text-decoration:none;font-family:monospace;'>"
+                f"{_e(_short_hash(tx_hash))} ↗</a>"
+            )
+        status_html = "<span style='color:#00c853;'>✓</span>" if success else "<span style='color:#f44336;'>✗</span>"
+
+        table_rows.append(
+            "<tr>"
+            f"<td style='padding:2px 6px;color:#888;'>{idx}</td>"
+            f"<td style='padding:2px 6px;'>{status_html}</td>"
+            f"<td style='padding:2px 6px;color:#90caf9;font-family:monospace;font-size:0.82rem;'>"
+            f"{_e(label)}</td>"
+            f"<td style='padding:2px 6px;color:#bbb;font-family:monospace;font-size:0.82rem;'>"
+            f"{gas_used:,}</td>"
+            f"<td style='padding:2px 6px;'>{link_html}</td>"
+            "</tr>"
+        )
+
+    st.markdown(
+        "<div style='background:#1a1a1a;border-radius:4px;padding:0.4rem;'>"
+        "<table style='width:100%;border-collapse:collapse;font-size:0.84rem;'>"
+        "<thead><tr style='color:#888;text-align:left;'>"
+        "<th style='padding:2px 6px;'>#</th>"
+        "<th style='padding:2px 6px;'></th>"
+        "<th style='padding:2px 6px;'>action</th>"
+        "<th style='padding:2px 6px;'>gas</th>"
+        "<th style='padding:2px 6px;'>tx</th>"
+        "</tr></thead><tbody>"
+        f"{''.join(table_rows)}"
+        "</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_kv_block(
@@ -552,6 +781,44 @@ def _render_oracle_block(prices: Any) -> None:
             "</table></div>",
             unsafe_allow_html=True,
         )
+
+
+def _render_receipt_block(extracted_data_json: str) -> None:
+    """Render the receipt-parsed extracted_data dict.
+
+    ``all_tx_results`` is shown structurally by ``_render_sub_tx_block``
+    above, so we strip it from the raw kv view to avoid duplicating
+    the same data twice in the same expander.
+    """
+    if not extracted_data_json:
+        st.markdown(
+            "<div style='color:#666;font-style:italic;'>no receipt-parsed data on this row</div>",
+            unsafe_allow_html=True,
+        )
+        return
+    try:
+        data = json.loads(extracted_data_json)
+    except (json.JSONDecodeError, TypeError):
+        st.code(extracted_data_json or "—", language="text")
+        return
+    # Only strip ``all_tx_results`` from the raw kv view when the
+    # sub-tx table above is actually rendering it (i.e. multi-tx
+    # bundle). For a single-item ``all_tx_results``, the bundle is
+    # not rendered as a separate table — keep the field in the kv
+    # view so the operator can still see the lone leg.
+    if isinstance(data, dict):
+        legs = data.get("all_tx_results")
+        if isinstance(legs, list) and len(legs) > 1:
+            data.pop("all_tx_results", None)
+    if isinstance(data, dict) and not data:
+        st.markdown(
+            "<div style='color:#666;font-style:italic;'>"
+            "(other receipt fields rendered in the sub-transactions table above)"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+    _render_kv_block(data, prefix="extracted_data")
 
 
 def _render_state_block(state_json: str) -> None:
