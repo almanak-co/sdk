@@ -1938,6 +1938,84 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
             logger.warning(f"Failed to extract Slipstream CL lp_close_data: {e}")
             return None
 
+    def _extract_collect_amounts(self, receipt: dict[str, Any]) -> tuple[int, int] | None:
+        """Sum (amount0, amount1) over every Collect event in the receipt.
+
+        Returns None when no Collect event is present **or when the receipt
+        also carries a DecreaseLiquidity event** — the latter signals an
+        LP_CLOSE bundle (decreaseLiquidity → collect) where the Collect
+        amounts include unlocked principal in addition to any owed fees,
+        making the value semantically incompatible with a pure-fees readout.
+
+        ResultEnricher invokes both this extractor (via ``fees0``/``fees1``
+        for LP_COLLECT_FEES) and ``extract_lp_close_data`` (for LP_CLOSE) on
+        the same parser without protocol-level scoping; gating fees on
+        absence of DecreaseLiquidity prevents an LP_CLOSE bundle from
+        polluting ``extracted_data["fees0"]`` with principal+fees.
+        """
+        try:
+            logs = receipt.get("logs", [])
+            total0 = 0
+            total1 = 0
+            found = False
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes | bytearray):
+                    topic0 = "0x" + bytes(topic0).hex()
+                else:
+                    topic0 = str(topic0)
+                if not topic0.startswith("0x"):
+                    topic0 = "0x" + topic0
+                topic0_lower = topic0.lower()
+
+                # Fees are not separable from principal in an LP_CLOSE bundle —
+                # see docstring. Bail out as soon as we see DecreaseLiquidity.
+                if topic0_lower == _DECREASE_LIQUIDITY_TOPIC:
+                    return None
+
+                if topic0_lower != _COLLECT_CL_TOPIC:
+                    continue
+
+                data = HexDecoder.normalize_hex(log.get("data", ""))
+                # data layout: recipient(32b) + amount0(32b) + amount1(32b).
+                # ``normalize_hex`` strips the ``0x`` prefix, so 96 bytes = 192
+                # hex chars; reject any malformed payload that would cause
+                # ``decode_uint256(data, 64)`` below to read past the end.
+                if len(data) < 192:
+                    continue
+                total0 += HexDecoder.decode_uint256(data, 32)
+                total1 += HexDecoder.decode_uint256(data, 64)
+                found = True
+
+            if not found:
+                return None
+            return total0, total1
+        except Exception as e:
+            logger.warning(f"Failed to extract Slipstream CL collect amounts: {e}")
+            return None
+
+    def extract_fees0(self, receipt: dict[str, Any]) -> int | None:
+        """Extract token0 fees collected from a Slipstream Collect event.
+
+        Used to enrich LP_COLLECT_FEES intents. The Collect event amount equals
+        the realized fee in token0 only when liquidity is unchanged; if a
+        DecreaseLiquidity event is also present we return None rather than
+        misreport principal as fees (see ``_extract_collect_amounts``).
+        """
+        amounts = self._extract_collect_amounts(receipt)
+        return None if amounts is None else amounts[0]
+
+    def extract_fees1(self, receipt: dict[str, Any]) -> int | None:
+        """Extract token1 fees collected from a Slipstream Collect event.
+
+        See ``extract_fees0`` for semantics.
+        """
+        amounts = self._extract_collect_amounts(receipt)
+        return None if amounts is None else amounts[1]
+
     def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
         """Fail-closed variant of extract_lp_close_data for Slipstream CL."""
         err = self._strict_parse(receipt)

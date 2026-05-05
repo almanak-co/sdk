@@ -4611,6 +4611,16 @@ class IntentCompiler:
                 intent_id=intent.intent_id,
             )
 
+        # Dispatch by raw protocol BEFORE alias normalization so
+        # ``aerodrome_slipstream`` is not collapsed into ``aerodrome``.
+        # Ordering mirrors LP_OPEN/LP_CLOSE dispatch (compiler.py:_dispatch_lp_open_route).
+        # Apply the same case + hyphen normalization that ``normalize_protocol``
+        # uses so callers passing ``"Aerodrome-Slipstream"`` or similar aren't
+        # silently routed into the catch-all unsupported branch.
+        raw_protocol = (intent.protocol or "").strip().lower().replace("-", "_")
+        if raw_protocol == "aerodrome_slipstream":
+            return self._compile_collect_fees_aerodrome_slipstream(intent)
+
         protocol = self._resolve_protocol(intent.protocol)
         if protocol == "traderjoe_v2":
             return self._compile_collect_fees_traderjoe_v2(intent)
@@ -4618,9 +4628,31 @@ class IntentCompiler:
         if protocol == "uniswap_v4":
             return self._compile_collect_fees_uniswap_v4(intent)
 
+        # Aerodrome Classic (Solidly fork) uses fungible LP tokens with auto-
+        # compounding fees: trading fees accrue into pool reserves and are
+        # only realized when liquidity is removed. There is no contract-level
+        # ``collect()`` on the V1 router, so standalone fee harvest is not
+        # representable. Surface the limitation explicitly so callers know
+        # to use ``LP_CLOSE(collect_fees=True)`` instead of guessing.
+        if protocol == "aerodrome":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Aerodrome Classic (volatile/stable) pools do not support standalone "
+                    "LP_COLLECT_FEES: trading fees auto-compound into the pool and are only "
+                    "realized when liquidity is removed. Use Intent.lp_close(..., collect_fees=True) "
+                    "to harvest, or use Intent.collect_fees(protocol='aerodrome_slipstream', ...) "
+                    "with a Slipstream NFT tokenId for in-position fee collection."
+                ),
+                intent_id=intent.intent_id,
+            )
+
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. Supported: traderjoe_v2, uniswap_v4",
+            error=(
+                f"Protocol '{intent.protocol}' does not support LP_COLLECT_FEES. "
+                f"Supported: traderjoe_v2, uniswap_v4, aerodrome_slipstream"
+            ),
             intent_id=intent.intent_id,
         )
 
@@ -4926,6 +4958,12 @@ class IntentCompiler:
         from .compiler_aerodrome import compile_lp_close_aerodrome_slipstream
 
         return compile_lp_close_aerodrome_slipstream(self, intent)
+
+    def _compile_collect_fees_aerodrome_slipstream(self, intent: "CollectFeesIntent") -> CompilationResult:
+        """Compile LP_COLLECT_FEES intent for Aerodrome Slipstream CL."""
+        from .compiler_aerodrome import compile_collect_fees_aerodrome_slipstream
+
+        return compile_collect_fees_aerodrome_slipstream(self, intent)
 
     def _resolve_traderjoe_v2_swap_tokens(
         self,

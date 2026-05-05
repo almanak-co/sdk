@@ -17,7 +17,7 @@ from .compiler_models import CompilationResult, CompilationStatus
 from .vocabulary import IntentType
 
 if TYPE_CHECKING:
-    from .vocabulary import LPCloseIntent, LPOpenIntent, SwapIntent
+    from .vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
 
 logger = logging.getLogger("almanak.framework.intents.compiler")
 
@@ -1052,6 +1052,159 @@ def compile_lp_close_aerodrome_slipstream(compiler, intent: LPCloseIntent) -> Co
 
     except Exception as e:
         logger.exception(f"Failed to compile Aerodrome Slipstream LP_CLOSE intent: {e}")
+        result.status = CompilationStatus.FAILED
+        result.error = str(e)
+
+    return result
+
+
+def compile_collect_fees_aerodrome_slipstream(compiler, intent: CollectFeesIntent) -> CompilationResult:
+    """Compile LP_COLLECT_FEES intent for Aerodrome Slipstream CL.
+
+    Slipstream's NonfungiblePositionManager is V3-shaped: ``collect()`` harvests
+    accrued fees + any previously-unlocked principal without burning the position.
+    Calling it on a position with zero owed tokens is a no-op on-chain (the
+    transaction succeeds but transfers nothing); we still emit it so the runner
+    sees a deterministic outcome rather than guessing client-side.
+
+    The NFT ``tokenId`` is required and is read from
+    ``intent.protocol_params["position_id"]``.
+
+    Args:
+        compiler: IntentCompiler instance
+        intent: CollectFeesIntent to compile
+
+    Returns:
+        CompilationResult with Aerodrome Slipstream collect ActionBundle
+    """
+    result = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=intent.intent_id,
+    )
+
+    try:
+        from almanak.framework.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
+
+        protocol_params = intent.protocol_params or {}
+        position_id_raw = protocol_params.get("position_id")
+        if position_id_raw is None or position_id_raw == "":
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Aerodrome Slipstream LP_COLLECT_FEES requires protocol_params={'position_id': '<NFT tokenId>'}"
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        try:
+            # Coerce to string first to reject implicit numeric conversions:
+            # ``int(1.9)`` silently truncates to ``1`` and ``int(True)`` is
+            # ``1`` — both would build a tx for the wrong NFT. Going through
+            # ``str(...).strip()`` requires the caller pass a clean integer
+            # literal (or an int) and surfaces float / bool inputs as errors.
+            token_id = int(str(position_id_raw).strip())
+        except (TypeError, ValueError):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Invalid position_id '{position_id_raw}': Aerodrome Slipstream "
+                    f"LP_COLLECT_FEES requires a numeric NFT tokenId"
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        cl_nft = LP_POSITION_MANAGERS.get(compiler.chain, {}).get("aerodrome_slipstream")
+        if not cl_nft:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Aerodrome Slipstream CL not supported on chain '{compiler.chain}'. "
+                    f"Supported chains: {sorted(c for c, m in LP_POSITION_MANAGERS.items() if 'aerodrome_slipstream' in m)}."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        _cfg = getattr(compiler, "_config", None)
+        permission_discovery = bool(_cfg and getattr(_cfg, "permission_discovery", False))
+        # Reject non-positive tokenIds at compile time outside permission
+        # discovery — ``NonfungiblePositionManager.collect()`` reverts on
+        # tokenId 0 / non-existent positions, so failing loudly here saves
+        # the strategy a chain round-trip and a confusing on-chain error.
+        if token_id < 0 or (token_id == 0 and not permission_discovery):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Invalid position_id '{position_id_raw}': Aerodrome Slipstream "
+                    f"LP_COLLECT_FEES requires a positive NFT tokenId"
+                ),
+                intent_id=intent.intent_id,
+            )
+        if permission_discovery and token_id == 0:
+            token_id = 1
+            logger.debug(
+                "Permission discovery mode: using synthetic tokenId=1 for Aerodrome Slipstream LP_COLLECT_FEES"
+            )
+
+        config = AerodromeConfig(
+            chain=compiler.chain,
+            wallet_address=compiler.wallet_address,
+            price_provider=compiler.price_oracle,
+            rpc_url=compiler._get_chain_rpc_url(),
+            gateway_client=compiler._gateway_client,
+        )
+        adapter = AerodromeAdapter(config)
+
+        collect_result = adapter.collect_cl_fees(
+            token_id=token_id,
+            recipient=compiler.wallet_address,
+        )
+
+        if not collect_result.success:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Failed to build CL collect TX: {collect_result.error}",
+                intent_id=intent.intent_id,
+            )
+
+        # ``adapter.collect_cl_fees`` returns the connector-local
+        # ``aerodrome.adapter.TransactionData``, distinct from the compiler's
+        # ``compiler_models.TransactionData``; type as ``Any`` to mirror the
+        # pattern in ``compile_lp_close_aerodrome_slipstream`` and avoid
+        # spurious mypy errors at the boundary.
+        transactions: list[Any] = list(collect_result.transactions)
+        total_gas = sum(tx.gas_estimate for tx in transactions)
+
+        # Preserve the caller-supplied position_id verbatim so manifest
+        # consumers see what the strategy passed (mirrors LP_CLOSE Slipstream
+        # at compile_lp_close_aerodrome_slipstream's metadata). In permission
+        # discovery the on-chain ``token_id`` field carries the synthetic
+        # substitute; the symbolic ``position_id`` field carries the original.
+        action_bundle = ActionBundle(
+            intent_type=IntentType.LP_COLLECT_FEES.value,
+            transactions=[tx.to_dict() for tx in transactions],
+            metadata={
+                "pool": intent.pool,
+                "position_id": str(position_id_raw),
+                "token_id": token_id,
+                "protocol": "aerodrome_slipstream",
+                "chain": compiler.chain,
+                "nft_manager": cl_nft,
+            },
+        )
+
+        result.action_bundle = action_bundle
+        result.transactions = transactions
+        result.total_gas_estimate = total_gas
+
+        tx_types = " + ".join(str(getattr(tx, "tx_type", "")) for tx in transactions) if transactions else ""
+        tx_summary = f" ({tx_types})" if tx_types else ""
+        logger.info(
+            f"Compiled Aerodrome Slipstream LP_COLLECT_FEES: tokenId={token_id}, "
+            f"{len(transactions)} txs{tx_summary}, {total_gas} gas"
+        )
+
+    except Exception as e:
+        logger.exception(f"Failed to compile Aerodrome Slipstream LP_COLLECT_FEES intent: {e}")
         result.status = CompilationStatus.FAILED
         result.error = str(e)
 

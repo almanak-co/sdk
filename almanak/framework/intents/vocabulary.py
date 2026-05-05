@@ -506,13 +506,24 @@ class CollectFeesIntent(AlmanakImmutableModel):
     This is useful for fee harvesting and auto-compounding strategies that want
     to claim earned fees while keeping their liquidity position open.
 
+    Supported protocols: ``traderjoe_v2``, ``uniswap_v4``, ``aerodrome_slipstream``.
+
+    Aerodrome Classic (``protocol="aerodrome"``, volatile/stable Solidly-fork
+    pools) does NOT support standalone fee collection: trading fees auto-compound
+    into pool reserves and are realized only on liquidity removal. Use
+    ``LPCloseIntent(collect_fees=True)`` instead.
+
     Attributes:
         pool: Pool identifier (format: TOKEN_X/TOKEN_Y/BIN_STEP for TraderJoe V2,
-            or TOKEN_A/TOKEN_B/FEE for Uniswap V4)
-        protocol: LP protocol (e.g., "traderjoe_v2", "uniswap_v4")
+            TOKEN_A/TOKEN_B/FEE for Uniswap V4, or
+            TOKEN_A/TOKEN_B/TICK_SPACING for Aerodrome Slipstream)
+        protocol: LP protocol (e.g., "traderjoe_v2", "uniswap_v4",
+            "aerodrome_slipstream")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
-        protocol_params: Optional protocol-specific parameters. For Uniswap V4:
-            ``{"position_id": <int>, "currency0": "<addr>", "currency1": "<addr>"}``
+        protocol_params: Optional protocol-specific parameters.
+            For Uniswap V4: ``{"position_id": <int>, "currency0": "<addr>",
+            "currency1": "<addr>"}``.
+            For Aerodrome Slipstream: ``{"position_id": "<NFT tokenId>"}``.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
 
@@ -946,19 +957,43 @@ class Intent:
     ) -> CollectFeesIntent:
         """Create a collect fees intent to harvest LP fees without closing the position.
 
+        Supported protocols:
+
+        - ``traderjoe_v2``: pool format ``"TOKEN_X/TOKEN_Y/BIN_STEP"``.
+        - ``uniswap_v4``: requires ``protocol_params={"position_id": <int>,
+          "currency0": "<addr>", "currency1": "<addr>"}``.
+        - ``aerodrome_slipstream``: concentrated-liquidity (NFT) positions on
+          Base; requires ``protocol_params={"position_id": "<NFT tokenId>"}``.
+
+        Aerodrome Classic (volatile/stable Solidly-fork pools) does NOT support
+        standalone fee collection: trading fees auto-compound into the pool
+        reserves and can only be realized by removing liquidity. Use
+        ``Intent.lp_close(..., collect_fees=True)`` to harvest while exiting,
+        or open a Slipstream CL position when in-position fee collection is
+        required.
+
         Args:
-            pool: Pool identifier (e.g., "WAVAX/USDC/20" for TraderJoe V2)
+            pool: Pool identifier (e.g., "WAVAX/USDC/20" for TraderJoe V2,
+                "WETH/USDC/200" for Aerodrome Slipstream).
             protocol: LP protocol (default "traderjoe_v2")
             chain: Target chain for execution (defaults to strategy's primary chain)
-            protocol_params: Optional protocol-specific parameters. For Uniswap V4:
-                position_id, currency0, currency1
+            protocol_params: Optional protocol-specific parameters. See per-protocol
+                requirements above.
 
         Returns:
             CollectFeesIntent: The created collect fees intent
 
         Example:
-            # Collect fees from a TraderJoe V2 WAVAX/USDC LP position
+            # TraderJoe V2 — symbolic pool identifier is sufficient
             intent = Intent.collect_fees(pool="WAVAX/USDC/20", protocol="traderjoe_v2")
+
+            # Aerodrome Slipstream — NFT tokenId required
+            intent = Intent.collect_fees(
+                pool="WETH/USDC/200",
+                protocol="aerodrome_slipstream",
+                chain="base",
+                protocol_params={"position_id": "12345"},
+            )
         """
         return CollectFeesIntent(
             pool=pool,

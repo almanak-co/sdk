@@ -1175,6 +1175,66 @@ class AerodromeAdapter:
             logger.exception(f"Failed to build CL remove liquidity: {e}")
             return LiquidityResult(success=False, error=str(e))
 
+    def collect_cl_fees(
+        self,
+        token_id: int,
+        recipient: str | None = None,
+    ) -> LiquidityResult:
+        """Build a Slipstream CL ``collect()`` transaction without burning the position.
+
+        The NonfungiblePositionManager.collect() entry point harvests any
+        owed token0/token1 (accrued fees plus principal previously unlocked
+        by decreaseLiquidity) into ``recipient`` and leaves the position's
+        liquidity intact.  Used by LP_COLLECT_FEES intents that want to
+        compound fees in-position rather than fully exit.
+
+        Calling on a position with zero owed tokens is a contract-level
+        no-op (the tx still succeeds and emits Collect with zero amounts).
+        We always emit the tx so the runner sees a deterministic outcome
+        rather than client-side guessing the zero case.
+
+        Args:
+            token_id: NFT tokenId for the CL position
+            recipient: Address to receive collected tokens (default: wallet)
+
+        Returns:
+            LiquidityResult with a single ``collect`` transaction
+        """
+        try:
+            recipient = recipient or self.wallet_address
+            web3 = self._get_web3()
+
+            collect_tx_dict = self.sdk.build_cl_collect_tx(
+                token_id=token_id,
+                recipient=recipient,
+                amount0_max=MAX_UINT128,
+                amount1_max=MAX_UINT128,
+                sender=self.wallet_address,
+                web3=web3,
+            )
+            collect_tx = TransactionData(
+                to=collect_tx_dict["to"],
+                value=collect_tx_dict.get("value", 0),
+                data=collect_tx_dict["data"].hex()
+                if isinstance(collect_tx_dict["data"], bytes)
+                else collect_tx_dict["data"],
+                gas_estimate=AERODROME_GAS_ESTIMATES["cl_collect"],
+                description=f"Aerodrome Slipstream CL collect tokenId={token_id}",
+                tx_type="lp_collect_fees",
+            )
+
+            logger.info(f"Built Aerodrome Slipstream CL collect_fees: tokenId={token_id}, recipient={recipient}")
+
+            return LiquidityResult(
+                success=True,
+                transactions=[collect_tx],
+                gas_estimate=collect_tx.gas_estimate,
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to build CL collect_fees: {e}")
+            return LiquidityResult(success=False, error=str(e))
+
     # =========================================================================
     # Intent Compilation
     # =========================================================================
