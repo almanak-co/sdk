@@ -79,8 +79,22 @@ Only needed if your strategy uses these specific protocols.
 | `POLYMARKET_API_KEY` | Optional pre-provisioned CLOB API key. If unset, the gateway derives/creates credentials from the signer when needed. |
 | `POLYMARKET_SECRET` | Optional pre-provisioned HMAC secret paired with `POLYMARKET_API_KEY`. |
 | `POLYMARKET_PASSPHRASE` | Optional pre-provisioned API passphrase paired with `POLYMARKET_API_KEY`. |
-| `POLYMARKET_PRIVATE_KEY` | Legacy gateway-only fallback for Polymarket signing. Prefer `ALMANAK_PRIVATE_KEY`; strategy containers should not require this. |
+| `POLYMARKET_PRIVATE_KEY` | Optional override for Polymarket signing. Falls through to `ALMANAK_PRIVATE_KEY` when unset (see fallback ladder below). |
 | `ALMANAK_POLYMARKET_MARKET_CACHE_TTL_SECONDS` | TTL (seconds) for the gateway's bounded LRU cache of Polymarket market metadata used on every BUY/SELL. Default `60`; set to `0` to disable (every order re-reads from Gamma); hard-capped at 86400 (24 h). Read once at gateway startup, so changes require a gateway restart. Lower under incident if you suspect stale tick / min-size metadata. |
+
+Polymarket signing-key fallback ladder (VIB-3772). The gateway resolves
+`polymarket_private_key` in this order; the first non-empty value wins:
+
+1. `ALMANAK_GATEWAY_POLYMARKET_PRIVATE_KEY` — gateway-prefixed pydantic field.
+2. `POLYMARKET_PRIVATE_KEY` — bare legacy name.
+3. `ALMANAK_POLYMARKET_PRIVATE_KEY` — almanak-prefixed alias.
+4. `ALMANAK_PRIVATE_KEY` (via the resolved primary signer key) — unifies the
+   default flow so a single `ALMANAK_PRIVATE_KEY` in `.env` is enough to use
+   Polymarket strategies. The gateway logs an INFO line at startup when this
+   rung is taken so operators see which key is signing Polymarket orders.
+
+Use a dedicated `POLYMARKET_PRIVATE_KEY` only when you intentionally want
+Polymarket trades signed by a different wallet from the rest of the SDK.
 
 Notes:
 - Strategy containers should not need `POLYMARKET_*` secrets.
