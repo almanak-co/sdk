@@ -961,7 +961,7 @@ class PostgresStore:
                    value_usd, tick_lower, tick_upper, liquidity, in_range,
                    fees_token0, fees_token1, leverage, entry_price,
                    mark_price, unrealized_pnl, is_long, tx_hash, gas_usd,
-                   ledger_entry_id,
+                   ledger_entry_id, protocol_fees_usd,
                    attribution_json::text AS attribution_text,
                    attribution_version
             FROM position_events
@@ -1184,20 +1184,16 @@ def _pg_row_to_accounting_event_dict(row: Any) -> dict[str, Any]:
 def _pg_row_to_position_event_dict(row: Any) -> dict[str, Any]:
     """Convert a ``position_events`` row to the SQLite-shaped dict.
 
-    ``protocol_fees_usd`` is intentionally emitted as ``""`` (sentinel
-    meaning "source did not emit", per AGENTS.md "Empty ≠ zero"). The
-    column genuinely does not exist on hosted metrics_db today — verified
-    against the live staging schema 2026-05-04. The column was added to
-    SDK SQLite by VIB-3205 (commit 506f649cf, 2026-04-20 06:04 UTC) but
-    was missed by the same-day metrics-database "reconcile schema drift"
-    commit (3073f08, 2026-04-20 06:57 UTC) because the SDK PR #1602
-    hadn't merged to main yet at reconcile time. Tracked for migration:
-    file the metrics-database ticket referenced in
-    docs/internal/VIB-3933-hosted-postgres-read-path.md (review finding
-    #3). After the migration lands, add ``protocol_fees_usd`` to the
-    ``get_position_events_dict`` SELECT and read the real value here.
-    Until then the sentinel keeps dict-shape parity with SQLite so
-    consumers (GetTradeTape, lp_report) don't KeyError on hosted.
+    ``protocol_fees_usd`` reads from the real Postgres column (added by
+    VIB-3966 — metrics-database PR #27). The previous sentinel ``""`` was
+    a workaround for a SDK→metrics-database timing-race miss from
+    VIB-3205 (full timeline in
+    ``docs/internal/VIB-3933-hosted-postgres-read-path.md`` Finding #3).
+    The trailing ``or ""`` defends against legacy rows that pre-date the
+    backfill default — ``""`` semantically means "parser did not emit"
+    per AGENTS.md "Empty ≠ zero", which is the right reading both for a
+    NULL row (shouldn't exist post-migration but cheap to defend) and a
+    DEFAULT-applied empty string.
     """
     timestamp = _require_dt(row["timestamp"], "position_events.timestamp")
     return {
@@ -1231,8 +1227,7 @@ def _pg_row_to_position_event_dict(row: Any) -> dict[str, Any]:
         "tx_hash": row.get("tx_hash") or "",
         "gas_usd": row.get("gas_usd") or "",
         "ledger_entry_id": row.get("ledger_entry_id") or "",
-        # Sentinel for column missing on metrics_db — see docstring above.
-        "protocol_fees_usd": "",
+        "protocol_fees_usd": row.get("protocol_fees_usd") or "",
         "attribution_json": row.get("attribution_text") or "{}",
         "attribution_version": int(row.get("attribution_version") or 0),
     }

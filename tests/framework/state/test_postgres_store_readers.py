@@ -419,6 +419,7 @@ def _pe_row(**overrides):
         "tx_hash": "0xabc",
         "gas_usd": "1.50",
         "ledger_entry_id": "tx-1",
+        "protocol_fees_usd": "0.0125",
         "attribution_text": "{}",
         "attribution_version": 1,
     }
@@ -440,11 +441,15 @@ async def test_get_position_events_dict_keys_on_deployment_id():
     assert r["event_type"] == "OPEN"
     assert r["in_range"] is True
     assert r["timestamp"].startswith("2026-05-04T")
+    # VIB-3966: column now exists on metrics_db, real value passes through.
+    assert r["protocol_fees_usd"] == "0.0125"
 
     _, sql, args = conn.calls[0]
     assert "FROM position_events" in sql
     assert "WHERE deployment_id = $1" in sql
     assert "ORDER BY timestamp ASC" in sql
+    # VIB-3966: protocol_fees_usd must be in the SELECT list now.
+    assert "protocol_fees_usd" in sql
     assert args == (_DEPLOYMENT_ID,)
 
 
@@ -600,22 +605,27 @@ def test_pg_row_to_position_event_dict_preserves_tri_state_in_range():
     assert d["in_range"] is None
 
 
-def test_pg_row_to_position_event_dict_emits_protocol_fees_sentinel():
-    """``protocol_fees_usd`` key is present even though the column is missing
-    on hosted metrics_db (review finding #3).
+def test_pg_row_to_position_event_dict_passes_protocol_fees_through():
+    """``protocol_fees_usd`` reads the real Postgres column post VIB-3966.
 
-    Verified against the live staging schema 2026-05-04: ``position_events``
-    has 33 columns, ``protocol_fees_usd`` is not among them. The column was
-    added to SDK SQLite by VIB-3205 but missed by the same-day metrics-
-    database reconcile commit (timing race with PR #1602 merge).
-
-    Until the metrics-database migration lands, this converter emits ``""``
-    so consumers (GetTradeTape, lp_report) get a stable dict shape — per
-    AGENTS.md "Empty ≠ zero", ``""`` honestly means "source did not emit".
+    The metrics-database migration (PR #27) added the column with
+    ``TEXT NOT NULL DEFAULT ''``. The SDK converter now reads the value
+    off the row instead of emitting the sentinel.
     """
-    d = _pg_row_to_position_event_dict(_pe_row())
-    assert "protocol_fees_usd" in d
-    assert d["protocol_fees_usd"] == ""
+    # Real value present on the row — round-trips.
+    assert _pg_row_to_position_event_dict(_pe_row())["protocol_fees_usd"] == "0.0125"
+
+    # Empty string from the DEFAULT survives as "" (parser-did-not-emit
+    # semantic per AGENTS.md "Empty ≠ zero", distinct from "0").
+    assert _pg_row_to_position_event_dict(_pe_row(protocol_fees_usd=""))["protocol_fees_usd"] == ""
+
+    # Defensive: the row.get(...) or "" fallback collapses NULL legacy rows
+    # (shouldn't happen with NOT NULL DEFAULT, but cheap to defend) to "".
+    assert _pg_row_to_position_event_dict(_pe_row(protocol_fees_usd=None))["protocol_fees_usd"] == ""
+
+    # Measured zero passes through without being collapsed to "" — important
+    # because "0" and "" mean different things in the accounting contract.
+    assert _pg_row_to_position_event_dict(_pe_row(protocol_fees_usd="0"))["protocol_fees_usd"] == "0"
 
 
 def test_position_event_dict_keyset_parity_pg_vs_sqlite():
