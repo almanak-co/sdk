@@ -89,6 +89,7 @@ dev = [
     # CRAP/complexity tooling (Phase 0, see docs/internal/coverage-improvement-plan.md §8)
     "radon>=6.0.1",
     "xenon>=0.9.1",
+    "diff-cover>=10.2.0",
 ]
 
 [tool.poetry]
@@ -104,6 +105,11 @@ build-backend = "poetry.core.masonry.api"
 
 [project.scripts]
 almanak = "almanak.cli:almanak"
+
+[project.entry-points.diff_cover]
+# Diff-aware CRAP gate. Invoke via `diff-quality --violations crap`.
+# Implementation: scripts/ci/crap_diff_plugin.py (see [tool.crap-diff] for config).
+crap = "scripts.ci.crap_diff_plugin"
 
 
 [tool.ruff]
@@ -126,6 +132,7 @@ dev = [
     "asgi-lifespan>=2.1.0",
     "radon>=6.0.1",
     "xenon>=0.9.1",
+    "diff-cover>=10.2.0",
 ]
 
 [tool.ruff.lint]
@@ -209,6 +216,19 @@ omit = [
 fail_under = 72
 show_missing = true
 skip_empty = true
+
+# --- CRAP diff gate (PR-only; see scripts/ci/crap_diff_plugin.py) ---
+[tool.crap-diff]
+# Threshold above which a function is flagged. CRAP = CC^2 * (1-cov)^3 + CC.
+# Matches scripts/crap_score.py and docs/internal/coverage-improvement-plan.md §7.
+threshold = 30
+# Coverage data file — produced by `make test-ci`.
+coverage_data = ".coverage"
+# Walk only this package; ignores files outside it (e.g. tests/, scripts/).
+package_root = "almanak"
+# Honor [tool.coverage.run].omit so files already excluded from the coverage
+# denominator (Streamlit pages, accountant_test, etc.) don't trip the gate.
+honor_omit = true
 
 # --- mypy type checking ---
 [tool.mypy]

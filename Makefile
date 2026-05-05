@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap crap-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap crap-fresh crap-diff test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene
 
 # Load .env file if it exists
 -include .env
@@ -129,6 +129,20 @@ crap:
 crap-fresh:
 	$(MAKE) test-coverage
 	$(MAKE) crap
+
+# Diff-aware CRAP gate — fails if a PR adds or modifies a line inside any
+# function whose CRAP score exceeds [tool.crap-diff].threshold (default 30).
+# Requires a `.coverage` data file (produced by `make test-ci` or
+# `make test-coverage`) and at least one ancestor commit on the compare branch.
+# Override BASE for non-PR runs: `make crap-diff BASE=origin/feat/foo`.
+BASE ?= origin/main
+crap-diff:
+	@test -f .coverage || (echo "crap-diff: .coverage missing — run 'make test-ci' or 'make test-coverage' first" && exit 1)
+	# No positional path arg — diff-quality treats those as pre-generated input
+	# reports (`Could not load report 'almanak/'`). Scope is enforced by
+	# [tool.crap-diff].package_root in pyproject.toml.
+	uv run diff-quality --violations crap --fail-under 100 \
+		--compare-branch=$(BASE)
 
 # Cyclomatic-complexity / maintainability-index report on production code.
 # `make complexity`              → full almanak/ tree report.
