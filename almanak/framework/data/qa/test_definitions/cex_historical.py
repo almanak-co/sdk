@@ -5,7 +5,7 @@ data using CoinGecko as the data source. It validates data continuity, gap detec
 and overall data quality for historical price analysis.
 
 Example:
-    from almanak.framework.data.qa.tests.cex_historical import CEXHistoricalTest
+    from almanak.framework.data.qa.test_definitions.cex_historical import CEXHistoricalTest
     from almanak.framework.data.qa.config import load_config
 
     config = load_config()

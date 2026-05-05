@@ -179,8 +179,14 @@ omit = [
     # moved into `tests/unit/`, so the only remaining matches were production
     # library modules under `almanak/framework/data/qa/tests/` (cex_historical,
     # dex_historical, rsi, etc., used by `data/qa/runner.py`) — they belong in
-    # the coverage denominator, so the rule has been removed.
-    "almanak/**/test_*.py",
+    # the coverage denominator, so the rule has been removed. (#2068 also
+    # renamed that production package to `data/qa/test_definitions/`.)
+    #
+    # The follow-up `almanak/**/test_*.py` rule (issue #2068) is also gone:
+    # the last `test_*.py` file under `almanak/` (a manual Anvil reproducer
+    # in `demo_strategies/fluid_swap_arb/`) has been renamed to
+    # `run_on_anvil.py`, so coverage no longer needs to skip pytest-shaped
+    # files inside the package.
     # Phase 0 (2026-05-04): exclude non-production surfaces from the coverage denominator.
     # Rationale lives in docs/internal/coverage-improvement-plan.md §8 Phase 0.
     "almanak/demo_strategies/*",                    # user-facing tutorial templates, not framework

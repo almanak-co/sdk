@@ -28,9 +28,7 @@ from almanak.framework.backtesting.pnl.simulated_result import (
     build_simulated_result,
     is_lp_open_intent,
 )
-from tests.unit.backtesting.pnl.test_engine import (
-    MockDataProvider,
-)
+from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
 # =============================================================================
 # Mock intents

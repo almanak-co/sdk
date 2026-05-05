@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.data.qa.config import QAConfig, QAThresholds
-from almanak.framework.data.qa.tests.dex_spot import (
+from almanak.framework.data.qa.test_definitions.dex_spot import (
     DEFAULT_TRADE_SIZE_WETH,
     DEXSpotPriceTest,
     DEXSpotResult,

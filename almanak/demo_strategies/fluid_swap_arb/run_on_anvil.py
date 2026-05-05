@@ -1,15 +1,16 @@
-"""End-to-end Fluid DEX swap test on Anvil fork.
+"""End-to-end Fluid DEX swap reproducer on an Anvil fork.
 
-Tests the full pipeline: Intent -> Compile -> Execute -> Parse -> Verify
-on a local Anvil fork of Arbitrum. No gateway required.
+This is a manual run-on-Anvil script -- NOT a pytest test. It exercises the
+full pipeline (Intent -> Compile -> Execute -> Parse -> Verify) against a
+local Anvil fork of Arbitrum. No gateway required.
 
 Usage:
     # Start anvil fork first:
     anvil --fork-url https://arbitrum-one-rpc.publicnode.com --port 8555 --chain-id 42161
 
     # Then run:
-    cd strategies/demo/fluid_swap_arb
-    uv run python test_anvil.py
+    cd almanak/demo_strategies/fluid_swap_arb
+    uv run python run_on_anvil.py
 """
 
 import sys

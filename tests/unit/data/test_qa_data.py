@@ -34,11 +34,11 @@ pytestmark = pytest.mark.integration
 
 from almanak.framework.data.qa import QARunner, load_config
 from almanak.framework.data.qa.config import QAConfig, QAThresholds
-from almanak.framework.data.qa.tests.cex_historical import CEXHistoricalResult, CEXHistoricalTest
-from almanak.framework.data.qa.tests.cex_spot import CEXSpotPriceTest, CEXSpotResult
-from almanak.framework.data.qa.tests.dex_historical import DEXHistoricalResult, DEXHistoricalTest
-from almanak.framework.data.qa.tests.dex_spot import DEXSpotPriceTest, DEXSpotResult
-from almanak.framework.data.qa.tests.rsi import RSIResult, RSITest
+from almanak.framework.data.qa.test_definitions.cex_historical import CEXHistoricalResult, CEXHistoricalTest
+from almanak.framework.data.qa.test_definitions.cex_spot import CEXSpotPriceTest, CEXSpotResult
+from almanak.framework.data.qa.test_definitions.dex_historical import DEXHistoricalResult, DEXHistoricalTest
+from almanak.framework.data.qa.test_definitions.dex_spot import DEXSpotPriceTest, DEXSpotResult
+from almanak.framework.data.qa.test_definitions.rsi import RSIResult, RSITest
 
 # =============================================================================
 # Fixtures

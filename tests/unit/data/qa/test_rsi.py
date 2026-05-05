@@ -16,7 +16,7 @@ import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, InsufficientDataError, OHLCVCandle
 from almanak.framework.data.qa.config import QAConfig, QAThresholds
-from almanak.framework.data.qa.tests.rsi import (
+from almanak.framework.data.qa.test_definitions.rsi import (
     RSI_OVERBOUGHT_THRESHOLD,
     RSI_OVERSOLD_THRESHOLD,
     RSIDataPoint,

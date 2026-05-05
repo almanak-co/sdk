@@ -5,7 +5,7 @@ price data with WETH denomination. It fetches token/USD and ETH/USD OHLCV data
 from CoinGecko and derives WETH-denominated prices.
 
 Example:
-    from almanak.framework.data.qa.tests.dex_historical import DEXHistoricalTest
+    from almanak.framework.data.qa.test_definitions.dex_historical import DEXHistoricalTest
     from almanak.framework.data.qa.config import load_config
 
     config = load_config()

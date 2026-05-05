@@ -5,7 +5,7 @@ using the RSICalculator and CoinGeckoOHLCVProvider. It validates RSI bounds,
 calculates rolling RSI history, and determines overbought/oversold signals.
 
 Example:
-    from almanak.framework.data.qa.tests.rsi import RSITest
+    from almanak.framework.data.qa.test_definitions.rsi import RSITest
     from almanak.framework.data.qa.config import load_config
 
     config = load_config()

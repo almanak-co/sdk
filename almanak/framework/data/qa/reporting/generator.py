@@ -25,11 +25,11 @@ from datetime import datetime
 from pathlib import Path
 
 from almanak.framework.data.qa.config import QAConfig
-from almanak.framework.data.qa.tests.cex_historical import CEXHistoricalResult
-from almanak.framework.data.qa.tests.cex_spot import CEXSpotResult
-from almanak.framework.data.qa.tests.dex_historical import DEXHistoricalResult
-from almanak.framework.data.qa.tests.dex_spot import DEXSpotResult
-from almanak.framework.data.qa.tests.rsi import RSIResult
+from almanak.framework.data.qa.test_definitions.cex_historical import CEXHistoricalResult
+from almanak.framework.data.qa.test_definitions.cex_spot import CEXSpotResult
+from almanak.framework.data.qa.test_definitions.dex_historical import DEXHistoricalResult
+from almanak.framework.data.qa.test_definitions.dex_spot import DEXSpotResult
+from almanak.framework.data.qa.test_definitions.rsi import RSIResult
 
 logger = logging.getLogger(__name__)
 

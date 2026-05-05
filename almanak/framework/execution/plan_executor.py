@@ -1333,6 +1333,17 @@ class PlanExecutor:
         handler = self._handler_registry.get_handler(bundle)
         return handler is not None and handler == self._clob_handler
 
+    @staticmethod
+    def _has_clob_shape(bundle: "ActionBundle") -> bool:
+        """Detect a CLOB-shaped bundle independent of handler registration.
+
+        A bundle with no on-chain transactions but an `order_request` payload
+        can only be executed off-chain via a CLOB handler -- on-chain executors
+        have nothing to dispatch. This shape check guards against silently
+        simulating CLOB orders when the executor is misconfigured (no handler).
+        """
+        return len(bundle.transactions) == 0 and "order_request" in bundle.metadata
+
     async def execute_bundle(
         self,
         bundle: "ActionBundle",
@@ -1370,6 +1381,22 @@ class PlanExecutor:
                     "protocol": bundle.metadata.get("protocol"),
                     "intent_id": bundle.metadata.get("intent_id"),
                     "handler": handler.__class__.__name__,
+                },
+            )
+            result.execution_path = ExecutionPath.CLOB
+            return await self._execute_clob_bundle(bundle, result)
+
+        # Refuse to silently fall through to the on-chain simulator for a
+        # CLOB-shaped bundle when no handler is configured. _execute_clob_bundle
+        # will mark the result as failed because self._clob_handler is None,
+        # which is the correct outcome for a misconfigured executor.
+        if self._has_clob_shape(bundle):
+            logger.error(
+                "CLOB-shaped bundle received but no CLOB handler is configured",
+                extra={
+                    "intent_type": bundle.intent_type,
+                    "protocol": bundle.metadata.get("protocol"),
+                    "intent_id": bundle.metadata.get("intent_id"),
                 },
             )
             result.execution_path = ExecutionPath.CLOB

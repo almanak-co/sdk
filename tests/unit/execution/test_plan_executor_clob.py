@@ -273,20 +273,15 @@ class TestExecuteBundleRouting:
         mock_onchain_executor.assert_called_once()
         assert result.execution_path == ExecutionPath.ON_CHAIN
 
-    @pytest.mark.xfail(
-        reason=(
-            "Behaviour drift surfaced by #2066: a CLOB-shaped bundle (empty "
-            "transactions, order_request metadata) submitted to a PlanExecutor "
-            "with no CLOB handler now falls through the registry to the "
-            "on-chain path and is silently simulated to success when no "
-            "on-chain executor is supplied. The original test invariant "
-            "(misconfigured PlanExecutor must fail for CLOB bundles, not "
-            "silently succeed) is still correct. Tracked: #2068."
-        ),
-        strict=True,
-    )
     def test_clob_without_handler_fails(self, executor_no_clob, clob_buy_bundle):
-        """CLOB bundle without handler should fail gracefully."""
+        """CLOB-shaped bundle on a PlanExecutor with no CLOB handler must fail.
+
+        The shape gate in `execute_bundle` routes empty-transactions /
+        `order_request` bundles into the CLOB path even when the registry has
+        no matching handler. `_execute_clob_bundle` then sees `_clob_handler
+        is None` and reports failure -- preventing silent on-chain simulation
+        of an off-chain order on a misconfigured executor.
+        """
         result = asyncio.run(executor_no_clob.execute_bundle(clob_buy_bundle))
 
         assert result.success is False

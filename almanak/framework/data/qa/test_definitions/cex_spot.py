@@ -5,7 +5,7 @@ using CoinGecko as the data source. It validates price freshness, confidence,
 and data availability.
 
 Example:
-    from almanak.framework.data.qa.tests.cex_spot import CEXSpotPriceTest
+    from almanak.framework.data.qa.test_definitions.cex_spot import CEXSpotPriceTest
     from almanak.framework.data.qa.config import load_config
 
     config = load_config()

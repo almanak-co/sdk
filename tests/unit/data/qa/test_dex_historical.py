@@ -15,7 +15,7 @@ import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.qa.config import QAConfig, QAThresholds
-from almanak.framework.data.qa.tests.dex_historical import (
+from almanak.framework.data.qa.test_definitions.dex_historical import (
     DEXHistoricalResult,
     DEXHistoricalTest,
     WETHPricePoint,

@@ -21,7 +21,7 @@ import pytest
 
 from almanak.framework.data.interfaces import OHLCVCandle
 from almanak.framework.data.qa.reporting.plots import PlotConfig, PlotGenerator, PlotResult
-from almanak.framework.data.qa.tests.rsi import RSIDataPoint
+from almanak.framework.data.qa.test_definitions.rsi import RSIDataPoint
 
 # =============================================================================
 # Helper Functions

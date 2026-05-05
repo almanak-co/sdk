@@ -5,7 +5,7 @@ using the MultiDexPriceService. It validates on-chain price discovery with
 WETH-quoted prices.
 
 Example:
-    from almanak.framework.data.qa.tests.dex_spot import DEXSpotPriceTest
+    from almanak.framework.data.qa.test_definitions.dex_spot import DEXSpotPriceTest
     from almanak.framework.data.qa.config import load_config
 
     config = load_config()
