@@ -90,6 +90,16 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
         "quoter_v2": "0x661E93cca42AfacB172121EF892830cA3b70F08d",
     },
+    "mantle": {
+        # Governance-deployed mainnet (chain 5000) — non-canonical addresses.
+        # Source: https://gov.uniswap.org/t/official-uniswap-v3-deployments-list/24323
+        # Coexists with Agni Finance (Uniswap V3 fork — see AGNI_FINANCE).
+        "swap_router": "0x738fD6d10bCc05c230388B4027CAd37f82fe2AF2",  # SwapRouter02
+        "swap_router_02": "0x738fD6d10bCc05c230388B4027CAd37f82fe2AF2",
+        "factory": "0x0d922Fb1Bc191F64970ac40376643808b4B74Df9",
+        "position_manager": "0x5911cB3633e764939edc2d92b7e1ad375Bb57649",
+        "quoter_v2": "0xdD489C75be1039ec7d843A6aC2Fd658350B067Cf",
+    },
     "xlayer": {
         # Non-canonical deployment via Uniswap Governance Proposal 67
         # Source: https://github.com/Uniswap/sdks (XLAYER_ADDRESSES)

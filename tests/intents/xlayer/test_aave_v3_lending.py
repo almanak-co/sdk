@@ -306,8 +306,8 @@ class TestAaveV3SupplyIntent:
             if tx_result.receipt:
                 parser = AaveV3ReceiptParser()
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                if parse_result.success and parse_result.withdrawals:
-                    for withdraw_event in parse_result.withdrawals:
+                if parse_result.success and parse_result.withdraws:
+                    for withdraw_event in parse_result.withdraws:
                         assert withdraw_event.amount > 0, "Withdraw event amount must be > 0"
                         withdraw_parsed = True
 

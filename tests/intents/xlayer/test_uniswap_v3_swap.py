@@ -55,6 +55,7 @@ class TestUniswapV3SwapIntent:
     - Balance changes match expected amounts
     """
 
+    @pytest.mark.skip(reason="#2106: USDC/WETH pool does not exist on xlayer Uniswap V3 at any fee tier")
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -186,6 +187,7 @@ class TestUniswapV3SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.skip(reason="#2106: WETH/USDC pool does not exist on xlayer Uniswap V3 at any fee tier")
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,
@@ -279,6 +281,7 @@ class TestUniswapV3SwapIntent:
         print(f"USDC received: {format_token_amount(usdc_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.skip(reason="#2106: USDC/WETH pool does not exist on xlayer Uniswap V3 — compile-time pool check fails")
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

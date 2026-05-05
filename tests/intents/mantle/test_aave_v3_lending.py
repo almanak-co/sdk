@@ -114,6 +114,7 @@ class TestAaveV3SupplyIntent:
     - Balance changes and account data verification
     """
 
+    @pytest.mark.skip(reason="#2102: Aave V3 mantle WETH reserve is frozen + Safe-side supply revert (see issue)")
     @pytest.mark.asyncio
     async def test_supply_weth_using_intent(
         self,
@@ -218,6 +219,7 @@ class TestAaveV3SupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.skip(reason="#2102: depends on test_supply_weth happy-path (frozen reserve + Safe-side supply revert)")
     @pytest.mark.asyncio
     async def test_withdraw_weth_using_intent(
         self,
@@ -298,9 +300,9 @@ class TestAaveV3SupplyIntent:
             if tx_result.receipt:
                 parser = AaveV3ReceiptParser()
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                if parse_result.success and parse_result.withdrawals:
+                if parse_result.success and parse_result.withdraws:
                     withdraw_parsed = True
-                    for withdraw_event in parse_result.withdrawals:
+                    for withdraw_event in parse_result.withdraws:
                         assert withdraw_event.amount > 0, "Withdraw amount must be > 0"
                         print(f"  Withdraw amount: {withdraw_event.amount}")
 
@@ -404,6 +406,7 @@ class TestAaveV3BorrowIntent:
     Verifies supply WETH as collateral, then borrow USDC at ~30% LTV.
     """
 
+    @pytest.mark.skip(reason="#2102: depends on WETH collateral supply (frozen reserve + Safe-side supply revert)")
     @pytest.mark.asyncio
     async def test_borrow_usdc_after_supply_weth(
         self,
@@ -525,6 +528,7 @@ class TestAaveV3RepayIntent:
     Verifies supply -> borrow -> repay flow.
     """
 
+    @pytest.mark.skip(reason="#2102: depends on WETH collateral supply (frozen reserve + Safe-side supply revert)")
     @pytest.mark.asyncio
     async def test_repay_usdc_after_borrow(
         self,

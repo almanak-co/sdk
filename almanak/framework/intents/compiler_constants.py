@@ -161,6 +161,7 @@ PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "agni_finance": "0x319B69888b0d11cEC22caA5034e25FfFBDc88421",  # Agni Finance SwapRouter
+        "uniswap_v3": "0x738fD6d10bCc05c230388B4027CAd37f82fe2AF2",  # SwapRouter02 (Uniswap Governance — non-canonical)
     },
     "xlayer": {
         "uniswap_v3": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA",  # SwapRouter02 (Governance Proposal 67)
@@ -232,6 +233,7 @@ LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "agni_finance": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",  # Agni Finance NFT Position Manager
+        "uniswap_v3": "0x5911cB3633e764939edc2d92b7e1ad375Bb57649",  # NonfungiblePositionManager (Uniswap Governance — non-canonical)
     },
     "xlayer": {
         "uniswap_v3": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical deployment (Governance Proposal 67)
@@ -407,6 +409,7 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "mantle": {
         "agni_finance": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni Finance QuoterV2
+        "uniswap_v3": "0xdD489C75be1039ec7d843A6aC2Fd658350B067Cf",  # QuoterV2 (Uniswap Governance — non-canonical)
     },
     "xlayer": {
         "uniswap_v3": "0x976183AC3d09840D243A88c0268BADb3B3e3259f",  # QuoterV2 (Governance Proposal 67)

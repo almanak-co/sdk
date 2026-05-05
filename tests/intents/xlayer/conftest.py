@@ -1,6 +1,12 @@
 """Fixtures for X-Layer intent tests.
 
 Uses gateway's Anvil fixtures to avoid duplicate fork instances.
+
+Default-on Zodiac (Phase G.4): every intent test under ``tests/intents/xlayer/``
+routes through Safe + Roles + ``execTransactionWithRole`` automatically, so
+``funded_wallet`` is the per-test Safe address and ``orchestrator`` is a
+``ZodiacOrchestrator``. Tests that legitimately can't run through Safe + Roles
+opt out via ``@pytest.mark.no_zodiac(reason="...")``.
 """
 
 import pytest
@@ -11,6 +17,7 @@ from almanak.framework.execution.signer import LocalKeySigner
 from almanak.framework.execution.simulator import DirectSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.conftest_gateway import AnvilFixture
+from tests.intents._permission_onchain_harness import ZodiacOrchestrator
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     TEST_PRIVATE_KEY,
@@ -18,6 +25,7 @@ from tests.intents.conftest import (
     TEST_TX_TIMEOUT_SECONDS,
     TEST_WALLET,
     TEST_WEB3_REQUEST_TIMEOUT,
+    ZodiacContext,
     fund_erc20_token,
     fund_native_token,
     get_token_decimals,
@@ -82,8 +90,15 @@ def test_private_key() -> str:
 
 
 @pytest.fixture(scope="module")
-def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
-    """Fund the test wallet with native OKB and common ERC20s.
+def _eoa_funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
+    """Module-scoped EOA funding (original ``funded_wallet`` behaviour).
+
+    Kept as a private fixture so the function-scoped ``funded_wallet`` below can
+    delegate to it for ``no_zodiac``-marked tests without duplicating the
+    module-scoped seeding work. For default-on Zodiac tests, ``funded_wallet``
+    returns the Safe address instead and this fixture's side effect (seeding
+    the EOA) is still useful — the member EOA uses its balance to pay gas
+    when signing ``execTransactionWithRole``.
 
     Reverts the fork to session pristine state first so each test module gets a
     clean slate independent of prior modules on the same chain (VIB-3059).
@@ -98,6 +113,29 @@ def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) 
     )
 
 
+@pytest.fixture
+def funded_wallet(
+    _eoa_funded_wallet: str,
+    zodiac_safe: ZodiacContext | None,
+) -> str:
+    """Return the wallet tests should treat as the token holder.
+
+    Default-on Zodiac: returns the per-test Safe address from ``zodiac_safe``.
+    The Safe has already been seeded with the same CHAIN_CONFIGS ERC-20
+    balances the EOA path normally receives, so tests that read
+    ``funded_wallet`` purely as a token holder keep working.
+
+    For ``@pytest.mark.no_zodiac(...)`` tests: returns ``TEST_WALLET`` (the EOA),
+    preserving the original module-scoped behaviour.
+    """
+    if zodiac_safe is not None:
+        # Depend on the EOA fixture so the EOA is funded for gas, but return
+        # the Safe address as the holder.
+        _ = _eoa_funded_wallet
+        return zodiac_safe.safe_address
+    return _eoa_funded_wallet
+
+
 @pytest.fixture(scope="module")
 def reseed_wallet_state(anvil_instance: AnvilFixture):
     """Return a callable that re-seeds balances on demand (for fork recovery)."""
@@ -110,8 +148,39 @@ def reseed_wallet_state(anvil_instance: AnvilFixture):
 
 
 @pytest.fixture
-def orchestrator(test_private_key: str, anvil_rpc_url: str) -> ExecutionOrchestrator:
-    """Create ExecutionOrchestrator for testing."""
+def orchestrator(
+    test_private_key: str,
+    anvil_rpc_url: str,
+    web3: Web3,
+    zodiac_safe: ZodiacContext | None,
+    _zodiac_intent_recorder: list,
+):
+    """Create the execution orchestrator for this test.
+
+    Returns a ``ZodiacOrchestrator`` by default — under the opt-out model,
+    every intent test routes through Safe + Roles + ``execTransactionWithRole``
+    unless it carries ``@pytest.mark.no_zodiac(reason="...")``. The
+    orchestrator generates a manifest at execute-time from the intents
+    recorded by ``_zodiac_intent_recorder`` and applies new targets to Roles
+    incrementally, so multi-step tests (open-then-close, supply-then-borrow)
+    extend the authorisation scope as they go.
+
+    For ``no_zodiac``-marked tests: returns the standard ``ExecutionOrchestrator``.
+    """
+    if zodiac_safe is not None:
+        return ZodiacOrchestrator(
+            web3=web3,
+            roles_address=zodiac_safe.roles_address,
+            role_key=zodiac_safe.role_key,
+            member_eoa=zodiac_safe.member_eoa,
+            member_private_key=zodiac_safe.member_private_key,
+            chain=CHAIN_NAME,
+            rpc_url=anvil_rpc_url,
+            safe_address=zodiac_safe.safe_address,
+            owner_eoa=zodiac_safe.owner_eoa,
+            owner_private_key=zodiac_safe.owner_private_key,
+            recorded_intents=_zodiac_intent_recorder,
+        )
     signer = LocalKeySigner(private_key=test_private_key)
     submitter = PublicMempoolSubmitter(
         rpc_url=anvil_rpc_url,
