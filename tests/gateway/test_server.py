@@ -77,25 +77,6 @@ async def test_server_health_check_after_stop():
 
 
 @pytest.mark.asyncio
-async def test_server_settings_from_environment(monkeypatch):
-    """Server loads settings from environment variables."""
-    monkeypatch.setenv("ALMANAK_GATEWAY_GRPC_PORT", "50055")
-    monkeypatch.setenv("ALMANAK_GATEWAY_GRPC_MAX_WORKERS", "5")
-
-    # Clear the lru_cache to pick up new env vars
-    from almanak.gateway.core.settings import get_settings
-
-    get_settings.cache_clear()
-
-    settings = get_settings()
-    assert settings.grpc_port == 50055
-    assert settings.grpc_max_workers == 5
-
-    # Clean up
-    get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
 async def test_allow_insecure_disables_auth_even_with_configured_token():
     """allow_insecure=True must win for local test harnesses on test networks."""
     settings = GatewaySettings(

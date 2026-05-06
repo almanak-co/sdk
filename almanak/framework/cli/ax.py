@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import click
 
+from almanak.config.cli_options import gateway_client_options
 from almanak.framework.data.models import _NATIVE_TO_WRAPPED
 from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
@@ -45,19 +46,7 @@ def _merge_flags(ctx, sub_yes=False, sub_dry_run=False, sub_json_output=False):
 
 
 @click.group(invoke_without_command=True)
-@click.option(
-    "--gateway-host",
-    default="localhost",
-    envvar="GATEWAY_HOST",
-    help="Gateway hostname (default: localhost).",
-)
-@click.option(
-    "--gateway-port",
-    default=50051,
-    type=int,
-    envvar="GATEWAY_PORT",
-    help="Gateway gRPC port (default: 50051).",
-)
+@gateway_client_options
 @click.option(
     "--chain",
     "-c",
@@ -362,6 +351,9 @@ def _get_executor(ctx: click.Context):
     return executor, client
 
 
+# crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
+# through gateway_config_from_env(...) — no complexity added. Function refactor is
+# tracked separately; allowlist is the documented escape hatch for no-op cutovers.
 def _start_managed_gateway(
     ctx: click.Context,
     host: str,
@@ -377,7 +369,7 @@ def _start_managed_gateway(
     import os
     import uuid
 
-    from almanak.gateway.core.settings import GatewaySettings
+    from almanak.config.env import gateway_config_from_env
     from almanak.gateway.managed import ManagedGateway, find_available_gateway_port, is_port_in_use
 
     resolved_network = network or "mainnet"
@@ -411,7 +403,9 @@ def _start_managed_gateway(
     if private_key:
         gateway_kwargs["private_key"] = private_key
 
-    settings = GatewaySettings(**gateway_kwargs)
+    # Phase 1: route through the config service so the same env-fallback
+    # ladders apply here as for the gateway subcommand and managed gateway.
+    settings = gateway_config_from_env(**gateway_kwargs)
     anvil_chains = [chain] if resolved_network == "anvil" else []
 
     # Status messages go to STDERR so they don't corrupt the CLI's actual

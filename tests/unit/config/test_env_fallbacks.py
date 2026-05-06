@@ -1,50 +1,61 @@
-"""Tests for GatewaySettings env var fallback behavior.
+"""Tests for the gateway env-var fallback layer.
 
-Verifies precedence: ALMANAK_GATEWAY_* takes priority over ALMANAK_* fallbacks.
+Verifies precedence: ``ALMANAK_GATEWAY_*`` takes priority over the
+unprefixed ``ALMANAK_*`` and bare-name fallbacks consumed by the service
+boundary in :mod:`almanak.config.env`.
+
+Phase 1 (config-service plan): these tests used to construct
+``GatewaySettings()`` directly and exercise the deleted in-class
+``_fallback_env_vars`` validator. They now go through
+:func:`almanak.config.env.gateway_config_from_env` — the public function
+that builds a fully-resolved :class:`GatewayConfig`. Behavior is
+bit-for-bit identical; only the entry point changed. File moved from
+``tests/gateway/test_settings_fallback.py`` so the contract lives next to
+the service it locks in.
 """
 
 import os
 from unittest.mock import patch
 
-from almanak.gateway.core.settings import GatewaySettings
+from almanak.config.env import gateway_config_from_env
 
 
 class TestSettingsFallback:
-    """Test _fallback_env_vars hydrates from ALMANAK_* when ALMANAK_GATEWAY_* is missing."""
+    """Test that env fallbacks hydrate ALMANAK_* when ALMANAK_GATEWAY_* is missing."""
 
     def test_eoa_address_fallback(self):
         """ALMANAK_EOA_ADDRESS populates eoa_address when gateway var is unset."""
         env = {"ALMANAK_EOA_ADDRESS": "0xABC123", "ALMANAK_GATEWAY_EOA_ADDRESS": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.eoa_address == "0xABC123"
 
     def test_safe_address_fallback(self):
         """ALMANAK_SAFE_ADDRESS populates safe_address when gateway var is unset."""
         env = {"ALMANAK_SAFE_ADDRESS": "0xSAFE", "ALMANAK_GATEWAY_SAFE_ADDRESS": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.safe_address == "0xSAFE"
 
     def test_zodiac_address_fallback(self):
         """ALMANAK_ZODIAC_ADDRESS populates zodiac_roles_address."""
         env = {"ALMANAK_ZODIAC_ADDRESS": "0xZODIAC", "ALMANAK_GATEWAY_ZODIAC_ROLES_ADDRESS": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.zodiac_roles_address == "0xZODIAC"
 
     def test_signer_service_url_fallback(self):
         """ALMANAK_SIGNER_SERVICE_URL populates signer_service_url."""
         env = {"ALMANAK_SIGNER_SERVICE_URL": "https://signer.test", "ALMANAK_GATEWAY_SIGNER_SERVICE_URL": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.signer_service_url == "https://signer.test"
 
     def test_signer_service_jwt_fallback(self):
         """ALMANAK_SIGNER_SERVICE_JWT populates signer_service_jwt."""
         env = {"ALMANAK_SIGNER_SERVICE_JWT": "jwt-tok", "ALMANAK_GATEWAY_SIGNER_SERVICE_JWT": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.signer_service_jwt == "jwt-tok"
 
     def test_gateway_var_takes_precedence_over_fallback(self):
@@ -54,14 +65,14 @@ class TestSettingsFallback:
             "ALMANAK_EOA_ADDRESS": "0xFALLBACK",
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.eoa_address == "0xGATEWAY"
 
     def test_private_key_fallback(self):
         """ALMANAK_PRIVATE_KEY populates private_key when gateway var is unset."""
         env = {"ALMANAK_PRIVATE_KEY": "0xKEY", "ALMANAK_GATEWAY_PRIVATE_KEY": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.private_key == "0xKEY"
 
     # --- Third-party API key fallbacks (bare name -> Pydantic field) ---
@@ -70,14 +81,14 @@ class TestSettingsFallback:
         """ALCHEMY_API_KEY populates alchemy_api_key when prefixed var is unset."""
         env = {"ALCHEMY_API_KEY": "alchemy-test-key", "ALMANAK_GATEWAY_ALCHEMY_API_KEY": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.alchemy_api_key == "alchemy-test-key"
 
     def test_coingecko_api_key_bare_fallback(self):
         """COINGECKO_API_KEY populates coingecko_api_key when prefixed var is unset."""
         env = {"COINGECKO_API_KEY": "cg-test-key", "ALMANAK_GATEWAY_COINGECKO_API_KEY": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.coingecko_api_key == "cg-test-key"
 
     def test_prefixed_alchemy_key_takes_precedence(self):
@@ -87,14 +98,14 @@ class TestSettingsFallback:
             "ALCHEMY_API_KEY": "bare-key",
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.alchemy_api_key == "prefixed-key"
 
     def test_enso_api_key_bare_fallback(self):
         """ENSO_API_KEY populates enso_api_key when prefixed var is unset."""
         env = {"ENSO_API_KEY": "enso-test-key", "ALMANAK_GATEWAY_ENSO_API_KEY": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.enso_api_key == "enso-test-key"
 
     def test_prefixed_enso_key_takes_precedence(self):
@@ -104,21 +115,21 @@ class TestSettingsFallback:
             "ENSO_API_KEY": "bare-enso-key",
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.enso_api_key == "prefixed-enso-key"
 
     def test_portfolio_api_key_fallback(self):
         """ALMANAK_PORTFOLIO_API_KEY populates portfolio_api_key when gateway var is unset."""
         env = {"ALMANAK_PORTFOLIO_API_KEY": "portfolio-test-key", "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.portfolio_api_key == "portfolio-test-key"
 
     def test_zerion_api_key_fallback(self):
         """ZERION_API_KEY also populates portfolio_api_key for local experiments."""
         env = {"ZERION_API_KEY": "zerion-test-key", "ALMANAK_GATEWAY_PORTFOLIO_API_KEY": "", "ALMANAK_PORTFOLIO_API_KEY": ""}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.portfolio_api_key == "zerion-test-key"
 
     def test_api_keys_empty_when_neither_set(self):
@@ -135,7 +146,7 @@ class TestSettingsFallback:
             "ZERION_API_KEY": "",
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert not settings.alchemy_api_key
             assert not settings.coingecko_api_key
             assert not settings.enso_api_key
@@ -177,7 +188,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
             "ALMANAK_PRIVATE_KEY": self._PRIMARY_KEY,
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.polymarket_private_key == self._GATEWAY_KEY
 
     def test_rung2_bare_polymarket_key(self):
@@ -188,7 +199,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
             "ALMANAK_PRIVATE_KEY": self._PRIMARY_KEY,
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.polymarket_private_key == self._BARE_KEY
 
     def test_rung3_almanak_polymarket_key(self):
@@ -198,7 +209,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
             "ALMANAK_PRIVATE_KEY": self._PRIMARY_KEY,
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.polymarket_private_key == self._ALMANAK_PM_KEY
 
     def test_rung4_falls_back_to_almanak_private_key(self, caplog):
@@ -213,7 +224,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
         env = self._clear_env() | {"ALMANAK_PRIVATE_KEY": self._PRIMARY_KEY}
         with patch.dict(os.environ, env, clear=False):
             with caplog.at_level(logging.INFO, logger="almanak.gateway.core.settings"):
-                settings = GatewaySettings()
+                settings = gateway_config_from_env()
             assert settings.polymarket_private_key == self._PRIMARY_KEY
             # Sanity: the primary signer key was also resolved correctly.
             assert settings.private_key == self._PRIMARY_KEY
@@ -236,7 +247,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
         env = self._clear_env() | {"ALMANAK_GATEWAY_PRIVATE_KEY": self._PRIMARY_KEY}
         with patch.dict(os.environ, env, clear=False):
             with caplog.at_level(logging.INFO, logger="almanak.gateway.core.settings"):
-                settings = GatewaySettings()
+                settings = gateway_config_from_env()
             assert settings.polymarket_private_key == self._PRIMARY_KEY
             assert any(
                 "Polymarket signing" in r.getMessage()
@@ -254,7 +265,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
         """
         env = self._clear_env()
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             # ``""`` is allowed (pydantic preserves the explicit empty string
             # when the env var is set to empty); the contract is "no usable
             # signing material", which is what every downstream consumer
@@ -268,7 +279,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
 
         env = self._clear_env()
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             service = PolymarketServiceServicer(settings=settings)
             assert service._available is False
             reason = service._last_credentials_failure or ""
@@ -279,7 +290,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
         """A constructor-level kwarg must still beat the ALMANAK_PRIVATE_KEY rung."""
         env = self._clear_env() | {"ALMANAK_PRIVATE_KEY": self._PRIMARY_KEY}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings(polymarket_private_key=self._GATEWAY_KEY)
+            settings = gateway_config_from_env(polymarket_private_key=self._GATEWAY_KEY)
             assert settings.polymarket_private_key == self._GATEWAY_KEY
 
     def test_unification_log_names_actual_source(self, caplog):
@@ -296,7 +307,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
         env = self._clear_env() | {"ALMANAK_PRIVATE_KEY": self._PRIMARY_KEY}
         with patch.dict(os.environ, env, clear=False):
             with caplog.at_level(logging.INFO, logger="almanak.gateway.core.settings"):
-                GatewaySettings()
+                gateway_config_from_env()
         messages = [r.getMessage() for r in caplog.records]
         assert any("ALMANAK_PRIVATE_KEY" in m and "Polymarket signing" in m for m in messages)
         assert not any("ALMANAK_GATEWAY_PRIVATE_KEY" in m for m in messages)
@@ -308,7 +319,7 @@ class TestPolymarketPrivateKeyFallbackLadder:
         env = self._clear_env() | {"ALMANAK_GATEWAY_PRIVATE_KEY": self._PRIMARY_KEY}
         with patch.dict(os.environ, env, clear=False):
             with caplog.at_level(logging.INFO, logger="almanak.gateway.core.settings"):
-                GatewaySettings()
+                gateway_config_from_env()
         messages = [r.getMessage() for r in caplog.records]
         assert any("ALMANAK_GATEWAY_PRIVATE_KEY" in m and "Polymarket signing" in m for m in messages)
 
@@ -336,7 +347,7 @@ class TestPolymarketWalletAddressFallbackLadder:
             "ALMANAK_POLYMARKET_WALLET_ADDRESS": "0xALMANAK",
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.polymarket_wallet_address == "0xGATEWAY"
 
     def test_bare_beats_almanak_prefixed(self):
@@ -345,19 +356,19 @@ class TestPolymarketWalletAddressFallbackLadder:
             "ALMANAK_POLYMARKET_WALLET_ADDRESS": "0xALMANAK",
         }
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.polymarket_wallet_address == "0xBARE"
 
     def test_almanak_polymarket_wallet_address(self):
         env = self._clear_env() | {"ALMANAK_POLYMARKET_WALLET_ADDRESS": "0xALMANAK"}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.polymarket_wallet_address == "0xALMANAK"
 
     def test_unset_leaves_none_for_service_to_derive(self):
         env = self._clear_env()
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             # Falsy (None or "") is the contract — downstream
             # ``_resolve_funder_address`` checks truthiness, not identity.
             assert not settings.polymarket_wallet_address
@@ -377,7 +388,7 @@ class TestAuthTokenInitKwargPrecedence:
         """Passing auth_token=None as kwarg must win over ALMANAK_GATEWAY_AUTH_TOKEN."""
         env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "from-env-should-lose"}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings(auth_token=None, allow_insecure=True)
+            settings = gateway_config_from_env(auth_token=None, allow_insecure=True)
             assert settings.auth_token is None
             assert settings.allow_insecure is True
 
@@ -385,12 +396,12 @@ class TestAuthTokenInitKwargPrecedence:
         """Passing a session token kwarg (mainnet path) overrides env token."""
         env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "from-env"}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings(auth_token="session-token-xyz")
+            settings = gateway_config_from_env(auth_token="session-token-xyz")
             assert settings.auth_token == "session-token-xyz"
 
     def test_env_still_used_when_no_kwarg_passed(self):
         """Regression sanity: without kwarg, env token is still honoured (non-test paths)."""
         env = {"ALMANAK_GATEWAY_AUTH_TOKEN": "env-token"}
         with patch.dict(os.environ, env, clear=False):
-            settings = GatewaySettings()
+            settings = gateway_config_from_env()
             assert settings.auth_token == "env-token"

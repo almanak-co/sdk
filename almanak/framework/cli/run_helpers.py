@@ -804,6 +804,9 @@ def _resolve_identity(
     )
 
 
+# crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
+# through gateway_config_from_env(...) — no complexity added. Function refactor is
+# tracked separately; allowlist is the documented escape hatch for no-op cutovers.
 def _setup_gateway(  # noqa: C901
     *,
     working_dir: str,
@@ -866,7 +869,7 @@ def _setup_gateway(  # noqa: C901
     import atexit
     import uuid
 
-    from almanak.gateway.core.settings import GatewaySettings
+    from almanak.config.env import gateway_config_from_env
     from almanak.gateway.managed import ManagedGateway, find_available_gateway_port
 
     from ..gateway_client import GatewayClient, GatewayClientConfig
@@ -1155,7 +1158,9 @@ def _setup_gateway(  # noqa: C901
         gateway_kwargs["auth_token"] = session_auth_token
     if gateway_private_key:
         gateway_kwargs["private_key"] = gateway_private_key
-    gateway_settings = GatewaySettings(**gateway_kwargs)
+    # Phase 1: route through the config service so unprefixed ALMANAK_* and
+    # Polymarket-ladder fallbacks resolve identically to gateway boot.
+    gateway_settings = gateway_config_from_env(**gateway_kwargs)
 
     if anvil_chains:
         click.echo(

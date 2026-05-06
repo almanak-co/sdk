@@ -50,12 +50,13 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Phase 1 (config-service plan): the module-load ``load_dotenv()`` call was
+# removed — every dotenv ingest now routes through
+# :func:`almanak.config.env._load_dotenv_once`, called once at the Click main
+# group and at the standalone gateway entrypoint. This module's
+# ``os.environ.get`` reads remain (Phase 4 territory).
 
 
 def _get_gateway_api_key(name: str) -> str | None:

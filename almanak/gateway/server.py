@@ -30,7 +30,7 @@ from almanak.gateway._server_start_helpers import (
     validate_state_schema_at_boot,
 )
 from almanak.gateway.audit import configure_structlog
-from almanak.gateway.core.settings import GatewaySettings, get_settings
+from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.lifecycle import reset_lifecycle_store
 from almanak.gateway.metrics import MetricsServer
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -180,13 +180,18 @@ class GatewayServer:
     - Observability (logging, alerts, metrics)
     """
 
-    def __init__(self, settings: GatewaySettings | None = None):
+    def __init__(self, settings: GatewaySettings):
         """Initialize the gateway server.
 
         Args:
-            settings: Gateway settings. If None, loads from environment.
+            settings: Gateway settings. Phase 1 (config-service plan): the
+                caller is responsible for constructing settings via
+                :func:`almanak.config.service.load_config` (or the lower-level
+                :func:`almanak.config.env.gateway_config_from_env`). The old
+                ``settings or get_settings()`` fallback was removed because it
+                bypassed the service boundary.
         """
-        self.settings = settings or get_settings()
+        self.settings = settings
         self.server: grpc.aio.Server | None = None
         self._executor: futures.ThreadPoolExecutor | None = None
         self._health_servicer = health_aio.HealthServicer()
@@ -589,11 +594,11 @@ class GatewayServer:
             await self.server.wait_for_termination()
 
 
-async def serve(settings: GatewaySettings | None = None) -> None:
+async def serve(settings: GatewaySettings) -> None:
     """Run the gateway server with signal handling.
 
     Args:
-        settings: Gateway settings. If None, loads from environment.
+        settings: Gateway settings. Caller resolves via almanak.config.load_config().
     """
     server = GatewayServer(settings)
 
@@ -626,7 +631,14 @@ def main() -> None:
     # Initialize structlog for audit logging
     configure_structlog()
 
-    settings = get_settings()
+    # Phase 1 (config-service plan): the standalone gateway entrypoint owns
+    # its own dotenv ingest because there is no Click main group to call
+    # ``_load_dotenv_once`` for it. ``load_config`` produces a fully-resolved
+    # GatewaySettings (incl. unprefixed ALMANAK_* and Polymarket fallbacks).
+    from almanak.config.service import load_config
+
+    config = load_config()
+    settings = config.gateway
     logger.info(f"Starting gateway with settings: grpc_port={settings.grpc_port}")
     asyncio.run(serve(settings))
 

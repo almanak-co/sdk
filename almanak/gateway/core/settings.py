@@ -1,12 +1,10 @@
 """Gateway configuration using Pydantic Settings."""
 
 import logging
-import os
-from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator, model_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 logger = logging.getLogger(__name__)
@@ -21,6 +19,22 @@ class GatewaySettings(BaseSettings):
     The gateway server supports both HTTP (FastAPI) and gRPC interfaces:
     - HTTP: External API access (docs, health endpoints)
     - gRPC: Internal strategy-gateway communication (secure, efficient)
+
+    Phase 1 (config-service plan): the unprefixed ``ALMANAK_*`` and bare-name
+    fallback ladders that used to live on this class as ``model_validator``
+    methods now live at the service boundary in
+    :mod:`almanak.config.env`. Construct via
+    :func:`almanak.config.env.gateway_config_from_env` (or the higher-level
+    :func:`almanak.config.service.load_config`) — calling
+    ``GatewaySettings()`` directly only loads ``ALMANAK_GATEWAY_*`` prefixed
+    env vars and skips the legacy unprefixed fallbacks.
+
+    The model intentionally has **no** ``env_file`` in ``model_config``:
+    dotenv ingest is owned by :func:`almanak.config.env._load_dotenv_once`,
+    the single boundary for the SDK. ``GatewaySettings()`` reads only what
+    is already in ``os.environ``; entrypoints that need ``.env`` must call
+    ``load_config()`` (or ``gateway_config_from_env()``) which loads dotenv
+    first.
     """
 
     # HTTP server settings (FastAPI)
@@ -139,7 +153,10 @@ class GatewaySettings(BaseSettings):
 
     model_config = {
         "env_prefix": "ALMANAK_GATEWAY_",
-        "env_file": ".env",
+        # Intentionally no ``env_file`` — the dotenv boundary lives in
+        # ``almanak.config.env._load_dotenv_once``. Construction via
+        # ``gateway_config_from_env`` / ``load_config`` calls it; direct
+        # ``GatewaySettings()`` reads only the live ``os.environ``.
         "extra": "ignore",
     }
 
@@ -172,185 +189,3 @@ class GatewaySettings(BaseSettings):
             except ValueError:
                 normalized.append(chain.lower())
         return normalized
-
-    @model_validator(mode="after")
-    def _fallback_env_vars(self) -> "GatewaySettings":  # noqa: C901
-        """Fall back to ALMANAK_* env vars if ALMANAK_GATEWAY_* variants are not set."""
-        from dotenv import load_dotenv
-
-        load_dotenv()
-
-        if not self.private_key:
-            fallback = os.environ.get("ALMANAK_PRIVATE_KEY")
-            if fallback:
-                self.private_key = fallback
-        if not self.solana_private_key:
-            fallback = os.environ.get("SOLANA_PRIVATE_KEY")
-            if fallback:
-                self.solana_private_key = fallback
-
-        if not self.eoa_address:
-            fallback = os.environ.get("ALMANAK_EOA_ADDRESS")
-            if fallback:
-                self.eoa_address = fallback
-
-        if not self.safe_address:
-            fallback = os.environ.get("ALMANAK_SAFE_ADDRESS")
-            if fallback:
-                self.safe_address = fallback
-
-        if not self.zodiac_roles_address:
-            fallback = os.environ.get("ALMANAK_ZODIAC_ADDRESS")
-            if fallback:
-                self.zodiac_roles_address = fallback
-
-        if not self.signer_service_url:
-            fallback = os.environ.get("ALMANAK_SIGNER_SERVICE_URL")
-            if fallback:
-                self.signer_service_url = fallback
-
-        if not self.signer_service_jwt:
-            fallback = os.environ.get("ALMANAK_SIGNER_SERVICE_JWT")
-            if fallback:
-                self.signer_service_jwt = fallback
-
-        self._resolve_polymarket_credentials()
-
-        # Third-party API keys: the deployer and docker-compose inject these
-        # under their bare names (e.g. ALCHEMY_API_KEY, not
-        # ALMANAK_GATEWAY_ALCHEMY_API_KEY).  Fall back to the bare name so
-        # both Pydantic settings consumers and direct os.environ readers
-        # (like rpc_provider.py) work from the same env var.
-        if not self.alchemy_api_key:
-            fallback = os.environ.get("ALCHEMY_API_KEY")
-            if fallback:
-                self.alchemy_api_key = fallback
-        if not self.coingecko_api_key:
-            fallback = os.environ.get("COINGECKO_API_KEY")
-            if fallback:
-                self.coingecko_api_key = fallback
-        if not self.enso_api_key:
-            fallback = os.environ.get("ENSO_API_KEY")
-            if fallback:
-                self.enso_api_key = fallback
-        if not self.portfolio_api_key:
-            fallback = os.environ.get("ALMANAK_PORTFOLIO_API_KEY") or os.environ.get("ZERION_API_KEY")
-            if fallback:
-                self.portfolio_api_key = fallback
-        if not self.portfolio_providers:
-            fallback = os.environ.get("PORTFOLIO_PROVIDERS")
-            if fallback:
-                self.portfolio_providers = fallback
-
-        return self
-
-    def _resolve_polymarket_credentials(self) -> None:
-        """Resolve the Polymarket-specific env-var fallback ladders.
-
-        Extracted from ``_fallback_env_vars`` to keep the per-credential
-        ladders focused and individually testable. Each rung is documented
-        inline at its decision point.
-        """
-        self._resolve_polymarket_wallet_address()
-        self._resolve_polymarket_private_key()
-        self._resolve_polymarket_api_credentials()
-
-    def _resolve_polymarket_wallet_address(self) -> None:
-        """Polymarket wallet-address fallback ladder (most specific → least).
-
-        1. ``ALMANAK_GATEWAY_POLYMARKET_WALLET_ADDRESS`` (already populated
-           by pydantic if set — handled by the prefix).
-        2. ``POLYMARKET_WALLET_ADDRESS``.
-        3. ``ALMANAK_POLYMARKET_WALLET_ADDRESS``.
-
-        If none are set we deliberately leave the field ``None``:
-        ``PolymarketService._resolve_funder_address`` already derives the
-        funder from the signer / Safe address downstream, so a missing value
-        is the correct "use the unified identity" signal — not an error.
-        There is no ``ALMANAK_WALLET_ADDRESS`` to fall back to; the user's
-        wallet address is implied by the private key in the local-EOA flow
-        and by ``ALMANAK_GATEWAY_SAFE_ADDRESS`` in the hosted-Safe flow.
-        """
-        if self.polymarket_wallet_address:
-            return
-        fallback = os.environ.get("POLYMARKET_WALLET_ADDRESS") or os.environ.get("ALMANAK_POLYMARKET_WALLET_ADDRESS")
-        if fallback:
-            self.polymarket_wallet_address = fallback
-
-    def _resolve_polymarket_private_key(self) -> None:
-        """Polymarket private-key fallback ladder (VIB-3772).
-
-        1. ``ALMANAK_GATEWAY_POLYMARKET_PRIVATE_KEY`` (pydantic prefix).
-        2. ``POLYMARKET_PRIVATE_KEY`` (legacy bare name).
-        3. ``ALMANAK_POLYMARKET_PRIVATE_KEY`` (almanak-prefixed alias).
-        4. ``self.private_key`` — the already-resolved primary signer key
-           (which itself fell back through ALMANAK_GATEWAY_PRIVATE_KEY →
-           ALMANAK_PRIVATE_KEY in ``_fallback_env_vars``). Unifies the
-           credential surface so users only need a single ALMANAK_PRIVATE_KEY
-           in ``.env`` to start signing Polymarket orders.
-
-        The last rung is intentionally a copy of an already-resolved field,
-        not a re-read of the env var, so explicit constructor kwargs and the
-        gateway-prefixed env var both flow through the same primary signer
-        the rest of the gateway uses.
-        """
-        polymarket_key_was_unset = not self.polymarket_private_key
-        if polymarket_key_was_unset:
-            fallback = os.environ.get("POLYMARKET_PRIVATE_KEY") or os.environ.get("ALMANAK_POLYMARKET_PRIVATE_KEY")
-            if fallback:
-                self.polymarket_private_key = fallback
-
-        if not self.polymarket_private_key and self.private_key:
-            self.polymarket_private_key = self.private_key
-            if polymarket_key_was_unset:
-                self._log_polymarket_unified_signer()
-
-    def _log_polymarket_unified_signer(self) -> None:
-        """Log which env var supplied the primary signer key for the
-        Polymarket-unified-with-primary path.
-
-        ``self.private_key`` was resolved earlier via the ladder
-        ``ALMANAK_GATEWAY_PRIVATE_KEY`` (pydantic prefix) → constructor
-        kwarg → ``ALMANAK_PRIVATE_KEY``. We re-check the env vars to
-        disambiguate; falling back to "constructor/explicit" when neither
-        env var holds the value (i.e. the key came from a Pydantic
-        constructor kwarg in tests / programmatic init).
-        """
-        if os.environ.get("ALMANAK_GATEWAY_PRIVATE_KEY"):
-            source_label = "ALMANAK_GATEWAY_PRIVATE_KEY"
-        elif os.environ.get("ALMANAK_PRIVATE_KEY"):
-            source_label = "ALMANAK_PRIVATE_KEY"
-        else:
-            source_label = "explicit private_key (constructor)"
-        logger.info(
-            "Polymarket signing using %s "
-            "(set POLYMARKET_PRIVATE_KEY or ALMANAK_GATEWAY_POLYMARKET_PRIVATE_KEY "
-            "to use a separate wallet for Polymarket).",
-            source_label,
-        )
-
-    def _resolve_polymarket_api_credentials(self) -> None:
-        """Polymarket CLOB API credential fallbacks (api_key/secret/passphrase).
-
-        Each falls back ``POLYMARKET_X`` then ``ALMANAK_POLYMARKET_X``.
-        """
-        if not self.polymarket_api_key:
-            fallback = os.environ.get("POLYMARKET_API_KEY") or os.environ.get("ALMANAK_POLYMARKET_API_KEY")
-            if fallback:
-                self.polymarket_api_key = fallback
-
-        if not self.polymarket_secret:
-            fallback = os.environ.get("POLYMARKET_SECRET") or os.environ.get("ALMANAK_POLYMARKET_SECRET")
-            if fallback:
-                self.polymarket_secret = fallback
-
-        if not self.polymarket_passphrase:
-            fallback = os.environ.get("POLYMARKET_PASSPHRASE") or os.environ.get("ALMANAK_POLYMARKET_PASSPHRASE")
-            if fallback:
-                self.polymarket_passphrase = fallback
-
-
-@lru_cache
-def get_settings() -> GatewaySettings:
-    """Get cached gateway settings."""
-    return GatewaySettings()

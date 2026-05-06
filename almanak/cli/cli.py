@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from almanak import __version__
 from almanak.cli.agent import agent as agent_group
+from almanak.config.cli_options import gateway_client_options
 from almanak.core.redaction import install_redaction
 
 # V2 Framework CLI commands
@@ -132,6 +133,17 @@ def _exec_native_binary(extra_args=None):
 @click.pass_context
 def almanak(ctx):
     """Almanak CLI for managing strategies."""
+    # Phase 1 (config-service plan): the SDK's single dotenv ingest. Every
+    # subcommand inherits the loaded environment without each one calling
+    # ``load_dotenv()`` itself. Idempotent — safe across nested invocations.
+    from almanak.config.cli_options import warn_legacy_gateway_envvars
+    from almanak.config.env import _load_dotenv_once
+
+    _load_dotenv_once()
+    # Order matters: dotenv first so legacy names from .env are visible to
+    # the deprecation warning. Phase 2 (#2099): unprefixed GATEWAY_* names
+    # are deprecated in favour of ALMANAK_GATEWAY_*.
+    warn_legacy_gateway_envvars()
     if ctx.invoked_subcommand is None:
         _exec_native_binary()
 
@@ -375,20 +387,7 @@ def mcp():
 
 
 @mcp.command("serve")
-@click.option(
-    "--gateway-host",
-    default="localhost",
-    type=str,
-    envvar="GATEWAY_HOST",
-    help="Gateway hostname (default: localhost).",
-)
-@click.option(
-    "--gateway-port",
-    default=50051,
-    type=int,
-    envvar="GATEWAY_PORT",
-    help="Gateway gRPC port (default: 50051).",
-)
+@gateway_client_options
 @click.option(
     "--allowed-tokens",
     multiple=True,
@@ -649,6 +648,9 @@ def docs_agent_skill(dump):
         sys.exit(1)
 
 
+# crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
+# through gateway_config_from_env(...) — no complexity added. Function refactor is
+# tracked separately; allowlist is the documented escape hatch for no-op cutovers.
 @almanak.command()
 @click.option(
     "--port",
@@ -744,9 +746,9 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
     import os
     import sys
 
+    from almanak.config.env import gateway_config_from_env
     from almanak.framework.deployment import is_hosted
     from almanak.framework.local_paths import auto_detect_strategy_folder
-    from almanak.gateway.core.settings import GatewaySettings
     from almanak.gateway.server import serve
 
     # VIB-3761/-3835: anchor the gateway to a strategy folder before any
@@ -805,8 +807,10 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
     # allow_insecure: auto-enabled for anvil, or via --insecure flag / env var
     allow_insecure = is_test_network or insecure
 
-    # Build GatewaySettings first so it picks up auth_token from env vars AND .env file
-    settings = GatewaySettings(
+    # Build settings via the config service so env-var fallbacks (unprefixed
+    # ALMANAK_* and Polymarket ladders) flow through the single boundary in
+    # almanak.config.env (Phase 1).
+    settings = gateway_config_from_env(
         grpc_port=port,
         metrics_enabled=metrics,
         metrics_port=metrics_port,
@@ -941,20 +945,7 @@ def backtest_service(host, port, workers, log_level):
     envvar="DASHBOARD_PORT",
     help="Streamlit port number (default: 8501).",
 )
-@click.option(
-    "--gateway-host",
-    default="localhost",
-    type=str,
-    envvar="GATEWAY_HOST",
-    help="Gateway hostname (default: localhost).",
-)
-@click.option(
-    "--gateway-port",
-    default=50051,
-    type=int,
-    envvar="GATEWAY_PORT",
-    help="Gateway gRPC port (default: 50051).",
-)
+@gateway_client_options
 @click.option(
     "--no-browser",
     is_flag=True,
@@ -1494,19 +1485,7 @@ def strategy_test(
     help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing. "
     "For paper trading with PnL tracking, use 'almanak strat backtest paper'.",
 )
-@click.option(
-    "--gateway-host",
-    default="localhost",
-    envvar="GATEWAY_HOST",
-    help="Gateway sidecar hostname.",
-)
-@click.option(
-    "--gateway-port",
-    default=50051,
-    type=int,
-    envvar="GATEWAY_PORT",
-    help="Gateway sidecar gRPC port.",
-)
+@gateway_client_options
 @click.option(
     "--no-gateway",
     "no_gateway",

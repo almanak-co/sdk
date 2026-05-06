@@ -190,7 +190,7 @@ def setup_gateway(
 
     # Lazy imports to keep the top-level cost low and to mirror the
     # original execute_teardown lazy-import pattern (VIB-522).
-    from almanak.gateway.core.settings import GatewaySettings
+    from almanak.config.env import gateway_config_from_env
     from almanak.gateway.managed import ManagedGateway, find_available_gateway_port
 
     from ..gateway_client import GatewayClient, GatewayClientConfig
@@ -254,7 +254,9 @@ def setup_gateway(
     session_auth_token = uuid.uuid4().hex
 
     resolved_network = network or "mainnet"
-    gateway_settings = GatewaySettings(
+    # Phase 1: route through the config service so the same env-fallback
+    # ladders apply here as for the gateway subcommand and managed gateway.
+    gateway_settings = gateway_config_from_env(
         grpc_host=effective_host,
         grpc_port=gateway_port,
         network=resolved_network,

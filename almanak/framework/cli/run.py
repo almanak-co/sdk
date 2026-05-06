@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 import click
 
+from almanak.config.cli_options import gateway_client_options
 from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
@@ -240,32 +241,73 @@ def _warn_missing_token_funding(config: dict[str, Any], config_path: Path) -> No
     )
 
 
+# crap-allowlist: Phase 3 (#2098/#2101) — schema validation around existing loader, no body complexity added.
 def load_strategy_config(
     strategy_name: str,
     config_file: str | None = None,
 ) -> dict[str, Any]:
     """Load strategy configuration from file or defaults.
 
+    Phase 3 (#2098 / #2101) wraps the file read in Pydantic schema validation.
+    JSON / YAML parse errors and schema mismatches surface as
+    ``click.ClickException`` naming the file, instead of bubbling as opaque
+    stack traces or — worse — being swallowed by ``except Exception`` further
+    upstream in ``_setup_gateway``.
+
+    The validated model is dumped back to ``dict`` (``mode="python"``) so
+    downstream callers keep their dict API; Pydantic-coerced typed values
+    (e.g. stringly-typed ``"0.005"`` -> ``Decimal("0.005")``) flow through.
+
     Args:
         strategy_name: Name of the strategy
         config_file: Optional explicit config file path
 
     Returns:
-        Configuration dictionary
+        Configuration dictionary (Pydantic-validated; typed values preserved).
     """
+    from pydantic import ValidationError
+
+    from almanak.config.strategy import StrategyConfig
+
+    def _parse_file(config_path: Path) -> dict[str, Any]:
+        """Read, parse, and schema-validate a config file. Errors name the path."""
+        import yaml
+
+        try:
+            with open(config_path) as f:
+                if config_path.suffix.lower() in [".yaml", ".yml"]:
+                    raw = yaml.safe_load(f)
+                else:
+                    raw = json.load(f)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as e:
+            raise click.ClickException(f"Failed to read strategy config {config_path}: {e}") from e
+
+        if raw is None:
+            # Empty / all-comments YAML — treat as empty config.
+            raw = {}
+        if not isinstance(raw, dict):
+            raise click.ClickException(
+                f"Strategy config {config_path} must be a JSON/YAML object, got {type(raw).__name__}."
+            )
+
+        try:
+            validated = StrategyConfig.model_validate(raw)
+        except ValidationError as e:
+            raise click.ClickException(f"Strategy config {config_path} failed schema validation:\n{e}") from e
+
+        # ``mode="python"`` preserves Decimal / list types instead of coercing
+        # to JSON-friendly strings. ``exclude_unset=True`` preserves the
+        # pre-Phase-3 dict shape exactly: only fields actually present in the
+        # source file appear in the returned dict. Downstream contracts like
+        # ``_warn_missing_token_funding`` (``"token_funding" in config``) and
+        # the per-strategy dataclass extension keep working.
+        return validated.model_dump(mode="python", exclude_unset=True)
+
     if config_file:
         config_path = Path(config_file)
         if not config_path.exists():
             raise click.ClickException(f"Config file not found: {config_file}")
-
-        if config_path.suffix.lower() in [".yaml", ".yml"]:
-            import yaml
-
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-        else:
-            with open(config_path) as f:
-                config = json.load(f)
+        config = _parse_file(config_path)
         click.echo(f"Loaded config from: {config_path}")
         _warn_missing_token_funding(config, config_path)
         return config
@@ -273,23 +315,10 @@ def load_strategy_config(
     # Search for config in standard locations
     strategy_dir = find_strategy_dir(strategy_name)
     if strategy_dir:
-        # Try JSON first
-        config_path = strategy_dir / "config.json"
-        if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-            click.echo(f"Loaded config from: {config_path}")
-            _warn_missing_token_funding(config, config_path)
-            return config
-
-        # Try YAML
-        for yaml_name in ["config.yaml", "config.yml"]:
-            config_path = strategy_dir / yaml_name
+        for name in ("config.json", "config.yaml", "config.yml"):
+            config_path = strategy_dir / name
             if config_path.exists():
-                import yaml
-
-                with open(config_path) as f:
-                    config = yaml.safe_load(f)
+                config = _parse_file(config_path)
                 click.echo(f"Loaded config from: {config_path}")
                 _warn_missing_token_funding(config, config_path)
                 return config
@@ -1068,19 +1097,7 @@ def format_iteration_result(result: IterationResult) -> str:
     help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing (auto-starts Anvil on a free port). "
     "For paper trading with PnL tracking, use 'almanak strat backtest paper'. Overrides config.json 'network' field.",
 )
-@click.option(
-    "--gateway-host",
-    default="localhost",
-    envvar="GATEWAY_HOST",
-    help="Gateway sidecar hostname",
-)
-@click.option(
-    "--gateway-port",
-    default=50051,
-    type=int,
-    envvar="GATEWAY_PORT",
-    help="Gateway sidecar port",
-)
+@gateway_client_options
 @click.option(
     "--fresh",
     is_flag=True,

@@ -52,6 +52,8 @@ if TYPE_CHECKING:
 
 import click
 
+from almanak.config.cli_options import gateway_client_options
+
 logger = logging.getLogger(__name__)
 
 from ..teardown import (
@@ -558,19 +560,7 @@ def teardown():
     default=False,
     help="Skip confirmation prompt.",
 )
-@click.option(
-    "--gateway-host",
-    default="localhost",
-    envvar="GATEWAY_HOST",
-    help="Gateway sidecar hostname.",
-)
-@click.option(
-    "--gateway-port",
-    default=50051,
-    type=int,
-    envvar="GATEWAY_PORT",
-    help="Gateway sidecar gRPC port.",
-)
+@gateway_client_options
 @click.option(
     "--no-gateway",
     "no_gateway",

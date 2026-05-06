@@ -8,6 +8,6 @@ Strategy containers connect only to the gRPC interface and have no direct
 access to platform secrets or external services.
 """
 
-from almanak.gateway.core.settings import GatewaySettings, get_settings
+from almanak.gateway.core.settings import GatewaySettings
 
-__all__ = ["GatewaySettings", "get_settings"]
+__all__ = ["GatewaySettings"]

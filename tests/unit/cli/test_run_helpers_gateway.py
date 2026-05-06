@@ -100,9 +100,14 @@ def _install_gateway_fakes(monkeypatch: pytest.MonkeyPatch, *, port: int = 50051
 
     This intercepts the deferred imports inside the helper so tests do not
     start real subprocesses or open real gRPC channels.
+
+    Phase 1 (config-service plan): the helper now constructs gateway settings
+    via :func:`almanak.config.env.gateway_config_from_env` instead of
+    ``GatewaySettings(...)`` directly, so the fake replaces the boundary
+    helper rather than the pydantic class.
     """
+    from almanak.config import env as cfg_env
     from almanak.gateway import managed as gw_managed
-    from almanak.gateway.core import settings as gw_settings
 
     from almanak.framework import gateway_client as gw_client_pkg
 
@@ -112,7 +117,7 @@ def _install_gateway_fakes(monkeypatch: pytest.MonkeyPatch, *, port: int = 50051
 
     monkeypatch.setattr(gw_managed, "ManagedGateway", _FakeManagedGateway)
     monkeypatch.setattr(gw_managed, "find_available_gateway_port", lambda host, port: port)
-    monkeypatch.setattr(gw_settings, "GatewaySettings", _FakeSettings)
+    monkeypatch.setattr(cfg_env, "gateway_config_from_env", _FakeSettings)
 
     monkeypatch.setattr(gw_client_pkg, "GatewayClient", _FakeGatewayClient)
 
