@@ -65,6 +65,191 @@ _ACTIVITY_FEED_KEY_LEDGER_PRIORITY = "1"
 _ACTIVITY_FEED_KEY_TIMELINE_PRIORITY = "0"
 
 
+def _index_trade_tape_accounting_events(
+    accounting_events: Sequence[Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Index accounting events by ``ledger_entry_id`` and ``cycle_id`` for fast trade-tape join."""
+    events_by_ledger: dict[str, dict[str, Any]] = {}
+    events_by_cycle: dict[str, list[dict[str, Any]]] = {}
+    for ev in accounting_events:
+        if not isinstance(ev, dict):
+            continue
+        le = ev.get("ledger_entry_id")
+        if le:
+            events_by_ledger[le] = ev
+        cy = ev.get("cycle_id")
+        if cy:
+            events_by_cycle.setdefault(cy, []).append(ev)
+    return events_by_ledger, events_by_cycle
+
+
+def _index_trade_tape_position_events(position_events: Sequence[Any]) -> dict[str, dict[str, Any]]:
+    """Index position events by ``ledger_entry_id`` for fast trade-tape join."""
+    pos_by_ledger: dict[str, dict[str, Any]] = {}
+    for pe in position_events:
+        if not isinstance(pe, dict):
+            continue
+        le = pe.get("ledger_entry_id")
+        if le:
+            pos_by_ledger[le] = pe
+    return pos_by_ledger
+
+
+def _resolve_trade_tape_row_event(
+    entry_id: str,
+    cycle_id: str,
+    events_by_ledger: dict[str, dict[str, Any]],
+    events_by_cycle: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Pick the accounting event for a ledger row, with a safe cycle-level fallback.
+
+    The cycle-level fallback only fires when the cycle has *exactly one*
+    accounting event. A teardown cycle deliberately writes one event per
+    intent (LP_CLOSE, REPAY, swap-back …), and grabbing ``cyc_events[0]``
+    could attach another intent's payload, confidence, position key, and
+    version stamps to this row. The trade tape is an audit surface — wrong
+    joins are worse than empty cells. (Codex audit on PR #2014.)
+    """
+    row_event = events_by_ledger.get(entry_id)
+    if row_event is not None:
+        return row_event
+    cyc_events = events_by_cycle.get(cycle_id, [])
+    if len(cyc_events) == 1:
+        return cyc_events[0]
+    return None
+
+
+def _parse_trade_tape_payload_versions(payload_raw: str) -> tuple[str, int, int, int]:
+    """Extract ``(unavailable_reason, schema_v, formula_v, matching_v)`` from an accounting payload.
+
+    Non-integer version stamps (e.g. ``"v1"`` from older/corrupt rows) are coerced to 0
+    rather than allowed to bubble out as ``ValueError`` — a single malformed payload must
+    not turn ``GetTradeTape`` into an INTERNAL gRPC error.
+    """
+    if not payload_raw:
+        return "", 0, 0, 0
+    try:
+        parsed = json.loads(payload_raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "", 0, 0, 0
+    if not isinstance(parsed, dict):
+        return "", 0, 0, 0
+
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # Coerce non-string truthy values (e.g. ``{"code": "x"}``) to "". Without
+    # this guard, the dict would slip through ``or ""`` (truthy, so the OR
+    # short-circuits) and into ``_build_trade_tape_row()``'s proto string field,
+    # which protobuf would reject — turning ``GetTradeTape`` into INTERNAL.
+    raw_unavailable_reason = parsed.get("unavailable_reason")
+    unavailable_reason = raw_unavailable_reason if isinstance(raw_unavailable_reason, str) else ""
+    schema_v = _safe_int(parsed.get("schema_version"))
+    formula_v = _safe_int(parsed.get("formula_version"))
+    matching_v = _safe_int(parsed.get("matching_policy_version"))
+    return unavailable_reason, schema_v, formula_v, matching_v
+
+
+def _build_trade_tape_position_fields(pe: dict[str, Any] | None) -> tuple[str, str, str]:
+    """Return ``(position_event_json, position_id, position_event_type)`` for a row."""
+    if pe is None:
+        return "", "", ""
+    pe_clean = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in pe.items()}
+    try:
+        position_event_json = json.dumps(pe_clean, default=str)
+    except (TypeError, ValueError):
+        position_event_json = ""
+    position_id = str(pe.get("position_id") or "")
+    position_event_type = str(pe.get("event_type") or "")
+    return position_event_json, position_id, position_event_type
+
+
+def _trade_tape_entry_str(entry: Any, name: str) -> str:
+    """Read a string-valued ledger attribute, coercing missing/None to empty string."""
+    return getattr(entry, name, "") or ""
+
+
+def _coerce_trade_tape_proto_string(value: Any) -> str:
+    """Coerce an accounting-event field to a proto-safe ``str``.
+
+    Strings pass through; ``None`` / missing collapses to ``""``; anything else
+    (e.g. JSONB returned as ``dict`` / ``list``, numeric, bool) is JSON-serialised
+    so the value survives across the proto boundary instead of crashing the
+    string-field assignment in ``_build_trade_tape_row``.
+    """
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _build_trade_tape_row(
+    entry: Any,
+    row_event: dict[str, Any] | None,
+    pe: dict[str, Any] | None,
+) -> gateway_pb2.TradeTapeRow:
+    """Assemble a single ``TradeTapeRow`` proto from a ledger entry + joined events."""
+    ts = getattr(entry, "timestamp", None)
+    ts_unix = int(ts.timestamp()) if ts else 0
+
+    # Untrusted accounting-event fields can carry JSONB-shaped (dict/list) or
+    # other non-string values. Coerce to proto-safe strings so one corrupt row
+    # doesn't take ``GetTradeTape`` down with a proto type error.
+    payload_raw = _coerce_trade_tape_proto_string(row_event.get("payload_json") if row_event else None)
+    confidence = _coerce_trade_tape_proto_string(row_event.get("confidence") if row_event else None)
+    event_type = _coerce_trade_tape_proto_string(row_event.get("event_type") if row_event else None)
+    position_key = _coerce_trade_tape_proto_string(row_event.get("position_key") if row_event else None)
+    unavailable_reason, schema_v, formula_v, matching_v = _parse_trade_tape_payload_versions(payload_raw)
+    position_event_json, position_id, position_event_type = _build_trade_tape_position_fields(pe)
+
+    return gateway_pb2.TradeTapeRow(
+        id=getattr(entry, "id", ""),
+        cycle_id=getattr(entry, "cycle_id", ""),
+        timestamp=ts_unix,
+        intent_type=getattr(entry, "intent_type", ""),
+        token_in=_trade_tape_entry_str(entry, "token_in"),
+        amount_in=_trade_tape_entry_str(entry, "amount_in"),
+        token_out=_trade_tape_entry_str(entry, "token_out"),
+        amount_out=_trade_tape_entry_str(entry, "amount_out"),
+        effective_price=_trade_tape_entry_str(entry, "effective_price"),
+        slippage_bps=getattr(entry, "slippage_bps", None) or 0.0,
+        gas_used=getattr(entry, "gas_used", 0) or 0,
+        gas_usd=_trade_tape_entry_str(entry, "gas_usd"),
+        tx_hash=_trade_tape_entry_str(entry, "tx_hash"),
+        chain=_trade_tape_entry_str(entry, "chain"),
+        protocol=_trade_tape_entry_str(entry, "protocol"),
+        success=bool(getattr(entry, "success", True)),
+        error=_trade_tape_entry_str(entry, "error"),
+        amount_in_usd="",
+        amount_out_usd="",
+        extracted_data_json=_trade_tape_entry_str(entry, "extracted_data_json"),
+        price_inputs_json=_trade_tape_entry_str(entry, "price_inputs_json"),
+        pre_state_json=_trade_tape_entry_str(entry, "pre_state_json"),
+        post_state_json=_trade_tape_entry_str(entry, "post_state_json"),
+        accounting_payload_json=payload_raw,
+        accounting_event_type=event_type,
+        position_key=position_key,
+        confidence=confidence,
+        unavailable_reason=unavailable_reason,
+        schema_version=schema_v,
+        formula_version=formula_v,
+        matching_policy_version=matching_v,
+        position_event_json=position_event_json,
+        position_id=position_id,
+        position_event_type=position_event_type,
+        row_wallet_delta_usd="",
+        row_component_usd="",
+        row_residual_usd="",
+    )
+
+
 def _to_timeline_feed_item(event: Any, resolved_id: str) -> tuple[gateway_pb2.ActivityFeedItem, str]:
     """Build an ``ActivityFeedItem`` proto for a timeline event + its cursor key."""
     ts_unix = int(event.timestamp.timestamp()) if event.timestamp else 0
@@ -122,6 +307,222 @@ def _to_ledger_feed_item(entry: Any) -> tuple[gateway_pb2.ActivityFeedItem, str]
         ),
         f"{_ACTIVITY_FEED_KEY_LEDGER_PRIORITY}:L:{entry.id}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Paper-session discovery helpers (used by DashboardServiceServicer._discover_paper_sessions)
+# ---------------------------------------------------------------------------
+
+# File-status values that always mark a session inactive regardless of PID.
+_PAPER_INACTIVE_FILE_STATUSES = frozenset({"stopped", "stopped_clean", "error", "completed"})
+
+# A session whose PID is no longer alive AND whose last_save is older than this
+# is considered stale and reported as INACTIVE.
+_PAPER_STALE_THRESHOLD_SECONDS = 300
+
+# Cap on equity-curve points returned to the dashboard. The last point is
+# always preserved so the most recent value is never lost to downsampling.
+_PAPER_EQUITY_CURVE_MAX_POINTS = 200
+
+
+def _load_paper_state_file(state_file: Path) -> dict | None:
+    """Parse a paper-trader state file, returning ``None`` on read/parse errors.
+
+    ``Path.read_text()`` defaults to UTF-8 and raises ``UnicodeDecodeError``
+    (a subclass of ``ValueError`` but NOT of ``OSError``) on a non-UTF-8 file.
+    Without that branch, one corrupt-encoding ``.state.json`` would abort
+    ``_discover_paper_sessions`` for the whole dashboard request.
+    """
+    try:
+        data = json.loads(state_file.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        logger.debug(f"Failed to read paper state file {state_file}: {e}")
+        return None
+    if not isinstance(data, dict):
+        logger.debug(f"Paper state file {state_file} is not a JSON object, skipping")
+        return None
+    return data
+
+
+def _parse_iso_utc(value: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp, normalising naive values to UTC."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Return True if a signal-0 probe to ``pid`` succeeds."""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _determine_paper_session_status(data: dict) -> str:
+    """Classify a paper session as PAPER_TRADING or INACTIVE.
+
+    A session is INACTIVE when its persisted file_status is terminal, or its
+    PID is dead AND its last_save is missing/unparseable/older than the stale
+    threshold. Otherwise it's reported as PAPER_TRADING.
+    """
+    # Coerce to ``str`` before the set-membership check — a corrupt
+    # ``"status": []`` or ``"status": {}`` is unhashable and would raise
+    # ``TypeError`` on the ``in <set>`` test, aborting discovery for every
+    # paper session.
+    raw_status = data.get("status", "unknown")
+    status = raw_status if isinstance(raw_status, str) else "unknown"
+    if status in _PAPER_INACTIVE_FILE_STATUSES:
+        return "INACTIVE"
+
+    pid = data.get("pid")
+    if not (isinstance(pid, int) and pid > 0):
+        return "PAPER_TRADING"
+    if _is_pid_alive(pid):
+        return "PAPER_TRADING"
+
+    last_save = data.get("last_save")
+    if not last_save:
+        return "INACTIVE"
+    last_dt = _parse_iso_utc(last_save)
+    if last_dt is None:
+        return "INACTIVE"
+    age = (datetime.now(UTC) - last_dt).total_seconds()
+    return "INACTIVE" if age > _PAPER_STALE_THRESHOLD_SECONDS else "PAPER_TRADING"
+
+
+def _compute_paper_equity_pnl(equity_curve: list) -> tuple[Decimal, Decimal, Decimal]:
+    """Return (initial_value, current_value, simulated_pnl) from an equity curve.
+
+    Returns zeroes when the curve is empty or its endpoints can't be parsed as
+    Decimals — PnL without a basis is reported as 0 rather than guessed.
+    """
+    if not equity_curve:
+        return Decimal("0"), Decimal("0"), Decimal("0")
+    try:
+        initial = Decimal(str(equity_curve[0].get("value", "0")))
+        current = Decimal(str(equity_curve[-1].get("value", "0")))
+    except (IndexError, AttributeError, ValueError, ArithmeticError):
+        # Decimal(str("garbage")) raises decimal.InvalidOperation (subclass of
+        # ArithmeticError), not ValueError — a corrupt equity_curve endpoint must
+        # not bubble out of paper-session discovery and break dashboard reads.
+        return Decimal("0"), Decimal("0"), Decimal("0")
+    return initial, current, current - initial
+
+
+def _sum_paper_gas_cost(trades: list) -> Decimal:
+    """Sum gas_cost_usd over trades, skipping malformed entries with a debug log."""
+    total = Decimal("0")
+    for trade in trades:
+        try:
+            total += Decimal(str(trade.get("gas_cost_usd", "0")))
+        except (ValueError, TypeError, ArithmeticError) as e:
+            logger.debug("Skipping malformed gas_cost_usd in trade %s: %s", trade, e)
+    return total
+
+
+def _compute_paper_trades_per_hour(session_start: str, success_count: int) -> Decimal:
+    """Compute trades/hour from session_start to now; 0 when not derivable."""
+    if not session_start or success_count <= 0:
+        return Decimal("0")
+    start_dt = _parse_iso_utc(session_start)
+    if start_dt is None:
+        return Decimal("0")
+    hours = Decimal(str((datetime.now(UTC) - start_dt).total_seconds())) / Decimal("3600")
+    if hours <= 0:
+        return Decimal("0")
+    return Decimal(success_count) / hours
+
+
+def _build_paper_error_breakdown(persisted: Any, errors: list) -> dict:
+    """Prefer persisted error_breakdown; otherwise reconstruct from errors list."""
+    if isinstance(persisted, dict):
+        return persisted
+    breakdown: dict = {}
+    for error in errors:
+        if isinstance(error, dict):
+            # Coerce ``error_type`` to a non-empty ``str`` before using as a
+            # dict key — a corrupt ``"error_type": []`` or ``{...}`` is
+            # unhashable and raises ``TypeError`` on the ``breakdown[etype]``
+            # lookup, aborting paper-session discovery.
+            raw_etype = error.get("error_type", "unknown")
+            etype = raw_etype if isinstance(raw_etype, str) and raw_etype else "unknown"
+            breakdown[etype] = breakdown.get(etype, 0) + 1
+    return breakdown
+
+
+def _downsample_equity_curve(points: list, max_points: int = _PAPER_EQUITY_CURVE_MAX_POINTS) -> list:
+    """Downsample an equity curve to at most ``max_points`` (last point preserved)."""
+    if max_points <= 0:
+        return []
+    if len(points) <= max_points:
+        return points
+    if max_points == 1:
+        return [points[-1]]
+    step = len(points) / (max_points - 1)
+    return [points[int(i * step)] for i in range(max_points - 1)] + [points[-1]]
+
+
+def _compute_paper_last_action_ts(last_save: Any) -> int:
+    """Return last_save as a unix timestamp, or 0 when missing/unparseable."""
+    last_dt = _parse_iso_utc(last_save if isinstance(last_save, str) else None)
+    return int(last_dt.timestamp()) if last_dt else 0
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce ``value`` to a non-negative ``int`` with a fallback default.
+
+    Persisted JSON fields (``tick_count``, ``ticks_with_*``) can arrive as
+    strings, ``None``, or other unexpected types from corrupt ``.state.json``
+    files. ``int(None)`` raises ``TypeError`` and ``int("garbage")`` raises
+    ``ValueError`` — either would abort the entire paper-session discovery.
+    """
+    try:
+        coerced = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+    return max(0, coerced)
+
+
+def _build_paper_metrics(
+    *,
+    data: dict,
+    trades: list,
+    errors: list,
+    equity_curve: list,
+    simulated_pnl: Decimal,
+) -> dict:
+    """Build the ``paper_metrics`` dict embedded as JSON in the session row."""
+    tick_count = _safe_int(data.get("tick_count"))
+    success_count = len(trades)
+    error_count = len(errors)
+    last_trade_at = trades[-1].get("timestamp", "") if trades else ""
+    session_start = data.get("session_start", "")
+
+    return {
+        "tick_count": tick_count,
+        "success_count": success_count,
+        "hold_count": max(0, tick_count - success_count - error_count),
+        "error_count": error_count,
+        "simulated_pnl_usd": str(simulated_pnl),
+        "total_gas_cost_usd": str(_sum_paper_gas_cost(trades)),
+        "last_trade_at": last_trade_at,
+        "session_start": session_start,
+        "trades_per_hour": str(_compute_paper_trades_per_hour(session_start, success_count)),
+        "equity_curve": _downsample_equity_curve(equity_curve),
+        "error_breakdown": _build_paper_error_breakdown(data.get("error_breakdown"), errors),
+        "ticks_with_fork": _safe_int(data.get("ticks_with_fork")),
+        "ticks_with_indicators": _safe_int(data.get("ticks_with_indicators")),
+        "ticks_with_action": _safe_int(data.get("ticks_with_action")),
+        "anvil_result": data.get("anvil_result"),
+    }
 
 
 class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
@@ -276,7 +677,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return strategies
 
-    def _discover_paper_sessions(self) -> list[dict]:  # noqa: C901
+    def _discover_paper_sessions(self) -> list[dict]:
         """Discover paper trading sessions from ~/.almanak/paper/.
 
         Reads state files produced by the BackgroundPaperTrader to surface
@@ -290,180 +691,95 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return []
 
         sessions: list[dict] = []
-
         for state_file in paper_dir.glob("*.state.json"):
-            try:
-                data = json.loads(state_file.read_text())
-            except (json.JSONDecodeError, OSError) as e:
-                logger.debug(f"Failed to read paper state file {state_file}: {e}")
+            data = _load_paper_state_file(state_file)
+            if data is None:
                 continue
-
-            if not isinstance(data, dict):
-                logger.debug(f"Paper state file {state_file} is not a JSON object, skipping")
-                continue
-
-            strategy_id = data.get("strategy_id", state_file.stem.replace(".state", ""))
-            config = data.get("config", {})
-            if not isinstance(config, dict):
-                config = {}
-
-            # Determine status: check PID liveness and file freshness
-            status = "PAPER_TRADING"
-            pid = data.get("pid")
-            file_status = data.get("status", "unknown")
-            if file_status in ("stopped", "stopped_clean", "error", "completed"):
-                status = "INACTIVE"
-            elif isinstance(pid, int) and pid > 0:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    last_save = data.get("last_save")
-                    if last_save:
-                        try:
-                            last_dt = datetime.fromisoformat(last_save)
-                            if last_dt.tzinfo is None:
-                                last_dt = last_dt.replace(tzinfo=UTC)
-                            age = (datetime.now(UTC) - last_dt).total_seconds()
-                            if age > 300:
-                                status = "INACTIVE"
-                        except (ValueError, TypeError):
-                            status = "INACTIVE"
-
-            chain = config.get("chain", "arbitrum")
-            protocol = config.get("protocol", "")
-            if not protocol:
-                protocol = self._derive_protocol_from_config(config, strategy_id)
-
-            trades = data.get("trades", [])
-            if not isinstance(trades, list):
-                trades = []
-            errors = data.get("errors", [])
-            if not isinstance(errors, list):
-                errors = []
-            equity_curve = data.get("equity_curve", [])
-            if not isinstance(equity_curve, list):
-                equity_curve = []
-            tick_count = data.get("tick_count", 0)
-            success_count = len(trades)
-            error_count = len(errors)
-            hold_count = max(0, tick_count - success_count - error_count)
-
-            total_gas_cost = Decimal("0")
-            for trade in trades:
-                try:
-                    total_gas_cost += Decimal(str(trade.get("gas_cost_usd", "0")))
-                except (ValueError, TypeError, ArithmeticError) as e:
-                    logger.debug("Skipping malformed gas_cost_usd in trade %s: %s", trade, e)
-
-            # PnL from portfolio state, not summed trade deltas (Fix #4).
-            # The equity curve tracks mark-to-market portfolio value including
-            # open positions. PnL = latest equity value - initial value.
-            simulated_pnl = Decimal("0")
-            initial_value = Decimal("0")
-            current_value = Decimal("0")
-            if equity_curve:
-                try:
-                    initial_value = Decimal(str(equity_curve[0].get("value", "0")))
-                    current_value = Decimal(str(equity_curve[-1].get("value", "0")))
-                    simulated_pnl = current_value - initial_value
-                except (IndexError, AttributeError, ValueError):
-                    pass
-            # Fallback: use initial/current balances if no equity curve
-            if not equity_curve:
-                initial_balances = data.get("initial_balances", {})
-                current_balances = data.get("current_balances", {})
-                if initial_balances and current_balances:
-                    # Can't compute PnL without prices — leave at 0
-                    pass
-
-            last_trade_at = ""
-            if trades:
-                last_trade_at = trades[-1].get("timestamp", "")
-
-            trades_per_hour = Decimal("0")
-            session_start = data.get("session_start", "")
-            if session_start and success_count > 0:
-                try:
-                    start_dt = datetime.fromisoformat(session_start)
-                    if start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(tzinfo=UTC)
-                    hours = Decimal(str((datetime.now(UTC) - start_dt).total_seconds())) / Decimal("3600")
-                    if hours > 0:
-                        trades_per_hour = Decimal(success_count) / hours
-                except (ValueError, TypeError):
-                    pass
-
-            # Prefer persisted error_breakdown; fall back to reconstructing from errors list
-            error_breakdown = data.get("error_breakdown")
-            if not isinstance(error_breakdown, dict):
-                error_breakdown = {}
-                for error in errors:
-                    if isinstance(error, dict):
-                        etype = error.get("error_type", "unknown")
-                        error_breakdown[etype] = error_breakdown.get(etype, 0) + 1
-
-            # Downsample equity curve to max 200 points (always include last point)
-            eq_points = equity_curve
-            if len(eq_points) > 200:
-                step = len(eq_points) / 199
-                eq_points = [eq_points[int(i * step)] for i in range(199)] + [eq_points[-1]]
-
-            paper_metrics = {
-                "tick_count": tick_count,
-                "success_count": success_count,
-                "hold_count": hold_count,
-                "error_count": error_count,
-                "simulated_pnl_usd": str(simulated_pnl),
-                "total_gas_cost_usd": str(total_gas_cost),
-                "last_trade_at": last_trade_at,
-                "session_start": session_start,
-                "trades_per_hour": str(trades_per_hour),
-                "equity_curve": eq_points,
-                "error_breakdown": error_breakdown,
-                "ticks_with_fork": data.get("ticks_with_fork", 0),
-                "ticks_with_indicators": data.get("ticks_with_indicators", 0),
-                "ticks_with_action": data.get("ticks_with_action", 0),
-                "anvil_result": data.get("anvil_result"),
-            }
-
-            total_value = str(current_value) if current_value else "0"
-
-            last_action_ts = 0
-            last_save = data.get("last_save")
-            if last_save:
-                try:
-                    last_dt = datetime.fromisoformat(last_save)
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=UTC)
-                    last_action_ts = int(last_dt.timestamp())
-                except (ValueError, TypeError):
-                    pass
-
-            sessions.append(
-                {
-                    "strategy_id": f"paper:{strategy_id}",
-                    "name": strategy_id.replace("_", " ").title() + " (Paper)",
-                    "status": status,
-                    "chain": chain,
-                    "protocol": protocol,
-                    "total_value_usd": total_value,
-                    "pnl_24h_usd": "0",  # Keep 0 to avoid contaminating portfolio 24h total; simulated PnL is in paper_metrics_json
-                    "last_action_at": last_action_ts,
-                    "attention_required": status == "INACTIVE",
-                    "attention_reason": "Paper session inactive" if status == "INACTIVE" else "",
-                    "is_multi_chain": "," in str(chain),
-                    "chains": [c.strip() for c in str(chain).split(",")],
-                    "execution_mode": "paper",
-                    "paper_metrics_json": json.dumps(paper_metrics),
-                }
-            )
-
+            sessions.append(self._build_paper_session(state_file, data))
         return sessions
+
+    def _build_paper_session(self, state_file: Path, data: dict) -> dict:
+        """Assemble a single paper-session info dict from a parsed state file."""
+        # ``data.get("strategy_id", default)`` returns ``None`` when the key is
+        # *present-and-explicitly-null* (the default only fires on absent keys).
+        # Downstream we call ``strategy_id.replace(...)`` and pass it into
+        # ``_derive_protocol_from_config``, which would crash and abort discovery
+        # for *every* paper session. Guard with isinstance + non-empty check.
+        raw_strategy_id = data.get("strategy_id")
+        strategy_id = (
+            raw_strategy_id
+            if isinstance(raw_strategy_id, str) and raw_strategy_id
+            else state_file.stem.replace(".state", "")
+        )
+        raw_config = data.get("config")
+        config: dict = raw_config if isinstance(raw_config, dict) else {}
+
+        status = _determine_paper_session_status(data)
+        # Untrusted JSON ``config["chain"]`` / ``config["protocol"]`` can be a
+        # dict, list, or other non-string. Downstream callers (``s["chain"].lower()``
+        # in ``ListStrategies``, proto string field population) would crash on
+        # one bad ``.state.json`` and take down the whole response path.
+        raw_chain = config.get("chain")
+        chain = raw_chain if isinstance(raw_chain, str) and raw_chain else "arbitrum"
+        raw_protocol = config.get("protocol")
+        protocol = (
+            raw_protocol
+            if isinstance(raw_protocol, str) and raw_protocol
+            else self._derive_protocol_from_config(config, strategy_id)
+        )
+
+        # Filter list contents — not just the container type — so a single
+        # non-dict element (e.g. ``trades: [null, {...}]`` from a corrupt
+        # ``.state.json``) doesn't blow up ``_build_paper_metrics``
+        # (``trade.get(...)``) and abort discovery for every other paper session.
+        raw_trades = data.get("trades")
+        trades: list = [t for t in raw_trades if isinstance(t, dict)] if isinstance(raw_trades, list) else []
+        raw_errors = data.get("errors")
+        errors: list = [e for e in raw_errors if isinstance(e, dict)] if isinstance(raw_errors, list) else []
+        raw_equity_curve = data.get("equity_curve")
+        equity_curve: list = (
+            [p for p in raw_equity_curve if isinstance(p, dict)] if isinstance(raw_equity_curve, list) else []
+        )
+
+        # PnL from portfolio state, not summed trade deltas (Fix #4).
+        # The equity curve tracks mark-to-market portfolio value including
+        # open positions. PnL = latest equity value - initial value.
+        _, current_value, simulated_pnl = _compute_paper_equity_pnl(equity_curve)
+
+        paper_metrics = _build_paper_metrics(
+            data=data,
+            trades=trades,
+            errors=errors,
+            equity_curve=equity_curve,
+            simulated_pnl=simulated_pnl,
+        )
+
+        return {
+            "strategy_id": f"paper:{strategy_id}",
+            "name": strategy_id.replace("_", " ").title() + " (Paper)",
+            "status": status,
+            "chain": chain,
+            "protocol": protocol,
+            "total_value_usd": str(current_value) if current_value else "0",
+            # Keep 0 to avoid contaminating portfolio 24h total; simulated PnL is in paper_metrics_json
+            "pnl_24h_usd": "0",
+            "last_action_at": _compute_paper_last_action_ts(data.get("last_save")),
+            "attention_required": status == "INACTIVE",
+            "attention_reason": "Paper session inactive" if status == "INACTIVE" else "",
+            "is_multi_chain": "," in str(chain),
+            "chains": [c.strip() for c in str(chain).split(",")],
+            "execution_mode": "paper",
+            "paper_metrics_json": json.dumps(paper_metrics),
+        }
 
     def _derive_protocol_from_config(self, config: dict, strategy_id: str) -> str:  # noqa: C901
         """Derive protocol string from config or strategy ID."""
-        if "protocol" in config:
-            return config["protocol"]
+        # Same untrusted-JSON hazard as the caller: ``config["protocol"]`` could
+        # be a list / dict / None. Only honour a non-empty string; otherwise
+        # fall through to the strategy-id heuristics below.
+        explicit = config.get("protocol")
+        if isinstance(explicit, str) and explicit:
+            return explicit
 
         if "pool" in config:
             return "Uniswap V3"
@@ -1849,7 +2165,51 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             xfail_cells=posture.xfail,
         )
 
-    async def GetTradeTape(  # noqa: C901
+    async def _collect_trade_tape_sources(
+        self,
+        strategy_id: str,
+        limit: int,
+        before_ts: datetime | None,
+    ) -> tuple[list[Any], list[dict[str, Any]], list[Any]]:
+        """Fetch ledger / accounting / position rows for a trade tape.
+
+        Failure semantics differ across sources:
+          - **Ledger** is the primary source. ``GetTradeTapeResponse`` has no
+            error field, so a swallowed backend failure here is indistinguishable
+            from a genuine empty history. We let the exception propagate so the
+            caller can map it to a non-OK gRPC status. A missing ``StateManager``
+            (initialization failed) is treated the same way — the ledger backend
+            is unavailable and callers must be told, not lied to with empty rows.
+          - **Accounting / position** are optional enrichment. Per-source failures
+            are logged at DEBUG and degrade gracefully to empty lists — the trade
+            tape still renders the ledger rows without joined event payloads.
+        """
+        accounting_events: list[dict[str, Any]] = []
+        position_events: list[Any] = []
+        if self._state_manager is None:
+            # Same fail-loud contract as a backend exception — see GetTradeTape
+            # which catches and maps to gRPC UNAVAILABLE.
+            raise RuntimeError("StateManager unavailable")
+
+        # Primary source — propagate to caller.
+        # Over-fetch by 1 to set has_more; push before_timestamp cursor into SQL
+        # so we never return an empty page when `limit` newer-than-cursor rows exist.
+        ledger_entries = await self._state_manager.get_ledger_entries(
+            strategy_id, since=None, intent_type=None, limit=limit + 1, before=before_ts
+        )
+        # Optional enrichment — swallow per-source errors.
+        try:
+            # Async sibling — see GetQuantHeader for rationale (VIB-3933).
+            accounting_events = await self._state_manager.get_accounting_events_for_dashboard(deployment_id=strategy_id)
+        except Exception:
+            logger.debug("get_accounting_events_for_dashboard failed for %s", strategy_id, exc_info=True)
+        try:
+            position_events = await self._state_manager.get_position_events_for_dashboard(deployment_id=strategy_id)
+        except Exception:
+            logger.debug("get_position_events_for_dashboard failed for %s", strategy_id, exc_info=True)
+        return ledger_entries, accounting_events, position_events
+
+    async def GetTradeTape(
         self,
         request: gateway_pb2.GetTradeTapeRequest,
         context: grpc.aio.ServicerContext,
@@ -1872,151 +2232,50 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         strategy_id = resolve_agent_id(strategy_id)
 
         limit = request.limit if request.limit > 0 else 50
-        before_ts = datetime.fromtimestamp(request.before_timestamp, tz=UTC) if request.before_timestamp > 0 else None
+        # Validate the cursor: ``datetime.fromtimestamp`` raises ``OverflowError``
+        # / ``OSError`` / ``ValueError`` on out-of-range epoch values (year > 9999,
+        # platform-specific bounds). Map to INVALID_ARGUMENT so callers can
+        # correct the request — same pattern used by ``GetActivityFeed``.
+        try:
+            before_ts = (
+                datetime.fromtimestamp(request.before_timestamp, tz=UTC) if request.before_timestamp > 0 else None
+            )
+        except (OverflowError, OSError, ValueError) as e:
+            logger.warning("Invalid before_timestamp in GetTradeTape (%r): %s", request.before_timestamp, e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                "before_timestamp out of range (must be a Unix epoch second within the supported datetime range)"
+            )
+            return gateway_pb2.GetTradeTapeResponse()
 
-        ledger_entries: list[Any] = []
-        accounting_events: list[dict[str, Any]] = []
-        position_events: list[Any] = []
-
-        if self._state_manager is not None:
-            try:
-                # over-fetch by 1 to set has_more; push before_timestamp
-                # cursor into SQL so we never return an empty page when
-                # `limit` newer-than-cursor rows exist
-                ledger_entries = await self._state_manager.get_ledger_entries(
-                    strategy_id, since=None, intent_type=None, limit=limit + 1, before=before_ts
-                )
-            except Exception:
-                logger.debug("get_ledger_entries failed for %s", strategy_id, exc_info=True)
-            try:
-                # Async sibling — see GetQuantHeader for rationale (VIB-3933).
-                accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
-                    deployment_id=strategy_id
-                )
-            except Exception:
-                logger.debug("get_accounting_events_for_dashboard failed for %s", strategy_id, exc_info=True)
-            try:
-                position_events = await self._state_manager.get_position_events_for_dashboard(deployment_id=strategy_id)
-            except Exception:
-                logger.debug("get_position_events_for_dashboard failed for %s", strategy_id, exc_info=True)
-
-        # Index accounting events by ledger_entry_id and cycle_id for fast join
-        events_by_ledger: dict[str, dict[str, Any]] = {}
-        events_by_cycle: dict[str, list[dict[str, Any]]] = {}
-        for ev in accounting_events:
-            if not isinstance(ev, dict):
-                continue
-            le = ev.get("ledger_entry_id")
-            if le:
-                events_by_ledger[le] = ev
-            cy = ev.get("cycle_id")
-            if cy:
-                events_by_cycle.setdefault(cy, []).append(ev)
-
-        # Index position events by ledger_entry_id
-        pos_by_ledger: dict[str, dict[str, Any]] = {}
-        for pe in position_events:
-            if not isinstance(pe, dict):
-                continue
-            le = pe.get("ledger_entry_id")
-            if le:
-                pos_by_ledger[le] = pe
+        try:
+            ledger_entries, accounting_events, position_events = await self._collect_trade_tape_sources(
+                strategy_id, limit, before_ts
+            )
+        except Exception:
+            # Ledger backend failure on the primary source. ``GetTradeTapeResponse``
+            # has no error field, so we can't render an empty list without lying
+            # about what happened — surface UNAVAILABLE so callers can retry or
+            # degrade their UI rather than rendering "no trades" misleadingly.
+            # Stack trace is logged but not returned to the client (gateway is the
+            # security boundary — no implementation details leak across the gRPC
+            # response).
+            logger.exception("get_ledger_entries failed for %s", strategy_id)
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details("Failed to load trade tape from ledger backend")
+            return gateway_pb2.GetTradeTapeResponse()
+        events_by_ledger, events_by_cycle = _index_trade_tape_accounting_events(accounting_events)
+        pos_by_ledger = _index_trade_tape_position_events(position_events)
 
         rows: list[gateway_pb2.TradeTapeRow] = []
         for entry in ledger_entries:
-            entry_id = getattr(entry, "id", "")
-            cycle_id = getattr(entry, "cycle_id", "")
             ts = getattr(entry, "timestamp", None)
-            ts_unix = int(ts.timestamp()) if ts else 0
             if before_ts is not None and ts and ts >= before_ts:
                 continue
-
-            row_event: dict[str, Any] | None = events_by_ledger.get(entry_id)
-            if row_event is None:
-                # Cycle-level fallback only when the join is unambiguous —
-                # i.e. the cycle has *exactly one* accounting event. A
-                # teardown cycle deliberately writes one event per intent
-                # (LP_CLOSE, REPAY, swap-back …), and grabbing
-                # ``cyc_events[0]`` could attach another intent's payload,
-                # confidence, position key, and version stamps to this row.
-                # The trade tape is an audit surface — wrong joins are
-                # worse than empty cells. (Codex audit on PR #2014.)
-                cyc_events = events_by_cycle.get(cycle_id, [])
-                if len(cyc_events) == 1:
-                    row_event = cyc_events[0]
-
-            payload_raw = row_event.get("payload_json") if row_event else ""
-            confidence = row_event.get("confidence", "") if row_event else ""
-            event_type = row_event.get("event_type", "") if row_event else ""
-            position_key = row_event.get("position_key", "") if row_event else ""
-
-            unavailable_reason = ""
-            schema_v = formula_v = matching_v = 0
-            if payload_raw:
-                try:
-                    p = json.loads(payload_raw)
-                    if isinstance(p, dict):
-                        unavailable_reason = p.get("unavailable_reason") or ""
-                        schema_v = int(p.get("schema_version") or 0)
-                        formula_v = int(p.get("formula_version") or 0)
-                        matching_v = int(p.get("matching_policy_version") or 0)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    pass
-
-            pe = pos_by_ledger.get(entry_id)
-            position_event_json = ""
-            position_id = ""
-            position_event_type = ""
-            if pe is not None:
-                # Convert datetime objects to ISO strings for JSON
-                pe_clean = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in pe.items()}
-                try:
-                    position_event_json = json.dumps(pe_clean, default=str)
-                except (TypeError, ValueError):
-                    position_event_json = ""
-                position_id = str(pe.get("position_id") or "")
-                position_event_type = str(pe.get("event_type") or "")
-
-            row = gateway_pb2.TradeTapeRow(
-                id=entry_id,
-                cycle_id=cycle_id,
-                timestamp=ts_unix,
-                intent_type=getattr(entry, "intent_type", ""),
-                token_in=getattr(entry, "token_in", "") or "",
-                amount_in=getattr(entry, "amount_in", "") or "",
-                token_out=getattr(entry, "token_out", "") or "",
-                amount_out=getattr(entry, "amount_out", "") or "",
-                effective_price=getattr(entry, "effective_price", "") or "",
-                slippage_bps=getattr(entry, "slippage_bps", None) or 0.0,
-                gas_used=getattr(entry, "gas_used", 0) or 0,
-                gas_usd=getattr(entry, "gas_usd", "") or "",
-                tx_hash=getattr(entry, "tx_hash", "") or "",
-                chain=getattr(entry, "chain", "") or "",
-                protocol=getattr(entry, "protocol", "") or "",
-                success=bool(getattr(entry, "success", True)),
-                error=getattr(entry, "error", "") or "",
-                amount_in_usd="",
-                amount_out_usd="",
-                extracted_data_json=getattr(entry, "extracted_data_json", "") or "",
-                price_inputs_json=getattr(entry, "price_inputs_json", "") or "",
-                pre_state_json=getattr(entry, "pre_state_json", "") or "",
-                post_state_json=getattr(entry, "post_state_json", "") or "",
-                accounting_payload_json=payload_raw or "",
-                accounting_event_type=event_type,
-                position_key=position_key,
-                confidence=confidence,
-                unavailable_reason=unavailable_reason,
-                schema_version=schema_v,
-                formula_version=formula_v,
-                matching_policy_version=matching_v,
-                position_event_json=position_event_json,
-                position_id=position_id,
-                position_event_type=position_event_type,
-                row_wallet_delta_usd="",
-                row_component_usd="",
-                row_residual_usd="",
-            )
-            rows.append(row)
+            entry_id = getattr(entry, "id", "")
+            cycle_id = getattr(entry, "cycle_id", "")
+            row_event = _resolve_trade_tape_row_event(entry_id, cycle_id, events_by_ledger, events_by_cycle)
+            rows.append(_build_trade_tape_row(entry, row_event, pos_by_ledger.get(entry_id)))
             if len(rows) >= limit:
                 break
 

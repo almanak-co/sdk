@@ -421,6 +421,30 @@ class TestGatewayPaperSessionDiscovery:
             sessions = self._make_servicer()._discover_paper_sessions()
         assert sessions == []
 
+    def test_handles_non_utf8_state_file(self, tmp_path):
+        """A non-UTF-8 ``.state.json`` is skipped, not allowed to abort discovery.
+
+        ``Path.read_text()`` defaults to UTF-8 and raises ``UnicodeDecodeError``
+        (subclass of ``ValueError``, NOT ``OSError``) on a binary / latin-1 file.
+        Without explicit handling, one corrupt-encoding file would take out
+        every paper session in the dashboard.
+        """
+        paper_dir = tmp_path / ".almanak" / "paper"
+        paper_dir.mkdir(parents=True)
+        # Write bytes that are valid latin-1 but invalid UTF-8 (0xff is never
+        # a valid first byte in UTF-8). A real-world repro is e.g. a state
+        # file written by a Windows tool with cp1252 encoding.
+        (paper_dir / "bad_encoding.state.json").write_bytes(b"\xff\xfe garbage")
+        # And a healthy file alongside it — the bad one must be skipped, not
+        # cascade-fail the healthy one.
+        self._make_state_file(paper_dir, "healthy_strat")
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            sessions = self._make_servicer()._discover_paper_sessions()
+
+        assert len(sessions) == 1
+        assert sessions[0]["strategy_id"] == "paper:healthy_strat"
+
     def test_equity_curve_downsampling(self, tmp_path):
         paper_dir = tmp_path / ".almanak" / "paper"
         paper_dir.mkdir(parents=True)
@@ -435,6 +459,242 @@ class TestGatewayPaperSessionDiscovery:
 
         metrics = json.loads(sessions[0]["paper_metrics_json"])
         assert len(metrics["equity_curve"]) == 200
+
+    def test_dead_pid_without_last_save_is_inactive(self, tmp_path):
+        """Dead PID + missing ``last_save`` must be INACTIVE per docstring contract.
+
+        The previous branch returned PAPER_TRADING here, which kept orphaned paper
+        sessions looking live whenever the timestamp had never been persisted.
+        """
+        paper_dir = tmp_path / ".almanak" / "paper"
+        paper_dir.mkdir(parents=True)
+        # PID 999999999 is essentially guaranteed dead. Remove the ``last_save`` key
+        # entirely (not just blank it) so the test would catch any future divergence
+        # between "missing field" and "empty string" in _determine_paper_session_status.
+        state_file = self._make_state_file(paper_dir, "orphan_strat", pid=999999999)
+        payload = json.loads(state_file.read_text())
+        payload.pop("last_save", None)
+        state_file.write_text(json.dumps(payload))
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            sessions = self._make_servicer()._discover_paper_sessions()
+
+        assert len(sessions) == 1
+        assert sessions[0]["status"] == "INACTIVE"
+
+    def test_null_strategy_id_falls_back_to_state_file_stem(self, tmp_path):
+        """``strategy_id: null`` in JSON must fall back to the state-file stem.
+
+        ``data.get("strategy_id", default)`` only returns the default when the
+        key is *absent*. With ``"strategy_id": null`` the key is present, so the
+        helper returned ``None`` — and downstream ``strategy_id.replace(...)``
+        / ``_derive_protocol_from_config`` would crash, aborting the whole
+        paper-session list discovery.
+        """
+        paper_dir = tmp_path / ".almanak" / "paper"
+        paper_dir.mkdir(parents=True)
+        # ``_make_state_file`` takes ``strategy_id`` as a positional that drives
+        # both the file content AND the file stem; overwrite just the content
+        # field afterwards so the stem stays ``null_strat`` and the JSON has
+        # ``"strategy_id": null``.
+        state_file = self._make_state_file(paper_dir, "null_strat")
+        payload = json.loads(state_file.read_text())
+        payload["strategy_id"] = None
+        state_file.write_text(json.dumps(payload))
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            sessions = self._make_servicer()._discover_paper_sessions()
+
+        assert len(sessions) == 1
+        # Falls back to ``state_file.stem.replace(".state", "")``.
+        assert sessions[0]["strategy_id"] == "paper:null_strat"
+
+    def test_non_string_chain_and_protocol_fall_back_to_defaults(self, tmp_path):
+        """Non-string ``chain`` / ``protocol`` must coerce to defaults, not crash.
+
+        Downstream callers (``s["chain"].lower()`` in ``ListStrategies``, proto
+        string field population) would crash on a corrupt ``{"chain": {}}`` /
+        ``{"protocol": []}`` and take down the whole response path.
+        """
+        paper_dir = tmp_path / ".almanak" / "paper"
+        paper_dir.mkdir(parents=True)
+        self._make_state_file(
+            paper_dir,
+            "bad_config",
+            config={"chain": {}, "protocol": []},  # both non-string
+        )
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            sessions = self._make_servicer()._discover_paper_sessions()
+
+        assert len(sessions) == 1
+        session = sessions[0]
+        # ``chain`` falls back to the "arbitrum" default; ``protocol`` falls
+        # back to ``_derive_protocol_from_config``'s output (a string).
+        assert session["chain"] == "arbitrum"
+        assert isinstance(session["protocol"], str)
+        # Downstream contract: chain/protocol are always proto-safe strings.
+        assert isinstance(session["chain"], str)
+
+    def test_non_dict_items_in_trades_errors_equity_dont_crash_discovery(self, tmp_path):
+        """Non-dict elements in ``trades`` / ``errors`` / ``equity_curve`` are filtered out.
+
+        Without the content filter, downstream helpers (``trade.get(...)``,
+        ``error.get(...)``, equity-curve endpoint accessors) would raise on the
+        first non-dict element and abort ``_discover_paper_sessions`` — taking
+        out *every* paper session in the dashboard, not just the corrupt one.
+        """
+        paper_dir = tmp_path / ".almanak" / "paper"
+        paper_dir.mkdir(parents=True)
+        self._make_state_file(
+            paper_dir,
+            "corrupt_lists",
+            trades=[
+                None,  # corrupt
+                "not a dict",  # corrupt
+                {"timestamp": "2026-04-01T10:30:00+00:00", "gas_cost_usd": "0.10", "net_pnl_usd": "0.50"},
+            ],
+            errors=[None, "string error", {"error_type": "rpc"}],
+            equity_curve=[
+                None,
+                {"timestamp": "2026-04-01T10:00:00+00:00", "value": "100"},
+                "not a dict",
+                {"timestamp": "2026-04-01T11:00:00+00:00", "value": "101"},
+            ],
+        )
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            sessions = self._make_servicer()._discover_paper_sessions()
+
+        # Discovery completes; the session is rendered using only the dict items.
+        assert len(sessions) == 1
+        metrics = json.loads(sessions[0]["paper_metrics_json"])
+        # Equity curve survives with the two valid dict points only.
+        assert len(metrics["equity_curve"]) == 2
+
+
+def test_determine_paper_session_status_handles_unhashable_status() -> None:
+    """A non-string ``status`` (list / dict) must NOT raise on the ``in <set>`` check.
+
+    Without the ``isinstance(raw, str)`` guard, ``data["status"] in
+    _PAPER_INACTIVE_FILE_STATUSES`` raises ``TypeError`` on unhashable values
+    and aborts ``_discover_paper_sessions`` for every paper session.
+    """
+    from almanak.gateway.services.dashboard_service import _determine_paper_session_status
+
+    # Unhashable values fall through to the "unknown" classification path.
+    assert _determine_paper_session_status({"status": []}) == "PAPER_TRADING"
+    assert _determine_paper_session_status({"status": {}}) == "PAPER_TRADING"
+    assert _determine_paper_session_status({"status": None}) == "PAPER_TRADING"
+    assert _determine_paper_session_status({"status": 42}) == "PAPER_TRADING"
+    # And the happy-path string still triggers the inactive set membership.
+    assert _determine_paper_session_status({"status": "stopped"}) == "INACTIVE"
+
+
+def test_build_paper_error_breakdown_coerces_unhashable_error_type() -> None:
+    """A non-string ``error_type`` must coerce to ``"unknown"`` instead of crashing.
+
+    ``breakdown[etype]`` raises ``TypeError`` when ``etype`` is a list/dict
+    (unhashable). Coercing to a str-or-fallback keeps the aggregation intact.
+    """
+    from almanak.gateway.services.dashboard_service import _build_paper_error_breakdown
+
+    errors = [
+        {"error_type": "rpc"},
+        {"error_type": []},  # unhashable list
+        {"error_type": {"nested": "x"}},  # unhashable dict
+        {"error_type": None},
+        {"error_type": ""},  # empty string falls back to "unknown"
+        {"error_type": "rpc"},
+    ]
+    breakdown = _build_paper_error_breakdown(None, errors)
+    assert breakdown == {"rpc": 2, "unknown": 4}
+
+
+def test_safe_int_coerces_or_falls_back() -> None:
+    """``_safe_int`` is the chokepoint that prevents bad JSON from crashing discovery."""
+    from almanak.gateway.services.dashboard_service import _safe_int
+
+    # Happy paths.
+    assert _safe_int(42) == 42
+    assert _safe_int("42") == 42
+    assert _safe_int(0) == 0
+
+    # Garbage / unexpected types fall back to 0 (default) instead of raising.
+    assert _safe_int(None) == 0
+    assert _safe_int("garbage") == 0
+    assert _safe_int([1, 2]) == 0
+    assert _safe_int({"x": 1}) == 0
+
+    # Negatives clamp to 0 (paper-session counters are never negative).
+    assert _safe_int(-5) == 0
+
+    # Custom defaults are honoured for missing/None values.
+    assert _safe_int(None, default=7) == 7
+
+
+def test_build_paper_metrics_handles_string_tick_count(tmp_path) -> None:
+    """A string ``tick_count`` from a corrupt state file must not crash discovery.
+
+    Without the ``_safe_int`` coercion, ``max(0, "50" - len(trades) - len(errors))``
+    raises ``TypeError`` and aborts ``_discover_paper_sessions`` for every paper
+    session in the dashboard, not just the corrupt one.
+    """
+    from almanak.gateway.services.dashboard_service import _build_paper_metrics
+
+    metrics = _build_paper_metrics(
+        data={"tick_count": "50", "ticks_with_fork": None, "ticks_with_action": "garbage"},
+        trades=[],
+        errors=[],
+        equity_curve=[],
+        simulated_pnl=Decimal("0"),
+    )
+
+    # Each tick field independently coerced; corrupt fields fall back to 0.
+    assert metrics["tick_count"] == 50
+    assert metrics["ticks_with_fork"] == 0
+    assert metrics["ticks_with_action"] == 0
+    # hold_count arithmetic survives because tick_count is a clean int.
+    assert metrics["hold_count"] == 50
+
+
+def test_downsample_equity_curve_guards_max_points_one() -> None:
+    """``max_points=1`` must not trigger ``ZeroDivisionError`` (n / (max_points - 1))."""
+    from almanak.gateway.services.dashboard_service import _downsample_equity_curve
+
+    points = [{"value": str(i)} for i in range(10)]
+    # Should preserve the last point only — no division by zero.
+    assert _downsample_equity_curve(points, max_points=1) == [{"value": "9"}]
+    # And max_points=0 / negative degrade gracefully to an empty curve.
+    assert _downsample_equity_curve(points, max_points=0) == []
+    assert _downsample_equity_curve(points, max_points=-5) == []
+
+
+def test_compute_paper_equity_pnl_returns_zero_on_corrupt_decimal() -> None:
+    """Garbage ``value`` strings raise ``decimal.InvalidOperation`` (an ArithmeticError).
+
+    The except clause must catch ArithmeticError so a single corrupt endpoint
+    in a ``.state.json`` file doesn't bubble out of paper-session discovery and
+    break dashboard reads.
+    """
+    from decimal import Decimal
+
+    from almanak.gateway.services.dashboard_service import _compute_paper_equity_pnl
+
+    # Endpoint with a non-numeric value — Decimal(str("not-a-number")) raises
+    # decimal.InvalidOperation, which is NOT a ValueError.
+    curve = [{"value": "100"}, {"value": "garbage"}]
+    initial, current, pnl = _compute_paper_equity_pnl(curve)
+    assert (initial, current, pnl) == (Decimal("0"), Decimal("0"), Decimal("0"))
+
+    # Empty endpoint dict ("value" missing) defaults to "0" → still parseable.
+    curve = [{}, {}]
+    initial, current, pnl = _compute_paper_equity_pnl(curve)
+    assert (initial, current, pnl) == (Decimal("0"), Decimal("0"), Decimal("0"))
+
+    # Non-dict endpoint (e.g. ``None``) is caught via AttributeError and zeroes out.
+    initial, current, pnl = _compute_paper_equity_pnl([None, {"value": "100"}])
+    assert (initial, current, pnl) == (Decimal("0"), Decimal("0"), Decimal("0"))
 
 
 # ---------------------------------------------------------------------------

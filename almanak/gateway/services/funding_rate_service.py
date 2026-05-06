@@ -185,6 +185,73 @@ class FundingRateData:
     is_live_data: bool
 
 
+# =============================================================================
+# Hyperliquid response parsing helpers (pure, module-private)
+# =============================================================================
+
+
+def _find_hyperliquid_coin_index(universe: list, coin: str) -> int | None:
+    """Locate ``coin`` within Hyperliquid's universe list, validating each entry."""
+    for i, u in enumerate(universe):
+        try:
+            item = HyperliquidUniverseItem.model_validate(u)
+        except Exception:
+            logger.debug("Skipping invalid universe item at index %d", i)
+            continue
+        if item.name.upper() == coin:
+            return i
+    return None
+
+
+def _parse_hyperliquid_asset_ctx(
+    asset_ctxs: list,
+    coin_index: int,
+    market: str,
+    default_rate: Decimal,
+    default_mark: Decimal,
+    default_oi_long: Decimal,
+    default_oi_short: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal, bool]:
+    """Extract (rate_hourly, oi_long, oi_short, mark_price, is_live) from one asset context."""
+    rate_hourly = default_rate
+    open_interest_long = default_oi_long
+    open_interest_short = default_oi_short
+    mark_price = default_mark
+    is_live_data = False
+
+    if coin_index >= len(asset_ctxs):
+        return rate_hourly, open_interest_long, open_interest_short, mark_price, is_live_data
+
+    try:
+        ctx = HyperliquidAssetContext.model_validate(asset_ctxs[coin_index])
+    except Exception as e:
+        logger.warning("Invalid Hyperliquid asset context for %s: %s", market, e)
+        ctx = HyperliquidAssetContext()
+
+    # Funding is reported as an 8-hour rate; convert to hourly to match our schema.
+    if ctx.funding:
+        funding_8h = Decimal(str(ctx.funding))
+        rate_hourly = funding_8h / Decimal("8")
+        is_live_data = True
+
+    if ctx.openInterest and ctx.markPx:
+        oi_coins = Decimal(str(ctx.openInterest))
+        mark_price = Decimal(str(ctx.markPx))
+        total_oi_usd = oi_coins * mark_price
+        open_interest_long = total_oi_usd * Decimal("0.52")
+        open_interest_short = total_oi_usd * Decimal("0.48")
+
+    return rate_hourly, open_interest_long, open_interest_short, mark_price, is_live_data
+
+
+def _compute_hyperliquid_next_funding_time(now: datetime) -> datetime:
+    """Hyperliquid settles funding every 8 hours at 00:00 / 08:00 / 16:00 UTC."""
+    next_settlement_hour = ((now.hour // 8) + 1) * 8
+    if next_settlement_hour >= 24:
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return now.replace(hour=next_settlement_hour, minute=0, second=0, microsecond=0)
+
+
 class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
     """Implements FundingRateService gRPC interface.
 
@@ -258,72 +325,40 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
                 json={"type": "metaAndAssetCtxs"},
                 headers={"Content-Type": "application/json"},
             ) as response:
-                if response.status == 200:
+                if response.status != 200:
+                    logger.warning("Hyperliquid API returned %d for %s", response.status, market)
+                else:
                     data = await response.json()
-
                     if isinstance(data, list) and len(data) >= 2:
-                        meta = data[0]
+                        universe = data[0].get("universe", [])
                         asset_ctxs = data[1]
-
-                        # Find the coin index by validating universe items
-                        universe = meta.get("universe", [])
-                        coin_index = None
-                        for i, u in enumerate(universe):
-                            try:
-                                item = HyperliquidUniverseItem.model_validate(u)
-                                if item.name.upper() == coin:
-                                    coin_index = i
-                                    break
-                            except Exception:
-                                logger.debug("Skipping invalid universe item at index %d", i)
-                                continue
-
-                        if coin_index is not None and coin_index < len(asset_ctxs):
-                            # Validate asset context with Pydantic
-                            try:
-                                ctx = HyperliquidAssetContext.model_validate(asset_ctxs[coin_index])
-                            except Exception as e:
-                                logger.warning("Invalid Hyperliquid asset context for %s: %s", market, e)
-                                ctx = HyperliquidAssetContext()
-
-                            # Extract funding rate (8-hour rate as decimal)
-                            if ctx.funding:
-                                funding_8h = Decimal(str(ctx.funding))
-                                rate_hourly = funding_8h / Decimal("8")
-                                is_live_data = True
-
-                            # Extract open interest
-                            if ctx.openInterest and ctx.markPx:
-                                oi_coins = Decimal(str(ctx.openInterest))
-                                mark_price = Decimal(str(ctx.markPx))
-                                total_oi_usd = oi_coins * mark_price
-                                open_interest_long = total_oi_usd * Decimal("0.52")
-                                open_interest_short = total_oi_usd * Decimal("0.48")
-
+                        coin_index = _find_hyperliquid_coin_index(universe, coin)
+                        if coin_index is not None:
+                            (
+                                rate_hourly,
+                                open_interest_long,
+                                open_interest_short,
+                                mark_price,
+                                is_live_data,
+                            ) = _parse_hyperliquid_asset_ctx(
+                                asset_ctxs,
+                                coin_index,
+                                market,
+                                rate_hourly,
+                                mark_price,
+                                open_interest_long,
+                                open_interest_short,
+                            )
                             logger.debug(
                                 "Fetched Hyperliquid rate for %s: %s/hour (live)",
                                 market,
                                 rate_hourly,
                             )
-                else:
-                    logger.warning("Hyperliquid API returned %d for %s", response.status, market)
 
         except TimeoutError:
             logger.warning("Timeout fetching Hyperliquid rate for %s", market)
         except Exception as e:
             logger.warning("Failed to fetch Hyperliquid rate for %s: %s", market, e)
-
-        # Calculate next funding time (8-hour windows at 00:00, 08:00, 16:00 UTC)
-        now = datetime.now(UTC)
-        current_hour = now.hour
-        next_settlement_hour = ((current_hour // 8) + 1) * 8
-        if next_settlement_hour >= 24:
-            next_settlement_hour = 0
-            next_funding_time = (now + timedelta(days=1)).replace(
-                hour=next_settlement_hour, minute=0, second=0, microsecond=0
-            )
-        else:
-            next_funding_time = now.replace(hour=next_settlement_hour, minute=0, second=0, microsecond=0)
 
         return FundingRateData(
             venue="hyperliquid",
@@ -333,7 +368,7 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             open_interest_short=open_interest_short,
             mark_price=mark_price,
             index_price=mark_price,
-            next_funding_time=next_funding_time,
+            next_funding_time=_compute_hyperliquid_next_funding_time(datetime.now(UTC)),
             is_live_data=is_live_data,
         )
 

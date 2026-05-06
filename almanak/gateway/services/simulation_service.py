@@ -58,6 +58,168 @@ ALCHEMY_NETWORKS = {
 ALCHEMY_SUPPORTED_CHAINS = set(ALCHEMY_NETWORKS.keys())
 ALCHEMY_MAX_BUNDLE_SIZE = 3
 
+_ALCHEMY_DEFAULT_GAS_USED = 100_000
+_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+# =============================================================================
+# Alchemy helpers (module-private; pure unless noted)
+# =============================================================================
+
+
+def _normalize_alchemy_value(value: str) -> str:
+    """Normalize a tx value string to 0x-prefixed hex; default '0x0' on parse failure."""
+    try:
+        return value if value.startswith("0x") else hex(int(value))
+    except ValueError:
+        logger.warning("Invalid transaction value format: %s, using default 0x0", value)
+        return "0x0"
+
+
+def _build_alchemy_tx_dict(tx: gateway_pb2.SimulateTransaction) -> dict:
+    """Convert a single SimulateTransaction proto into Alchemy's tx dict."""
+    tx_dict: dict = {
+        "from": tx.from_address or _ZERO_ADDRESS,
+        "data": tx.data or "0x",
+    }
+    # Only include "to" for non-contract-creation transactions
+    # Contract creation has empty to_address and should omit the field
+    if tx.to_address:
+        tx_dict["to"] = tx.to_address
+    if tx.value:
+        tx_dict["value"] = _normalize_alchemy_value(tx.value)
+    if tx.gas_limit > 0:
+        tx_dict["gas"] = hex(tx.gas_limit)
+    return tx_dict
+
+
+def _build_alchemy_payload(transactions: list[gateway_pb2.SimulateTransaction]) -> dict:
+    """Build the alchemy_simulateExecutionBundle JSON-RPC payload."""
+    return {
+        "jsonrpc": "2.0",
+        "method": "alchemy_simulateExecutionBundle",
+        "params": [[_build_alchemy_tx_dict(tx) for tx in transactions], "latest"],
+        "id": 1,
+    }
+
+
+def _parse_hex_or_int(value: object) -> int:
+    """Parse a string that is either 0x-prefixed hex or decimal; returns 0 on bad input.
+
+    Defensive against malformed Alchemy responses (e.g. ``"gasUsed": "bogus"`` or a
+    non-string value) — these would otherwise raise ``ValueError`` / ``TypeError`` and
+    bubble out of ``_parse_alchemy_results`` into ``SimulateBundle``'s generic
+    ``except Exception`` handler, which maps to gRPC ``INTERNAL`` and obscures the
+    real shape problem.
+    """
+    if not isinstance(value, str):
+        return 0
+    try:
+        return int(value, 16) if value.startswith("0x") else int(value)
+    except ValueError:
+        return 0
+
+
+def _extract_alchemy_gas_used(result: dict) -> int:
+    """Extract gas used from one Alchemy result; returns 0 if absent or malformed."""
+    if "gasUsed" in result:
+        return _parse_hex_or_int(result.get("gasUsed", "0x0"))
+    calls = result.get("calls")
+    if isinstance(calls, list) and calls and isinstance(calls[0], dict):
+        # Use only the first call (top-level transaction gas).
+        return _parse_hex_or_int(calls[0].get("gasUsed", "0x0"))
+    return 0
+
+
+def _find_alchemy_call_error(result: dict) -> str | None:
+    """Return the revert reason from the first failing call, or None on malformed shape.
+
+    Important subtlety: ``call.get("revertReason", default)`` returns ``None`` when
+    the field is *present and explicitly null* (only returns ``default`` when the key
+    is *absent*). Alchemy can and does emit ``"revertReason": null`` alongside an
+    ``"error"`` field. Without explicit-null handling, the caller's
+    ``revert_reason is not None`` check would skip the error branch and report the
+    failed tx as ``success=True``.
+    """
+    calls = result.get("calls")
+    if not isinstance(calls, list):
+        return None
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        if "error" in call:
+            # Prefer revertReason if it's a non-empty string. Fall back to error.
+            revert_reason = call.get("revertReason")
+            if isinstance(revert_reason, str) and revert_reason:
+                return revert_reason
+            error_msg = call.get("error", "Unknown error")
+            # Coerce non-string error payloads (dict / int / None) so the gRPC
+            # proto field stays a clean string, not a leaked Python repr.
+            return error_msg if isinstance(error_msg, str) else str(error_msg)
+    return None
+
+
+def _alchemy_rpc_error_response(data: dict) -> gateway_pb2.SimulateBundleResponse:
+    """Build an error response for a JSON-RPC ``error`` payload."""
+    error = data["error"]
+    error_msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+    return gateway_pb2.SimulateBundleResponse(
+        success=False,
+        simulated=True,
+        simulator_used="alchemy",
+        revert_reason=error_msg,
+    )
+
+
+def _parse_alchemy_results(data: dict, chain: str) -> gateway_pb2.SimulateBundleResponse:
+    """Convert a parsed Alchemy response into a SimulateBundleResponse.
+
+    HTTP 200 with neither a JSON-RPC ``error`` nor a non-empty ``result`` list is treated
+    as a malformed upstream response, not a green simulation — otherwise an Alchemy
+    protocol failure would be reported back to callers as ``success=True`` with empty
+    ``gas_estimates``.
+    """
+    if "error" in data:
+        return _alchemy_rpc_error_response(data)
+
+    results = data.get("result")
+    if not isinstance(results, list) or not results:
+        return gateway_pb2.SimulateBundleResponse(
+            success=False,
+            simulated=True,
+            simulator_used="alchemy",
+            error="Malformed Alchemy response: missing or empty result list",
+        )
+
+    gas_buffer = SIMULATION_GAS_BUFFERS.get(chain, DEFAULT_SIMULATION_BUFFER)
+    gas_estimates: list[int] = []
+
+    for result in results:
+        if not isinstance(result, dict):
+            return gateway_pb2.SimulateBundleResponse(
+                success=False,
+                simulated=True,
+                simulator_used="alchemy",
+                error="Malformed Alchemy response: invalid result item",
+            )
+        revert_reason = _find_alchemy_call_error(result)
+        if revert_reason is not None:
+            return gateway_pb2.SimulateBundleResponse(
+                success=False,
+                simulated=True,
+                simulator_used="alchemy",
+                revert_reason=revert_reason,
+            )
+        gas_used = _extract_alchemy_gas_used(result) or _ALCHEMY_DEFAULT_GAS_USED
+        gas_estimates.append(int(gas_used * (1 + gas_buffer)))
+
+    return gateway_pb2.SimulateBundleResponse(
+        success=True,
+        simulated=True,
+        gas_estimates=gas_estimates,
+        simulator_used="alchemy",
+    )
+
 
 class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
     """Implements SimulationService gRPC interface.
@@ -302,49 +464,31 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
             simulator_used="tenderly",
         )
 
-    async def _simulate_alchemy(  # noqa: C901
+    async def _simulate_alchemy(
         self,
         chain: str,
         transactions: list[gateway_pb2.SimulateTransaction],
     ) -> gateway_pb2.SimulateBundleResponse:
         """Simulate via Alchemy API."""
-        network = ALCHEMY_NETWORKS[chain]
-        url = f"https://{network}.g.alchemy.com/v2/{self._alchemy_key}"
+        url = f"https://{ALCHEMY_NETWORKS[chain]}.g.alchemy.com/v2/{self._alchemy_key}"
+        payload = _build_alchemy_payload(transactions)
 
-        # Build transactions array
-        raw_transactions = []
-        for tx in transactions:
-            tx_dict = {
-                "from": tx.from_address or "0x0000000000000000000000000000000000000000",
-                "data": tx.data or "0x",
-            }
-            # Only include "to" for non-contract-creation transactions
-            # Contract creation has empty to_address and should omit the field
-            if tx.to_address:
-                tx_dict["to"] = tx.to_address
+        data_or_response = await self._post_alchemy_simulate(url, payload)
+        if isinstance(data_or_response, gateway_pb2.SimulateBundleResponse):
+            return data_or_response
 
-            if tx.value:
-                value = tx.value
-                try:
-                    if not value.startswith("0x"):
-                        value = hex(int(value))
-                    tx_dict["value"] = value
-                except ValueError:
-                    logger.warning("Invalid transaction value format: %s, using default 0x0", value)
-                    tx_dict["value"] = "0x0"
+        return _parse_alchemy_results(data_or_response, chain)
 
-            if tx.gas_limit > 0:
-                tx_dict["gas"] = hex(tx.gas_limit)
+    async def _post_alchemy_simulate(
+        self,
+        url: str,
+        payload: dict,
+    ) -> dict | gateway_pb2.SimulateBundleResponse:
+        """POST to Alchemy and decode JSON.
 
-            raw_transactions.append(tx_dict)
-
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "alchemy_simulateExecutionBundle",
-            "params": [raw_transactions, "latest"],
-            "id": 1,
-        }
-
+        Returns the parsed dict on success, or an error SimulateBundleResponse
+        on HTTP non-200 / JSON decode failure.
+        """
         session = await self._get_session()
         async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as response:
             response_text = await response.text()
@@ -358,7 +502,7 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
                 )
 
             try:
-                data = json.loads(response_text)
+                return json.loads(response_text)
             except json.JSONDecodeError as e:
                 return gateway_pb2.SimulateBundleResponse(
                     success=False,
@@ -366,63 +510,6 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
                     simulator_used="alchemy",
                     error=f"Invalid JSON response: {e}",
                 )
-
-        # Check for RPC-level error
-        if "error" in data:
-            error = data["error"]
-            error_msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-            return gateway_pb2.SimulateBundleResponse(
-                success=False,
-                simulated=True,
-                simulator_used="alchemy",
-                revert_reason=error_msg,
-            )
-
-        # Parse results - one gas estimate per result (transaction)
-        results = data.get("result", [])
-        gas_estimates: list[int] = []
-        warnings: list[str] = []
-        gas_buffer = SIMULATION_GAS_BUFFERS.get(chain, DEFAULT_SIMULATION_BUFFER)
-
-        for result in results:
-            calls = result.get("calls", [])
-
-            # Check all calls for errors first
-            for call in calls:
-                if "error" in call:
-                    error_msg = call.get("error", "Unknown error")
-                    revert_reason = call.get("revertReason", error_msg)
-                    return gateway_pb2.SimulateBundleResponse(
-                        success=False,
-                        simulated=True,
-                        simulator_used="alchemy",
-                        revert_reason=revert_reason,
-                    )
-
-            # Use result-level gas or first call's gas (top-level transaction)
-            # Only one gas estimate per result, not per call
-            gas_used = 0
-            if "gasUsed" in result:
-                gas_used_hex = result.get("gasUsed", "0x0")
-                gas_used = int(gas_used_hex, 16) if gas_used_hex.startswith("0x") else int(gas_used_hex)
-            elif calls:
-                # Use only the first call (top-level transaction gas)
-                gas_used_hex = calls[0].get("gasUsed", "0x0")
-                gas_used = int(gas_used_hex, 16) if gas_used_hex.startswith("0x") else int(gas_used_hex)
-
-            if gas_used == 0:
-                gas_used = 100000  # Conservative default
-
-            buffered_gas = int(gas_used * (1 + gas_buffer))
-            gas_estimates.append(buffered_gas)
-
-        return gateway_pb2.SimulateBundleResponse(
-            success=True,
-            simulated=True,
-            gas_estimates=gas_estimates,
-            warnings=warnings,
-            simulator_used="alchemy",
-        )
 
     async def SimulateBundle(
         self,
