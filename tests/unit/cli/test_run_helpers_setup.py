@@ -682,3 +682,47 @@ class TestPrintStartupBanner:
     def test_dashboard_flag_adds_dashboard_line(self) -> None:
         output = _capture_banner(dashboard=True)
         assert "Dashboard: Will launch alongside strategy" in output
+
+
+# ---------------------------------------------------------------------------
+# _anchor_strategy_folder_env (Phase 4c)
+# ---------------------------------------------------------------------------
+
+
+class TestAnchorStrategyFolderEnv:
+    """The Phase 4c hoist of the VIB-3761 strategy-folder pin out of `run()`.
+
+    Three branches:
+        1. folder exists + env unset → set to resolved absolute path
+        2. folder exists + env already set → leave operator override alone
+        3. folder does not exist → no-op
+    """
+
+    def test_dir_with_unset_env_pins_resolved_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        run_helpers._anchor_strategy_folder_env(str(tmp_path))
+        import os as _os
+
+        assert _os.environ["ALMANAK_STRATEGY_FOLDER"] == str(tmp_path.resolve())
+
+    def test_dir_with_existing_env_does_not_overwrite(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        operator_override = "/explicitly/set/by/operator"
+        monkeypatch.setenv("ALMANAK_STRATEGY_FOLDER", operator_override)
+        run_helpers._anchor_strategy_folder_env(str(tmp_path))
+        import os as _os
+
+        assert _os.environ["ALMANAK_STRATEGY_FOLDER"] == operator_override
+
+    def test_nonexistent_path_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("ALMANAK_STRATEGY_FOLDER", raising=False)
+        missing = tmp_path / "does-not-exist"
+        run_helpers._anchor_strategy_folder_env(str(missing))
+        import os as _os
+
+        assert "ALMANAK_STRATEGY_FOLDER" not in _os.environ

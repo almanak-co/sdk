@@ -1287,15 +1287,6 @@ def run(  # noqa: C901
         max_iterations=max_iterations,
     )
 
-    # VIB-3761: anchor every local artifact (DB, logs, lock) to the
-    # strategy's folder so 10 strategies launched from the same cwd cannot
-    # collide on a shared ./almanak_state.db (the April 29 silent-failure
-    # root cause). The env var is set ONLY when the operator did not
-    # already set it explicitly so test/operator overrides win.
-    _resolved_strategy_folder = Path(working_dir).expanduser().resolve()
-    if _resolved_strategy_folder.is_dir() and not os.environ.get("ALMANAK_STRATEGY_FOLDER"):
-        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(_resolved_strategy_folder)
-
     # Gateway setup (phase 2 helper): managed auto-start or external connect.
     (
         gateway_client,

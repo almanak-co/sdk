@@ -112,6 +112,8 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
     scripts can detect a misconfigured invocation rather than silently writing
     to the wrong DB.
     """
+    from almanak.framework.local_paths import set_strategy_folder
+
     # Step 1: explicit -d flag wins.
     if working_dir is not None:
         candidate = Path(working_dir).expanduser().resolve()
@@ -121,7 +123,7 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
             raise click.ClickException(
                 f"--working-dir does not look like a strategy folder: {candidate}\n  {_STRATEGY_FOLDER_HINT}"
             )
-        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(candidate)
+        set_strategy_folder(candidate)
         # Reset any singleton state managers cached from a prior path so the
         # exported folder takes effect for this invocation.
         _reset_teardown_state_singleton()
@@ -143,7 +145,7 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
     # Step 3: try cwd.
     cwd = Path.cwd().resolve()
     if _looks_like_strategy_folder(cwd):
-        os.environ["ALMANAK_STRATEGY_FOLDER"] = str(cwd)
+        set_strategy_folder(cwd)
         _reset_teardown_state_singleton()
         return cwd
 

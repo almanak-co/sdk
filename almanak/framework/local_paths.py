@@ -145,6 +145,27 @@ def auto_detect_strategy_folder(*, export_env: bool = True) -> Path | None:
     return None
 
 
+def set_strategy_folder(path: Path | str) -> None:
+    """Pin ``ALMANAK_STRATEGY_FOLDER`` for downstream env-readers.
+
+    Centralised setter. CLI handlers that resolve a strategy folder
+    from arguments / cwd and need to make it visible to env-reading
+    consumers (the gateway, runtime config, teardown helpers) call
+    this instead of mutating ``os.environ`` directly. The mutation
+    still happens — it just happens in this single allowlisted file
+    rather than scattered across CLI handlers (issue #2100, plan
+    Phase 4c).
+
+    Idempotent: re-pinning the same path is a no-op for downstream
+    readers; re-pinning a different path overwrites cleanly.
+
+    Args:
+        path: A ``Path`` or path-like ``str``. ``str(...)`` is applied
+            so callers don't need to coerce.
+    """
+    os.environ["ALMANAK_STRATEGY_FOLDER"] = str(path)
+
+
 def _ensure_local() -> None:
     """Refuse to be used in hosted mode.
 

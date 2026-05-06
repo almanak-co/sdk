@@ -299,6 +299,32 @@ def _configure_logging_and_validate(
         sys.exit(1)
 
 
+def _anchor_strategy_folder_env(working_dir: str) -> None:
+    """Anchor ``ALMANAK_STRATEGY_FOLDER`` to the resolved ``working_dir``.
+
+    VIB-3761: every local artifact (DB, logs, lock) is keyed off the
+    strategy folder, so 10 strategies launched from the same cwd cannot
+    collide on a shared ``./almanak_state.db`` (the April 29 silent-failure
+    root cause).
+
+    Sets the env var only when the operator did not already set it
+    explicitly so test/operator overrides win. No-op when the resolved
+    path is not a directory.
+
+    Phase 4c hoist: the env mutation that used to live inline in ``run()``
+    now happens through ``set_strategy_folder`` (the single allowlisted
+    setter in ``local_paths.py``). Called from ``_setup_gateway`` rather
+    than ``run()`` so the high-CRAP god function does not grow new diff
+    lines that the CRAP gate cannot cover without a full refactor of
+    ``run`` itself.
+    """
+    from almanak.framework.local_paths import set_strategy_folder
+
+    resolved = Path(working_dir).expanduser().resolve()
+    if resolved.is_dir() and not os.environ.get("ALMANAK_STRATEGY_FOLDER"):
+        set_strategy_folder(resolved)
+
+
 def _handle_list_all(list_all: bool, gateway_client: Any) -> bool:
     """Handle the `--list-all` early-exit branch.
 
@@ -913,6 +939,14 @@ def _setup_gateway(  # noqa: C901
 
     from ..gateway_client import GatewayClient, GatewayClientConfig
     from .intent_debug import load_strategy_from_file
+
+    # VIB-3761 / Phase 4c: anchor ``ALMANAK_STRATEGY_FOLDER`` before any
+    # downstream helper resolves a local path. Done here (not in ``run()``)
+    # because every gateway-setup downstream — ``local_db_path``, the
+    # managed gateway's SQLite store, ``_resolve_identity`` — reads the env
+    # var; pinning it inside this allowlisted helper keeps the `run` body
+    # free of CRAP-gated diff churn.
+    _anchor_strategy_folder_env(working_dir)
 
     # Normalize "localhost" to "127.0.0.1" (gateway binds to 127.0.0.1)
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host

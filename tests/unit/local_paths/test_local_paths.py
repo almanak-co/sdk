@@ -28,6 +28,7 @@ from almanak.framework.local_paths import (
     local_log_path,
     local_strategy_db_path,
     release_local_db_lock,
+    set_strategy_folder,
     warn_if_legacy_cwd_db_exists,
 )
 
@@ -335,3 +336,23 @@ def test_strategy_db_path_hosted_mode_refuses(clean_env) -> None:
     clean_env.setenv("AGENT_ID", "agent-test")
     with pytest.raises(LocalPathError, match=r"hosted mode"):
         local_strategy_db_path()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4c (#2100): set_strategy_folder() centralised setter
+# ---------------------------------------------------------------------------
+def test_set_strategy_folder_writes_env(clean_env) -> None:
+    """The setter pins ``ALMANAK_STRATEGY_FOLDER`` for downstream readers.
+
+    Phase 4c rationale: CLI handlers used to mutate ``os.environ`` inline
+    in three places. Routing every CLI write through this setter keeps the
+    mutation in the single allowlisted file (``local_paths.py``) instead.
+    """
+    set_strategy_folder("/tmp/foo")
+    assert os.environ["ALMANAK_STRATEGY_FOLDER"] == "/tmp/foo"
+
+
+def test_set_strategy_folder_accepts_path_object(clean_env) -> None:
+    """The setter coerces ``Path`` to ``str`` so callers don't have to."""
+    set_strategy_folder(Path("/tmp/foo"))
+    assert os.environ["ALMANAK_STRATEGY_FOLDER"] == str(Path("/tmp/foo"))
