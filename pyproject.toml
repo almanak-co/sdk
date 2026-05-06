@@ -201,6 +201,22 @@ omit = [
     "almanak/framework/accounting/observations.py",     # Track A2 — composed observation type, no caller
     "almanak/framework/accounting/receipts.py",         # Track A2 — pure receipt type, only used by observations.py
     "almanak/framework/accounting/typed_columns.py",    # Track B — populate_typed_columns library, no production caller
+    # Phase W4 (VIB-4081, 2026-05-06): dashboard UI shells.
+    # Rule: any file whose primary contract is "produce a streamlit.* widget tree
+    # or a plotly.graph_objects.Figure" is excluded from the coverage denominator —
+    # there is no feasible unit-test harness, so counting these lines is a
+    # measurement error (same disposition as Phase 0's `dashboard/pages/*` glob).
+    # Pure helpers (adapters, data_client, data_source, export, gateway_client,
+    # mock_data, models, quant_aggregations, theme, custom/{api_client,discoverer,
+    # loader}, pages/_detail_render) stay in the denominator.
+    # Staleness guard: tests/unit/framework/dashboard/test_coverage_omits_no_callers.py —
+    # any non-test code wiring one of these into production fails CI. Mixed shells
+    # (app.py / config.py / sections.py / utils.py / custom/renderer.py) are NOT
+    # omitted here because non-shell code currently imports them; an extraction
+    # follow-up is required before they can join the omit list.
+    "almanak/framework/dashboard/templates/*",          # Streamlit per-primitive dashboards (lending/lp/perp/prediction/ta)
+    "almanak/framework/dashboard/plots/*",              # Plotly chart builders (figure-producing helpers)
+    "almanak/framework/dashboard/components.py",        # Streamlit widget helpers (only called by already-omitted dashboard/pages/*)
 ]
 
 [tool.coverage.report]
