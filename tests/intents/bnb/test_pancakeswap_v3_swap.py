@@ -23,6 +23,7 @@ from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    SWAP_MAX_SLIPPAGE,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -279,8 +280,11 @@ class TestPancakeSwapV3SwapIntent:
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdt_balance) / Decimal(10**in_decimals)
 
-        # Try to swap more than we have
-        excessive_amount = balance_decimal * Decimal("100")
+        # Exceed balance by 2x so execution fails on-chain with insufficient balance,
+        # but stay inside the compiler's price-impact guard (default 30%) so this path
+        # exercises execution-level failure rather than compile-time rejection.
+        # See bnb test_uniswap_swap.py for the sibling pattern (issue #2150).
+        excessive_amount = balance_decimal * Decimal("2")
 
         print(f"\n{'='*80}")
         print("Test: SwapIntent with Insufficient Balance (PancakeSwap V3)")
@@ -292,7 +296,7 @@ class TestPancakeSwapV3SwapIntent:
             from_token="USDT",
             to_token="WBNB",
             amount=excessive_amount,
-            max_slippage=Decimal("0.01"),
+            max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="pancakeswap_v3",
             chain=CHAIN_NAME,
         )
@@ -303,14 +307,51 @@ class TestPancakeSwapV3SwapIntent:
             price_oracle=price_oracle,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS"
-        assert compilation_result.action_bundle is not None
 
-        # Try to execute - should fail
-        execution_result = await orchestrator.execute(compilation_result.action_bundle)
-
-        assert not execution_result.success, "Execution should fail with insufficient balance"
-        print(f"Execution failed as expected: {execution_result.error}")
+        # Accept BOTH outcomes as valid insufficient-balance signals, but
+        # narrowly — the failure message in EITHER branch must point to the
+        # insufficient-balance / price-impact family. Anything else (router
+        # errors, slippage misconfig, liquidity gaps) would be masked by a
+        # permissive "any failure wins" check, hiding unrelated regressions
+        # in what is meant to be a balance-guard test.
+        #
+        #   1) Compilation SUCCESS -> execution must fail with an
+        #      insufficient-balance error (balance check trips at execute time).
+        #   2) Compilation FAILED -> compiler error must contain a price-impact
+        #      or insufficient-balance phrase (the compiler guard trips first
+        #      because an excessive amount also tips the price-impact guard).
+        # Narrow phrases: bare "balance" would also match unrelated errors like
+        # "balance check failed for token X"; use explicit failure shapes from
+        # the insufficient-balance / price-impact family.
+        _expected_phrases = (
+            "insufficient balance",
+            "insufficient funds",
+            "transfer amount exceeds balance",
+            "price impact",
+            # Zodiac wraps inner reverts in ``ModuleTransactionFailed()``;
+            # the inner reason isn't recoverable from the eth_call replay.
+            # The bilateral conservation check below is the load-bearing
+            # signal under Zodiac. EOA-mode error messages don't contain
+            # ``execTransactionWithRole``, so this stays strict for EOA.
+            "exectransactionwithrole",
+        )
+        if compilation_result.status.value == "SUCCESS":
+            assert compilation_result.action_bundle is not None
+            execution_result = await orchestrator.execute(compilation_result.action_bundle)
+            assert not execution_result.success, "Execution should fail with insufficient balance"
+            exec_err = (execution_result.error or "").lower()
+            assert any(p in exec_err for p in _expected_phrases), (
+                f"Execution failed but not with an expected insufficient-balance signal: "
+                f"{execution_result.error!r}"
+            )
+            print(f"Execution failed as expected: {execution_result.error}")
+        else:
+            err = (compilation_result.error or "").lower()
+            assert any(p in err for p in _expected_phrases), (
+                f"Compilation failed but not with an expected insufficient-balance signal: "
+                f"{compilation_result.error!r}"
+            )
+            print(f"Compilation failed as expected: {compilation_result.error}")
 
         # Verify balances unchanged (bilateral conservation check)
         usdt_after = get_token_balance(web3, token_in, funded_wallet)
