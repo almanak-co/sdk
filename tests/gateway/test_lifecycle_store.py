@@ -95,6 +95,23 @@ class TestSQLiteLifecycleStoreState:
             state = store.read_state("agent-1")
             assert state.state == state_name
 
+    def test_write_state_records_running_version(self, store):
+        """Every state write stamps the SDK version actually running in the gateway."""
+        from almanak._version import __version__
+
+        store.write_state("agent-1", "RUNNING")
+        state = store.read_state("agent-1")
+        assert state.running_almanak_version == __version__
+
+    def test_heartbeat_refreshes_running_version(self, store):
+        """Heartbeat refreshes running_almanak_version so a rolled image is observable."""
+        from almanak._version import __version__
+
+        store.write_state("agent-1", "RUNNING")
+        store.heartbeat("agent-1")
+        state = store.read_state("agent-1")
+        assert state.running_almanak_version == __version__
+
 
 class TestSQLiteLifecycleStoreCommands:
     """Tests for command CRUD operations."""

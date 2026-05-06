@@ -25,6 +25,11 @@ class AgentState:
     error_message: str | None = None
     iteration_count: int = 0
     source: str = "gateway"  # 'gateway' or 'platform' — tracks who last wrote the state
+    # almanak SDK version loaded inside the running gateway. Written on every
+    # state change and heartbeat so the platform UI can show what is actually
+    # executing — not the deploy-time value the platform extracted from
+    # uv.lock. ``None`` only when the row predates the column.
+    running_almanak_version: str | None = None
 
 
 @dataclass

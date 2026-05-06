@@ -16,6 +16,8 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from almanak._version import __version__ as ALMANAK_VERSION
+
 from .store import AgentCommand, AgentState
 
 logger = logging.getLogger(__name__)
@@ -23,13 +25,14 @@ logger = logging.getLogger(__name__)
 
 LIFECYCLE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agent_state (
-    agent_id          TEXT PRIMARY KEY,
-    state             TEXT NOT NULL,
-    state_changed_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    last_heartbeat_at TEXT,
-    error_message     TEXT,
-    iteration_count   INTEGER DEFAULT 0,
-    source            TEXT NOT NULL DEFAULT 'gateway'
+    agent_id                TEXT PRIMARY KEY,
+    state                   TEXT NOT NULL,
+    state_changed_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    last_heartbeat_at       TEXT,
+    error_message           TEXT,
+    iteration_count         INTEGER DEFAULT 0,
+    source                  TEXT NOT NULL DEFAULT 'gateway',
+    running_almanak_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agent_command (
@@ -77,6 +80,11 @@ class SQLiteLifecycleStore:
                     conn.execute("ALTER TABLE agent_state ADD COLUMN source TEXT NOT NULL DEFAULT 'gateway'")
                 except sqlite3.OperationalError:
                     pass  # Column already exists
+                # Migration: add running_almanak_version to existing databases
+                try:
+                    conn.execute("ALTER TABLE agent_state ADD COLUMN running_almanak_version TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
                 conn.commit()
             self._initialized = True
             logger.info(f"SQLiteLifecycleStore initialized: {self._db_path}")
@@ -99,16 +107,18 @@ class SQLiteLifecycleStore:
                 conn.execute(
                     """
                     INSERT INTO agent_state
-                        (agent_id, state, state_changed_at, last_heartbeat_at, error_message, source)
-                    VALUES (?, ?, ?, ?, ?, 'gateway')
+                        (agent_id, state, state_changed_at, last_heartbeat_at,
+                         error_message, source, running_almanak_version)
+                    VALUES (?, ?, ?, ?, ?, 'gateway', ?)
                     ON CONFLICT (agent_id) DO UPDATE SET
                         state = excluded.state,
                         state_changed_at = excluded.state_changed_at,
                         last_heartbeat_at = excluded.last_heartbeat_at,
                         error_message = excluded.error_message,
-                        source = 'gateway'
+                        source = 'gateway',
+                        running_almanak_version = excluded.running_almanak_version
                     """,
-                    (agent_id, state, now, now, error_message),
+                    (agent_id, state, now, now, error_message, ALMANAK_VERSION),
                 )
                 conn.commit()
 
@@ -135,6 +145,9 @@ class SQLiteLifecycleStore:
                     error_message=row["error_message"],
                     iteration_count=row["iteration_count"] or 0,
                     source=row["source"] if "source" in row.keys() else "gateway",
+                    running_almanak_version=(
+                        row["running_almanak_version"] if "running_almanak_version" in row.keys() else None
+                    ),
                 )
 
     def heartbeat(self, agent_id: str) -> None:
@@ -146,10 +159,12 @@ class SQLiteLifecycleStore:
                 conn.execute(
                     """
                     UPDATE agent_state
-                    SET last_heartbeat_at = ?, iteration_count = iteration_count + 1
+                    SET last_heartbeat_at = ?,
+                        iteration_count = iteration_count + 1,
+                        running_almanak_version = ?
                     WHERE agent_id = ?
                     """,
-                    (now, agent_id),
+                    (now, ALMANAK_VERSION, agent_id),
                 )
                 conn.commit()
 

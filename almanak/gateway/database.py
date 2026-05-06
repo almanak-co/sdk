@@ -41,17 +41,20 @@ def _strip_schema_param(database_url: str) -> tuple[str, str | None]:
 POSTGRES_SCHEMA = """
 -- Lifecycle tables ---------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_state (
-    agent_id          TEXT PRIMARY KEY,
-    state             TEXT NOT NULL,
-    state_changed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_heartbeat_at TIMESTAMPTZ,
-    error_message     TEXT,
-    iteration_count   BIGINT DEFAULT 0,
-    source            TEXT NOT NULL DEFAULT 'gateway'
+    agent_id                TEXT PRIMARY KEY,
+    state                   TEXT NOT NULL,
+    state_changed_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_heartbeat_at       TIMESTAMPTZ,
+    error_message           TEXT,
+    iteration_count         BIGINT DEFAULT 0,
+    source                  TEXT NOT NULL DEFAULT 'gateway',
+    running_almanak_version TEXT
 );
 
 -- Migration: add source column to existing installations
 ALTER TABLE agent_state ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'gateway';
+-- Migration: add running_almanak_version column to existing installations
+ALTER TABLE agent_state ADD COLUMN IF NOT EXISTS running_almanak_version TEXT;
 
 CREATE TABLE IF NOT EXISTS agent_command (
     id            BIGSERIAL PRIMARY KEY,
