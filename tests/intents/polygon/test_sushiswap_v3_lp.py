@@ -27,7 +27,6 @@ from almanak.framework.intents import (
     IntentCompiler,
     LPCloseIntent,
     LPOpenIntent,
-    SwapIntent,
 )
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
@@ -423,11 +422,6 @@ class TestSushiSwapV3LPCloseIntent:
 
         print("\nALL CHECKS PASSED")
 
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(
-        reason="flaky: receipt timeout on Anvil fork under load; previously quarantined in #606",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
         self,
@@ -438,7 +432,11 @@ class TestSushiSwapV3LPCloseIntent:
         anvil_rpc_url: str,
         test_private_key: str,
     ):
-        """Test #3: Close position with no liquidity but uncollected owed tokens."""
+        """Test #3: Close position with no liquidity but uncollected owed tokens.
+
+        decreaseLiquidity itself moves the LP principal into tokensOwed0/1,
+        so no swap-to-generate-fees step is required to populate owed tokens.
+        """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc_addr = tokens["USDC"]
         weth_addr = tokens["WETH"]
@@ -456,27 +454,12 @@ class TestSushiSwapV3LPCloseIntent:
         position_id = await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
         print(f"Opened position #{position_id}")
 
-        swap_intent = SwapIntent(
-            from_token="USDC",
-            to_token="WETH",
-            amount=Decimal("1000"),
-            max_slippage=Decimal("0.05"),
-            protocol="sushiswap_v3",
-            chain=CHAIN_NAME,
-        )
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
-        swap_compilation = compiler.compile(swap_intent)
-        if swap_compilation.status.value == "SUCCESS" and swap_compilation.action_bundle:
-            swap_result = await orchestrator.execute(swap_compilation.action_bundle)
-            if swap_result.success:
-                print("Executed swap to generate LP fees")
-            else:
-                print(f"Swap failed (non-critical for this test): {swap_result.error}")
 
         await decrease_all_liquidity(
             web3, orchestrator,

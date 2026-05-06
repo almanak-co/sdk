@@ -31,7 +31,6 @@ from almanak.framework.intents import (
     IntentCompiler,
     LPCloseIntent,
     LPOpenIntent,
-    SwapIntent,
 )
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
@@ -489,11 +488,6 @@ class TestSushiSwapV3LPCloseIntent:
         print(f"WBNB delta: {wbnb_delta}")
         print("\nALL CHECKS PASSED")
 
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(
-        reason="flaky: receipt timeout on Anvil fork under load; previously quarantined in #606",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_lp_close_position_no_liquidity_but_owed_tokens(
         self,
@@ -506,19 +500,18 @@ class TestSushiSwapV3LPCloseIntent:
     ):
         """Test #3: Close position with no liquidity but uncollected owed tokens.
 
-        After decreaseLiquidity, the principal tokens (and any accrued fees)
-        become "owed" to the position but are not yet transferred. The collect
-        step in LPCloseIntent should retrieve these owed tokens.
+        After decreaseLiquidity, the principal tokens become "owed" to the
+        position but are not yet transferred. The collect step in LPCloseIntent
+        should retrieve these owed tokens.
 
         Flow:
         1. Open LP position via LPOpenIntent
-        2. Execute a swap to generate trading fees for the position
-        3. Decrease all liquidity via direct contract call (tokens become owed)
-        4. Do NOT collect - tokens remain owed
-        5. Verify position has 0 liquidity
-        6. Record balances BEFORE close
-        7. Close via LPCloseIntent (should collect owed tokens and burn)
-        8. Verify tokens were collected
+        2. Decrease all liquidity via direct contract call (principal becomes owed)
+        3. Do NOT collect - tokens remain owed
+        4. Verify position has 0 liquidity
+        5. Record balances BEFORE close
+        6. Close via LPCloseIntent (should collect owed tokens and burn)
+        7. Verify tokens were collected
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdt_addr = tokens["USDT"]
@@ -534,30 +527,16 @@ class TestSushiSwapV3LPCloseIntent:
         position_id = await _open_position_via_intent(funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
         print(f"Opened position #{position_id}")
 
-        # 2. Execute a swap through the pool to generate fees
-        swap_intent = SwapIntent(
-            from_token="USDT",
-            to_token="WBNB",
-            amount=Decimal("1000"),
-            max_slippage=Decimal("0.20"),  # Higher slippage for BNB chain
-            protocol="sushiswap_v3",
-            chain=CHAIN_NAME,
-        )
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
-        swap_compilation = compiler.compile(swap_intent)
-        if swap_compilation.status.value == "SUCCESS" and swap_compilation.action_bundle:
-            swap_result = await orchestrator.execute(swap_compilation.action_bundle)
-            if swap_result.success:
-                print("Executed swap to generate LP fees")
-            else:
-                print(f"Swap failed (non-critical for this test): {swap_result.error}")
 
-        # 3. Decrease all liquidity (tokens become owed but not collected)
+        # 2. Decrease all liquidity (principal becomes owed but not collected).
+        #    decreaseLiquidity itself moves the LP principal into tokensOwed0/1,
+        #    so no swap-to-generate-fees step is required to populate owed tokens.
         await decrease_all_liquidity(
             web3, orchestrator,
             chain=CHAIN_NAME, protocol="sushiswap_v3",
@@ -565,18 +544,18 @@ class TestSushiSwapV3LPCloseIntent:
         )
         print("Decreased all liquidity via direct call (tokens now owed)")
 
-        # 4. Do NOT collect - leave tokens owed
+        # 3. Do NOT collect - leave tokens owed
 
-        # 5. Verify 0 liquidity
+        # 4. Verify 0 liquidity
         liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity == 0, f"Expected 0 liquidity after decrease, got {liquidity}"
         print(f"Position liquidity: {liquidity}")
 
-        # 6. Record balances BEFORE close
+        # 5. Record balances BEFORE close
         usdt_before_close = get_token_balance(web3, usdt_addr, funded_wallet)
         wbnb_before_close = get_token_balance(web3, wbnb_addr, funded_wallet)
 
-        # 7. Close via LPCloseIntent (should collect owed tokens)
+        # 6. Close via LPCloseIntent (should collect owed tokens)
         close_intent = LPCloseIntent(
             position_id=str(position_id),
             pool=POOL,
@@ -609,7 +588,7 @@ class TestSushiSwapV3LPCloseIntent:
                         f"amount1_collected={lp_close_data.amount1_collected}"
                     )
 
-        # 8. Verify tokens were collected (owed tokens from decrease + any fees)
+        # 7. Verify tokens were collected (owed tokens from decrease)
         usdt_after_close = get_token_balance(web3, usdt_addr, funded_wallet)
         wbnb_after_close = get_token_balance(web3, wbnb_addr, funded_wallet)
 
