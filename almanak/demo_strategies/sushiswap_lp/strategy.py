@@ -175,8 +175,10 @@ class SushiSwapLPConfig:
     author="Almanak",
     # Tags for categorization
     tags=["demo", "tutorial", "lp", "liquidity", "sushiswap-v3", "arbitrum", "concentrated-liquidity"],
-    # Supported blockchains (SushiSwap V3 is on multiple chains, primary is Arbitrum)
-    supported_chains=["arbitrum", "ethereum", "base", "polygon", "avalanche", "optimism"],
+    # Supported blockchains (SushiSwap V3 is on multiple chains, primary is Arbitrum).
+    # avalanche removed: SushiSwap V3 has zero usable liquidity there and is dropped
+    # from PROTOCOL_ROUTERS / LP_POSITION_MANAGERS for the chain (VIB-2069).
+    supported_chains=["arbitrum", "ethereum", "base", "polygon", "optimism"],
     # Protocols this strategy interacts with
     supported_protocols=["sushiswap_v3"],
     # Types of intents this strategy may return
