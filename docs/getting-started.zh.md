@@ -193,6 +193,7 @@ class MyStrategy(IntentStrategy):
 | `LPCloseIntent` | 关闭流动性头寸 |
 | `BorrowIntent` | 从借贷协议借款 |
 | `RepayIntent` | 偿还借款资产 |
+| `DeleverageIntent` | 风险管理触发的紧急偿还。工厂方法：`Intent.deleverage()` |
 | `SupplyIntent` | 向借贷协议提供资产 |
 | `WithdrawIntent` | 从借贷协议提取资产 |
 | `StakeIntent` | 质押代币 |

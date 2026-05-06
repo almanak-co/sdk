@@ -8,15 +8,15 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 4 | Price data, balances, batch balances, and technical indicators |
-| StateService | 9 | Strategy state persistence, portfolio snapshots/metrics, and transaction ledger |
+| StateService | 20 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, and accounting outbox |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
 | IntegrationService | 12 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
-| DashboardService | 11 | Operator dashboard data, actions, and transaction ledger |
+| DashboardService | 15 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, and trade tape |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
-| PolymarketService | 18 | Polymarket CLOB API proxy (market data, orders, positions) |
+| PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
 | LifecycleService | 6 | Agent state management, heartbeat, and commands |
@@ -313,6 +313,102 @@ message SaveLedgerEntryResponse {
   bool success = 1;
   string error = 2;
 }
+```
+
+### GetLedgerEntry
+
+Retrieve a single ledger entry by id (for re-derivation and audit lookups).
+
+```protobuf
+rpc GetLedgerEntry(GetLedgerEntryRequest) returns (GetLedgerEntryResponse)
+```
+
+### SaveAccountingEvent
+
+Persist a typed accounting event (Layer 5 accounting). Writers must route through
+the accounting outbox; direct calls from connectors or the runner hot path are
+forbidden (see `blueprints/27-accounting.md`).
+
+```protobuf
+rpc SaveAccountingEvent(SaveAccountingEventRequest) returns (SaveAccountingEventResponse)
+```
+
+### GetAccountingEvents
+
+Retrieve typed accounting events for a strategy or ledger entry.
+
+```protobuf
+rpc GetAccountingEvents(GetAccountingEventsRequest) returns (GetAccountingEventsResponse)
+```
+
+### HasAccountingEventsForLedger
+
+Idempotency check: returns whether typed events already exist for a given
+ledger entry (used by the outbox processor to avoid double-writes).
+
+```protobuf
+rpc HasAccountingEventsForLedger(HasAccountingEventsForLedgerRequest) returns (HasAccountingEventsForLedgerResponse)
+```
+
+### SavePositionEvent
+
+Persist an LP or perp position lifecycle event (open/close/collect-fees).
+Lending intents (`SUPPLY`, `BORROW`, `REPAY`, `WITHDRAW`) are intentionally
+**not** routed through this RPC — lending positions are fungible (no stable
+`position_id`) and are tracked via Layer 5 typed accounting events instead.
+
+```protobuf
+rpc SavePositionEvent(SavePositionEventRequest) returns (SavePositionEventResponse)
+```
+
+### GetPositionHistory
+
+Retrieve the lifecycle event history for a single position.
+
+```protobuf
+rpc GetPositionHistory(GetPositionHistoryRequest) returns (GetPositionHistoryResponse)
+```
+
+### UpdatePositionAttribution
+
+Update lot-level attribution metadata (FIFO matching policy results) on an
+existing position event.
+
+```protobuf
+rpc UpdatePositionAttribution(UpdatePositionAttributionRequest) returns (UpdatePositionAttributionResponse)
+```
+
+### SaveOutboxEntry
+
+Enqueue a typed-event payload onto the accounting outbox for the async
+processor (VIB-3467).
+
+```protobuf
+rpc SaveOutboxEntry(SaveOutboxEntryRequest) returns (SaveOutboxEntryResponse)
+```
+
+### GetOutboxEntry
+
+Read a single outbox entry by id.
+
+```protobuf
+rpc GetOutboxEntry(GetOutboxEntryRequest) returns (GetOutboxEntryResponse)
+```
+
+### GetOutboxPending
+
+Fetch the next batch of pending outbox entries for the processor to drain.
+
+```protobuf
+rpc GetOutboxPending(GetOutboxPendingRequest) returns (GetOutboxPendingResponse)
+```
+
+### UpdateOutboxEntry
+
+Mark an outbox entry as processed, failed, or retry-pending.
+
+```protobuf
+rpc UpdateOutboxEntry(UpdateOutboxEntryRequest) returns (UpdateOutboxEntryResponse)
 ```
 
 ## ExecutionService
@@ -837,6 +933,40 @@ Retrieve the transaction ledger for a strategy instance.
 rpc GetTransactionLedger(GetTransactionLedgerRequest) returns (GetTransactionLedgerResponse)
 ```
 
+### GetPnLSummary
+
+Aggregated PnL summary (realized, unrealized, lifetime) for the operator
+dashboard. Sourced from `portfolio_metrics` and `accounting_events`.
+
+```protobuf
+rpc GetPnLSummary(GetPnLSummaryRequest) returns (PnLSummary)
+```
+
+### GetCostStack
+
+Per-strategy cost decomposition (gas, slippage, protocol fees, MEV).
+
+```protobuf
+rpc GetCostStack(GetCostStackRequest) returns (CostStackInfo)
+```
+
+### GetAuditPosture
+
+Audit-readiness snapshot: lot-policy version coverage, missing receipts,
+outbox lag, and reconciliation drift signals.
+
+```protobuf
+rpc GetAuditPosture(GetAuditPostureRequest) returns (AuditPosture)
+```
+
+### GetTradeTape
+
+Time-ordered tape of executed trades for the dashboard timeline view.
+
+```protobuf
+rpc GetTradeTape(GetTradeTapeRequest) returns (GetTradeTapeResponse)
+```
+
 ## FundingRateService
 
 Provides perpetual funding rate data from venues like GMX V2 and Hyperliquid.
@@ -964,6 +1094,8 @@ Proxy for the Polymarket CLOB API. Provides market data, order management, and p
 | `GetOpenOrders` | Get open orders |
 | `GetTradesHistory` | Get trade history |
 | `GetOrder` | Get order details |
+| `GetPriceHistory` | Get historical prices for a token (for backtesting and charts) |
+| `GetTradeTape` | Get time-ordered trade tape across markets |
 | `GetBalanceAllowance` | Get balance and allowance |
 
 ## EnsoService

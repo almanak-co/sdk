@@ -49,5 +49,5 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each c
 | [Orca](orca.md) | DEX / LP | Solana | `orca` |
 | [Raydium](raydium.md) | DEX / LP | Solana | `raydium` |
 | [LiFi](lifi.md) | Bridge Aggregator | Multi-chain | `lifi` |
-| Radiant V2 | Lending | Arbitrum | (via Aave V3 fork) |
+| Radiant V2 | Lending | Arbitrum | (via Aave V2 fork) |
 | [Base Infrastructure](base.md) | Shared | N/A | `base` |

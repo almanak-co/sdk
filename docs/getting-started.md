@@ -196,6 +196,7 @@ class MyStrategy(IntentStrategy):
 | `LPCloseIntent` | Close liquidity position |
 | `BorrowIntent` | Borrow from lending protocols |
 | `RepayIntent` | Repay borrowed assets |
+| `DeleverageIntent` | Emergency repay triggered by risk management. Factory: `Intent.deleverage()` |
 | `SupplyIntent` | Supply to lending protocols |
 | `WithdrawIntent` | Withdraw from lending protocols |
 | `StakeIntent` | Stake tokens |

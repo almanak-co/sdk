@@ -196,6 +196,7 @@ class MyStrategy(IntentStrategy):
 | `LPCloseIntent` | Fermer une position de liquidité |
 | `BorrowIntent` | Emprunter auprès de protocoles de prêt |
 | `RepayIntent` | Rembourser les actifs empruntés |
+| `DeleverageIntent` | Remboursement d'urgence déclenché par la gestion des risques. Méthode de fabrique : `Intent.deleverage()` |
 | `SupplyIntent` | Fournir aux protocoles de prêt |
 | `WithdrawIntent` | Retirer des protocoles de prêt |
 | `StakeIntent` | Staker des tokens |
