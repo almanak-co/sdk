@@ -439,6 +439,332 @@ def _check_lending_reserve_active(
     return None
 
 
+# ─── Borrow capacity pre-flight (defense-in-depth) ────────────────────────────
+# Mainnet protocol enforcement is the primary safety net, but the on-chain
+# revert costs gas + a strategy iteration. The compile-time pre-flight here
+# catches over-borrows before tx submission so the runner's permanent-error
+# classifier can prevent a retry storm. Fail-open on RPC errors mirrors the
+# VIB-3825 borrowable check.
+
+# Selectors for the borrow-capacity pre-flight reads.
+# keccak256("getUserAccountData(address)")[:4] — Aave V3 Pool.
+_AAVE_GET_USER_ACCOUNT_DATA_SELECTOR = "0xbf92857c"
+# keccak256("getAssetPrice(address)")[:4] — Aave V3 IAaveOracle.
+_AAVE_GET_ASSET_PRICE_SELECTOR = "0xb3596f07"
+# keccak256("getAccountLiquidity(address)")[:4] — Compound V2 Comptroller.
+_COMPV2_GET_ACCOUNT_LIQUIDITY_SELECTOR = "0x5ec88c79"
+# keccak256("oracle()")[:4] — Compound V2 Comptroller.
+_COMPV2_ORACLE_SELECTOR = "0x7dc0d1d0"
+# keccak256("getUnderlyingPrice(address)")[:4] — Compound V2 PriceOracle.
+_COMPV2_GET_UNDERLYING_PRICE_SELECTOR = "0xfc57d4df"
+
+# Default safety margin applied to the computed capacity ceiling.
+# A 1% headroom matches what VIB-3825 uses for governance-bit checks and
+# absorbs minor oracle drift between the pre-flight read and the on-chain
+# borrow execution. Applied as `available * (1 - margin)`.
+_BORROW_CAPACITY_SAFETY_MARGIN = Decimal("0.01")
+
+
+def _gateway_eth_call_raw(compiler: Any, to: str, data: str, label: str) -> str | None:
+    """Issue an ``eth_call`` via the compiler's gateway client and return the hex payload.
+
+    Mirrors the call shape used by ``_fetch_reserve_config`` so the borrow-capacity
+    pre-flight rides the same gateway-bounded RPC plumbing. Returns ``None`` on
+    any error (no gateway, RPC failure, revert, malformed response) so callers
+    can fail-open — the on-chain protocol check remains the final guard.
+    """
+    gateway = getattr(compiler, "_gateway_client", None)
+    if gateway is None or not getattr(gateway, "is_connected", False):
+        return None
+
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=compiler.chain,
+                method="eth_call",
+                params=json.dumps([{"to": to, "data": data}, "latest"]),
+                id=f"{label}:{compiler.chain}:{to.lower()}",
+            ),
+            timeout=getattr(compiler, "rpc_timeout", 5.0),
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s pre-flight skipped on %s: gateway call failed (%s)",
+            label,
+            compiler.chain,
+            exc,
+        )
+        return None
+
+    if not response.success or not response.result:
+        return None
+
+    try:
+        decoded = json.loads(response.result) if response.result.startswith('"') else response.result
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, str):
+        return None
+    if decoded.lower() == "0x" or decoded == "":
+        return None
+    return decoded
+
+
+def _decode_uint_word(hex_data: str, word_index: int) -> int | None:
+    """Decode word ``word_index`` of an ABI-encoded uint256 response.
+
+    ``hex_data`` may include the ``0x`` prefix. Returns ``None`` if the payload
+    is too short to contain the requested word.
+    """
+    raw = hex_data.removeprefix("0x") if hex_data.startswith("0x") else hex_data
+    start = word_index * 64
+    if len(raw) < start + 64:
+        return None
+    try:
+        return int(raw[start : start + 64], 16)
+    except ValueError:
+        return None
+
+
+def _check_lending_borrow_capacity_aave_v3(
+    compiler: Any,
+    wallet_address: str,
+    borrow_asset_address: str,
+    borrow_asset_symbol: str,
+    requested_amount_decimal: Decimal,
+    borrow_decimals: int,
+    *,
+    safety_margin: Decimal = _BORROW_CAPACITY_SAFETY_MARGIN,
+) -> tuple[str | None, Decimal | None]:
+    """Aave V3 borrow-capacity pre-flight via ``Pool.getUserAccountData`` + oracle.
+
+    Returns a ``(reason, available_in_underlying)`` tuple:
+      - ``reason`` is ``None`` when the requested amount fits within capacity
+        (or when the check could not be performed — fail-open). It is a
+        human-readable string when the requested amount conclusively exceeds
+        the available capacity.
+      - ``available_in_underlying`` is the computed cap (in human units of the
+        borrow asset, *after* applying the safety margin) or ``None`` when not
+        determinable.
+    """
+    chain = compiler.chain
+    if chain not in AAVE_V3:
+        return None, None
+
+    # Cache: (chain, protocol, wallet, asset) → (reason, available)
+    cache = getattr(compiler, "_lending_borrow_capacity_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_borrow_capacity_cache = cache
+    cache_key = (chain, "aave_v3", wallet_address.lower(), borrow_asset_address.lower())
+
+    if cache_key in cache:
+        prev_reason, prev_available = cache[cache_key]
+        # Cache hit returns the prior verdict only when the new request would
+        # also fail (or we have no available number). When we previously had
+        # capacity for amount X but the new request asks for Y > X, recompute.
+        if prev_available is None:
+            return prev_reason, None
+        if requested_amount_decimal <= prev_available:
+            return None, prev_available
+        # Recompute below — a tighter request may now exceed.
+
+    pool_address = AAVE_V3[chain].get("pool")
+    oracle_address = AAVE_V3[chain].get("oracle")
+    if not pool_address or not oracle_address:
+        return None, None
+
+    # 1. Pool.getUserAccountData(wallet) → 6 uint256 words. Word 2 is
+    #    availableBorrowsBase (8-decimal USD on Aave V3).
+    user_calldata = _AAVE_GET_USER_ACCOUNT_DATA_SELECTOR + wallet_address.lower().replace("0x", "").zfill(64)
+    user_resp = _gateway_eth_call_raw(compiler, pool_address, user_calldata, "aave_v3 borrow-capacity user")
+    if user_resp is None:
+        return None, None
+    available_borrows_base = _decode_uint_word(user_resp, 2)
+    if available_borrows_base is None:
+        return None, None
+
+    # 2. IAaveOracle.getAssetPrice(asset) → uint256 base-currency price
+    #    (8-decimal USD).
+    oracle_calldata = _AAVE_GET_ASSET_PRICE_SELECTOR + borrow_asset_address.lower().replace("0x", "").zfill(64)
+    oracle_resp = _gateway_eth_call_raw(compiler, oracle_address, oracle_calldata, "aave_v3 borrow-capacity oracle")
+    if oracle_resp is None:
+        return None, None
+    asset_price_base = _decode_uint_word(oracle_resp, 0)
+    if asset_price_base is None or asset_price_base == 0:
+        return None, None
+
+    # 3. Convert the USD-base capacity to underlying units of the borrow
+    #    asset. Both numerator and denominator are 8-decimal USD; the ratio is
+    #    a dimensionless number of borrow-asset units (in human / non-wei
+    #    terms — caller handles the decimals scale separately if it needs wei).
+    available_in_underlying = Decimal(available_borrows_base) / Decimal(asset_price_base)
+
+    # Apply safety margin (1% default) — absorbs minor oracle drift between
+    # the pre-flight read and the borrow tx execution.
+    cap = available_in_underlying * (Decimal("1") - safety_margin)
+
+    if requested_amount_decimal > cap:
+        reason = (
+            f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
+            f"aave_v3 {chain} exceeds wallet capacity ({cap} after "
+            f"{safety_margin * 100}% safety margin; "
+            f"availableBorrowsBase={available_borrows_base / Decimal('1e8')} USD, "
+            f"oracle price={asset_price_base / Decimal('1e8')} USD). "
+            "Reduce the borrow amount or supply more collateral first."
+        )
+        cache[cache_key] = (reason, cap)
+        return reason, cap
+
+    cache[cache_key] = (None, cap)
+    return None, cap
+
+
+def _fetch_compv2_account_liquidity(
+    compiler: Any,
+    comptroller_address: str,
+    wallet_address: str,
+) -> tuple[int, int, int] | None:
+    """Read Compound V2 ``getAccountLiquidity(wallet)``.
+
+    Returns ``(err_code, liquidity, shortfall)`` or ``None`` on RPC failure.
+    """
+    calldata = _COMPV2_GET_ACCOUNT_LIQUIDITY_SELECTOR + wallet_address.lower().replace("0x", "").zfill(64)
+    resp = _gateway_eth_call_raw(compiler, comptroller_address, calldata, "benqi borrow-capacity liquidity")
+    if resp is None:
+        return None
+    err_code = _decode_uint_word(resp, 0)
+    liquidity = _decode_uint_word(resp, 1)
+    shortfall = _decode_uint_word(resp, 2)
+    if err_code is None or liquidity is None or shortfall is None:
+        return None
+    return err_code, liquidity, shortfall
+
+
+def _fetch_compv2_underlying_price(
+    compiler: Any,
+    comptroller_address: str,
+    qi_token_address: str,
+) -> int | None:
+    """Read ``Comptroller.oracle().getUnderlyingPrice(qiToken)``.
+
+    Returns the raw 1e(36 - decimals)-scaled price or ``None`` on any RPC /
+    decode failure (caller fails open).
+    """
+    oracle_resp = _gateway_eth_call_raw(
+        compiler, comptroller_address, _COMPV2_ORACLE_SELECTOR, "benqi borrow-capacity oracle-addr"
+    )
+    if oracle_resp is None:
+        return None
+    oracle_word = _decode_uint_word(oracle_resp, 0)
+    if oracle_word is None or oracle_word == 0:
+        return None
+    oracle_address = "0x" + format(oracle_word, "040x")
+
+    px_calldata = _COMPV2_GET_UNDERLYING_PRICE_SELECTOR + qi_token_address.lower().replace("0x", "").zfill(64)
+    px_resp = _gateway_eth_call_raw(compiler, oracle_address, px_calldata, "benqi borrow-capacity underlying-price")
+    if px_resp is None:
+        return None
+    underlying_price = _decode_uint_word(px_resp, 0)
+    if underlying_price is None or underlying_price == 0:
+        return None
+    return underlying_price
+
+
+def _check_lending_borrow_capacity_benqi(
+    compiler: Any,
+    wallet_address: str,
+    qi_token_address: str,
+    borrow_asset_symbol: str,
+    requested_amount_decimal: Decimal,
+    borrow_decimals: int,
+    *,
+    safety_margin: Decimal = _BORROW_CAPACITY_SAFETY_MARGIN,
+) -> tuple[str | None, Decimal | None]:
+    """BENQI (Compound V2 fork) borrow-capacity pre-flight.
+
+    Calls ``Comptroller.getAccountLiquidity(wallet)`` and converts the 18-decimal
+    USD "liquidity" into units of the borrow asset using
+    ``Comptroller.oracle().getUnderlyingPrice(qiToken)``. The oracle returns
+    price scaled by ``1e(36 - underlying_decimals)`` (Compound V2 convention),
+    so the conversion is dimension-clean: ``liquidity / underlying_price`` gives
+    units of the underlying scaled by ``10**underlying_decimals`` — i.e., wei.
+
+    Returns ``(reason, available_in_underlying)`` analogous to the Aave V3 helper.
+    """
+    from ..connectors.benqi.adapter import BENQI_COMPTROLLER_ADDRESS
+
+    chain = compiler.chain
+    if chain != "avalanche":
+        return None, None
+
+    cache = getattr(compiler, "_lending_borrow_capacity_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_borrow_capacity_cache = cache
+    cache_key = (chain, "benqi", wallet_address.lower(), qi_token_address.lower())
+
+    if cache_key in cache:
+        prev_reason, prev_available = cache[cache_key]
+        if prev_available is None:
+            return prev_reason, None
+        if requested_amount_decimal <= prev_available:
+            return None, prev_available
+
+    liquidity_tuple = _fetch_compv2_account_liquidity(compiler, BENQI_COMPTROLLER_ADDRESS, wallet_address)
+    if liquidity_tuple is None:
+        return None, None
+    err_code, liquidity, shortfall = liquidity_tuple
+
+    # Non-zero error code from getAccountLiquidity is a Comptroller fault —
+    # fail-open (the borrow tx will surface the same error on-chain).
+    if err_code != 0:
+        return None, None
+
+    # If the wallet is already underwater (shortfall > 0), capacity is zero —
+    # any borrow exceeds it.
+    if shortfall > 0:
+        reason = (
+            f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
+            f"benqi {chain} cannot proceed — wallet is already underwater "
+            f"(shortfall={Decimal(shortfall) / Decimal('1e18')} USD). "
+            "Repay outstanding debt or supply more collateral first."
+        )
+        cache[cache_key] = (reason, Decimal("0"))
+        return reason, Decimal("0")
+
+    underlying_price = _fetch_compv2_underlying_price(compiler, BENQI_COMPTROLLER_ADDRESS, qi_token_address)
+    if underlying_price is None:
+        return None, None
+
+    # Compound V2 conversion.
+    #   underlying_price = USD_per_unit * 1e(36 - decimals)
+    #   liquidity        = USD_amount * 1e18
+    # available_wei = liquidity * 1e18 / underlying_price
+    #                = (USD_amount / USD_per_unit) * 1e(decimals)
+    # We then divide by 10**decimals to compare against the human-decimal
+    # requested amount.
+    available_wei = (Decimal(liquidity) * Decimal(10**18)) / Decimal(underlying_price)
+    available_in_underlying = available_wei / Decimal(10**borrow_decimals)
+    cap = available_in_underlying * (Decimal("1") - safety_margin)
+
+    if requested_amount_decimal > cap:
+        reason = (
+            f"BORROW request for {requested_amount_decimal} {borrow_asset_symbol} on "
+            f"benqi {chain} exceeds wallet capacity ({cap} after "
+            f"{safety_margin * 100}% safety margin; "
+            f"liquidity={Decimal(liquidity) / Decimal('1e18')} USD). "
+            "Reduce the borrow amount or supply more collateral first."
+        )
+        cache[cache_key] = (reason, cap)
+        return reason, cap
+
+    cache[cache_key] = (None, cap)
+    return None, cap
+
+
 class _CompilerLikeShim:
     """Tiny duck-typed shim used when a strategy calls the public
     ``assert_lending_reserve_active`` helper without a real ``IntentCompiler``.
@@ -1040,8 +1366,52 @@ def _compile_borrow_aave_compatible(
             reason=borrow_disabled_reason,
         )
 
+    # Borrow-capacity pre-flight — defense in depth on top of the on-chain
+    # protocol enforcement (Aave V3 ``executeBorrow`` → code 35
+    # COLLATERAL_CANNOT_COVER_NEW_BORROW). Reads ``getUserAccountData`` at
+    # ``latest`` to compute available borrow against current on-chain
+    # collateral. Fail-open on RPC errors keeps placeholder-mode compiles
+    # flowing.
+    #
+    # Compute the on-chain integer collateral amount up-front so the
+    # capacity-bypass check uses the same wei value the supply tx will emit.
+    # Comparing the raw Decimal would let dust amounts like ``1e-19`` WETH
+    # bypass the pre-flight while flooring to ``0`` wei downstream — the
+    # bundle would emit no supply tx but skip the capacity gate, so an
+    # over-capacity borrow could still compile.
     collateral_amount = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
     borrow_amount = int(intent.borrow_amount * Decimal(10**borrow_token.decimals))
+
+    # Same-bundle supply+borrow: when the intent supplies a non-zero
+    # collateral wei amount AND borrows against it in the same ActionBundle,
+    # the on-chain ``getUserAccountData`` does not yet see the pending
+    # supply. The capacity check would false-reject a valid bundle. Skip
+    # the gate when ``collateral_amount > 0`` (scaled wei, not raw Decimal)
+    # to avoid that false-negative; the on-chain protocol still enforces
+    # correctness if the supply turns out insufficient. Modeling pending
+    # collateral inside the helper is a follow-up enhancement (see linked
+    # GitHub issue in the PR).
+    if protocol_lower == "aave_v3" and collateral_amount == 0:
+        capacity_reason, _capacity = _check_lending_borrow_capacity_aave_v3(
+            compiler,
+            compiler.wallet_address,
+            borrow_token.address,
+            borrow_token.symbol,
+            intent.borrow_amount,
+            borrow_token.decimals,
+        )
+        if capacity_reason is not None:
+            from .intent_errors import LendingBorrowExceedsCapacityError
+
+            raise LendingBorrowExceedsCapacityError(
+                chain=compiler.chain,
+                protocol=intent.protocol,
+                asset_symbol=borrow_token.symbol,
+                asset_address=borrow_token.address,
+                requested_amount=intent.borrow_amount,
+                available_amount=_capacity,
+                reason=capacity_reason,
+            )
 
     # Build approve TX and supply TX for collateral (if collateral > 0)
     if collateral_amount > 0:
@@ -1571,6 +1941,12 @@ def _compile_borrow_benqi(
     )
     benqi_adapter = BenqiAdapter(benqi_config)
 
+    # Compute the on-chain integer collateral amount up-front so the
+    # capacity-bypass check below can use the same wei value the supply tx
+    # would emit. A dust Decimal like ``1e-19`` floors to ``0`` wei and
+    # must not skip the pre-flight (no actual supply tx would land).
+    collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
+
     # If collateral > 0, first supply collateral + enterMarkets
     if collateral_amount_decimal > 0:
         collateral_symbol = collateral_token.symbol.upper()
@@ -1582,8 +1958,6 @@ def _compile_borrow_benqi(
                 error=f"BENQI does not support collateral asset: {collateral_symbol}. Supported: {list(BENQI_QI_TOKENS.keys())}",
                 intent_id=intent.intent_id,
             )
-
-        collateral_amount_wei = int(collateral_amount_decimal * Decimal(10**collateral_token.decimals))
 
         # Build approve TX for qiToken (skip for native AVAX)
         if not collateral_market.is_native:
@@ -1648,6 +2022,48 @@ def _compile_borrow_benqi(
 
     # Build borrow TX
     borrow_symbol = borrow_token.symbol.upper()
+
+    # Borrow-capacity pre-flight — defense in depth on top of the BENQI
+    # Comptroller's on-chain enforcement (``borrowAllowed`` → error code 4
+    # INSUFFICIENT_LIQUIDITY). The Anvil-fork harness has historically failed
+    # to enforce this reliably (oracle prices on the fork drift); this
+    # pre-flight makes the bound observable at compile-time. Mainnet
+    # behaviour is presumed correct — a follow-up probe verifies empirically.
+    #
+    # Same-bundle supply+enterMarkets+borrow: when the intent supplies new
+    # collateral (non-zero scaled wei) and enters its market in the same
+    # ActionBundle, ``getAccountLiquidity`` at ``latest`` does not yet see
+    # those side-effects, so the pre-flight would false-reject a valid
+    # bundle. Skip the gate in that case and rely on the on-chain
+    # Comptroller; modeling pending collateral inside the helper is a
+    # follow-up enhancement (see linked GitHub issue in the PR).
+    #
+    # Bypass is gated on ``collateral_amount_wei == 0`` (not the raw
+    # Decimal) so a dust amount that floors to 0 wei still runs the
+    # pre-flight — there's no actual supply tx to mask the false-negative.
+    borrow_market_for_capacity = benqi_adapter.get_market_info(borrow_symbol)
+    if borrow_market_for_capacity is not None and collateral_amount_wei == 0:
+        capacity_reason, _capacity = _check_lending_borrow_capacity_benqi(
+            compiler,
+            compiler.wallet_address,
+            borrow_market_for_capacity.qi_token_address,
+            borrow_token.symbol,
+            intent.borrow_amount,
+            borrow_token.decimals,
+        )
+        if capacity_reason is not None:
+            from .intent_errors import LendingBorrowExceedsCapacityError
+
+            raise LendingBorrowExceedsCapacityError(
+                chain=compiler.chain,
+                protocol=intent.protocol,
+                asset_symbol=borrow_token.symbol,
+                asset_address=borrow_token.address,
+                requested_amount=intent.borrow_amount,
+                available_amount=_capacity,
+                reason=capacity_reason,
+            )
+
     borrow_result = benqi_adapter.borrow(asset=borrow_symbol, amount=intent.borrow_amount)
 
     if not borrow_result.success:

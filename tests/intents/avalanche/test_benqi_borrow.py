@@ -478,10 +478,21 @@ class TestBenqiBorrowIntent:
 
         print("\nALL CHECKS PASSED — borrow-only path verified")
 
+    # The compile-time borrow-capacity pre-flight added in PR #2129 prevents
+    # this scenario in production (gateway-connected) — see
+    # tests/unit/intents/test_compiler_borrow_pre_flight_capacity.py for
+    # the unit-test coverage. The pre-flight is gated on
+    # ``compiler._gateway_client.is_connected`` and the intent-test harness
+    # instantiates IntentCompiler without a gateway client, so the pre-flight
+    # does not fire here. The on-chain Comptroller's enforcement is also
+    # unreliable on Anvil forks (oracle drift), which is the original xfail
+    # reason. End-to-end mainnet validation is tracked at GitHub issue #2128.
     # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         reason="BENQI Comptroller on Anvil fork does not reliably enforce borrow limits. "
-        "The oracle price feed on the fork may return values that allow excessive borrows.",
+        "The oracle price feed on the fork may return values that allow excessive borrows. "
+        "Compile-time pre-flight (PR #2129) covers this in production via gateway eth_call; "
+        "intent tests run without a gateway client so the pre-flight is bypassed here.",
         strict=False,
     )
     @pytest.mark.asyncio

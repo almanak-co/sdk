@@ -191,6 +191,62 @@ class LendingBorrowNotEnabledError(ValueError):
         super().__init__(f"{self.ERROR_PREFIX} for {asset_symbol} on {protocol} {chain}: {reason}")
 
 
+class LendingBorrowExceedsCapacityError(ValueError):
+    """Raised when a BORROW intent requests more than the wallet's available borrow capacity.
+
+    The wallet's collateral and the protocol's per-asset oracle price together
+    define an upper bound on how much of any borrow asset the wallet can draw
+    without immediately tripping the protocol's collateralization check. When
+    the requested amount exceeds this bound the on-chain borrow always
+    reverts (Aave V3 short-string code ``35`` ``COLLATERAL_CANNOT_COVER_NEW_BORROW``;
+    Compound V2 / BENQI Comptroller error code ``4`` ``INSUFFICIENT_LIQUIDITY``)
+    after burning gas + retry iterations.
+    The compile-time pre-flight in
+    :func:`almanak.framework.intents.compiler_lending._check_lending_borrow_capacity`
+    fires this typed error so strategies can match on the stable error-message
+    prefix and emit ``Intent.hold(...)`` instead of looping on the on-chain
+    revert.
+    Defense in depth — mainnet protocol enforcement is presumed correct
+    (Compound V2 ``borrowAllowed`` / Aave V3 ``executeBorrow``), but this
+    pre-flight makes the revert observable at compile time so the runner's
+    permanent-error classifier can prevent retry storms.
+    Attributes:
+        chain: The chain the BORROW targets.
+        protocol: The lending protocol (e.g. ``"benqi"``, ``"aave_v3"``).
+        asset_symbol: The borrow asset symbol that exceeds capacity.
+        asset_address: The borrow asset's contract address.
+        requested_amount: The borrow amount the strategy asked for.
+        available_amount: The capacity the pre-flight computed (in the same
+            asset's underlying decimals).
+        reason: Human-facing diagnostic message including both numbers.
+    Strategies can match on the stable error-message prefix
+    (``"Lending borrow exceeds capacity"``) returned in
+    ``CompilationResult.error`` to emit a clean ``Intent.hold(...)``.
+    """
+
+    ERROR_PREFIX = "Lending borrow exceeds capacity"
+
+    def __init__(
+        self,
+        *,
+        chain: str,
+        protocol: str,
+        asset_symbol: str,
+        asset_address: str,
+        requested_amount: Any,
+        available_amount: Any,
+        reason: str,
+    ) -> None:
+        self.chain = chain
+        self.protocol = protocol
+        self.asset_symbol = asset_symbol
+        self.asset_address = asset_address
+        self.requested_amount = requested_amount
+        self.available_amount = available_amount
+        self.reason = reason
+        super().__init__(f"{self.ERROR_PREFIX} for {asset_symbol} on {protocol} {chain}: {reason}")
+
+
 class InvalidCollateralForMarketError(ValueError):
     """Raised when a perp intent specifies a collateral that is invalid for the market.
 

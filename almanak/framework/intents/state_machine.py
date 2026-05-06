@@ -980,6 +980,31 @@ class IntentStateMachine:
         """
         error_lower = error_message.lower()
 
+        # Specific protocol-level capacity revert tokens that always repeat
+        # for the same (collateral, borrow_amount). Check BEFORE the generic
+        # `revert` keyword so the runner classifies them as
+        # COMPILATION_PERMANENT and skips the retry storm.
+        #
+        # Compound V2 / BENQI: tokens like ``BORROW_LIMIT_REACHED`` and
+        # ``INSUFFICIENT_LIQUIDITY`` appear in raw Comptroller revert
+        # messages. The bare keyword ``insufficient_liquidity`` is generic
+        # enough to surface in non-Compound paths (e.g. router-level swap
+        # failures), so we additionally require ``comptroller`` context to
+        # avoid false positives.
+        #
+        # Aave V3: ``COLLATERAL_CANNOT_COVER_NEW_BORROW`` (code 35) is the
+        # raw revert when the borrow exceeds available borrows. It's
+        # protocol-specific and unambiguous, so it does not need extra
+        # context.
+        compound_fork_permanent = (
+            "borrow_limit_reached",
+            "insufficient_liquidity",
+        )
+        if "comptroller" in error_lower and any(kw in error_lower for kw in compound_fork_permanent):
+            return "COMPILATION_PERMANENT"
+        if "collateral_cannot_cover_new_borrow" in error_lower:
+            return "COMPILATION_PERMANENT"
+
         # Common error categories
         if "insufficient" in error_lower and ("funds" in error_lower or "balance" in error_lower):
             return "INSUFFICIENT_FUNDS"
@@ -1043,6 +1068,20 @@ class IntentStateMachine:
             # HOLD until governance enables borrowing or pick a different
             # borrow asset.
             "lending borrow not enabled",
+            # LendingBorrowExceedsCapacityError.ERROR_PREFIX (intent_errors.py)
+            # surfaces from the BORROW compile-time capacity pre-flight in
+            # compiler_lending._check_lending_borrow_capacity_{aave_v3,benqi}.
+            # Retrying with the same (collateral, borrow_amount) reproduces the
+            # on-chain revert (Aave V3 code 35
+            # COLLATERAL_CANNOT_COVER_NEW_BORROW; Compound V2 / BENQI
+            # Comptroller error code 4 INSUFFICIENT_LIQUIDITY) — strategy must
+            # reduce the borrow amount or supply more collateral first.
+            # Note: the specific Compound-fork tokens (BORROW_LIMIT_REACHED,
+            # INSUFFICIENT_LIQUIDITY) are matched earlier (see
+            # ``compound_fork_permanent`` above) so they don't get caught by
+            # the generic ``revert`` short-circuit when the pre-flight has
+            # failed open and the on-chain revert is what surfaces here.
+            "lending borrow exceeds capacity",
             # VIB-3828: EnsoRouterRevertError.ERROR_PREFIX
             # (enso/exceptions.py) surfaces when the Enso router reverts with
             # a known custom-error selector (e.g. 0xef3dcb2f on Base —

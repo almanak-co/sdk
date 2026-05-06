@@ -685,6 +685,13 @@ class TestAaveV3BorrowIntent:
 
         Uses a borrow amount (10M USDG) that exceeds any possible collateral
         from earlier tests, making this test order-independent.
+
+        Note: in production the compile-time borrow-capacity pre-flight
+        (PR #2129) catches this earlier via gateway eth_call. The intent
+        test harness instantiates IntentCompiler without a gateway client,
+        so the pre-flight is bypassed here and the on-chain Pool's
+        rejection is what surfaces. Unit-test coverage for the pre-flight
+        lives in tests/unit/intents/test_compiler_borrow_pre_flight_capacity.py.
         """
         # USDG address (Aave V3.6 borrow reserve on X-Layer)
         usdg_address = "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8"
