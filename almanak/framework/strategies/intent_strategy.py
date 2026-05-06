@@ -38,8 +38,31 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
+    import pandas as pd
+
+    from ..data.defi.pools import PoolReserves
     from ..data.funding import FundingRate, FundingRateSpread
+    from ..data.health import HealthReport
+    from ..data.lp import ILExposure, ProjectedILResult
+    from ..data.models import DataEnvelope, Instrument
+    from ..data.ohlcv.module import GapStrategy
+    from ..data.pools.aggregation import AggregatedPrice
+    from ..data.pools.analytics import PoolAnalytics, PoolAnalyticsResult
+    from ..data.pools.history import PoolSnapshot
+    from ..data.pools.liquidity import LiquidityDepth, SlippageEstimate
+    from ..data.pools.reader import PoolPrice
+    from ..data.position_health import PTPositionHealth
+    from ..data.prediction_provider import (
+        PredictionMarket,
+        PredictionOrder,
+        PredictionPosition,
+    )
+    from ..data.rates.history import FundingRateSnapshot, LendingRateSnapshot
+    from ..data.risk.metrics import PortfolioRisk, RollingSharpeResult
+    from ..data.staking.solana_lst_provider import LSTExchangeRate
+    from ..data.volatility.realized import VolatilityResult, VolConeResult
     from ..data.wallet_activity import WalletActivityProvider
+    from ..data.yields.aggregator import YieldOpportunity
     from ..portfolio.models import PortfolioSnapshot
     from ..teardown.models import (
         TeardownMode,
@@ -132,6 +155,15 @@ logger = logging.getLogger(__name__)
 # before hint-matching so the word "unavailable" in the wrapper doesn't trigger a
 # false transient hit on a purely permanent failure (e.g. "Unknown token for Binance").
 _DSU_BOILERPLATE_RE = re.compile(r"data source '[^']*' unavailable:\s*")
+
+# Hard cap on the implicit OHLCV fetch size used by the volatility helpers
+# (``realized_vol`` / ``vol_cone``) when ``ohlcv_limit`` is not supplied
+# explicitly. Without this cap, sub-hourly timeframes balloon the request
+# size at multi-hundred-thousand candles per call (``vol_cone(timeframe="1m")``
+# with the default 90-day window asks for ~388,800 candles), which is
+# unsafe per-iteration in both local and hosted multi-tenant runners.
+# An explicit ``ohlcv_limit`` overrides this cap (the caller has opted in).
+_MAX_VOL_CANDLE_LIMIT = 10_000
 
 
 def _price_oracle_supports_chain_arg(price_oracle: PriceOracle) -> bool:
@@ -253,6 +285,36 @@ def _infer_oracle_source(price_oracle: PriceOracle) -> str:
 DEFAULT_TIMEFRAME = "4h"
 
 
+def _derive_ohlcv_base_symbol(token: Any, token_str: str) -> str:
+    """Pick the base symbol used as the ``base`` column in the OHLCV frame's
+    ``attrs``. Accepts an ``Instrument``, a ``BASE/QUOTE`` string, or a bare
+    symbol; falls back to the stringified token.
+    """
+    if hasattr(token, "base"):
+        return token.base
+    if isinstance(token, str) and "/" in token:
+        return token.split("/")[0].strip()
+    return str(token)
+
+
+def _ohlcv_candles_to_rows(candles: list[Any]) -> list[dict[str, Any]]:
+    """Materialize a list of ``OHLCVCandle`` into the row-dict shape that
+    ``pd.DataFrame`` expects. Volume is coerced to NaN when the upstream
+    didn't supply it.
+    """
+    return [
+        {
+            "timestamp": c.timestamp,
+            "open": float(c.open),
+            "high": float(c.high),
+            "low": float(c.low),
+            "close": float(c.close),
+            "volume": float(c.volume) if c.volume is not None else float("nan"),
+        }
+        for c in candles
+    ]
+
+
 class MarketSnapshot:
     """Helper class providing market data access for strategy decisions.
 
@@ -299,6 +361,30 @@ class MarketSnapshot:
         funding_rate_provider: Any | None = None,
         gateway_client: Any | None = None,
         default_timeframe: str | None = None,
+        # ALM-2696: optional Quant Data Layer providers. These power the
+        # ``pool_*`` / ``twap`` / ``lwap`` / ``ohlcv`` / ``il_*`` /
+        # ``prediction`` / ``realized_vol`` / etc. methods that are
+        # documented in the strategy-builder skill. They start as ``None``
+        # so existing call sites keep working unchanged; the corresponding
+        # methods raise ``ValueError("No <X> configured")`` when invoked
+        # without their provider, matching the pre-existing pattern for
+        # ``multi_dex_service`` / ``rate_monitor`` / ``funding_rate_provider``.
+        pool_reader_registry: Any | None = None,
+        pool_reader: Any | None = None,
+        price_aggregator: Any | None = None,
+        ohlcv_router: Any | None = None,
+        ohlcv_module: Any | None = None,
+        gas_oracle: Any | None = None,
+        pool_history_reader: Any | None = None,
+        liquidity_depth_reader: Any | None = None,
+        slippage_estimator: Any | None = None,
+        pool_analytics_reader: Any | None = None,
+        yield_aggregator: Any | None = None,
+        il_calculator: Any | None = None,
+        volatility_calculator: Any | None = None,
+        risk_calculator: Any | None = None,
+        rate_history_reader: Any | None = None,
+        solana_lst_provider: Any | None = None,
     ) -> None:
         """Initialize market snapshot.
 
@@ -320,6 +406,36 @@ class MarketSnapshot:
             default_timeframe: Default OHLCV timeframe from strategy config (e.g., "15m", "1h").
                 Used as the default for all indicator methods (rsi, macd, sma, etc.)
                 when no explicit timeframe is passed. Falls back to DEFAULT_TIMEFRAME if not set.
+            pool_reader_registry: PoolReaderRegistry for on-chain pool price reads
+                (powers ``pool_price`` / ``pool_price_by_pair`` / ``twap`` / ``lwap``).
+            pool_reader: UniswapV3PoolReader for pool reserves reads (powers
+                ``pool_reserves``).
+            price_aggregator: PriceAggregator for TWAP/LWAP price aggregation.
+            ohlcv_router: OHLCVRouter for multi-provider OHLCV with CEX/DEX awareness.
+            ohlcv_module: Legacy OHLCVModule for historical candlestick data (used
+                only when ``ohlcv_router`` is not configured).
+            gas_oracle: GasOracle for gas price reads (powers ``gas_price``).
+            pool_history_reader: PoolHistoryReader for historical pool snapshots
+                (powers ``pool_history``).
+            liquidity_depth_reader: LiquidityDepthReader for tick-level depth reads
+                (powers ``liquidity_depth``).
+            slippage_estimator: SlippageEstimator for swap slippage simulation
+                (powers ``estimate_slippage``).
+            pool_analytics_reader: PoolAnalyticsReader for pool TVL/volume/fee APR
+                (powers ``pool_analytics`` / ``best_pool``).
+            yield_aggregator: YieldAggregator for cross-protocol yield comparison
+                (powers ``yield_opportunities``).
+            il_calculator: ILCalculator for impermanent-loss tracking and projection
+                (powers ``il_exposure`` / ``projected_il``).
+            volatility_calculator: RealizedVolatilityCalculator for vol metrics
+                (powers ``realized_vol`` / ``vol_cone``).
+            risk_calculator: PortfolioRiskCalculator for portfolio risk metrics
+                (powers ``portfolio_risk`` / ``rolling_sharpe``).
+            rate_history_reader: RateHistoryReader for historical lending /
+                funding rate snapshots (powers ``lending_rate_history`` /
+                ``funding_rate_history``).
+            solana_lst_provider: SolanaLSTProvider for Solana LST exchange rates
+                and APY (powers ``lst_exchange_rate`` / ``lst_all_rates``).
         """
         self._chain = chain
         self._wallet_address = wallet_address
@@ -335,6 +451,23 @@ class MarketSnapshot:
         self._rate_monitor = rate_monitor
         self._funding_rate_provider = funding_rate_provider
         self._gateway_client = gateway_client
+        # ALM-2696: Quant Data Layer providers (optional)
+        self._pool_reader_registry = pool_reader_registry
+        self._pool_reader = pool_reader
+        self._price_aggregator = price_aggregator
+        self._ohlcv_router = ohlcv_router
+        self._ohlcv_module = ohlcv_module
+        self._gas_oracle = gas_oracle
+        self._pool_history_reader = pool_history_reader
+        self._liquidity_depth_reader = liquidity_depth_reader
+        self._slippage_estimator = slippage_estimator
+        self._pool_analytics_reader = pool_analytics_reader
+        self._yield_aggregator = yield_aggregator
+        self._il_calculator = il_calculator
+        self._volatility_calculator = volatility_calculator
+        self._risk_calculator = risk_calculator
+        self._rate_history_reader = rate_history_reader
+        self._solana_lst_provider = solana_lst_provider
 
         # Cache for fetched data
         self._price_cache: dict[str, PriceData] = {}
@@ -1975,6 +2108,1640 @@ class MarketSnapshot:
             min_usd_value=min_usd_value,
             leader_address=leader_address,
         )
+
+    # =========================================================================
+    # Quant Data Layer methods (ALM-2696 — Phase 1)
+    #
+    # These methods are documented in the strategy-builder skill and were
+    # historically only present on the data-layer ``MarketSnapshot``. They are
+    # provider-driven: each delegates to an optional injected provider and
+    # raises ``ValueError("No <X> configured")`` (matching the existing pattern
+    # for ``multi_dex_service`` / ``rate_monitor`` / ``funding_rate_provider``)
+    # when the runner has not wired the dependency. They never silently
+    # disable — strategy authors get a clear, actionable error pointing at
+    # the missing provider rather than an ``AttributeError``.
+    #
+    # Phase-2 deferral (VIB-4065 / GH #2126): the constructor accepts the new
+    # provider kwargs (``pool_reader_registry``, ``price_aggregator``,
+    # ``ohlcv_router``, ``il_calculator``, ``volatility_calculator``,
+    # ``risk_calculator``, ``yield_aggregator``, ``rate_history_reader``,
+    # ``solana_lst_provider``, etc.), but the runner does not yet construct
+    # them in ``IntentStrategy.create_market_snapshot()`` /
+    # ``almanak/framework/cli/run_helpers.py``. Until VIB-4065 lands, calling
+    # these methods on a snapshot produced by the production runner will
+    # raise ``ValueError("No <X> configured for MarketSnapshot")``. The
+    # method surface is exposed in Phase 1 so that
+    #   (a) the documented public API on this class matches the
+    #       strategy-builder skill (the ALM-2696 reproduction, where authors
+    #       hit ``AttributeError``, is fixed now);
+    #   (b) tests / paper-trading harnesses that wire providers manually can
+    #       use the methods today;
+    #   (c) Phase 2 is purely a wire-up change — no further surface churn.
+    # =========================================================================
+
+    # --- On-chain pool data ---------------------------------------------------
+
+    def pool_price(
+        self,
+        pool_address: str,
+        chain: str | None = None,
+    ) -> "DataEnvelope[PoolPrice]":
+        """Get the live price from an on-chain DEX pool.
+
+        Reads slot0() from the pool contract and decodes sqrtPriceX96 into a
+        human-readable price. Classification is EXECUTION_GRADE (fail-closed,
+        no off-chain fallback).
+
+        Args:
+            pool_address: Pool contract address.
+            chain: Chain name. Defaults to this snapshot's chain.
+
+        Returns:
+            DataEnvelope[PoolPrice] with provenance metadata.
+
+        Raises:
+            ValueError: If no pool reader registry is configured.
+            PoolPriceUnavailableError: If the pool price cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+
+        if self._pool_reader_registry is None:
+            raise ValueError("No pool reader registry configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            protocols = self._pool_reader_registry.protocols_for_chain(target_chain)
+            if not protocols:
+                raise PoolPriceUnavailableError(
+                    pool_address,
+                    f"No pool reader protocols registered for chain '{target_chain}'",
+                )
+            last_error: Exception | None = None
+            for protocol in protocols:
+                try:
+                    reader = self._pool_reader_registry.get_reader(target_chain, protocol)
+                    return reader.read_pool_price(pool_address, target_chain)
+                except Exception as e:  # noqa: BLE001
+                    last_error = e
+                    continue
+            raise PoolPriceUnavailableError(
+                pool_address,
+                f"All protocols failed for pool {pool_address} on {target_chain}: {last_error}",
+            )
+        except PoolPriceUnavailableError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise PoolPriceUnavailableError(pool_address, f"Unexpected error: {e}") from e
+
+    def pool_price_by_pair(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str | None = None,
+        protocol: str | None = None,
+        fee_tier: int = 3000,
+    ) -> "DataEnvelope[PoolPrice]":
+        """Get the live pool price for a token pair.
+
+        Resolves the pool address for the given pair and reads the price.
+
+        Args:
+            token_a: Token A symbol or address.
+            token_b: Token B symbol or address.
+            chain: Chain name. Defaults to this snapshot's chain.
+            protocol: Protocol name (e.g. "uniswap_v3"). If None, tries all
+                registered protocols.
+            fee_tier: Fee tier in basis points (default 3000 = 0.3%).
+
+        Returns:
+            DataEnvelope[PoolPrice] with provenance metadata.
+
+        Raises:
+            ValueError: If no pool reader registry is configured.
+            PoolPriceUnavailableError: If the pool cannot be found or the
+                price cannot be read.
+        """
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+
+        if self._pool_reader_registry is None:
+            raise ValueError("No pool reader registry configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        pair_str = f"{token_a}/{token_b}"
+
+        protocols = [protocol] if protocol else self._pool_reader_registry.protocols_for_chain(target_chain)
+        if not protocols:
+            raise PoolPriceUnavailableError(
+                pair_str,
+                f"No pool reader protocols registered for chain '{target_chain}'",
+            )
+        last_error: Exception | None = None
+        for proto in protocols:
+            try:
+                reader = self._pool_reader_registry.get_reader(target_chain, proto)
+                pool_addr = reader.resolve_pool_address(token_a, token_b, target_chain, fee_tier)
+                if pool_addr is None:
+                    continue
+                return reader.read_pool_price(pool_addr, target_chain)
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                continue
+
+        raise PoolPriceUnavailableError(
+            pair_str,
+            f"No pool found for {pair_str} (fee_tier={fee_tier}) on {target_chain}: {last_error}",
+        )
+
+    def pool_reserves(self, pool_address: str, chain: str | None = None) -> "PoolReserves":
+        """Get DEX pool reserves and state.
+
+        Fetches the current state of a DEX liquidity pool from the blockchain.
+
+        Args:
+            pool_address: Pool contract address.
+            chain: Chain identifier. Defaults to this snapshot's chain.
+
+        Returns:
+            PoolReserves dataclass with reserves, fee tier, sqrtPrice, etc.
+
+        Raises:
+            ValueError: If no pool reader is configured.
+            PoolReservesUnavailableError: If pool data cannot be retrieved.
+        """
+        from almanak.framework.data.interfaces import (
+            DataSourceError,
+            DataSourceUnavailable,
+        )
+        from almanak.framework.data.market_snapshot import PoolReservesUnavailableError
+
+        if self._pool_reader is None:
+            raise ValueError("No pool reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._run_async_bridged(self._pool_reader.get_pool_reserves(pool_address, target_chain))
+        except DataSourceUnavailable as e:
+            raise PoolReservesUnavailableError(pool_address, e.reason) from e
+        except DataSourceError as e:
+            raise PoolReservesUnavailableError(pool_address, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise PoolReservesUnavailableError(pool_address, f"Unexpected error: {e}") from e
+
+    # --- Price aggregation ----------------------------------------------------
+
+    def _resolve_pool_decimals_for_twap(
+        self,
+        pool_address: str,
+        chain: str,
+        protocol: str,
+        token0_decimals: int | None,
+        token1_decimals: int | None,
+        *,
+        explicit_pool: bool,
+    ) -> tuple[int, int]:
+        """Resolve (token0_decimals, token1_decimals) for an explicit
+        pool_address before passing to PriceAggregator.twap().
+
+        Caller-supplied decimals always take precedence. Otherwise we
+        consult the pool_reader_registry. If neither path can produce
+        decimals, raises ``ValueError`` — silently defaulting to 18/6
+        produces TWAPs off by powers of ten for non-WETH/USDC pools and
+        is unacceptable for an EXECUTION_GRADE call.
+
+        ``explicit_pool`` distinguishes the two callers:
+        - True: caller passed pool_address directly. The registry is
+          optional (caller may supply decimals), so a missing registry
+          is itself a ValueError with a remediation hint.
+        - False: caller passed only token_pair, and the registry was
+          already used to resolve the pool. The registry is guaranteed
+          to be present in this branch, so a metadata-fetch failure
+          surfaces directly.
+        """
+        if token0_decimals is not None and token1_decimals is not None:
+            return token0_decimals, token1_decimals
+
+        if self._pool_reader_registry is None:
+            if explicit_pool:
+                raise ValueError(
+                    f"Cannot derive token decimals for pool_address={pool_address}; "
+                    "supply token0_decimals/token1_decimals explicitly or wire a "
+                    "pool_reader_registry on the MarketSnapshot."
+                )
+            # Non-explicit_pool path always has a registry (the caller
+            # already used it to resolve pool_address). Defensive guard.
+            raise ValueError("No pool reader registry configured for decimals lookup")
+
+        try:
+            reader = self._pool_reader_registry.get_reader(chain, protocol)
+            md0, md1, _ = reader._get_pool_metadata(pool_address, chain)
+        except Exception as e:  # noqa: BLE001
+            if explicit_pool:
+                raise ValueError(
+                    f"Cannot derive token decimals for pool_address={pool_address} "
+                    f"on {chain} (protocol={protocol}): {e}. "
+                    "Supply token0_decimals/token1_decimals explicitly."
+                ) from e
+            raise
+
+        return (
+            md0 if token0_decimals is None else token0_decimals,
+            md1 if token1_decimals is None else token1_decimals,
+        )
+
+    def twap(
+        self,
+        token_pair: "str | Instrument",
+        chain: str | None = None,
+        window_seconds: int = 300,
+        pool_address: str | None = None,
+        protocol: str = "uniswap_v3",
+        token0_decimals: int | None = None,
+        token1_decimals: int | None = None,
+    ) -> "DataEnvelope[AggregatedPrice]":
+        """Get the time-weighted average price (TWAP) for a token pair.
+
+        Uses the Uniswap V3 oracle's observe() function to compute the TWAP
+        over the specified time window. Classification: EXECUTION_GRADE
+        (fail-closed, no off-chain fallback).
+
+        Args:
+            token_pair: Token pair as "BASE/QUOTE" string or Instrument.
+            chain: Chain name. Defaults to this snapshot's chain.
+            window_seconds: Time window in seconds (default 300 = 5 min).
+            pool_address: Explicit pool address. If None, resolves from pair.
+            protocol: Protocol to use (default "uniswap_v3").
+            token0_decimals: Decimals for token0. If omitted and
+                ``pool_address`` is given, the registry is consulted to
+                resolve pool metadata; if neither is available, raises
+                ``ValueError``.
+            token1_decimals: Decimals for token1. Same fallback as above.
+
+        Returns:
+            DataEnvelope[AggregatedPrice] with TWAP price and provenance.
+
+        Raises:
+            ValueError: If no price aggregator is configured, or if token
+                decimals cannot be derived for an explicit ``pool_address``.
+            PoolPriceUnavailableError: If TWAP cannot be calculated.
+        """
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+        from almanak.framework.data.models import resolve_instrument
+
+        if self._price_aggregator is None:
+            raise ValueError("No price aggregator configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        inst = resolve_instrument(token_pair, target_chain)
+        pair_str = inst.pair
+        explicit_pool = pool_address is not None
+
+        try:
+            if pool_address is None:
+                if self._pool_reader_registry is None:
+                    raise ValueError("No pool reader registry configured; provide pool_address explicitly")
+                reader = self._pool_reader_registry.get_reader(target_chain, protocol)
+                pool_address = reader.resolve_pool_address(inst.base, inst.quote, target_chain)
+                if pool_address is None:
+                    raise PoolPriceUnavailableError(
+                        pair_str,
+                        f"Cannot resolve pool for {pair_str} on {target_chain} (protocol={protocol})",
+                    )
+
+            token0_decimals, token1_decimals = self._resolve_pool_decimals_for_twap(
+                pool_address=pool_address,
+                chain=target_chain,
+                protocol=protocol,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
+                explicit_pool=explicit_pool,
+            )
+
+            return self._price_aggregator.twap(
+                pool_address=pool_address,
+                chain=target_chain,
+                window_seconds=window_seconds,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
+                protocol=protocol,
+            )
+        except PoolPriceUnavailableError:
+            raise
+        except ValueError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise PoolPriceUnavailableError(
+                pair_str,
+                f"TWAP calculation failed for {pair_str} on {target_chain}: {e}",
+            ) from e
+
+    def lwap(
+        self,
+        token_pair: "str | Instrument",
+        chain: str | None = None,
+        fee_tiers: list[int] | None = None,
+        protocols: list[str] | None = None,
+    ) -> "DataEnvelope[AggregatedPrice]":
+        """Get the liquidity-weighted average price (LWAP) for a token pair.
+
+        Reads live prices from all known pools for the pair, filters by
+        minimum liquidity, and computes a liquidity-weighted average.
+
+        Args:
+            token_pair: Token pair as "BASE/QUOTE" string or Instrument.
+            chain: Chain name. Defaults to this snapshot's chain.
+            fee_tiers: Fee tiers to search (default: [100, 500, 3000, 10000]).
+            protocols: Protocols to search (default: all registered for chain).
+
+        Returns:
+            DataEnvelope[AggregatedPrice] with LWAP price and provenance.
+
+        Raises:
+            ValueError: If no price aggregator is configured.
+            PoolPriceUnavailableError: If LWAP cannot be calculated.
+        """
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+        from almanak.framework.data.models import resolve_instrument
+
+        if self._price_aggregator is None:
+            raise ValueError("No price aggregator configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        inst = resolve_instrument(token_pair, target_chain)
+        pair_str = inst.pair
+
+        try:
+            return self._price_aggregator.lwap(
+                token_a=inst.base,
+                token_b=inst.quote,
+                chain=target_chain,
+                fee_tiers=fee_tiers,
+                protocols=protocols,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise PoolPriceUnavailableError(
+                pair_str,
+                f"LWAP calculation failed for {pair_str} on {target_chain}: {e}",
+            ) from e
+
+    # --- Pool history / depth / slippage -------------------------------------
+
+    def pool_history(
+        self,
+        pool_address: str,
+        chain: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        resolution: str = "1h",
+    ) -> "DataEnvelope[list[PoolSnapshot]]":
+        """Get historical pool state snapshots for backtesting and analytics.
+
+        Args:
+            pool_address: Pool contract address.
+            chain: Chain name. Defaults to this snapshot's chain.
+            start_date: Start of the history window. Defaults to 90 days
+                before ``end_date``.
+            end_date: End of the history window. Defaults to the snapshot's
+                iteration ``timestamp`` (NOT ``datetime.now()``) so backtests,
+                paper runs, and historical snapshots stay deterministic and
+                never leak future data.
+            resolution: "1h" / "4h" / "1d". Default "1h".
+
+        Returns:
+            DataEnvelope[list[PoolSnapshot]] with INFORMATIONAL classification.
+
+        Raises:
+            ValueError: If no pool history reader is configured.
+            PoolHistoryUnavailableError: If historical data cannot be retrieved.
+        """
+        from datetime import timedelta as _timedelta
+
+        from almanak.framework.data.market_snapshot import PoolHistoryUnavailableError
+
+        if self._pool_history_reader is None:
+            raise ValueError("No pool history reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        # Anchor the default window on the snapshot timestamp so this method
+        # is consistent with the rest of the snapshot (price/balance/etc.)
+        # and never leaks future data in deterministic replay paths
+        # (backtests, paper trading, manually-constructed historical
+        # snapshots). See PR #2125 / VIB-4065 follow-up.
+        effective_end = end_date if end_date is not None else self._timestamp
+        effective_start = start_date if start_date is not None else effective_end - _timedelta(days=90)
+
+        try:
+            return self._pool_history_reader.get_pool_history(
+                pool_address=pool_address,
+                chain=target_chain,
+                start_date=effective_start,
+                end_date=effective_end,
+                resolution=resolution,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise PoolHistoryUnavailableError(
+                pool_address,
+                f"Failed to fetch pool history for {pool_address} on {target_chain}: {e}",
+            ) from e
+
+    def liquidity_depth(
+        self,
+        pool_address: str,
+        chain: str | None = None,
+    ) -> "DataEnvelope[LiquidityDepth]":
+        """Get tick-level liquidity depth for a concentrated-liquidity pool.
+
+        Args:
+            pool_address: Pool contract address.
+            chain: Chain name. Defaults to this snapshot's chain.
+
+        Returns:
+            DataEnvelope[LiquidityDepth] with tick-level liquidity data.
+
+        Raises:
+            ValueError: If no liquidity depth reader is configured.
+            LiquidityDepthUnavailableError: If liquidity data cannot be read.
+        """
+        from almanak.framework.data.market_snapshot import LiquidityDepthUnavailableError
+
+        if self._liquidity_depth_reader is None:
+            raise ValueError("No liquidity depth reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._liquidity_depth_reader.read_liquidity_depth(
+                pool_address=pool_address,
+                chain=target_chain,
+            )
+        except LiquidityDepthUnavailableError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise LiquidityDepthUnavailableError(
+                pool_address,
+                f"Failed to read liquidity depth for {pool_address} on {target_chain}: {e}",
+            ) from e
+
+    def estimate_slippage(
+        self,
+        token_in: str,
+        token_out: str,
+        amount: Decimal,
+        chain: str | None = None,
+        protocol: str | None = None,
+    ) -> "DataEnvelope[SlippageEstimate]":
+        """Estimate price impact and slippage for a potential swap.
+
+        Simulates the swap through tick ranges using actual on-chain liquidity.
+
+        Args:
+            token_in: Input token symbol or address.
+            token_out: Output token symbol or address.
+            amount: Amount of token_in to swap (human-readable units).
+            chain: Chain name. Defaults to this snapshot's chain.
+            protocol: Protocol name. Auto-detected if None.
+
+        Returns:
+            DataEnvelope[SlippageEstimate] with price impact data.
+
+        Raises:
+            ValueError: If no slippage estimator is configured.
+            SlippageEstimateUnavailableError: If slippage cannot be estimated.
+        """
+        from almanak.framework.data.market_snapshot import SlippageEstimateUnavailableError
+
+        if self._slippage_estimator is None:
+            raise ValueError("No slippage estimator configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._slippage_estimator.estimate_slippage(
+                token_in=token_in,
+                token_out=token_out,
+                amount=amount,
+                chain=target_chain,
+                protocol=protocol,
+            )
+        except SlippageEstimateUnavailableError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise SlippageEstimateUnavailableError(
+                f"{token_in}/{token_out}",
+                f"Slippage estimation failed: {e}",
+            ) from e
+
+    # --- Pool analytics & yield ----------------------------------------------
+
+    def pool_analytics(
+        self,
+        pool_address: str,
+        chain: str | None = None,
+        protocol: str | None = None,
+    ) -> "DataEnvelope[PoolAnalytics]":
+        """Get real-time analytics for a pool (TVL, volume, fee APR/APY).
+
+        Args:
+            pool_address: Pool contract address.
+            chain: Chain name. Defaults to this snapshot's chain.
+            protocol: Optional protocol hint (e.g. "uniswap_v3").
+
+        Returns:
+            DataEnvelope[PoolAnalytics] with INFORMATIONAL classification.
+
+        Raises:
+            ValueError: If no pool analytics reader is configured.
+            PoolAnalyticsUnavailableError: If analytics cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
+
+        if self._pool_analytics_reader is None:
+            raise ValueError("No pool analytics reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._pool_analytics_reader.get_pool_analytics(
+                pool_address=pool_address,
+                chain=target_chain,
+                protocol=protocol,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise PoolAnalyticsUnavailableError(
+                pool_address,
+                f"Failed to fetch analytics for {pool_address} on {target_chain}: {e}",
+            ) from e
+
+    def best_pool(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str | None = None,
+        metric: str = "fee_apr",
+        protocols: list[str] | None = None,
+    ) -> "DataEnvelope[PoolAnalyticsResult]":
+        """Find the best pool for a token pair based on a metric.
+
+        Args:
+            token_a: First token symbol.
+            token_b: Second token symbol.
+            chain: Chain name. Defaults to this snapshot's chain.
+            metric: "fee_apr" / "fee_apy" / "tvl_usd" / "volume_24h_usd".
+            protocols: Optional list of protocols to filter by.
+
+        Returns:
+            DataEnvelope[PoolAnalyticsResult] with the best pool.
+
+        Raises:
+            ValueError: If no pool analytics reader is configured.
+            PoolAnalyticsUnavailableError: If no pools found or all providers fail.
+        """
+        from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
+
+        if self._pool_analytics_reader is None:
+            raise ValueError("No pool analytics reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._pool_analytics_reader.best_pool(
+                token_a=token_a,
+                token_b=token_b,
+                chain=target_chain,
+                metric=metric,
+                protocols=protocols,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise PoolAnalyticsUnavailableError(
+                f"{token_a}/{token_b}",
+                f"Failed to find best pool on {target_chain}: {e}",
+            ) from e
+
+    def yield_opportunities(
+        self,
+        token: str,
+        chains: list[str] | None = None,
+        min_tvl: float = 100_000,
+        sort_by: str = "apy",
+    ) -> "DataEnvelope[list[YieldOpportunity]]":
+        """Find yield opportunities for a token across protocols and chains.
+
+        Args:
+            token: Token symbol.
+            chains: Optional list of chains to filter. None means all.
+            min_tvl: Minimum TVL in USD. Default $100k.
+            sort_by: "apy" / "tvl" / "risk_score". Default "apy".
+
+        Returns:
+            DataEnvelope[list[YieldOpportunity]] sorted by chosen metric.
+
+        Raises:
+            ValueError: If no yield aggregator is configured.
+            YieldOpportunitiesUnavailableError: If data cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import YieldOpportunitiesUnavailableError
+
+        if self._yield_aggregator is None:
+            raise ValueError("No yield aggregator configured for MarketSnapshot")
+
+        try:
+            return self._yield_aggregator.get_yield_opportunities(
+                token=token,
+                chains=chains,
+                min_tvl=min_tvl,
+                sort_by=sort_by,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise YieldOpportunitiesUnavailableError(
+                token,
+                f"Failed to fetch yield opportunities: {e}",
+            ) from e
+
+    # --- Rate history --------------------------------------------------------
+
+    def lending_rate_history(
+        self,
+        protocol: str,
+        token: str,
+        chain: str | None = None,
+        days: int = 90,
+    ) -> "DataEnvelope[list[LendingRateSnapshot]]":
+        """Get historical lending rate snapshots for backtesting.
+
+        Args:
+            protocol: Lending protocol (e.g. "aave_v3").
+            token: Token symbol.
+            chain: Chain name. Defaults to this snapshot's chain.
+            days: Number of days of history. Default 90.
+
+        Returns:
+            DataEnvelope[list[LendingRateSnapshot]] sorted ascending.
+
+        Raises:
+            ValueError: If no rate history reader is configured.
+            LendingRateHistoryUnavailableError: If data cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import LendingRateHistoryUnavailableError
+
+        if self._rate_history_reader is None:
+            raise ValueError("No rate history reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._rate_history_reader.get_lending_rate_history(
+                protocol=protocol,
+                token=token,
+                chain=target_chain,
+                days=days,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise LendingRateHistoryUnavailableError(
+                protocol,
+                token,
+                f"Failed to fetch lending rate history: {e}",
+            ) from e
+
+    def funding_rate_history(
+        self,
+        venue: str,
+        market_symbol: str,
+        hours: int = 168,
+    ) -> "DataEnvelope[list[FundingRateSnapshot]]":
+        """Get historical funding rate snapshots for backtesting.
+
+        Args:
+            venue: Perps venue (e.g. "hyperliquid").
+            market_symbol: Market symbol (e.g. "ETH-USD").
+            hours: Number of hours of history. Default 168 (7 days).
+
+        Returns:
+            DataEnvelope[list[FundingRateSnapshot]] sorted ascending.
+
+        Raises:
+            ValueError: If no rate history reader is configured.
+            FundingRateHistoryUnavailableError: If data cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import FundingRateHistoryUnavailableError
+
+        if self._rate_history_reader is None:
+            raise ValueError("No rate history reader configured for MarketSnapshot")
+
+        try:
+            return self._rate_history_reader.get_funding_rate_history(
+                venue=venue,
+                market_symbol=market_symbol,
+                hours=hours,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise FundingRateHistoryUnavailableError(
+                venue,
+                market_symbol,
+                f"Failed to fetch funding rate history: {e}",
+            ) from e
+
+    # --- Impermanent loss ----------------------------------------------------
+
+    def il_exposure(
+        self,
+        position_id: str,
+        fees_earned: Decimal = Decimal("0"),
+    ) -> "ILExposure":
+        """Get impermanent loss exposure for a tracked LP position.
+
+        Requires an ILCalculator with the position already registered via
+        ``add_position()``.
+
+        Args:
+            position_id: Unique identifier for the LP position.
+            fees_earned: Optional fees earned (for net PnL).
+
+        Returns:
+            ILExposure with current IL metrics.
+
+        Raises:
+            ValueError: If no IL calculator is configured.
+            ILExposureUnavailableError: If exposure cannot be calculated.
+        """
+        from almanak.framework.data.lp import (
+            ILExposureUnavailableError as CalcILExposureError,
+        )
+        from almanak.framework.data.lp import (
+            PositionNotFoundError,
+        )
+        from almanak.framework.data.market_snapshot import (
+            ILExposureUnavailableError,
+            PriceUnavailableError,
+        )
+
+        if self._il_calculator is None:
+            raise ValueError("No IL calculator configured for MarketSnapshot")
+
+        try:
+            position = self._il_calculator.get_position(position_id)
+
+            current_price_a: Decimal | None = None
+            current_price_b: Decimal | None = None
+
+            if self._price_oracle is not None:
+                # Use this snapshot's ``price`` (carries cache + critical-failure
+                # plumbing) rather than the raw oracle so behaviour matches
+                # the documented API.
+                try:
+                    current_price_a = self.price(position.token_a)
+                except (PriceUnavailableError, ValueError):
+                    pass
+                try:
+                    current_price_b = self.price(position.token_b)
+                except (PriceUnavailableError, ValueError):
+                    pass
+
+            return self._il_calculator.calculate_il_exposure(
+                position_id=position_id,
+                current_price_a=current_price_a,
+                current_price_b=current_price_b,
+                fees_earned=fees_earned,
+            )
+        except PositionNotFoundError as e:
+            raise ILExposureUnavailableError(position_id, f"Position not found: {e}") from e
+        except CalcILExposureError as e:
+            raise ILExposureUnavailableError(position_id, e.reason) from e
+        except Exception as e:  # noqa: BLE001
+            raise ILExposureUnavailableError(position_id, f"Unexpected error: {e}") from e
+
+    def projected_il(
+        self,
+        token_a: str,
+        token_b: str,
+        price_change_pct: Decimal,
+        weight_a: Decimal = Decimal("0.5"),
+        weight_b: Decimal = Decimal("0.5"),
+    ) -> "ProjectedILResult":
+        """Project impermanent loss for a hypothetical price change.
+
+        Args:
+            token_a: Symbol of token A (the volatile token).
+            token_b: Symbol of token B (often a stablecoin).
+            price_change_pct: Price change percentage (50 for +50%).
+            weight_a: Weight of token A in the pool (default 0.5).
+            weight_b: Weight of token B in the pool (default 0.5).
+
+        Returns:
+            ProjectedILResult with il_ratio / il_percent / il_bps.
+
+        Raises:
+            ValueError: If no IL calculator is configured or invalid args.
+        """
+        from almanak.framework.data.lp import InvalidPriceError, InvalidWeightError
+
+        if self._il_calculator is None:
+            raise ValueError("No IL calculator configured for MarketSnapshot")
+
+        try:
+            return self._il_calculator.project_il(
+                price_change_pct=price_change_pct,
+                weight_a=weight_a,
+                weight_b=weight_b,
+            )
+        except InvalidPriceError as e:
+            raise ValueError(f"Invalid price change: {e.reason}") from e
+        except InvalidWeightError as e:
+            raise ValueError(f"Invalid weights: {e.reason}") from e
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"Failed to project IL: {e}") from e
+
+    # --- Volatility & risk ---------------------------------------------------
+
+    def realized_vol(
+        self,
+        token: str,
+        window_days: int = 30,
+        timeframe: str = "1h",
+        estimator: str = "close_to_close",
+        *,
+        ohlcv_limit: int | None = None,
+    ) -> "DataEnvelope[VolatilityResult]":
+        """Calculate realized volatility for a token.
+
+        Args:
+            token: Token symbol.
+            window_days: Lookback window in calendar days. Default 30.
+            timeframe: Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d). Default "1h".
+            estimator: "close_to_close" (default) or "parkinson".
+            ohlcv_limit: Override for number of candles to fetch.
+
+        Returns:
+            DataEnvelope[VolatilityResult] with INFORMATIONAL classification.
+
+        Raises:
+            ValueError: If no volatility calculator is configured.
+            VolatilityUnavailableError: If volatility cannot be calculated.
+        """
+        from almanak.framework.data.market_snapshot import VolatilityUnavailableError
+        from almanak.framework.data.models import (
+            DataClassification,
+            DataEnvelope,
+            DataMeta,
+        )
+
+        if self._volatility_calculator is None:
+            raise ValueError("No volatility calculator configured for MarketSnapshot")
+
+        try:
+            candles = self._fetch_candles_for_vol(token, window_days, timeframe, ohlcv_limit)
+            result = self._volatility_calculator.realized_vol(
+                candles=candles,
+                window_days=window_days,
+                timeframe=timeframe,
+                estimator=estimator,
+            )
+            meta = DataMeta(
+                source="computed",
+                observed_at=self._timestamp,
+                finality="off_chain",
+                confidence=1.0,
+                cache_hit=False,
+            )
+            return DataEnvelope(value=result, meta=meta, classification=DataClassification.INFORMATIONAL)
+        except VolatilityUnavailableError:
+            raise
+        except ValueError:
+            # Surface contract / cap errors verbatim — wrapping them as
+            # VolatilityUnavailableError would obscure the actionable hint
+            # (e.g. "pass ohlcv_limit explicitly", "unsupported timeframe").
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise VolatilityUnavailableError(token, str(e)) from e
+
+    def vol_cone(
+        self,
+        token: str,
+        windows: list[int] | None = None,
+        timeframe: str = "1h",
+        estimator: str = "close_to_close",
+        *,
+        ohlcv_limit: int | None = None,
+    ) -> "DataEnvelope[VolConeResult]":
+        """Compute volatility cone: current vol vs historical percentile.
+
+        Args:
+            token: Token symbol.
+            windows: Lookback windows in days. Default [7, 14, 30, 90].
+            timeframe: Candle timeframe. Default "1h".
+            estimator: "close_to_close" or "parkinson".
+            ohlcv_limit: Override for number of candles to fetch.
+
+        Returns:
+            DataEnvelope[VolConeResult] with INFORMATIONAL classification.
+
+        Raises:
+            ValueError: If no volatility calculator is configured.
+            VolConeUnavailableError: If vol cone cannot be calculated.
+        """
+        from almanak.framework.data.market_snapshot import VolConeUnavailableError
+        from almanak.framework.data.models import (
+            DataClassification,
+            DataEnvelope,
+            DataMeta,
+        )
+
+        if self._volatility_calculator is None:
+            raise ValueError("No volatility calculator configured for MarketSnapshot")
+
+        if windows is None:
+            windows = [7, 14, 30, 90]
+
+        try:
+            max_window = max(windows)
+            candles = self._fetch_candles_for_vol(token, max_window * 3, timeframe, ohlcv_limit)
+            result = self._volatility_calculator.vol_cone(
+                candles=candles,
+                windows=windows,
+                timeframe=timeframe,
+                estimator=estimator,
+                token=token,
+            )
+            meta = DataMeta(
+                source="computed",
+                observed_at=self._timestamp,
+                finality="off_chain",
+                confidence=1.0,
+                cache_hit=False,
+            )
+            return DataEnvelope(value=result, meta=meta, classification=DataClassification.INFORMATIONAL)
+        except VolConeUnavailableError:
+            raise
+        except ValueError:
+            # Surface contract / cap errors verbatim — wrapping them as
+            # VolConeUnavailableError would obscure the actionable hint
+            # (e.g. "pass ohlcv_limit explicitly", "unsupported timeframe").
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise VolConeUnavailableError(token, str(e)) from e
+
+    def portfolio_risk(
+        self,
+        pnl_series: list[float],
+        total_value_usd: Decimal | None = None,
+        return_interval: str = "1d",
+        risk_free_rate: Decimal = Decimal("0"),
+        var_method: str = "parametric",
+        timestamps: list[datetime] | None = None,
+        benchmark_eth_returns: list[float] | None = None,
+        benchmark_btc_returns: list[float] | None = None,
+    ) -> "DataEnvelope[PortfolioRisk]":
+        """Calculate portfolio risk metrics from a PnL return series.
+
+        Computes Sharpe ratio, Sortino ratio, VaR, CVaR, and drawdown.
+
+        Args:
+            pnl_series: Periodic returns as fractions (0.01 = 1% gain).
+            total_value_usd: Current portfolio value in USD.
+            return_interval: Periodicity of returns (1d, 1h, etc.).
+            risk_free_rate: Risk-free rate per period as a decimal.
+            var_method: "parametric" / "historical" / "cornish_fisher".
+            timestamps: Optional timestamps for each return.
+            benchmark_eth_returns: Optional ETH returns for beta.
+            benchmark_btc_returns: Optional BTC returns for beta.
+
+        Returns:
+            DataEnvelope[PortfolioRisk] with INFORMATIONAL classification.
+
+        Raises:
+            ValueError: If no risk calculator is configured.
+            PortfolioRiskUnavailableError: If risk metrics cannot be calculated.
+        """
+        from almanak.framework.data.market_snapshot import PortfolioRiskUnavailableError
+        from almanak.framework.data.models import (
+            DataClassification,
+            DataEnvelope,
+            DataMeta,
+        )
+
+        if self._risk_calculator is None:
+            raise ValueError("No risk calculator configured for MarketSnapshot")
+
+        try:
+            from almanak.framework.data.risk.metrics import VaRMethod
+
+            method_map = {
+                "parametric": VaRMethod.PARAMETRIC,
+                "historical": VaRMethod.HISTORICAL,
+                "cornish_fisher": VaRMethod.CORNISH_FISHER,
+            }
+            vm = method_map.get(var_method)
+            if vm is None:
+                raise ValueError(f"Unknown var_method '{var_method}'. Use: {list(method_map.keys())}")
+
+            result = self._risk_calculator.portfolio_risk(
+                pnl_series=pnl_series,
+                total_value_usd=total_value_usd or Decimal("0"),
+                return_interval=return_interval,
+                risk_free_rate=risk_free_rate,
+                var_method=vm,
+                timestamps=timestamps,
+                benchmark_eth_returns=benchmark_eth_returns,
+                benchmark_btc_returns=benchmark_btc_returns,
+            )
+            meta = DataMeta(
+                source="computed",
+                observed_at=self._timestamp,
+                finality="off_chain",
+                confidence=1.0,
+                cache_hit=False,
+            )
+            return DataEnvelope(value=result, meta=meta, classification=DataClassification.INFORMATIONAL)
+        except PortfolioRiskUnavailableError:
+            raise
+        except ValueError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise PortfolioRiskUnavailableError(str(e)) from e
+
+    def rolling_sharpe(
+        self,
+        pnl_series: list[float],
+        window_days: int = 30,
+        return_interval: str = "1d",
+        risk_free_rate: Decimal = Decimal("0"),
+        timestamps: list[datetime] | None = None,
+    ) -> "DataEnvelope[RollingSharpeResult]":
+        """Compute rolling Sharpe ratio over a PnL series.
+
+        Args:
+            pnl_series: Periodic returns as fractions.
+            window_days: Rolling window in days. Default 30.
+            return_interval: Periodicity of returns.
+            risk_free_rate: Risk-free rate per period.
+            timestamps: Optional timestamps aligned with pnl_series.
+
+        Returns:
+            DataEnvelope[RollingSharpeResult] with INFORMATIONAL classification.
+
+        Raises:
+            ValueError: If no risk calculator is configured.
+            RollingSharpeUnavailableError: If rolling Sharpe cannot be computed.
+        """
+        from almanak.framework.data.market_snapshot import RollingSharpeUnavailableError
+        from almanak.framework.data.models import (
+            DataClassification,
+            DataEnvelope,
+            DataMeta,
+        )
+
+        if self._risk_calculator is None:
+            raise ValueError("No risk calculator configured for MarketSnapshot")
+
+        try:
+            result = self._risk_calculator.rolling_sharpe(
+                pnl_series=pnl_series,
+                window_days=window_days,
+                return_interval=return_interval,
+                risk_free_rate=risk_free_rate,
+                timestamps=timestamps,
+            )
+            meta = DataMeta(
+                source="computed",
+                observed_at=self._timestamp,
+                finality="off_chain",
+                confidence=1.0,
+                cache_hit=False,
+            )
+            return DataEnvelope(value=result, meta=meta, classification=DataClassification.INFORMATIONAL)
+        except RollingSharpeUnavailableError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise RollingSharpeUnavailableError(str(e)) from e
+
+    def _fetch_candles_for_vol(
+        self,
+        token: str,
+        window_days: int,
+        timeframe: str,
+        ohlcv_limit: int | None,
+    ) -> list:
+        """Fetch OHLCV candles for volatility calculations.
+
+        Internal helper used by ``realized_vol`` / ``vol_cone``.
+        """
+        from almanak.framework.data.interfaces import OHLCVCandle
+        from almanak.framework.data.market_snapshot import VolatilityUnavailableError
+
+        hours_per_candle = {
+            "1m": 1 / 60,
+            "5m": 5 / 60,
+            "15m": 0.25,
+            "1h": 1.0,
+            "4h": 4.0,
+            "1d": 24.0,
+        }
+        if timeframe not in hours_per_candle:
+            raise ValueError(f"Unsupported timeframe '{timeframe}'")
+
+        # Validate explicit ``ohlcv_limit`` strictly: ``0`` and negatives are not
+        # "use the default" — they are caller bugs that would otherwise propagate
+        # silently as empty fetches or as ``MAX_VOL_CANDLE_LIMIT`` checks bypassed.
+        if ohlcv_limit is not None:
+            if ohlcv_limit <= 0:
+                raise ValueError(
+                    f"ohlcv_limit must be > 0 (got {ohlcv_limit!r}) for "
+                    f"token={token!r} timeframe={timeframe!r} window_days={window_days}"
+                )
+            limit = ohlcv_limit
+        else:
+            limit = max(int(window_days * 24 / hours_per_candle[timeframe]), 100)
+
+        # Guard against runaway implicit fetches at sub-hourly resolutions
+        # (see ``_MAX_VOL_CANDLE_LIMIT`` rationale). Explicit ``ohlcv_limit``
+        # bypasses the cap — the caller has measured the cost of the call.
+        if ohlcv_limit is None and limit > _MAX_VOL_CANDLE_LIMIT:
+            raise ValueError(
+                f"Volatility request for token={token!r} with timeframe={timeframe!r} "
+                f"and window_days={window_days} would fetch {limit} candles, exceeding "
+                f"the safe implicit cap of {_MAX_VOL_CANDLE_LIMIT}. Pass ``ohlcv_limit`` "
+                f"explicitly to opt in, or use a coarser timeframe."
+            )
+
+        df = self.ohlcv(token, timeframe=timeframe, limit=limit)
+
+        if df.empty:
+            raise VolatilityUnavailableError(token, "No OHLCV data available")
+
+        candles = []
+        for _, row in df.iterrows():
+            candles.append(
+                OHLCVCandle(
+                    timestamp=row["timestamp"],
+                    open=Decimal(str(row["open"])),
+                    high=Decimal(str(row["high"])),
+                    low=Decimal(str(row["low"])),
+                    close=Decimal(str(row["close"])),
+                    volume=(
+                        Decimal(str(row["volume"]))
+                        if not (hasattr(row["volume"], "__float__") and str(row["volume"]) == "nan")
+                        else None
+                    ),
+                )
+            )
+        return candles
+
+    # --- OHLCV / gas / batch helpers / health --------------------------------
+
+    def ohlcv(
+        self,
+        token: "str | Instrument",
+        timeframe: str = "1h",
+        limit: int = 100,
+        quote: str = "USD",
+        gap_strategy: "GapStrategy" = "nan",
+        *,
+        pool_address: str | None = None,
+    ) -> "pd.DataFrame":
+        """Get OHLCV (candlestick) data for a token.
+
+        Routes through ``ohlcv_router`` (preferred) or legacy ``ohlcv_module``.
+
+        Args:
+            token: Token symbol, "BASE/QUOTE" string, or Instrument.
+            timeframe: Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d). Default "1h".
+            limit: Maximum number of candles. Default 100.
+            quote: Quote currency. Default "USD".
+            gap_strategy: "nan" / "ffill" / "drop". Default "nan".
+            pool_address: Explicit pool address for DEX providers.
+
+        Returns:
+            pandas DataFrame with columns timestamp, open, high, low, close, volume.
+
+        Raises:
+            ValueError: If no OHLCV module/router is configured.
+            OHLCVUnavailableError: If OHLCV data cannot be retrieved.
+        """
+        token_str = token if isinstance(token, str) else token.pair
+
+        if self._ohlcv_router is not None:
+            envelope = self._fetch_ohlcv_via_router(token, timeframe, limit, pool_address, quote, token_str)
+            return self._envelope_to_ohlcv_df(envelope, token, token_str, quote, timeframe, gap_strategy)
+
+        if self._ohlcv_module is None:
+            raise ValueError("No OHLCV module or router configured for MarketSnapshot")
+
+        # The legacy ``OHLCVModule.get_ohlcv`` is strictly token-scoped (CEX
+        # tape via ``OHLCVProvider``); it has no ``pool_address`` parameter.
+        # Silently dropping ``pool_address`` would let a pool-scoped call
+        # appear to succeed while returning candles for a different market —
+        # the worst-class failure for an indicator-driven strategy. Fail
+        # loudly so the caller wires the OHLCV router instead.
+        if pool_address is not None:
+            raise ValueError(
+                "pool_address requires an OHLCV router (DEX-aware path); the "
+                "legacy ohlcv_module is token-scoped only and cannot fetch "
+                "pool-scoped candles. Wire ohlcv_router= on MarketSnapshot."
+            )
+
+        return self._fetch_ohlcv_legacy(token, timeframe, limit, quote, gap_strategy)
+
+    def _fetch_ohlcv_via_router(
+        self,
+        token: "str | Instrument",
+        timeframe: str,
+        limit: int,
+        pool_address: str | None,
+        quote: str,
+        token_str: str,
+    ) -> Any:
+        """Router-backed OHLCV fetch with the documented error contract.
+
+        Precondition: ``self._ohlcv_router`` is non-None (the public ``ohlcv``
+        method gates this branch).
+        """
+        from almanak.framework.data.interfaces import DataSourceError
+        from almanak.framework.data.market_snapshot import OHLCVUnavailableError
+
+        assert self._ohlcv_router is not None
+        try:
+            return self._ohlcv_router.get_ohlcv(
+                token=token,
+                chain=self._chain,
+                timeframe=timeframe,
+                limit=limit,
+                pool_address=pool_address,
+                quote=quote,
+            )
+        except DataSourceError as e:
+            raise OHLCVUnavailableError(token_str, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise OHLCVUnavailableError(token_str, f"Unexpected error: {e}") from e
+
+    def _envelope_to_ohlcv_df(
+        self,
+        envelope: Any,
+        token: "str | Instrument",
+        token_str: str,
+        quote: str,
+        timeframe: str,
+        gap_strategy: "GapStrategy",
+    ) -> "pd.DataFrame":
+        """Materialize a router envelope into the documented DataFrame shape."""
+        import pandas as pd
+
+        candles = envelope.value
+        attrs = {
+            "base": _derive_ohlcv_base_symbol(token, token_str),
+            "quote": quote,
+            "timeframe": timeframe,
+            "source": envelope.meta.source,
+            "chain": self._chain,
+            "fetched_at": datetime.now(UTC).isoformat(),
+            "confidence": envelope.meta.confidence,
+        }
+        if not candles:
+            df = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df.attrs = {**attrs, "base": token_str}
+            return df
+
+        df = pd.DataFrame(_ohlcv_candles_to_rows(candles))
+        if gap_strategy == "ffill":
+            df = df.ffill()
+        elif gap_strategy == "drop":
+            df = df.dropna()
+        df.attrs = attrs
+        return df
+
+    def _fetch_ohlcv_legacy(
+        self,
+        token: "str | Instrument",
+        timeframe: str,
+        limit: int,
+        quote: str,
+        gap_strategy: "GapStrategy",
+    ) -> "pd.DataFrame":
+        """Legacy ``OHLCVModule`` token-scoped fetch with the documented error contract.
+
+        Precondition: ``self._ohlcv_module`` is non-None (the public ``ohlcv``
+        method gates this branch).
+        """
+        from almanak.framework.data.interfaces import DataSourceError
+        from almanak.framework.data.market_snapshot import OHLCVUnavailableError
+
+        assert self._ohlcv_module is not None
+        legacy_token = token if isinstance(token, str) else token.base
+        try:
+            return self._ohlcv_module.get_ohlcv(
+                token=legacy_token,
+                timeframe=timeframe,
+                limit=limit,
+                quote=quote,
+                gap_strategy=gap_strategy,
+            )
+        except ValueError:
+            raise
+        except DataSourceError as e:
+            raise OHLCVUnavailableError(legacy_token, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise OHLCVUnavailableError(legacy_token, f"Unexpected error: {e}") from e
+
+    def gas_price(self, chain: str | None = None) -> Any:
+        """Get current gas price for a chain.
+
+        Args:
+            chain: Chain identifier. Defaults to this snapshot's chain.
+
+        Returns:
+            GasPrice with base_fee_gwei, priority_fee_gwei, max_fee_gwei, etc.
+
+        Raises:
+            ValueError: If no gas oracle is configured.
+            GasUnavailableError: If gas data cannot be retrieved.
+        """
+        from almanak.framework.data.interfaces import (
+            DataSourceError,
+            DataSourceUnavailable,
+        )
+        from almanak.framework.data.market_snapshot import GasUnavailableError
+
+        if self._gas_oracle is None:
+            raise ValueError("No gas oracle configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        try:
+            return self._run_async_bridged(self._gas_oracle.get_gas_price(target_chain))
+        except DataSourceUnavailable as e:
+            raise GasUnavailableError(target_chain, e.reason) from e
+        except DataSourceError as e:
+            raise GasUnavailableError(target_chain, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise GasUnavailableError(target_chain, f"Unexpected error: {e}") from e
+
+    # NOTE (ALM-2696 / VIB-4065): the batch-fetcher methods ``prices(tokens)``
+    # and ``balances(tokens)`` documented in SKILL.md exist on the deprecated
+    # data-layer ``MarketSnapshot`` (paper / backtest) but are deliberately NOT
+    # lifted onto the canonical class in this PR. They collide with legacy
+    # ``hasattr(market, "prices")`` / ``market.prices.get(...)`` patterns in
+    # ``almanak/framework/runner/runner_state.py:371`` and a handful of tests
+    # that historically relied on the canonical class NOT having these names —
+    # the absence was load-bearing. Lifting them safely requires updating those
+    # callers in lockstep, which belongs in the Phase 2 consolidation
+    # (VIB-4065 / GH#2126). Use ``price(symbol)`` and ``balance(symbol)`` per
+    # token until then.
+
+    def health(self) -> "HealthReport":
+        """Get a health report for all registered data providers.
+
+        Returns:
+            HealthReport with per-source health, cache stats, overall status.
+        """
+        from almanak.framework.data.health import (
+            CacheStats,
+            HealthReport,
+            SourceHealth,
+        )
+
+        sources: dict[str, SourceHealth] = {}
+        now = datetime.now(UTC)
+
+        def _add(name: str, present: bool) -> None:
+            if not present:
+                return
+            sources[name] = SourceHealth(
+                name=name,
+                success_rate=1.0,
+                latency_p50_ms=0.0,
+                latency_p95_ms=0.0,
+                error_count=0,
+                last_success=now,
+            )
+
+        _add("price_oracle", self._price_oracle is not None)
+        _add("balance_provider", self._balance_provider is not None)
+        _add("rsi_provider", self._rsi_provider is not None)
+        _add("indicator_provider", self._indicator_provider is not None)
+        _add("multi_dex_service", self._multi_dex_service is not None)
+        _add("rate_monitor", self._rate_monitor is not None)
+        _add("funding_rate_provider", self._funding_rate_provider is not None)
+        _add("gateway_client", self._gateway_client is not None)
+        _add("pool_reader_registry", self._pool_reader_registry is not None)
+        _add("pool_reader", self._pool_reader is not None)
+        _add("price_aggregator", self._price_aggregator is not None)
+        _add("ohlcv_router", self._ohlcv_router is not None)
+        _add("ohlcv_module", self._ohlcv_module is not None)
+        _add("gas_oracle", self._gas_oracle is not None)
+        _add("pool_history_reader", self._pool_history_reader is not None)
+        _add("liquidity_depth_reader", self._liquidity_depth_reader is not None)
+        _add("slippage_estimator", self._slippage_estimator is not None)
+        _add("pool_analytics_reader", self._pool_analytics_reader is not None)
+        _add("yield_aggregator", self._yield_aggregator is not None)
+        _add("il_calculator", self._il_calculator is not None)
+        _add("volatility_calculator", self._volatility_calculator is not None)
+        _add("risk_calculator", self._risk_calculator is not None)
+        _add("rate_history_reader", self._rate_history_reader is not None)
+        _add("solana_lst_provider", self._solana_lst_provider is not None)
+
+        total_cache_size = (
+            len(self._price_cache)
+            + len(self._balance_cache)
+            + len(self._rsi_cache)
+            + len(self._lending_rate_cache)
+            + len(self._position_health_cache)
+        )
+
+        return HealthReport(
+            timestamp=now,
+            sources=sources,
+            cache_stats=CacheStats(hits=0, misses=0, size=total_cache_size, max_size=None),
+            overall_status=HealthReport.calculate_overall_status(sources),
+        )
+
+    # --- Prediction markets --------------------------------------------------
+
+    def prediction(self, market_id: str) -> "PredictionMarket":
+        """Get prediction market data.
+
+        Args:
+            market_id: Prediction market ID or URL slug.
+
+        Returns:
+            PredictionMarket with full market details.
+
+        Raises:
+            ValueError: If no prediction provider is configured.
+            PredictionUnavailableError: If market data cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import PredictionUnavailableError
+
+        if self._prediction_provider is None:
+            raise ValueError("No prediction provider configured for MarketSnapshot")
+
+        try:
+            return self._prediction_provider.get_market(market_id)
+        except Exception as e:  # noqa: BLE001
+            raise PredictionUnavailableError(market_id, str(e)) from e
+
+    def prediction_positions(
+        self,
+        market_id: str | None = None,
+    ) -> list["PredictionPosition"]:
+        """Get all open prediction market positions.
+
+        Args:
+            market_id: Optional market ID or slug to filter by.
+
+        Returns:
+            List of PredictionPosition objects.
+
+        Raises:
+            ValueError: If no prediction provider is configured.
+            PredictionUnavailableError: If positions cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import PredictionUnavailableError
+
+        if self._prediction_provider is None:
+            raise ValueError("No prediction provider configured for MarketSnapshot")
+
+        try:
+            if market_id:
+                market = self._prediction_provider.get_market(market_id)
+                return self._prediction_provider.get_positions(
+                    wallet=self._wallet_address,
+                    market_id=market.market_id,
+                )
+            return self._prediction_provider.get_positions(wallet=self._wallet_address)
+        except Exception as e:  # noqa: BLE001
+            raise PredictionUnavailableError(market_id or "all", f"Failed to get positions: {e}") from e
+
+    def prediction_orders(
+        self,
+        market_id: str | None = None,
+    ) -> list["PredictionOrder"]:
+        """Get all open prediction market orders.
+
+        Args:
+            market_id: Optional market ID or slug to filter by.
+
+        Returns:
+            List of PredictionOrder objects.
+
+        Raises:
+            ValueError: If no prediction provider is configured.
+            PredictionUnavailableError: If orders cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import PredictionUnavailableError
+
+        if self._prediction_provider is None:
+            raise ValueError("No prediction provider configured for MarketSnapshot")
+
+        try:
+            return self._prediction_provider.get_open_orders(market_id)
+        except Exception as e:  # noqa: BLE001
+            raise PredictionUnavailableError(market_id or "all", f"Failed to get orders: {e}") from e
+
+    # --- Solana LSTs ---------------------------------------------------------
+
+    def lst_exchange_rate(self, symbol: str) -> "LSTExchangeRate":
+        """Get Solana LST exchange rate vs SOL.
+
+        Args:
+            symbol: LST symbol (e.g. "jitoSOL", "mSOL", "bSOL", "INF").
+
+        Returns:
+            LSTExchangeRate with rate vs SOL and APY data.
+
+        Raises:
+            ValueError: If no LST provider is configured.
+            LSTDataUnavailableError: If data cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import LSTDataUnavailableError
+
+        if self._solana_lst_provider is None:
+            raise ValueError("No Solana LST provider configured for MarketSnapshot")
+
+        try:
+            return self._run_async_bridged(self._solana_lst_provider.get_exchange_rate(symbol))
+        except ValueError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise LSTDataUnavailableError(symbol, f"Failed to fetch LST exchange rate: {e}") from e
+
+    def lst_all_rates(self) -> dict[str, "LSTExchangeRate"]:
+        """Get exchange rates for all tracked Solana LSTs.
+
+        Returns:
+            dict mapping symbol -> LSTExchangeRate.
+
+        Raises:
+            ValueError: If no LST provider is configured.
+            LSTDataUnavailableError: If data cannot be retrieved.
+        """
+        from almanak.framework.data.market_snapshot import LSTDataUnavailableError
+
+        if self._solana_lst_provider is None:
+            raise ValueError("No Solana LST provider configured for MarketSnapshot")
+
+        try:
+            return self._run_async_bridged(self._solana_lst_provider.get_all_rates())
+        except Exception as e:  # noqa: BLE001
+            raise LSTDataUnavailableError("all", f"Failed to fetch LST rates: {e}") from e
+
+    # --- PT-collateral position health (Pendle + Morpho Blue) ----------------
+
+    def pt_position_health(
+        self,
+        morpho_market_id: str,
+        pendle_market_address: str,
+        rpc_url: str | None = None,
+        collateral_price_usd: Decimal | None = None,
+        debt_price_usd: Decimal | None = None,
+    ) -> "PTPositionHealth":
+        """Get extended health data for a PT-collateral position.
+
+        Combines Morpho Blue position data with Pendle market metrics
+        (implied APY, maturity risk) for comprehensive risk assessment.
+
+        Args:
+            morpho_market_id: Morpho Blue market ID.
+            pendle_market_address: Pendle market address for the PT.
+            rpc_url: RPC endpoint (uses gateway-routed path when None).
+            collateral_price_usd: Override for PT collateral price.
+            debt_price_usd: Override for debt token price.
+
+        Returns:
+            PTPositionHealth with Morpho + Pendle risk metrics.
+
+        Raises:
+            HealthUnavailableError: If health data cannot be retrieved or
+                if neither a connected ``GatewayClient`` nor an explicit
+                ``rpc_url`` is available (the provider has no transport
+                otherwise — fail fast with an actionable contract error
+                instead of letting a downstream provider call surface a
+                less specific exception).
+        """
+        from almanak.framework.data.market_snapshot import HealthUnavailableError
+        from almanak.framework.data.position_health import PositionHealthProvider
+
+        # Fail fast when no transport is available: PositionHealthProvider
+        # needs either an explicit rpc_url or a connected GatewayClient to
+        # issue on-chain reads. Constructing it with ``rpc_url=""`` and a
+        # missing/disconnected gateway just produces a less specific
+        # downstream provider error at call time.
+        gateway_connected = self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False)
+        if not rpc_url and not gateway_connected:
+            raise HealthUnavailableError(
+                "pt_position_health requires either a connected GatewayClient "
+                "or an explicit rpc_url; neither was available on this "
+                "MarketSnapshot. Wire the gateway client or pass rpc_url=..."
+            )
+
+        provider = PositionHealthProvider(
+            rpc_url=rpc_url or "",
+            chain=self._chain,
+            price_oracle=self._price_oracle,
+            gateway_client=self._gateway_client,
+        )
+        try:
+            return provider.get_pt_position_health(
+                morpho_market_id=morpho_market_id,
+                pendle_market_address=pendle_market_address,
+                user_address=self._wallet_address,
+                collateral_price_usd=collateral_price_usd,
+                debt_price_usd=debt_price_usd,
+            )
+        except HealthUnavailableError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HealthUnavailableError(f"PT position health unavailable: {e}") from e
 
     def prediction_price(
         self,

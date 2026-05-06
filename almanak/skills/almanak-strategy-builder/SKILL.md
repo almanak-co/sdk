@@ -681,11 +681,25 @@ ich.is_above_cloud  # bool
 ### Multi-Token Queries
 
 ```python
-prices = market.prices(["WETH", "WBTC"])           # dict[str, Decimal]
-balances = market.balances(["USDC", "WETH"])        # dict[str, Decimal]
-usd_val = market.balance_usd("WETH")               # Decimal - USD value of holdings
+# Per-token reads work today on every deployment surface.
+weth_price = market.price("WETH")                   # Decimal
+wbtc_price = market.price("WBTC")                   # Decimal
+usdc_bal = market.balance("USDC")                   # TokenBalance
+weth_bal = market.balance("WETH")                   # TokenBalance
+usd_val = market.balance_usd("WETH")                # Decimal - USD value of holdings
 total = market.total_portfolio_usd()                # Decimal
 ```
+
+> **Batch helpers are Phase 2.** The deprecated data-layer class exposes
+> `market.prices([...])` / `market.balances([...])` batch fetchers. The
+> canonical strategy-facing class deliberately does NOT lift these names
+> in the ALM-2696 fix because legacy callers (runner_state.py, trust
+> tests) historically used `hasattr(market, "prices")` /
+> `market.prices.get(...)` patterns whose absence was load-bearing.
+> Phase 2 ([VIB-4065](https://linear.app/almanak/issue/VIB-4065) /
+> [GH#2126](https://github.com/almanak-co/almanak-sdk-private/issues/2126))
+> migrates those callers in lockstep before lifting these batch names.
+> Use the per-token form above until then.
 
 ```python
 # USD value of an arbitrary collateral amount (for perp position sizing)
@@ -710,16 +724,60 @@ analytics = market.pool_analytics("0x...")          # DataEnvelope[PoolAnalytics
 best = market.best_pool("WETH", "USDC", metric="fee_apr")  # DataEnvelope[PoolAnalyticsResult]
 ```
 
+> **Provider availability:** `pool_*`, `twap` / `lwap`, `liquidity_depth`,
+> `estimate_slippage`, `pool_analytics` / `best_pool`, `il_exposure` /
+> `projected_il`, `realized_vol` / `vol_cone`, `portfolio_risk` /
+> `rolling_sharpe`, `yield_opportunities`, `lst_*`, prediction-market
+> methods, and the rate-history methods are all **provider-driven**. The
+> runner wires the corresponding provider (pool reader registry, price
+> aggregator, IL calculator, …); when a provider is not wired the method
+> raises `ValueError("No <X> configured for MarketSnapshot")` rather than
+> returning silently. Do **not** guard these calls with `hasattr(market,
+> ...)` — the methods always exist; catch `ValueError` (or one of the
+> typed `*UnavailableError` subclasses defined in
+> `almanak.framework.data.market_snapshot`) if you need to degrade
+> gracefully.
+>
+> **Carve-out — `prediction_price()`:** unlike the other prediction-market
+> methods (`prediction()`, `prediction_positions()`, `prediction_orders()`,
+> all of which raise `ValueError` when no provider is wired),
+> `prediction_price()` returns `None` as a soft-signal fallback. Strategies
+> that use it as a side-channel signal can therefore branch on
+> `if (p := market.prediction_price(...)) is not None:` instead of
+> wrapping the call in `try / except ValueError`. This matches the
+> existing convention preserved by ALM-2696 and is pinned by the
+> regression suite.
+
 ### Price Aggregation and Slippage
 
 ```python
 twap = market.twap("WETH/USDC", window_seconds=300)       # DataEnvelope[AggregatedPrice]
+# Explicit-pool form: when you pass `pool_address` directly, you must also
+# pass token decimals (or have a `pool_reader_registry` wired so the snapshot
+# can resolve them automatically). There is no "WETH/USDC default" — the
+# decimals are required for the tick-to-price conversion.
+twap = market.twap(
+    "WBTC/WETH",
+    pool_address="0x...",
+    token0_decimals=8, token1_decimals=18,
+)
 lwap = market.lwap("WETH/USDC")                           # DataEnvelope[AggregatedPrice]
 depth = market.liquidity_depth("0x...")                    # DataEnvelope[LiquidityDepth]
 slip = market.estimate_slippage("WETH", "USDC", Decimal("10000"))  # DataEnvelope[SlippageEstimate]
 prices = market.price_across_dexs("WETH", "USDC", Decimal("1"))   # list[DexQuote]
 best_dex = market.best_dex_price("WETH", "USDC", Decimal("1"))    # BestDexResult
 ```
+
+> **Explicit-pool decimals contract (`twap`):** any call that supplies
+> `pool_address` directly must either pass
+> `token0_decimals` / `token1_decimals` explicitly OR have a
+> `pool_reader_registry` wired on the snapshot so the decimals can be
+> resolved from pool metadata. There is no "WETH/USDC fallback" — the
+> tick-to-price conversion needs the real decimals. Without either path,
+> the call raises `ValueError` rather than returning a price that can be
+> off by powers of ten for pools like WBTC/WETH (8/18) or USDC/USDT
+> (6/6). `lwap` does not accept `pool_address` and is unaffected (it
+> scans pools internally via the registry).
 
 ### Lending and Funding Rates
 
@@ -781,8 +839,10 @@ all_rates = market.lst_all_rates()           # dict[str, LSTExchangeRate]
 ```python
 vol = market.realized_vol("WETH", window_days=30)    # RealizedVol
 cone = market.vol_cone("WETH")                       # VolCone
-risk = market.portfolio_risk()                        # PortfolioRisk
-sharpe = market.rolling_sharpe("WETH", window_days=30)  # RollingSharpe
+# portfolio_risk / rolling_sharpe consume a periodic PnL return series
+# (each element is a fractional period return — e.g. 0.01 = 1% gain).
+risk = market.portfolio_risk(pnl_series)                          # PortfolioRisk
+sharpe = market.rolling_sharpe(pnl_series, window_days=30)        # RollingSharpe
 ```
 
 ### Yield and Analytics
