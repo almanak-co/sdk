@@ -3694,6 +3694,20 @@ class IntentStrategy(StrategyBase[ConfigT]):
         if is_hosted():
             return None
 
+        # ALM-2705: narrow exception handling so a *missing-table* / init-failure
+        # OperationalError surfaces loudly. The pre-fix behaviour of swallowing
+        # every Exception under a single warning hid two genuinely-bug-class
+        # failures (singleton constructed but ``_init_db`` lost a WAL race; DB
+        # path resolved to a file the gateway pre-created without the
+        # ``teardown_requests`` schema) as if they were the benign "no teardown
+        # row exists" path. Per CLAUDE.md "Teardown lane accounting boundary":
+        # init failures must be loud + durable, but must not block the runner —
+        # halting on an init failure here would prevent the strategy from
+        # running its next risk-reducing iteration.
+        import sqlite3
+
+        from almanak.framework.local_paths import LocalPathError
+
         try:
             from almanak.framework.teardown import get_teardown_state_manager
 
@@ -3708,8 +3722,44 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 )
             return request
 
-        except Exception as e:
-            logger.warning(f"Error checking teardown request: {e}")
+        except LocalPathError as e:
+            # Benign: no strategy folder resolved (e.g. running in an
+            # environment without ALMANAK_STRATEGY_FOLDER and no cwd hint).
+            # Hosted mode short-circuits earlier, so reaching here means a
+            # genuinely local-but-misconfigured caller — log debug and skip.
+            logger.debug("Skipping teardown request check (no local strategy DB): %s", e)
+            return None
+
+        except sqlite3.OperationalError as e:
+            # Loud + durable: this is the ALM-2705 failure mode. Either the
+            # singleton's ``_init_db`` lost a contention race (now retried —
+            # see ``TeardownStateManager._init_db``) or the DB file's schema
+            # is genuinely missing the ``teardown_requests`` table (e.g. a
+            # gateway-pre-created DB the runner never bootstrapped). Emit a
+            # grep-able structured log line and return None so the runner
+            # keeps making risk-reducing progress, but operators can find the
+            # failure post-mortem instead of it being indistinguishable from
+            # "no teardown row exists".
+            logger.error(
+                "teardown.check_request_failed: strategy_id=%s strategy_class=%s error=%s — "
+                "teardown signal channel is degraded; runner continuing without "
+                "teardown polling this iteration",
+                getattr(self, "_strategy_id", "<unset>") or self.STRATEGY_NAME,
+                self.__class__.__name__,
+                e,
+            )
+            return None
+
+        except Exception as e:  # noqa: BLE001 — catch-all for unexpected channel failures
+            # Genuinely unexpected: not a path problem, not a DB schema/lock
+            # issue. Keep the runner alive (same rationale as above) but log
+            # at WARNING with the exception type so future incidents are
+            # triagable from logs alone.
+            logger.warning(
+                "teardown.check_request_unexpected_error: type=%s error=%s",
+                type(e).__name__,
+                e,
+            )
             return None
 
     def acknowledge_teardown_request(self) -> bool:
@@ -3732,6 +3782,11 @@ class IntentStrategy(StrategyBase[ConfigT]):
         if is_hosted():
             return False
 
+        # ALM-2705: same narrow-exception treatment as ``_check_teardown_request``.
+        import sqlite3
+
+        from almanak.framework.local_paths import LocalPathError
+
         try:
             from almanak.framework.teardown import get_teardown_state_manager
 
@@ -3741,8 +3796,26 @@ class IntentStrategy(StrategyBase[ConfigT]):
             request = manager.acknowledge_request(strategy_id)
             return request is not None
 
-        except Exception as e:
-            logger.warning(f"Error acknowledging teardown request: {e}")
+        except LocalPathError as e:
+            logger.debug("Skipping teardown ack (no local strategy DB): %s", e)
+            return False
+
+        except sqlite3.OperationalError as e:
+            logger.error(
+                "teardown.ack_request_failed: strategy_id=%s strategy_class=%s error=%s — "
+                "teardown signal channel is degraded; ack skipped this iteration",
+                getattr(self, "_strategy_id", "<unset>") or self.STRATEGY_NAME,
+                self.__class__.__name__,
+                e,
+            )
+            return False
+
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "teardown.ack_request_unexpected_error: type=%s error=%s",
+                type(e).__name__,
+                e,
+            )
             return False
 
     def should_teardown(self) -> bool:

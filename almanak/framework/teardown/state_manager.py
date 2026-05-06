@@ -153,34 +153,52 @@ class TeardownStateManager:
         return local_strategy_db_path()
 
     def _init_db(self) -> None:
-        """Initialize the database schema."""
-        with _open_connection(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS teardown_requests (
-                    strategy_id TEXT PRIMARY KEY,
-                    mode TEXT NOT NULL,
-                    asset_policy TEXT NOT NULL,
-                    target_token TEXT NOT NULL,
-                    reason TEXT,
-                    requested_at TEXT NOT NULL,
-                    requested_by TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    acknowledged_at TEXT,
-                    started_at TEXT,
-                    completed_at TEXT,
-                    current_phase TEXT,
-                    positions_total INTEGER DEFAULT 0,
-                    positions_closed INTEGER DEFAULT 0,
-                    positions_failed INTEGER DEFAULT 0,
-                    cancel_requested INTEGER DEFAULT 0,
-                    cancel_deadline TEXT,
-                    error_message TEXT,
-                    result_json TEXT,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            conn.commit()
-            logger.debug(f"Initialized teardown state database at {self.db_path}")
+        """Initialize the database schema.
+
+        Wrapped in ``_with_retry`` to mirror :meth:`TeardownStateAdapter._init_tables`
+        (ALM-2705). The original asymmetry — ``_init_db`` non-retrying while every
+        sibling CRUD method retried — let a single transient ``OperationalError``
+        (e.g. WAL contention from the gateway lifecycle/accounting writers on the
+        same ``<workspace>/almanak_state.db``) leave the ``teardown_requests``
+        table un-created. Subsequent ``create_request`` calls then hit
+        ``no such table: teardown_requests`` even though every other path on the
+        same DB is healthy.
+
+        The ``CREATE TABLE IF NOT EXISTS`` statement is naturally idempotent, so
+        retrying is always safe; calling ``_init_db`` repeatedly on an already-
+        initialized DB is a no-op.
+        """
+
+        def _op() -> None:
+            with _open_connection(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS teardown_requests (
+                        strategy_id TEXT PRIMARY KEY,
+                        mode TEXT NOT NULL,
+                        asset_policy TEXT NOT NULL,
+                        target_token TEXT NOT NULL,
+                        reason TEXT,
+                        requested_at TEXT NOT NULL,
+                        requested_by TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        acknowledged_at TEXT,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        current_phase TEXT,
+                        positions_total INTEGER DEFAULT 0,
+                        positions_closed INTEGER DEFAULT 0,
+                        positions_failed INTEGER DEFAULT 0,
+                        cancel_requested INTEGER DEFAULT 0,
+                        cancel_deadline TEXT,
+                        error_message TEXT,
+                        result_json TEXT,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                conn.commit()
+                logger.debug(f"Initialized teardown state database at {self.db_path}")
+
+        _with_retry(_op, description="init_teardown_requests")
 
     def create_request(self, request: TeardownRequest) -> None:
         """Create or replace a teardown request.
