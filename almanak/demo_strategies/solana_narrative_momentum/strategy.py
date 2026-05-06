@@ -34,7 +34,8 @@ from typing import Any
 from almanak.framework.data.dexscreener import DexPair, DexScreenerClient
 from almanak.framework.intents import Intent
 from almanak.framework.intents.vocabulary import LPOpenIntent
-from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.teardown import TeardownPositionSummary
 
 logger = logging.getLogger(__name__)

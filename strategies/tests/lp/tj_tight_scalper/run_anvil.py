@@ -356,7 +356,7 @@ def run_strategy_directly(force_action: str = "open") -> int:
     print(f"{'=' * 60}")
     print(f"Force action: {force_action.upper()}")
 
-    from almanak.framework.strategies import MarketSnapshot, TokenBalance
+    from almanak.framework.market import MarketSnapshot, TokenBalance
     from strategies.tests.lp.tj_tight_scalper.strategy import (
         TJTightScalperConfig,
         TJTightScalperStrategy,

@@ -124,7 +124,8 @@ For Anvil testing, add `anvil_funding` to `config.json` so your wallet is auto-f
 ```python
 # strategy.py
 from decimal import Decimal
-from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+from almanak import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.intents import Intent
 
 @almanak_strategy(

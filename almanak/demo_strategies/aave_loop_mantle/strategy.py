@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 from almanak.framework.intents import Intent
-from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human
 
 logger = logging.getLogger(__name__)

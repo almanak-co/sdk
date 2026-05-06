@@ -36,10 +36,7 @@ from almanak.framework.connectors.polymarket.models import (
     USDC_NATIVE_POLYGON,
     USDCE_POLYGON,
 )
-from almanak.framework.strategies.intent_strategy import (
-    MarketSnapshot,
-    TokenBalance,
-)
+from almanak.framework.market import MarketSnapshot, TokenBalance
 
 # =============================================================================
 # (1) MarketSnapshot resolves pUSD for polymarket

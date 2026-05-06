@@ -445,7 +445,7 @@ class TestCompileSwapIntent:
             adapter.compile_swap_intent(intent)
 
     def test_compile_missing_price_raises(self, adapter: UniswapV3Adapter) -> None:
-        from almanak.framework.data.market_snapshot import PriceUnavailableError
+        from almanak.framework.market import PriceUnavailableError
 
         intent = SwapIntent(
             from_token="USDC",

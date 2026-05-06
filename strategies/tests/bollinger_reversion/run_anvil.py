@@ -343,7 +343,7 @@ def run_strategy_on_anvil(force_action: str = "buy") -> SwapResult | None:
     from almanak.framework.intents import IntentCompiler
     from almanak.framework.intents.compiler import CompilationStatus
     from almanak.framework.models.hot_reload_config import HotReloadableConfig
-    from almanak.framework.strategies import BollingerBandsData, MarketSnapshot, TokenBalance
+    from almanak.framework.market import BollingerBandsData, MarketSnapshot, TokenBalance
     from strategies.tests.bollinger_reversion import BollingerReversionStrategy
 
     w3 = Web3(Web3.HTTPProvider(ANVIL_RPC))

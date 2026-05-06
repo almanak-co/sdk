@@ -42,7 +42,7 @@ from almanak.framework.anvil.fork_manager import (
     RollingForkManager,
 )
 from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
-from almanak.framework.data.market_snapshot import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 
 # =============================================================================
 # Constants

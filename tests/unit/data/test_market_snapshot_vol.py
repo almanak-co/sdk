@@ -16,10 +16,10 @@ import pandas as pd
 import pytest
 
 from almanak.framework.data.market_snapshot import (
-    MarketSnapshot,
     VolatilityUnavailableError,
     VolConeUnavailableError,
 )
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.volatility.realized import (
     RealizedVolatilityCalculator,

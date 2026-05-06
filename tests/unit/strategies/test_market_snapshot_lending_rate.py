@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from almanak.framework.data.rates import BestRateResult, LendingRate, RateMonitor, RateSide
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 
 
 # =============================================================================
@@ -277,7 +277,7 @@ class TestBackwardCompatibility:
 
     def test_balance_still_works(self):
         """balance() still works after adding rate_monitor param."""
-        from almanak.framework.strategies.intent_strategy import TokenBalance
+        from almanak.framework.market import TokenBalance
 
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
         market.set_balance(
@@ -288,7 +288,7 @@ class TestBackwardCompatibility:
 
     def test_rsi_still_works(self):
         """rsi() still works after adding rate_monitor param."""
-        from almanak.framework.strategies.intent_strategy import RSIData
+        from almanak.framework.market import RSIData
 
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
         market.set_rsi("ETH", RSIData(value=Decimal("45")))
@@ -307,7 +307,7 @@ class TestBackwardCompatibility:
 
     def test_macd_still_works(self):
         """MACD indicator still works."""
-        from almanak.framework.strategies.intent_strategy import MACDData
+        from almanak.framework.market import MACDData
 
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
         market.set_macd(
@@ -319,7 +319,7 @@ class TestBackwardCompatibility:
 
     def test_total_portfolio_usd_still_works(self):
         """total_portfolio_usd() still works."""
-        from almanak.framework.strategies.intent_strategy import TokenBalance
+        from almanak.framework.market import TokenBalance
 
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
         market.set_balance("USDC", TokenBalance(symbol="USDC", balance=Decimal("1000"), balance_usd=Decimal("1000")))

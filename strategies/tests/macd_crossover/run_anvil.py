@@ -425,7 +425,7 @@ def run_strategy_on_anvil(force_action: str = "buy") -> SwapResult | None:
     from almanak.framework.intents import IntentCompiler
     from almanak.framework.intents.compiler import CompilationStatus
     from almanak.framework.models.hot_reload_config import HotReloadableConfig
-    from almanak.framework.strategies import MACDData, MarketSnapshot, TokenBalance
+    from almanak.framework.market import MACDData, MarketSnapshot, TokenBalance
     from strategies.tests.macd_crossover import MACDCrossoverStrategy
 
     w3 = Web3(Web3.HTTPProvider(ANVIL_RPC))

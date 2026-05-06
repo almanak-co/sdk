@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.framework.data.balance.gateway_multichain import MultiChainGatewayBalanceProvider
-from almanak.framework.strategies.intent_strategy import TokenBalance
+from almanak.framework.market import TokenBalance
 
 
 @pytest.fixture

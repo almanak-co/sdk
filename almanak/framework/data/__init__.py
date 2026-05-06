@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from almanak._lazy import LazySpec, build_lazy_module_dispatch
 
 if TYPE_CHECKING:
+    from ..market import MarketSnapshot
     from .exceptions import (
         DataUnavailableError,
         LowConfidenceError,
@@ -113,7 +114,6 @@ if TYPE_CHECKING:
         LendingRateUnavailableError,
         LiquidityDepthUnavailableError,
         LSTDataUnavailableError,
-        MarketSnapshot,
         MarketSnapshotError,
         PoolAnalyticsUnavailableError,
         PoolHistoryUnavailableError,
@@ -294,7 +294,7 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     "LendingRateUnavailableError": (".market_snapshot", "LendingRateUnavailableError"),
     "LiquidityDepthUnavailableError": (".market_snapshot", "LiquidityDepthUnavailableError"),
     "LSTDataUnavailableError": (".market_snapshot", "LSTDataUnavailableError"),
-    "MarketSnapshot": (".market_snapshot", "MarketSnapshot"),
+    "MarketSnapshot": ("..market", "MarketSnapshot"),
     "MarketSnapshotError": (".market_snapshot", "MarketSnapshotError"),
     "PoolAnalyticsUnavailableError": (".market_snapshot", "PoolAnalyticsUnavailableError"),
     "PoolHistoryUnavailableError": (".market_snapshot", "PoolHistoryUnavailableError"),

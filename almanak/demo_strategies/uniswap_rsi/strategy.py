@@ -69,12 +69,8 @@ from typing import Any
 from almanak.framework.intents import Intent
 
 # Core strategy framework imports
-from almanak.framework.strategies import (
-    ConfigValidationError,  # Raised by validate_config() on invalid config
-    IntentStrategy,  # Base class for all strategies
-    MarketSnapshot,  # Contains market data (prices, RSI, balances)
-    almanak_strategy,  # Decorator for strategy registration
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import ConfigValidationError, IntentStrategy, almanak_strategy
 
 # Logging utilities for user-friendly output
 from almanak.framework.utils.log_formatters import format_usd

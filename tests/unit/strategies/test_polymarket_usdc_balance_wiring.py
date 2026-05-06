@@ -22,10 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from almanak.framework.strategies.intent_strategy import (
-    MarketSnapshot,
-    TokenBalance,
-)
+from almanak.framework.market import MarketSnapshot, TokenBalance
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 

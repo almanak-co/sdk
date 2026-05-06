@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.strategies.intent_strategy import ATRData, BollingerBandsData, RSIData
+from almanak.framework.market import ATRData, BollingerBandsData, RSIData
 
 
 # ---------------------------------------------------------------------------

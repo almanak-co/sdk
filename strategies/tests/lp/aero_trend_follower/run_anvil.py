@@ -347,7 +347,7 @@ def run_strategy_directly(
     print("RUNNING AERODROME TREND-FOLLOWING STRATEGY DIRECTLY")
     print(f"{'=' * 60}")
 
-    from almanak.framework.strategies import MAData, MarketSnapshot, TokenBalance
+    from almanak.framework.market import MAData, MarketSnapshot, TokenBalance
     from strategies.tests.lp.aero_trend_follower.strategy import (
         AeroTrendFollowerConfig,
         AeroTrendFollowerStrategy,

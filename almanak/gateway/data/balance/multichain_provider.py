@@ -23,7 +23,7 @@ import asyncio
 import logging
 from decimal import Decimal
 
-from almanak.framework.strategies.intent_strategy import TokenBalance
+from almanak.framework.market import TokenBalance
 
 from .web3_provider import Web3BalanceProvider
 

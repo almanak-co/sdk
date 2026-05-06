@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from almanak.framework.strategies.intent_strategy import TokenBalance
+from almanak.framework.market import TokenBalance
 
 
 def _tb(balance: str = "100.5", balance_usd: str = "200.0") -> TokenBalance:

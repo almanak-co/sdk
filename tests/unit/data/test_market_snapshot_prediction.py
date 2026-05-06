@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.framework.data.market_snapshot import (
-    MarketSnapshot,
     PredictionUnavailableError,
 )
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.prediction_provider import (
     PredictionMarket,
     PredictionMarketDataProvider,

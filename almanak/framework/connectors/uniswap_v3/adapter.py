@@ -634,7 +634,7 @@ class UniswapV3Adapter:
             amount_in: Decimal = intent.amount  # type: ignore[assignment]
         elif intent.amount_usd is not None:
             # Convert USD to token amount
-            from almanak.framework.data.market_snapshot import PriceUnavailableError
+            from almanak.framework.market import PriceUnavailableError
 
             from_price = price_oracle.get(intent.from_token.upper())
             if not from_price:

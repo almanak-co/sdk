@@ -23,7 +23,7 @@ from decimal import Decimal
 
 from almanak.framework.data.balance.gateway_provider import _BACKOFF_BASE_SECONDS, _MAX_RETRIES, _is_retryable
 from almanak.framework.gateway_client import GatewayClient
-from almanak.framework.strategies.intent_strategy import TokenBalance
+from almanak.framework.market import TokenBalance
 from almanak.gateway.proto import gateway_pb2
 
 logger = logging.getLogger(__name__)

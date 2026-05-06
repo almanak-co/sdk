@@ -318,8 +318,10 @@ Lower-level base class for strategies that need direct action control.
 ## MarketSnapshot
 
 Unified interface for accessing market data within `decide()`.
+Canonical class lives under `almanak.framework.market` (VIB-4062);
+see also [`api/market.md`](market.md).
 
-::: almanak.framework.strategies.MarketSnapshot
+::: almanak.framework.market.MarketSnapshot
     options:
       show_root_heading: true
       members_order: source
@@ -367,84 +369,84 @@ Data types returned by `MarketSnapshot` getters and accepted by `set_*` methods 
 
 ### TokenBalance
 
-::: almanak.framework.strategies.TokenBalance
+::: almanak.framework.market.TokenBalance
     options:
       show_root_heading: true
       members_order: source
 
 ### PriceData
 
-::: almanak.framework.strategies.PriceData
+::: almanak.framework.market.PriceData
     options:
       show_root_heading: true
       members_order: source
 
 ### RSIData
 
-::: almanak.framework.strategies.RSIData
+::: almanak.framework.market.RSIData
     options:
       show_root_heading: true
       members_order: source
 
 ### MACDData
 
-::: almanak.framework.strategies.MACDData
+::: almanak.framework.market.MACDData
     options:
       show_root_heading: true
       members_order: source
 
 ### BollingerBandsData
 
-::: almanak.framework.strategies.BollingerBandsData
+::: almanak.framework.market.BollingerBandsData
     options:
       show_root_heading: true
       members_order: source
 
 ### StochasticData
 
-::: almanak.framework.strategies.StochasticData
+::: almanak.framework.market.StochasticData
     options:
       show_root_heading: true
       members_order: source
 
 ### ATRData
 
-::: almanak.framework.strategies.ATRData
+::: almanak.framework.market.ATRData
     options:
       show_root_heading: true
       members_order: source
 
 ### MAData
 
-::: almanak.framework.strategies.MAData
+::: almanak.framework.market.MAData
     options:
       show_root_heading: true
       members_order: source
 
 ### ADXData
 
-::: almanak.framework.strategies.ADXData
+::: almanak.framework.market.ADXData
     options:
       show_root_heading: true
       members_order: source
 
 ### OBVData
 
-::: almanak.framework.strategies.OBVData
+::: almanak.framework.market.OBVData
     options:
       show_root_heading: true
       members_order: source
 
 ### CCIData
 
-::: almanak.framework.strategies.CCIData
+::: almanak.framework.market.CCIData
     options:
       show_root_heading: true
       members_order: source
 
 ### IchimokuData
 
-::: almanak.framework.strategies.IchimokuData
+::: almanak.framework.market.IchimokuData
     options:
       show_root_heading: true
       members_order: source

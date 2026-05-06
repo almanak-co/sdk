@@ -121,7 +121,7 @@ from almanak.framework.backtesting.pnl.simulated_result import (
 )
 
 # Import strategy-related types
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -429,7 +429,7 @@ def create_market_snapshot_from_state(
 
     # If we have a portfolio, simulate balances
     if portfolio:
-        from almanak.framework.strategies.intent_strategy import TokenBalance
+        from almanak.framework.market import TokenBalance
 
         # Add token balances from portfolio
         for token, amount in portfolio.tokens.items():

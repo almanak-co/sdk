@@ -45,7 +45,7 @@ class TestCreateMarketSnapshotFromForkIndicators:
             rsi_calculator=mock_rsi_calc,
         )
 
-        assert snapshot._rsi_calculator is mock_rsi_calc
+        assert snapshot._rsi_provider is mock_rsi_calc
 
     @pytest.mark.asyncio()
     async def test_no_rsi_calculator_leaves_none(self, mock_fork_manager):
@@ -56,7 +56,7 @@ class TestCreateMarketSnapshotFromForkIndicators:
             wallet_address="0x1234",
         )
 
-        assert snapshot._rsi_calculator is None
+        assert snapshot._rsi_provider is None
 
     @pytest.mark.asyncio()
     async def test_rsi_raises_without_calculator(self, mock_fork_manager):
@@ -67,7 +67,10 @@ class TestCreateMarketSnapshotFromForkIndicators:
             wallet_address="0x1234",
         )
 
-        with pytest.raises(ValueError, match="No RSI calculator configured"):
+        # Canonical class raises a generic "Cannot calculate RSI" — the older
+        # data-layer copy raised "No RSI calculator configured". Either is
+        # acceptable; both are ValueErrors.
+        with pytest.raises(ValueError, match="(No RSI calculator configured|Cannot calculate RSI)"):
             snapshot.rsi("WETH")
 
 

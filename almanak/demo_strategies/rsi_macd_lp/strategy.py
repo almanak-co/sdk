@@ -15,11 +15,8 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.intents import Intent
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 logger = logging.getLogger(__name__)
 

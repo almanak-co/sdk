@@ -518,8 +518,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_routes_through_router(self):
         """ohlcv() uses OHLCVRouter when configured."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         candles = _make_candles(count=3, start_hours_ago=2)
         gecko = _mock_provider("geckoterminal", candles=candles)
 
@@ -541,8 +540,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_accepts_instrument(self):
         """ohlcv() accepts an Instrument object."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         candles = _make_candles(count=2)
         gecko = _mock_provider("geckoterminal", candles=candles)
 
@@ -562,8 +560,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_falls_back_to_legacy_module(self):
         """When no OHLCVRouter, ohlcv() uses the legacy OHLCVModule."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         ohlcv_module = MagicMock()
         ohlcv_module.get_ohlcv.return_value = pd.DataFrame(
             {"timestamp": [], "open": [], "high": [], "low": [], "close": [], "volume": []}
@@ -580,8 +577,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_no_module_no_router_raises(self):
         """With no OHLCVModule and no OHLCVRouter, ohlcv() raises ValueError."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         snapshot = MarketSnapshot(
             chain="arbitrum",
             wallet_address="0x1234",
@@ -592,7 +588,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_router_error_raises_ohlcv_unavailable(self):
         """When all providers fail, ohlcv() raises OHLCVUnavailableError."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot, OHLCVUnavailableError
+        from almanak.framework.market import MarketSnapshot, OHLCVUnavailableError
 
         router = OHLCVRouter()
         # No providers registered -> all will fail
@@ -614,7 +610,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_empty_result_raises(self):
         """All providers returning empty candles raises OHLCVUnavailableError."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot, OHLCVUnavailableError
+        from almanak.framework.market import MarketSnapshot, OHLCVUnavailableError
 
         gecko = _mock_provider("geckoterminal", candles=[])
         defillama = _mock_provider("defillama", candles=[])
@@ -636,8 +632,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_gap_strategy_ffill(self):
         """gap_strategy='ffill' forward-fills NaN volumes."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         now = datetime.now(UTC)
         candles = [
             OHLCVCandle(
@@ -673,8 +668,7 @@ class TestMarketSnapshotOHLCVRouter:
 
     def test_ohlcv_confidence_propagated_to_attrs(self):
         """DataMeta.confidence is propagated to DataFrame.attrs."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         candles = _make_candles(count=2)
         # Simulate CEX/DEX basis: binance as source for defi token
         binance = _mock_provider("binance", candles=candles)

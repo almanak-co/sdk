@@ -21,7 +21,8 @@ from almanak.framework.cli.teardown import (
 )
 
 STRATEGY_WITH_ABSTRACT_IMPORT = """\
-from almanak.framework.strategies import StatelessStrategy, MarketSnapshot
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import StatelessStrategy
 from almanak.framework.intents import Intent
 
 class ZebraStrategy(StatelessStrategy):
@@ -32,7 +33,8 @@ class ZebraStrategy(StatelessStrategy):
 """
 
 STRATEGY_WITH_MULTIPLE_ABSTRACT_IMPORTS = """\
-from almanak.framework.strategies import IntentStrategy, StatelessStrategy, MarketSnapshot
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, StatelessStrategy
 from almanak.framework.intents import Intent
 
 class ConcreteStrategy(StatelessStrategy):

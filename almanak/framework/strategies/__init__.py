@@ -19,7 +19,8 @@ Usage:
             pass
 
     # Or use IntentStrategy for simplified authoring
-    from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+    from almanak import MarketSnapshot
+    from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
     @almanak_strategy(name="my_intent_strategy")
     class MyIntentStrategy(IntentStrategy):
@@ -53,39 +54,17 @@ from .intent_strategy import (
     AaveAvailableBorrowProvider,
     # Protocol Health Metric Providers
     AaveHealthFactorProvider,
-    ADXData,
-    ATRData,
-    BalanceProvider,
-    BollingerBandsData,
-    CCIData,
     # Chain Health
     ChainHealth,
     ChainHealthStatus,
-    ChainNotConfiguredError,
-    DataFreshnessPolicy,
     ExecutionResult,
     GmxAvailableLiquidityProvider,
     GmxFundingRateProvider,
-    IchimokuData,
     IntentStrategy,
-    # Technical Indicator Data Classes
-    MACDData,
-    MAData,
-    MarketSnapshot,
     MultiChainBalanceProvider,
-    # Multi-Chain Market Snapshot
-    MultiChainMarketSnapshot,
     MultiChainPriceOracle,
-    OBVData,
-    PriceData,
-    PriceOracle,
-    RSIData,
-    RSIProvider,
-    StaleDataError,
-    StochasticData,
     StrategyDataRequirements,
     StrategyMetadata,
-    TokenBalance,
     almanak_strategy,
 )
 from .multi_step_strategy import MultiStepStrategy, Step
@@ -364,43 +343,23 @@ __all__ = [
     "ConfigSnapshot",
     "ConfigValidationError",
     "NotificationCallback",
-    # Intent Strategy
+    # Intent Strategy (DTOs / typed errors removed in VIB-4062 — use
+    # ``from almanak.framework.market import …`` or ``from almanak import …``)
     "IntentStrategy",
-    "MarketSnapshot",
-    "TokenBalance",
-    "PriceData",
-    "RSIData",
-    "PriceOracle",
-    "RSIProvider",
-    "BalanceProvider",
     "ExecutionResult",
     "almanak_strategy",
     "LEGACY_COMPAT_DATA_REQUIREMENTS",
     "StrategyDataRequirements",
     "StrategyMetadata",
-    # Technical Indicator Data Classes
-    "MACDData",
-    "BollingerBandsData",
-    "StochasticData",
-    "ATRData",
-    "MAData",
-    "ADXData",
-    "OBVData",
-    "CCIData",
-    "IchimokuData",
     # Multi-Intent Support
     "IntentSequence",
     "DecideResult",
-    # Multi-Chain Market Snapshot
-    "MultiChainMarketSnapshot",
+    # Multi-Chain providers (kept; only the snapshot class moved)
     "MultiChainPriceOracle",
     "MultiChainBalanceProvider",
-    "ChainNotConfiguredError",
     # Chain Health
     "ChainHealth",
     "ChainHealthStatus",
-    "StaleDataError",
-    "DataFreshnessPolicy",
     # Protocol Health Metric Providers
     "AaveHealthFactorProvider",
     "AaveAvailableBorrowProvider",

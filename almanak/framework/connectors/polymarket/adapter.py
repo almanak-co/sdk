@@ -35,18 +35,19 @@ from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
-# MarketSnapshot is bound at runtime so ``typing.get_type_hints`` on this
-# adapter's public methods resolves the annotation. Pandas was the original
-# reason this import was deferred; ``data.market_snapshot`` now imports
-# pandas only inside the methods that build DataFrames, so importing the
-# class itself is cheap.
-from ...data.market_snapshot import MarketSnapshot
 from ...intents.vocabulary import (
     IntentType,
     PredictionBuyIntent,
     PredictionRedeemIntent,
     PredictionSellIntent,
 )
+
+# MarketSnapshot is bound at runtime so ``typing.get_type_hints`` on this
+# adapter's public methods resolves the annotation. Pandas was the original
+# reason this import was deferred; ``data.market_snapshot`` now imports
+# pandas only inside the methods that build DataFrames, so importing the
+# class itself is cheap.
+from ...market import MarketSnapshot
 from ...models.reproduction_bundle import ActionBundle
 from .ctf_sdk import BINARY_PARTITION, INDEX_SET_NO, INDEX_SET_YES, CtfSDK
 from .exceptions import (

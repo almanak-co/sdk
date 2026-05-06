@@ -32,7 +32,7 @@ from almanak.framework.backtesting.paper.engine import (
     PaperTradeEventType,
 )
 from almanak.framework.backtesting.paper.models import PaperTradeError
-from almanak.framework.data.market_snapshot import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 
 # =============================================================================
 # Test Constants

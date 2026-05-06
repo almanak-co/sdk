@@ -1297,7 +1297,7 @@ def inject_simulated_balances(runner: Any, market: Any, strategy: Any) -> None:
     """
     from decimal import InvalidOperation
 
-    from almanak.framework.strategies.intent_strategy import MultiChainMarketSnapshot, TokenBalance
+    from almanak.framework.market import MultiChainMarketSnapshot, TokenBalance
 
     # Skip injection when a real balance provider is active. MarketSnapshot.balance()
     # prefers pre-populated balances over the provider, so injecting with a live

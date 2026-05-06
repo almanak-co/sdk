@@ -118,7 +118,7 @@ class TestForkRpcUrl:
 
     def test_data_layer_snapshot_fork_rpc_url_defaults_none(self):
         """Data-layer MarketSnapshot.fork_rpc_url defaults to None."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
+        from almanak.framework.market import MarketSnapshot
 
         snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0x1234")
         assert snapshot.fork_rpc_url is None
@@ -126,7 +126,7 @@ class TestForkRpcUrl:
 
     def test_data_layer_snapshot_fork_rpc_url_set(self):
         """Data-layer MarketSnapshot.fork_rpc_url reflects set value."""
-        from almanak.framework.data.market_snapshot import MarketSnapshot
+        from almanak.framework.market import MarketSnapshot
 
         snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0x1234")
         snapshot._fork_rpc_url = "http://127.0.0.1:8546"
@@ -137,7 +137,7 @@ class TestForkRpcUrl:
 
     def test_strategy_layer_snapshot_fork_rpc_url_defaults_none(self):
         """Strategy-facing MarketSnapshot.fork_rpc_url defaults to None."""
-        from almanak.framework.strategies.intent_strategy import MarketSnapshot
+        from almanak.framework.market import MarketSnapshot
 
         snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0x1234")
         assert snapshot.fork_rpc_url is None
@@ -145,7 +145,7 @@ class TestForkRpcUrl:
 
     def test_strategy_layer_snapshot_fork_rpc_url_set(self):
         """Strategy-facing MarketSnapshot.fork_rpc_url reflects set value."""
-        from almanak.framework.strategies.intent_strategy import MarketSnapshot
+        from almanak.framework.market import MarketSnapshot
 
         snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0x1234")
         snapshot._fork_rpc_url = "http://127.0.0.1:8547"

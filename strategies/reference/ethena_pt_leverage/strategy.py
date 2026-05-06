@@ -56,11 +56,8 @@ from almanak.framework.intents.pt_leverage import (
     build_pt_leverage_loop,
     build_pt_leverage_unwind,
 )
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 logger = logging.getLogger(__name__)
 

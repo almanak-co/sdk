@@ -307,22 +307,19 @@ class TestSolanaLSTProviderErrors:
 
 class TestMarketSnapshotLST:
     def test_lst_no_provider(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         ms = MarketSnapshot(chain="solana", wallet_address="0x123")
         with pytest.raises(ValueError, match="No Solana LST provider"):
             ms.lst_exchange_rate("jitoSOL")
 
     def test_lst_all_rates_no_provider(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         ms = MarketSnapshot(chain="solana", wallet_address="0x123")
         with pytest.raises(ValueError, match="No Solana LST provider"):
             ms.lst_all_rates()
 
     def test_lst_delegates(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         provider = MagicMock()
         rate = LSTExchangeRate(
             symbol="jitoSOL",
@@ -345,8 +342,7 @@ class TestMarketSnapshotLST:
         provider.get_exchange_rate.assert_called_once_with("jitoSOL")
 
     def test_lst_all_rates_delegates(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         provider = MagicMock()
         rates = {
             "jitoSOL": LSTExchangeRate(
@@ -371,8 +367,8 @@ class TestMarketSnapshotLST:
     def test_lst_error_wrapping(self):
         from almanak.framework.data.market_snapshot import (
             LSTDataUnavailableError,
-            MarketSnapshot,
         )
+        from almanak.framework.market import MarketSnapshot
 
         provider = MagicMock()
         provider.get_exchange_rate = AsyncMock(side_effect=DataSourceUnavailable(source="test", reason="fail"))
@@ -386,8 +382,7 @@ class TestMarketSnapshotLST:
             ms.lst_exchange_rate("jitoSOL")
 
     def test_lst_unknown_symbol_passthrough(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         provider = MagicMock()
         provider.get_exchange_rate = AsyncMock(side_effect=ValueError("Unknown LST symbol 'FAKE'"))
 

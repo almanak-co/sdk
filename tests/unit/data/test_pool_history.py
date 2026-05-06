@@ -25,7 +25,7 @@ import pytest
 from almanak.framework.data.cache.versioned_cache import VersionedDataCache
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.interfaces import DataSourceUnavailable
-from almanak.framework.data.market_snapshot import MarketSnapshot, PoolHistoryUnavailableError
+from almanak.framework.market import MarketSnapshot, PoolHistoryUnavailableError
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.pools.history import (
     PoolHistoryReader,

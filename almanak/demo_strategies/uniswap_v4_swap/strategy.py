@@ -37,11 +37,8 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from almanak.framework.intents import Intent
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_usd
 
 logger = logging.getLogger(__name__)

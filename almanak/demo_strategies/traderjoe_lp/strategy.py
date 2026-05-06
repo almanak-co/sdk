@@ -67,11 +67,8 @@ from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add
 from almanak.framework.intents import Intent
 
 # Core strategy framework imports
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 # =============================================================================
 # STRATEGY CONFIGURATION

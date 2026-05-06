@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.framework.intents import Intent
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies.multi_step_strategy import MultiStepStrategy, Step
 
 

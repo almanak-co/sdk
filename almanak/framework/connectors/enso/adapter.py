@@ -46,9 +46,9 @@ from typing import TYPE_CHECKING, Any
 
 from eth_abi import decode, encode
 
-from ...data.market_snapshot import PriceUnavailableError
 from ...data.tokens.exceptions import TokenResolutionError
 from ...intents.vocabulary import IntentType, SwapIntent
+from ...market import PriceUnavailableError
 from ...models.reproduction_bundle import ActionBundle
 from .client import EnsoClient, EnsoConfig
 

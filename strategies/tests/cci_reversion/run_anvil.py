@@ -416,8 +416,8 @@ def run_strategy_on_anvil(force_action: str = "buy") -> SwapResult | None:
     from almanak.framework.intents import IntentCompiler
     from almanak.framework.intents.compiler import CompilationStatus
     from almanak.framework.models.hot_reload_config import HotReloadableConfig
-    from almanak.framework.strategies import CCIData, MarketSnapshot
-    from almanak.framework.strategies.intent_strategy import TokenBalance
+    from almanak.framework.market import CCIData, MarketSnapshot
+    from almanak.framework.market import TokenBalance
     from strategies.tests.cci_reversion import CCIReversionStrategy
 
     w3 = Web3(Web3.HTTPProvider(ANVIL_RPC))

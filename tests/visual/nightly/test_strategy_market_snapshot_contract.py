@@ -54,7 +54,7 @@ from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
 from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
 from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
-from almanak.framework.strategies.intent_strategy import IndicatorProvider, MarketSnapshot
+from almanak.framework.market import IndicatorProvider, MarketSnapshot
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402

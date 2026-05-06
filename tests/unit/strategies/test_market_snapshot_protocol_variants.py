@@ -16,10 +16,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from almanak.framework.data.market_snapshot import PROTOCOL_TOKEN_VARIANTS
-from almanak.framework.strategies.intent_strategy import (
-    MarketSnapshot,
-    TokenBalance,
-)
+from almanak.framework.market import MarketSnapshot, TokenBalance
 
 
 def _make_market(chain: str, balances: dict[str, TokenBalance]) -> MarketSnapshot:

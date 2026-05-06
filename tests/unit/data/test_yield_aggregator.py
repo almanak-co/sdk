@@ -375,16 +375,13 @@ class TestYieldAggregatorErrors:
 
 class TestMarketSnapshotPoolAnalytics:
     def test_pool_analytics_no_reader(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         ms = MarketSnapshot(chain="arbitrum", wallet_address="0x123")
         with pytest.raises(ValueError, match="No pool analytics reader"):
             ms.pool_analytics("0xpool")
 
     def test_pool_analytics_delegates(self):
-        from almanak.framework.data.market_snapshot import (
-            MarketSnapshot,
-        )
+        from almanak.framework.market import MarketSnapshot
         from almanak.framework.data.pools.analytics import PoolAnalytics, PoolAnalyticsReader
 
         reader = MagicMock(spec=PoolAnalyticsReader)
@@ -429,9 +426,9 @@ class TestMarketSnapshotPoolAnalytics:
 
     def test_pool_analytics_error_wrapping(self):
         from almanak.framework.data.market_snapshot import (
-            MarketSnapshot,
             PoolAnalyticsUnavailableError,
         )
+        from almanak.framework.market import MarketSnapshot
 
         reader = MagicMock()
         reader.get_pool_analytics.side_effect = DataSourceUnavailable(source="test", reason="fail")
@@ -445,8 +442,7 @@ class TestMarketSnapshotPoolAnalytics:
             ms.pool_analytics("0xpool")
 
     def test_pool_analytics_default_chain(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         reader = MagicMock()
         reader.get_pool_analytics.return_value = MagicMock()
 
@@ -465,15 +461,13 @@ class TestMarketSnapshotPoolAnalytics:
 
 class TestMarketSnapshotBestPool:
     def test_best_pool_no_reader(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         ms = MarketSnapshot(chain="arbitrum", wallet_address="0x123")
         with pytest.raises(ValueError, match="No pool analytics reader"):
             ms.best_pool("WETH", "USDC")
 
     def test_best_pool_delegates(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         reader = MagicMock()
         reader.best_pool.return_value = MagicMock()
 
@@ -494,15 +488,13 @@ class TestMarketSnapshotBestPool:
 
 class TestMarketSnapshotYieldOpportunities:
     def test_yield_no_aggregator(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         ms = MarketSnapshot(chain="arbitrum", wallet_address="0x123")
         with pytest.raises(ValueError, match="No yield aggregator"):
             ms.yield_opportunities("USDC")
 
     def test_yield_delegates(self):
-        from almanak.framework.data.market_snapshot import MarketSnapshot
-
+        from almanak.framework.market import MarketSnapshot
         agg = MagicMock()
         agg.get_yield_opportunities.return_value = MagicMock()
 
@@ -521,9 +513,9 @@ class TestMarketSnapshotYieldOpportunities:
 
     def test_yield_error_wrapping(self):
         from almanak.framework.data.market_snapshot import (
-            MarketSnapshot,
             YieldOpportunitiesUnavailableError,
         )
+        from almanak.framework.market import MarketSnapshot
 
         agg = MagicMock()
         agg.get_yield_opportunities.side_effect = DataSourceUnavailable(source="test", reason="fail")

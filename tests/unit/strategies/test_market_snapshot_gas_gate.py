@@ -11,7 +11,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 from almanak.framework.data.defi.gas import STANDARD_GAS_UNITS, GasPrice
-from almanak.framework.data.market_snapshot import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.intents.compiler_constants import get_gas_estimate
 
 
@@ -147,7 +147,7 @@ class TestIsTradeWorthwhile:
         ``estimate_swap_gas_cost_usd`` raises ``GasUnavailableError``.
         ``is_trade_worthwhile`` must swallow that and fail-open to match its
         docstring contract."""
-        from almanak.framework.data.market_snapshot import GasUnavailableError
+        from almanak.framework.market import GasUnavailableError
 
         oracle = MagicMock()
         oracle.get_gas_price = AsyncMock(side_effect=GasUnavailableError("arbitrum", "rpc timeout"))

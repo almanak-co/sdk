@@ -25,13 +25,7 @@ from almanak.framework.backtesting.pnl.indicator_engine import (
     DEFAULT_MAX_HISTORY,
     BacktestIndicatorEngine,
 )
-from almanak.framework.strategies.intent_strategy import (
-    ATRData,
-    BollingerBandsData,
-    MACDData,
-    MarketSnapshot,
-    RSIData,
-)
+from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MarketSnapshot, RSIData
 
 
 # =============================================================================

@@ -40,11 +40,8 @@ from almanak.framework.connectors.uniswap_v4.hooks import (
     warn_empty_hook_data,
 )
 from almanak.framework.intents import Intent
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
 
 logger = logging.getLogger(__name__)

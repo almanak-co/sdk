@@ -27,9 +27,9 @@ import pytest
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.market_snapshot import (
     LiquidityDepthUnavailableError,
-    MarketSnapshot,
     SlippageEstimateUnavailableError,
 )
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.pools.liquidity import (
     FEE_TO_TICK_SPACING,

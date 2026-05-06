@@ -102,6 +102,7 @@ def paper() -> None:
     pass
 
 
+# crap-allowlist: VIB-4062 — pre-existing CC=55 in paper-start CLI; touched only by codemod (legacy MarketSnapshot import → canonical)
 @paper.command("start")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to paper trade")
 @click.option(
@@ -275,7 +276,7 @@ def paper_start(
         click.echo("Running with mock strategy for demonstration.", err=True)
         click.echo()
 
-        from ...data.market_snapshot import MarketSnapshot
+        from ...market import MarketSnapshot
 
         class MockPaperStrategy:
             """Mock strategy for paper trading demonstration."""

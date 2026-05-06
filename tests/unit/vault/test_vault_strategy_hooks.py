@@ -2,11 +2,8 @@
 
 from decimal import Decimal
 
-from almanak.framework.strategies.intent_strategy import (
-    IntentStrategy,
-    MarketSnapshot,
-    TokenBalance,
-)
+from almanak.framework.market import MarketSnapshot, TokenBalance
+from almanak.framework.strategies.intent_strategy import IntentStrategy
 from almanak.framework.vault.config import SettlementResult
 
 

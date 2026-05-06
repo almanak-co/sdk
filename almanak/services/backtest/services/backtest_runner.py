@@ -26,7 +26,6 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
-from almanak.framework.data.market_snapshot import MarketSnapshot
 from almanak.framework.intents.vocabulary import (
     BorrowIntent,
     HoldIntent,
@@ -34,6 +33,7 @@ from almanak.framework.intents.vocabulary import (
     SupplyIntent,
     SwapIntent,
 )
+from almanak.framework.market import MarketSnapshot
 from almanak.services.backtest.models import (
     BacktestRequest,
     QuickBacktestRequest,

@@ -26,7 +26,7 @@ from almanak.framework.data.indicators.sync_wrappers import (
     create_sync_sma_func,
     create_sync_stochastic_func,
 )
-from almanak.framework.strategies.intent_strategy import (
+from almanak.framework.market import (
     ADXData,
     ATRData,
     BollingerBandsData,

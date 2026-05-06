@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.framework.runner.strategy_runner import StrategyRunner
-from almanak.framework.strategies.intent_strategy import MarketSnapshot, TokenBalance
+from almanak.framework.market import MarketSnapshot, TokenBalance
 
 
 # =============================================================================
@@ -193,7 +193,7 @@ def test_inject_simulated_balances_multi_chain_injects_all_chains():
 
     Also verifies that per-chain price() is used correctly for USD valuation.
     """
-    from almanak.framework.strategies.intent_strategy import MultiChainMarketSnapshot
+    from almanak.framework.market import MultiChainMarketSnapshot
 
     runner = _make_runner()
     strategy = _make_strategy({"USDC": "10000", "WETH": "5"})

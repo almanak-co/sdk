@@ -115,7 +115,7 @@ class TestMarketSnapshotPriceOracleNormalization:
 
     def test_mixed_case_keys_normalized(self):
         """Pre-populated mixed-case keys should be uppercased."""
-        from almanak.framework.strategies.intent_strategy import MarketSnapshot
+        from almanak.framework.market import MarketSnapshot
 
         snapshot = MarketSnapshot(chain="base", wallet_address="0x1234")
         snapshot.set_price("cbETH", Decimal("3200"))
@@ -131,7 +131,7 @@ class TestMarketSnapshotPriceOracleNormalization:
 
     def test_original_case_keys_not_present(self):
         """Original mixed-case keys should not appear if they differ from uppercase."""
-        from almanak.framework.strategies.intent_strategy import MarketSnapshot
+        from almanak.framework.market import MarketSnapshot
 
         snapshot = MarketSnapshot(chain="base", wallet_address="0x1234")
         snapshot.set_price("cbETH", Decimal("3200"))

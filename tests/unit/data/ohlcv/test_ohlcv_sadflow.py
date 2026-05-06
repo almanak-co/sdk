@@ -22,7 +22,7 @@ from almanak.framework.data.ohlcv.ohlcv_router import (
     OHLCVRouter,
     _is_transient_exc,
 )
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 
 # ---------------------------------------------------------------------------
 # Fixtures

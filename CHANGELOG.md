@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### BREAKING — VIB-4062 Unified MarketSnapshot
+
+The two `MarketSnapshot` classes that have silently diverged since the
+v1→v2 framework migration on 2026-01-26 are unified into a single canonical
+class at `almanak.framework.market.snapshot.MarketSnapshot`.
+
+**Imports that continue to work**:
+- `from almanak import MarketSnapshot`
+- `from almanak import MultiChainMarketSnapshot` (TypeAlias to MarketSnapshot)
+
+**Imports that now hard-fail with `ImportError`**:
+- `from almanak.framework.strategies import MarketSnapshot`
+- `from almanak.framework.strategies.intent_strategy import MarketSnapshot`
+- `from almanak.framework.strategies.intent_strategy import MultiChainMarketSnapshot`
+- `from almanak.framework.strategies.multichain import MultiChainMarketSnapshot`
+- `from almanak.framework.data.market_snapshot import MarketSnapshot`
+
+See the migration guide at `docs/migration/vib-4062-marketsnapshot.md`. The
+PRD at `docs/internal/PRD-MarketSnapshotFix.md` is the implementation
+source-of-truth.
+
+**Other changes**:
+- Multi-chain snapshots raise `AmbiguousChainError` on `chain=None` (was: silent
+  default-to-primary). Single-chain snapshots raise `ChainNotConfiguredError`
+  on a chain= mismatch (was: silent ignore).
+- `fork_rpc_url` is deleted from the production strategy surface. Paper
+  trading routes fork-aware reads via internal service adapters.
+- New public `seed_*` API on `MarketSnapshot` (legacy `set_*` retained as
+  aliases until deprecation).
+- New `MarketSnapshotBuilder` with named factories per runtime surface
+  (`for_strategy_runner`, `for_pnl_backtest_state`, `for_paper_fork`,
+  `for_http_backtest_spec`, `seeded`).
+- Every snapshot now carries `runtime_surface` ∈ `{"local_sdk", "hosted",
+  "pnl_backtest", "paper_fork", "http_backtest", "unit_test"}`.
+- Layered drift-prevention CI gates: AST uniqueness, public-surface lockfile,
+  behavioral return-type contract suite, identity assertion under multiple
+  import orders, caller-bifurcation anti-bypass, private-cache-write
+  anti-bypass, direct-constructor anti-bypass, dynamic-import discovery
+  sweep, lean-import regression test.
+
 ## [2.15.0] - 2026-04-23
 
 ### Added

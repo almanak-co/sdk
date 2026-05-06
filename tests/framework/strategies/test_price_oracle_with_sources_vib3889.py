@@ -20,8 +20,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.framework.observability.ledger import build_ledger_entry
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
-from almanak.framework.strategies.strategy_models import PriceData
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.market import PriceData
 
 
 def _market(prices: dict | None = None, cache: dict | None = None) -> MarketSnapshot:
@@ -98,7 +98,7 @@ def test_infer_oracle_source_from_qualname():
     """The runner's price_oracle is typically a bound method like
     ``CoingeckoProvider.get_price`` — qualname lets us infer the source
     without changing the callable signature."""
-    from almanak.framework.strategies.intent_strategy import _infer_oracle_source
+    from almanak.framework.market.snapshot import _infer_oracle_source
 
     class CoingeckoProvider:
         def get_price(self, token, quote, chain):
@@ -111,7 +111,7 @@ def test_infer_oracle_source_from_qualname():
 def test_infer_oracle_source_from_module():
     """When qualname is generic, the module path can carry the hint
     (e.g. a free function ``almanak.framework.data.price.chainlink.fetch``)."""
-    from almanak.framework.strategies.intent_strategy import _infer_oracle_source
+    from almanak.framework.market.snapshot import _infer_oracle_source
 
     def _fetch(token, quote, chain):
         return Decimal("1")
@@ -124,7 +124,7 @@ def test_infer_oracle_source_returns_empty_for_unknown_callable():
     """Lambda or anonymous oracle → empty string (callers default to
     "unknown" downstream — strictly better than pre-VIB-3889 always-
     "unknown" because at least named providers identify themselves)."""
-    from almanak.framework.strategies.intent_strategy import _infer_oracle_source
+    from almanak.framework.market.snapshot import _infer_oracle_source
 
     assert _infer_oracle_source(lambda token, quote: Decimal("1")) == ""
 
@@ -135,7 +135,7 @@ def test_infer_oracle_source_handles_functools_partial():
     underlying provider."""
     import functools
 
-    from almanak.framework.strategies.intent_strategy import _infer_oracle_source
+    from almanak.framework.market.snapshot import _infer_oracle_source
 
     def _binance_get_price(token, quote, chain):
         return Decimal("1")

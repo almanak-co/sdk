@@ -107,7 +107,6 @@ from almanak.framework.backtesting.pnl.receipt_utils import (
     extract_token_flows as extract_receipt_token_flows,
 )
 from almanak.framework.data.interfaces import AllDataSourcesFailed, BasePriceSource
-from almanak.framework.data.market_snapshot import MarketSnapshot
 from almanak.framework.data.price.dex_twap import DEXTWAPDataProvider, LowLiquidityWarning
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
@@ -115,6 +114,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionResult,
 )
 from almanak.framework.execution.result_enricher import enrich_result
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.models.reproduction_bundle import ActionBundle, TransactionReceipt
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 from almanak.gateway.data.price.binance import BinancePriceSource
@@ -520,6 +520,10 @@ PaperTradeEventCallback = Callable[[str, dict[str, Any]], None]
 # =============================================================================
 
 
+# crap-allowlist: VIB-4062 — pre-existing complexity in fork-snapshot bridge.
+# Touched only to switch ``rsi_calculator`` kwarg → ``rsi_provider`` and to
+# replace dict balance storage with ``TokenBalance``; refactor / coverage
+# improvements are tracked separately.
 async def create_market_snapshot_from_fork(
     fork_manager: RollingForkManager,
     chain: str,
@@ -546,13 +550,16 @@ async def create_market_snapshot_from_fork(
     Returns:
         MarketSnapshot populated with fork-based data
     """
-    # Create snapshot with current timestamp
+    # Create snapshot with current timestamp.
+    # Note: ``rsi_provider`` on ``MarketSnapshot`` is typed as a Callable; an
+    # ``RSICalculator`` is duck-compatible but mypy sees a structural mismatch.
     snapshot = MarketSnapshot(
         chain=chain,
         wallet_address=wallet_address,
         timestamp=datetime.now(UTC),
         price_oracle=price_oracle,
-        rsi_calculator=rsi_calculator,
+        rsi_provider=rsi_calculator,  # type: ignore[arg-type]
+        runtime_surface="paper_fork",
     )
 
     # Add metadata about fork state (VIB-1956: expose for on-chain reads)
@@ -578,24 +585,15 @@ async def create_market_snapshot_from_fork(
 
             balance_usd = amount * price
 
-            # Create a simple dict for balance data (TokenBalance may not exist)
-            balance_data = {
-                "symbol": token,
-                "balance": amount,
-                "balance_usd": balance_usd,
-            }
-            # Store as private attribute since set_balance may not exist
-            if not hasattr(snapshot, "_balances"):
-                snapshot._balances = {}  # type: ignore[attr-defined]
-            snapshot._balances[token] = balance_data  # type: ignore[attr-defined]
-
-            # Also populate _balance_cache so market.balance() works without a provider.
+            # Populate _balance_cache so market.balance() works without a provider.
             # Use TokenBalance for full strategy compat (numeric comparisons, .balance_usd).
-            from almanak.framework.strategies.intent_strategy import TokenBalance
+            from almanak.framework.market import TokenBalance
 
-            snapshot._balance_cache[token] = TokenBalance(  # type: ignore[assignment]
-                symbol=token, balance=amount, balance_usd=balance_usd
-            )
+            tb = TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
+            snapshot._balance_cache[token] = tb
+            # _balances is the pre-populated map consumed by `balance()` first
+            # (chain-agnostic); keep it in sync.
+            snapshot._balances[token] = tb
             logger.debug(f"Cached balance: {token} = {amount} (${balance_usd:.2f})")
 
         # Cross-populate native <-> wrapped alias for the snapshot's chain only.
@@ -610,15 +608,19 @@ async def create_market_snapshot_from_fork(
             chain_wrapped = _NATIVE_TO_WRAPPED.get(chain_native)
             if chain_wrapped:
                 if chain_native in snapshot._balance_cache and chain_wrapped not in snapshot._balance_cache:
-                    src_bal: TokenBalance = snapshot._balance_cache[chain_native]  # type: ignore[assignment]
-                    snapshot._balance_cache[chain_wrapped] = TokenBalance(  # type: ignore[assignment]
+                    src_bal: TokenBalance = snapshot._balance_cache[chain_native]
+                    alias_bal = TokenBalance(
                         symbol=chain_wrapped, balance=src_bal.balance, balance_usd=src_bal.balance_usd
                     )
+                    snapshot._balance_cache[chain_wrapped] = alias_bal
+                    snapshot._balances[chain_wrapped] = alias_bal
                 elif chain_wrapped in snapshot._balance_cache and chain_native not in snapshot._balance_cache:
-                    src_bal = snapshot._balance_cache[chain_wrapped]  # type: ignore[assignment]
-                    snapshot._balance_cache[chain_native] = TokenBalance(  # type: ignore[assignment]
+                    src_bal = snapshot._balance_cache[chain_wrapped]
+                    alias_bal = TokenBalance(
                         symbol=chain_native, balance=src_bal.balance, balance_usd=src_bal.balance_usd
                     )
+                    snapshot._balance_cache[chain_native] = alias_bal
+                    snapshot._balances[chain_native] = alias_bal
     return snapshot
 
 
@@ -1595,6 +1597,10 @@ class PaperTrader:
         self._valuer_available = False
         self._last_market_snapshot = None
 
+    # crap-allowlist: VIB-4062 — pre-existing complexity in tick executor.
+    # Touched only to switch the canonical RSI cache key shape from string to
+    # ``(token, timeframe, period)`` tuple; refactor + coverage uplift is
+    # outside this PR's scope.
     async def _execute_tick(self, strategy: PaperTradeableStrategy) -> PaperTrade | None:  # noqa: C901
         """Execute a single trading tick.
 
@@ -1663,12 +1669,13 @@ class PaperTrader:
             #   - rsi() defaults to "4h"
             #   - sma/ema/macd/bollinger_bands/atr default to "1h"
             if self._rsi_calculator:
-                from almanak.framework.strategies.intent_strategy import RSIData
+                from almanak.framework.market import RSIData
 
                 for token in list(token_prices.keys()):
                     for period in [14]:
                         for timeframe in ["1h", "4h", "1d"]:
-                            cache_key = f"{token}:{period}:{timeframe}"
+                            # Canonical _rsi_cache key shape: (token, timeframe, period)
+                            cache_key: tuple[str, str, int] = (token, timeframe, period)
                             try:
                                 rsi_val = await self._rsi_calculator.calculate_rsi(token, period, timeframe)
                                 rsi_data = RSIData(value=Decimal(str(rsi_val)), period=period)

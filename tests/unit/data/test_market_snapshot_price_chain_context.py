@@ -4,9 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.framework.data.interfaces import PriceResult
-from almanak.framework.data.market_snapshot import MarketSnapshot
-
-
+from almanak.framework.market import MarketSnapshot
 def _price_result(price: str) -> PriceResult:
     return PriceResult(
         price=Decimal(price),

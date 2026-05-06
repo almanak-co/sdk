@@ -27,8 +27,8 @@ from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.market_snapshot import (
     FundingRateHistoryUnavailableError,
     LendingRateHistoryUnavailableError,
-    MarketSnapshot,
 )
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.rates.history import (
     FundingRateSnapshot,

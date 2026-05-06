@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.framework.data.position_health import PositionHealth
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
+from almanak.framework.market import MarketSnapshot
 
 
 def _sample_health() -> PositionHealth:
@@ -109,7 +109,7 @@ class TestPositionHealthProviderInvocation:
         assert get_health_kwargs["user_address"] == "0xWALLET"
 
     def test_provider_failure_raises_health_unavailable(self):
-        from almanak.framework.data.market_snapshot import HealthUnavailableError
+        from almanak.framework.market import HealthUnavailableError
 
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc")
         with patch("almanak.framework.data.position_health.PositionHealthProvider") as mock_cls:
@@ -120,7 +120,7 @@ class TestPositionHealthProviderInvocation:
     def test_disconnected_gateway_client_fails_fast(self):
         # Regression guard for PR #1926 review: a present-but-disconnected
         # gateway client must raise before any RPC attempt, with a clear message.
-        from almanak.framework.data.market_snapshot import HealthUnavailableError
+        from almanak.framework.market import HealthUnavailableError
         from almanak.framework.data.position_health import PositionHealthProvider
 
         disconnected = MagicMock(spec=["is_connected"])

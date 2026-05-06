@@ -122,7 +122,7 @@ def _create_synthetic_snapshot(chain: str) -> Any:
     """Create a minimal MarketSnapshot with placeholder prices."""
     from datetime import UTC, datetime
 
-    from almanak.framework.strategies.intent_strategy import MarketSnapshot
+    from almanak.framework.market import MarketSnapshot
 
     # Explicit wrapped-token alias map (no heuristic stripping)
     _WRAPPED_ALIASES: dict[str, str] = {

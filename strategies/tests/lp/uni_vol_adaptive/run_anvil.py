@@ -349,7 +349,7 @@ def run_strategy_directly(atr_value: Decimal, regime: str) -> int:
     print(f"ATR value: ${atr_value:.2f}")
     print(f"{'=' * 60}")
 
-    from almanak.framework.strategies import ATRData, MarketSnapshot, TokenBalance
+    from almanak.framework.market import ATRData, MarketSnapshot, TokenBalance
     from strategies.tests.lp.uni_vol_adaptive.strategy import (
         UniVolAdaptiveConfig,
         UniVolAdaptiveStrategy,

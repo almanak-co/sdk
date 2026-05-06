@@ -334,6 +334,7 @@ def print_crisis_backtest_results(result: CrisisBacktestResult) -> None:
 # =============================================================================
 
 
+# crap-allowlist: VIB-4062 — pre-existing CC=26 in walk-forward CLI; touched only to repoint MarketSnapshot import
 @backtest.command("walk-forward")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to optimize")
 @click.option("--start", required=True, callback=parse_date, help="Start date (YYYY-MM-DD)")
@@ -601,7 +602,7 @@ def walk_forward_backtest(  # noqa: C901
         click.echo("Running with mock strategy for demonstration.", err=True)
         click.echo()
 
-        from ...strategies import MarketSnapshot
+        from ...market import MarketSnapshot
 
         class MockWalkForwardStrategy:
             """Mock strategy for walk-forward demonstration."""
@@ -700,6 +701,7 @@ def walk_forward_backtest(  # noqa: C901
 # =============================================================================
 
 
+# crap-allowlist: VIB-4062 — pre-existing CC=17 in monte-carlo CLI; same import-only touch
 @backtest.command("monte-carlo")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to simulate")
 @click.option("--start", required=True, callback=parse_date, help="Start date for historical data (YYYY-MM-DD)")
@@ -857,7 +859,7 @@ def monte_carlo_backtest(  # noqa: C901
         click.echo("Running with mock strategy for demonstration.", err=True)
         click.echo()
 
-        from ...strategies import MarketSnapshot
+        from ...market import MarketSnapshot
 
         class MockMonteCarloStrategy:
             """Mock strategy for Monte Carlo demonstration."""
@@ -1009,6 +1011,7 @@ def monte_carlo_backtest(  # noqa: C901
 # =============================================================================
 
 
+# crap-allowlist: VIB-4062 — pre-existing CC=31 in scenario CLI; same import-only touch
 @backtest.command("scenario")
 @click.option("--strategy", "-s", required=False, default=None, help="Name of the strategy to backtest")
 @click.option(
@@ -1246,7 +1249,7 @@ def scenario_backtest(  # noqa: C901
         click.echo("Running with mock strategy for demonstration.", err=True)
         click.echo()
 
-        from ...strategies import MarketSnapshot
+        from ...market import MarketSnapshot
 
         class MockCrisisStrategy:
             """Mock strategy for crisis scenario demonstration."""

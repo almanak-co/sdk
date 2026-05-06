@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.strategies.intent_strategy import _infer_oracle_source
+from almanak.framework.market.snapshot import _infer_oracle_source
 
 
 class GatewayPriceOracle:

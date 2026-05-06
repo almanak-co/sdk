@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.data.market_snapshot import BalanceUnavailableError, MarketSnapshot
+from almanak.framework.data.market_snapshot import BalanceUnavailableError
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 

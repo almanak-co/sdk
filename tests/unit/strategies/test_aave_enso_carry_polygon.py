@@ -268,7 +268,7 @@ class TestDecideBorrowAndSwapSequence:
         assert borrow.borrow_amount == Decimal("600.00")
 
     def test_price_unavailable_returns_hold(self):
-        from almanak.framework.data.market_snapshot import PriceUnavailableError
+        from almanak.framework.market import PriceUnavailableError
 
         strategy = _make_strategy(borrow_amount_override="")
         market = MagicMock()

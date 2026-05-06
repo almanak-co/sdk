@@ -22,7 +22,8 @@ STRATEGY_SOURCE = textwrap.dedent(
     from decimal import Decimal
 
     from almanak.framework.intents import Intent
-    from almanak.framework.strategies import IntentStrategy, MarketSnapshot, almanak_strategy
+    from almanak.framework.market import MarketSnapshot
+    from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 
     @almanak_strategy(name="{name}")

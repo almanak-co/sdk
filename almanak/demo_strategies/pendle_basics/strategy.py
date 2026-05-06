@@ -47,11 +47,8 @@ from almanak.framework.intents import Intent
 
 if TYPE_CHECKING:
     from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_usd
 
 logger = logging.getLogger(__name__)

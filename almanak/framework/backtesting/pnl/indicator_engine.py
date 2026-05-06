@@ -28,13 +28,7 @@ from almanak.framework.data.indicators.bollinger_bands import BollingerBandsCalc
 from almanak.framework.data.indicators.macd import MACDCalculator
 from almanak.framework.data.indicators.rsi import RSICalculator
 from almanak.framework.data.interfaces import InsufficientDataError
-from almanak.framework.strategies.intent_strategy import (
-    ATRData,
-    BollingerBandsData,
-    MACDData,
-    MarketSnapshot,
-    RSIData,
-)
+from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MarketSnapshot, RSIData
 
 logger = logging.getLogger(__name__)
 

@@ -74,11 +74,8 @@ from almanak.framework.connectors.sushiswap_v3 import (
 from almanak.framework.intents import Intent
 
 # Core strategy framework imports
-from almanak.framework.strategies import (
-    IntentStrategy,
-    MarketSnapshot,
-    almanak_strategy,
-)
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 # Logging utilities for user-friendly output
 from almanak.framework.utils.log_formatters import format_token_amount_human

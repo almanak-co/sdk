@@ -14,7 +14,8 @@ from decimal import Decimal
 
 from almanak import IntentStrategy
 from almanak.framework.intents import Intent
-from almanak.framework.strategies.intent_strategy import MarketSnapshot, almanak_strategy
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies.intent_strategy import almanak_strategy
 
 
 @almanak_strategy(

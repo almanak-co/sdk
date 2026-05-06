@@ -33,9 +33,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from ...data.market_snapshot import PriceUnavailableError
 from ...data.tokens.exceptions import TokenResolutionError
 from ...intents.vocabulary import IntentType, SwapIntent
+from ...market import PriceUnavailableError
 from ...models.reproduction_bundle import ActionBundle
 from .client import LiFiClient, LiFiConfig
 

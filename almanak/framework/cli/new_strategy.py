@@ -2936,9 +2936,9 @@ from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lendi
 
 # Core strategy framework imports
 from almanak.framework.intents import Intent
+from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import (
     IntentStrategy,
-    MarketSnapshot,
     almanak_strategy,
 )
 

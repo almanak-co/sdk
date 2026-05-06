@@ -27,8 +27,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.strategies.intent_strategy import MarketSnapshot
-
+from almanak.framework.market import MarketSnapshot
 # =============================================================================
 # Documented public API on the strategy-facing MarketSnapshot
 # =============================================================================
