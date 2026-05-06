@@ -850,10 +850,418 @@ def _resolve_identity(
     )
 
 
-# crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
-# through gateway_config_from_env(...) — no complexity added. Function refactor is
-# tracked separately; allowlist is the documented escape hatch for no-op cutovers.
-def _setup_gateway(  # noqa: C901
+def _validate_no_gateway_flags(
+    *, no_gateway: bool, anvil_ports: tuple[str, ...], wallet: str, keep_anvil: bool
+) -> None:
+    """Raise ClickException for `--no-gateway` flag combinations that need a managed gateway."""
+    if not no_gateway:
+        return
+    if anvil_ports:
+        raise click.ClickException("--anvil-port requires a managed gateway (remove --no-gateway).")
+    if keep_anvil:
+        raise click.ClickException("--keep-anvil requires a managed gateway (remove --no-gateway).")
+    if wallet == "isolated":
+        raise click.ClickException(
+            "--wallet isolated requires a managed gateway (remove --no-gateway). "
+            "The managed gateway auto-funds the derived wallet on Anvil."
+        )
+
+
+def _attach_external_gateway(
+    *,
+    effective_host: str,
+    gateway_port: int,
+    gateway_network: str,
+    runtime_private_key: str | None,
+) -> tuple[Any, Any, str, int, str, str | None, str | None, type[IntentStrategy[Any]] | None]:
+    """Connect to an existing gateway (`--no-gateway` path) and return the standard tuple."""
+    from ..gateway_client import GatewayClient, GatewayClientConfig
+
+    click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
+    # Read ALMANAK_GATEWAY_AUTH_TOKEN with fallback to GATEWAY_AUTH_TOKEN for backward compatibility
+    auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
+    gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=auth_token)
+    gateway_client = GatewayClient(gateway_config)
+    gateway_client.connect()
+
+    click.echo("Waiting for gateway to become ready...")
+    if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
+        gateway_client.disconnect()
+        click.echo()
+        click.secho("ERROR: Gateway is not running or not healthy", fg="red", bold=True)
+        click.echo()
+        click.echo("The gateway sidecar is required for all strategy operations.")
+        click.echo("Start the gateway first with:")
+        click.echo()
+        click.echo("  almanak gateway")
+        click.echo()
+        raise click.ClickException(f"Gateway not available at {effective_host}:{gateway_port}")
+
+    click.secho(f"Connected to existing gateway at {effective_host}:{gateway_port}", fg="green")
+    # No managed gateway here, so no isolated-wallet path runs; whatever
+    # the caller plumbed in (or the contextvar) is already the right key
+    # for `_build_runtime_config` to read via the ContextVar. Mirror it
+    # explicitly so direct `_setup_gateway` callers (test paths) that
+    # set ``runtime_private_key=…`` see it propagated downstream too.
+    if runtime_private_key is not None:
+        _runtime_private_key_override.set(runtime_private_key)
+    return (gateway_client, None, effective_host, gateway_port, gateway_network, None, None, None)
+
+
+def _find_available_gateway_port_or_raise(effective_host: str, gateway_port: int) -> int:
+    """Wrap `find_available_gateway_port` with the user-facing error UX."""
+    from almanak.gateway.managed import find_available_gateway_port
+
+    try:
+        return find_available_gateway_port(effective_host, gateway_port)
+    except RuntimeError as e:
+        click.echo()
+        click.secho(f"ERROR: {e}", fg="red", bold=True)
+        click.echo()
+        click.echo("Set a specific port with:")
+        click.echo()
+        click.echo("  almanak strat run --gateway-port <port>")
+        click.echo()
+        click.echo("Or connect to an existing gateway:")
+        click.echo()
+        click.echo("  almanak strat run --no-gateway --gateway-port <port>")
+        click.echo()
+        raise click.ClickException(str(e)) from None
+
+
+def _parse_anvil_port_overrides(anvil_ports: tuple[str, ...]) -> dict[str, int]:
+    """Parse `--anvil-port CHAIN=PORT` entries, raising ClickException on malformed input."""
+    parsed: dict[str, int] = {}
+    for entry in anvil_ports:
+        if "=" not in entry:
+            raise click.ClickException(
+                f"Invalid --anvil-port format: '{entry}'. Expected CHAIN=PORT (e.g., arbitrum=8545)"
+            )
+        chain_name, port_str = entry.split("=", 1)
+        chain_name = chain_name.strip().lower()
+        if not chain_name:
+            raise click.ClickException(f"Invalid --anvil-port format: '{entry}'. Chain name cannot be empty.")
+        try:
+            port = int(port_str)
+        except ValueError:
+            raise click.ClickException(f"Invalid port in --anvil-port: '{port_str}'") from None
+        if not (1 <= port <= 65535):
+            raise click.ClickException(f"Invalid port in --anvil-port: '{port_str}'. Expected 1-65535.")
+        if chain_name in parsed:
+            raise click.ClickException(f"Duplicate --anvil-port for chain '{chain_name}'.")
+        parsed[chain_name] = port
+    return parsed
+
+
+def _early_load_strategy_class(working_dir: str) -> type[IntentStrategy[Any]] | None:
+    """Eager-load strategy.py so decorator metadata is available before gateway startup."""
+    from .intent_debug import load_strategy_from_file
+
+    strategy_file = Path(working_dir) / "strategy.py"
+    if not strategy_file.exists():
+        return None
+    cls, err = load_strategy_from_file(strategy_file)
+    if err:
+        logger.debug(f"Early strategy load failed (will retry later): {err}")
+    return cls
+
+
+def _resolve_quick_config_path(working_dir: str, config_file: str | None) -> Path | None:
+    """Pick the explicit `--config` path or auto-discover config.json/yaml/yml in `working_dir`."""
+    if config_file:
+        return Path(config_file)
+    for name in ("config.json", "config.yaml", "config.yml"):
+        candidate = Path(working_dir) / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _quick_load_config_dict(path: Path) -> dict[str, Any]:
+    """Best-effort parse of a quick-probe config file; malformed input yields an empty dict."""
+    try:
+        with open(path) as f:
+            if path.suffix.lower() in [".yaml", ".yml"]:
+                import yaml
+
+                parsed = yaml.safe_load(f)
+            else:
+                parsed = json.load(f)
+    except Exception as e:
+        logger.debug("Quick config probe failed for %s: %s", path, e)
+        return {}
+    # `yaml.safe_load` returns None for empty files, and a user-supplied
+    # config could parse to a scalar or list. Coerce anything non-dict
+    # to an empty dict so `.get()` is always safe.
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _chains_from_quick_config(quick_config: dict[str, Any]) -> list[str]:
+    """Extract `chains` (preferred) or `chain` from a quick-config dict."""
+    chains_val = quick_config.get("chains")
+    if chains_val is not None:
+        # Normalize via helper: wraps strings into single-element lists,
+        # coerces lists to list[str], and ignores non-str/non-list values
+        # (ints, dicts) rather than silently using dict keys as chains.
+        return _normalize_quick_chains(chains_val)
+    chain_val = quick_config.get("chain")
+    # Treat non-string scalars as absent so a malformed `chain: 123` doesn't
+    # blow up `c.lower()` downstream — the real config loader will surface a
+    # proper error later.
+    if isinstance(chain_val, str) and chain_val.strip():
+        return [chain_val]
+    return []
+
+
+def _resolve_anvil_chains_and_funding(
+    *,
+    working_dir: str,
+    config_file: str | None,
+    early_strategy_class: type[IntentStrategy[Any]] | None,
+    external_anvil_ports: dict[str, int],
+) -> tuple[list[str], dict[str, float | int | str]]:
+    """Resolve EVM chains needing Anvil forks (and their funding) for `--network anvil`."""
+    # Import get_default_chain lazily from .run to avoid circular-import.
+    from .run import get_default_chain
+
+    anvil_chains: list[str] = []
+    anvil_funding: dict[str, float | int | str] = {}
+
+    config_path = _resolve_quick_config_path(working_dir, config_file)
+    if config_path and config_path.exists():
+        # Malformed config files must not crash gateway startup. Swallow
+        # parse errors here and fall through with an empty dict; the
+        # full loader later in `_discover_and_load_config` will surface
+        # a proper user-facing error if the file is truly broken.
+        quick_config = _quick_load_config_dict(config_path)
+        anvil_chains = _chains_from_quick_config(quick_config)
+        anvil_funding = _normalize_anvil_funding(quick_config.get("anvil_funding", {}))
+
+    # Fall back to decorator metadata if config.json has no chain
+    if not anvil_chains and early_strategy_class:
+        decorator_chain = get_default_chain(early_strategy_class)
+        if decorator_chain:
+            anvil_chains = [decorator_chain]
+
+    # Add externally-specified chains to anvil_chains if not already present
+    for ext_chain in external_anvil_ports:
+        if ext_chain not in anvil_chains:
+            anvil_chains.append(ext_chain)
+
+    # Solana uses solana-test-validator (not Anvil); filter it out so
+    # ManagedGateway doesn't try to start a RollingForkManager for it.
+    # The Solana fork is started separately below in the runner setup.
+    NON_EVM_CHAINS = {"solana"}
+    evm_anvil_chains = [c for c in anvil_chains if c.lower() not in NON_EVM_CHAINS]
+    solana_anvil = any(c.lower() in NON_EVM_CHAINS for c in anvil_chains)
+
+    if not evm_anvil_chains and not solana_anvil:
+        click.echo(
+            "Warning: --network anvil specified but no chain found in config or decorator. "
+            "Gateway will start without Anvil forks."
+        )
+
+    return evm_anvil_chains, anvil_funding
+
+
+def _resolve_gateway_chains_for_mainnet(
+    *,
+    working_dir: str,
+    config_file: str | None,
+    early_strategy_class: type[IntentStrategy[Any]] | None,
+) -> list[str]:
+    """Resolve the chain list passed to the gateway for non-anvil networks."""
+    from .run import get_default_chain
+
+    chains: list[str] = []
+    config_path = _resolve_quick_config_path(working_dir, config_file)
+    if config_path and config_path.exists():
+        # Same defensive treatment as the Anvil probe above: a malformed
+        # config must not crash gateway startup at this early peek.
+        chains = _chains_from_quick_config(_quick_load_config_dict(config_path))
+
+    # Fall back to decorator metadata if config has no chain
+    if not chains and early_strategy_class:
+        decorator_chain = get_default_chain(early_strategy_class)
+        if decorator_chain:
+            chains = [decorator_chain]
+    return chains
+
+
+def _derive_isolated_wallet_or_none(
+    *,
+    wallet: str,
+    gateway_network: str,
+    working_dir: str,
+    runtime_private_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Derive an isolated wallet+key for `--wallet isolated`; otherwise return (None, None).
+
+    Resolution order for the master key: caller-plumbed ``runtime_private_key``
+    (or its contextvar fallback set by `almanak strat test`) >
+    ``ALMANAK_PRIVATE_KEY`` env var. Honours the kwarg-first, no-env signing-key
+    plumbing the rest of `_setup_gateway` documents (#2100).
+    """
+    if wallet != "isolated":
+        return None, None
+    if gateway_network != "anvil":
+        raise click.ClickException("--wallet isolated is only supported with --network anvil")
+
+    from almanak.gateway.managed import derive_isolated_wallet
+
+    master_key = runtime_private_key
+    if master_key is None:
+        master_key = _runtime_private_key_override.get()
+    if not master_key:
+        master_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+    if not master_key:
+        raise click.ClickException(
+            "--wallet isolated requires a private key — pass `runtime_private_key=...` or set ALMANAK_PRIVATE_KEY"
+        )
+    # Use the strategy directory name as the derivation seed
+    strategy_seed = Path(working_dir).resolve().name
+    derived_key, isolated_wallet_address = derive_isolated_wallet(master_key, strategy_seed)
+    # The derived key is plumbed via the runtime-config kwarg + gateway
+    # private_key argument below — no os.environ mutation (#2100).
+    click.echo(
+        f"Wallet: isolated ({isolated_wallet_address[:10]}...{isolated_wallet_address[-4:]}) "
+        f"[derived from strategy '{strategy_seed}']"
+    )
+    return isolated_wallet_address, derived_key
+
+
+def _resolve_signing_key(*, isolated_wallet_private_key: str | None, runtime_private_key: str | None) -> str | None:
+    """Resolve the effective signing key and publish it on `_runtime_private_key_override` (#2100).
+
+    Order: derived isolated-wallet key > caller-plumbed `runtime_private_key` kwarg
+    (or its contextvar fallback set by `almanak strat test`) > None for env fallback.
+    GatewaySettings reads ALMANAK_GATEWAY_PRIVATE_KEY (not ALMANAK_PRIVATE_KEY) for its
+    prefixed env source, so an explicit kwarg is the only way to feed it the unprefixed
+    ALMANAK_PRIVATE_KEY equivalent the CLI just resolved. The resolved value is published
+    on `_runtime_private_key_override` so the downstream `_build_runtime_config` reads
+    the same key — no extra return-tuple slot needed (which would have flagged every
+    line of the destructure inside `run` against the CRAP gate).
+    """
+    if runtime_private_key is None:
+        runtime_private_key = _runtime_private_key_override.get()
+    effective = isolated_wallet_private_key or runtime_private_key
+    if effective is not None:
+        _runtime_private_key_override.set(effective)
+    return effective
+
+
+def _build_gateway_settings(
+    *,
+    effective_host: str,
+    gateway_port: int,
+    gateway_network: str,
+    gateway_chains: list[str],
+    gateway_private_key: str | None,
+) -> tuple[Any, str | None]:
+    """Assemble `gateway_kwargs` and call `gateway_config_from_env`; returns (settings, session_token)."""
+    import uuid
+
+    from almanak.config.env import gateway_config_from_env
+
+    # Security: generate a random session token for the managed gateway so it
+    # is never running without authentication, even on mainnet (VIB-520).
+    # For anvil/sepolia we still use allow_insecure for convenience.
+    is_test_network = gateway_network in ("anvil", "sepolia")
+    session_auth_token = None if is_test_network else uuid.uuid4().hex
+
+    gateway_kwargs: dict[str, Any] = {
+        "grpc_host": effective_host,
+        "grpc_port": gateway_port,
+        "network": gateway_network,
+        "allow_insecure": is_test_network,
+        "metrics_enabled": False,
+        "audit_enabled": False,
+        "chains": gateway_chains,
+    }
+    # On test networks, force auth_token=None as an explicit kwarg so it wins
+    # over any ALMANAK_GATEWAY_AUTH_TOKEN loaded from .env. Without this, the
+    # server attaches AuthInterceptor while the client (allow_insecure=True)
+    # sends no token, producing UNAUTHENTICATED on every gRPC call (VIB-3032).
+    if is_test_network:
+        gateway_kwargs["auth_token"] = None
+    elif session_auth_token:
+        gateway_kwargs["auth_token"] = session_auth_token
+    if gateway_private_key:
+        gateway_kwargs["private_key"] = gateway_private_key
+    # Phase 1: route through the config service so unprefixed ALMANAK_* and
+    # Polymarket-ladder fallbacks resolve identically to gateway boot.
+    return gateway_config_from_env(**gateway_kwargs), session_auth_token
+
+
+def _start_managed_gateway_and_connect(
+    *,
+    gateway_settings: Any,
+    anvil_chains: list[str],
+    isolated_wallet_address: str | None,
+    anvil_funding: dict[str, float | int | str],
+    external_anvil_ports: dict[str, int],
+    keep_anvil: bool,
+    effective_host: str,
+    gateway_port: int,
+    gateway_network: str,
+    session_auth_token: str | None,
+) -> tuple[Any, Any]:
+    """Start the managed gateway, register atexit cleanup, and connect a client. Returns (client, managed)."""
+    import atexit
+
+    from almanak.gateway.managed import ManagedGateway
+
+    from ..gateway_client import GatewayClient, GatewayClientConfig
+    from ._anvil_timeout import compute_anvil_startup_timeout
+
+    if anvil_chains:
+        click.echo(
+            f"Starting managed gateway on {effective_host}:{gateway_port} "
+            f"(network={gateway_network}, anvil chains: {', '.join(anvil_chains)})..."
+        )
+    else:
+        click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network={gateway_network})...")
+    managed_gateway = ManagedGateway(
+        gateway_settings,
+        anvil_chains=anvil_chains,
+        wallet_address=isolated_wallet_address,
+        anvil_funding=anvil_funding,
+        external_anvil_ports=external_anvil_ports,
+        keep_anvil=keep_anvil,
+    )
+    # Per-chain Anvil startup-timeout policy lives in _anvil_timeout.py
+    # (VIB-3877) so the run + teardown CLI paths can never drift. See that
+    # module for the cold-cache-fork-vs-gRPC-race rationale this guards.
+    startup_timeout = compute_anvil_startup_timeout(anvil_chains)
+    try:
+        managed_gateway.start(timeout=startup_timeout)
+    except RuntimeError as e:
+        click.echo()
+        click.secho(f"ERROR: Failed to start managed gateway: {e}", fg="red", bold=True)
+        click.echo()
+        raise click.ClickException("Managed gateway startup failed") from e
+
+    # Register atexit handler as safety net for sys.exit() paths that skip cleanup
+    atexit.register(managed_gateway.stop)
+
+    click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
+
+    # Connect client to the managed gateway (use same session token)
+    gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=session_auth_token)
+    gateway_client = GatewayClient(gateway_config)
+    gateway_client.connect()
+
+    click.echo("Waiting for gateway to become ready...")
+    if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
+        managed_gateway.stop()
+        gateway_client.disconnect()
+        raise click.ClickException(
+            "Managed gateway started but health check failed. Check gateway logs above for details."
+        )
+    return gateway_client, managed_gateway
+
+
+def _setup_gateway(
     *,
     working_dir: str,
     config_file: str | None,
@@ -870,8 +1278,7 @@ def _setup_gateway(  # noqa: C901
 ) -> tuple[Any, Any, str, int, str, str | None, str | None, type[IntentStrategy[Any]] | None]:
     """Set up the gateway (managed auto-start or connect to external).
 
-    Mirrors phase 2 of `run()`. This is the CC-heaviest chunk in the phase
-    map, encompassing:
+    Mirrors phase 2 of `run()`. Orchestrates per-stage helpers covering:
         - `--wallet isolated` derivation (returns a per-strategy derived
           key alongside the wallet address; the caller plumbs it into
           `_build_runtime_config` via the `runtime_private_key` kwarg
@@ -931,15 +1338,6 @@ def _setup_gateway(  # noqa: C901
         early_strategy_class is None if strategy.py wasn't present or failed
         to load (retried later by `_load_strategy_class`).
     """
-    import atexit
-    import uuid
-
-    from almanak.config.env import gateway_config_from_env
-    from almanak.gateway.managed import ManagedGateway, find_available_gateway_port
-
-    from ..gateway_client import GatewayClient, GatewayClientConfig
-    from .intent_debug import load_strategy_from_file
-
     # VIB-3761 / Phase 4c: anchor ``ALMANAK_STRATEGY_FOLDER`` before any
     # downstream helper resolves a local path. Done here (not in ``run()``)
     # because every gateway-setup downstream — ``local_db_path``, the
@@ -950,10 +1348,6 @@ def _setup_gateway(  # noqa: C901
 
     # Normalize "localhost" to "127.0.0.1" (gateway binds to 127.0.0.1)
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
-
-    managed_gateway: ManagedGateway | None = None
-    early_strategy_class: type[IntentStrategy[Any]] | None = None
-    external_anvil_ports: dict[str, int] = {}
 
     # Resolve network mode early because later runner setup uses the same value
     # for both managed and pre-existing gateway flows.
@@ -969,198 +1363,43 @@ def _setup_gateway(  # noqa: C901
         )
 
     if no_gateway:
-        if anvil_ports:
-            raise click.ClickException("--anvil-port requires a managed gateway (remove --no-gateway).")
-        if keep_anvil:
-            raise click.ClickException("--keep-anvil requires a managed gateway (remove --no-gateway).")
-        # --wallet isolated requires the managed gateway (which auto-funds the derived wallet)
-        if wallet == "isolated":
-            raise click.ClickException(
-                "--wallet isolated requires a managed gateway (remove --no-gateway). "
-                "The managed gateway auto-funds the derived wallet on Anvil."
-            )
-
-        # --no-gateway: connect to an existing gateway, fail if unavailable
-        click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
-        # Read ALMANAK_GATEWAY_AUTH_TOKEN with fallback to GATEWAY_AUTH_TOKEN for backward compatibility
-        auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
-        gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=auth_token)
-        gateway_client = GatewayClient(gateway_config)
-        gateway_client.connect()
-
-        click.echo("Waiting for gateway to become ready...")
-        if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
-            gateway_client.disconnect()
-            click.echo()
-            click.secho("ERROR: Gateway is not running or not healthy", fg="red", bold=True)
-            click.echo()
-            click.echo("The gateway sidecar is required for all strategy operations.")
-            click.echo("Start the gateway first with:")
-            click.echo()
-            click.echo("  almanak gateway")
-            click.echo()
-            raise click.ClickException(f"Gateway not available at {effective_host}:{gateway_port}")
-
-        click.secho(f"Connected to existing gateway at {effective_host}:{gateway_port}", fg="green")
-        # No managed gateway here, so no isolated-wallet path runs; whatever
-        # the caller plumbed in (or the contextvar) is already the right key
-        # for `_build_runtime_config` to read via the ContextVar. Mirror it
-        # explicitly so direct `_setup_gateway` callers (test paths) that
-        # set ``runtime_private_key=…`` see it propagated downstream too.
-        if runtime_private_key is not None:
-            _runtime_private_key_override.set(runtime_private_key)
-        return (
-            gateway_client,
-            None,
-            effective_host,
-            gateway_port,
-            gateway_network,
-            None,
-            None,
-            None,
+        _validate_no_gateway_flags(no_gateway=no_gateway, anvil_ports=anvil_ports, wallet=wallet, keep_anvil=keep_anvil)
+        return _attach_external_gateway(
+            effective_host=effective_host,
+            gateway_port=gateway_port,
+            gateway_network=gateway_network,
+            runtime_private_key=runtime_private_key,
         )
 
     # Default: auto-start a managed gateway
-    try:
-        gateway_port = find_available_gateway_port(effective_host, gateway_port)
-    except RuntimeError as e:
-        click.echo()
-        click.secho(f"ERROR: {e}", fg="red", bold=True)
-        click.echo()
-        click.echo("Set a specific port with:")
-        click.echo()
-        click.echo("  almanak strat run --gateway-port <port>")
-        click.echo()
-        click.echo("Or connect to an existing gateway:")
-        click.echo()
-        click.echo("  almanak strat run --no-gateway --gateway-port <port>")
-        click.echo()
-        raise click.ClickException(str(e)) from None
-
-    # Parse --anvil-port values into dict
-    for entry in anvil_ports:
-        if "=" not in entry:
-            raise click.ClickException(
-                f"Invalid --anvil-port format: '{entry}'. Expected CHAIN=PORT (e.g., arbitrum=8545)"
-            )
-        chain_name, port_str = entry.split("=", 1)
-        chain_name = chain_name.strip().lower()
-        if not chain_name:
-            raise click.ClickException(f"Invalid --anvil-port format: '{entry}'. Chain name cannot be empty.")
-        try:
-            port = int(port_str)
-        except ValueError:
-            raise click.ClickException(f"Invalid port in --anvil-port: '{port_str}'") from None
-        if not (1 <= port <= 65535):
-            raise click.ClickException(f"Invalid port in --anvil-port: '{port_str}'. Expected 1-65535.")
-        if chain_name in external_anvil_ports:
-            raise click.ClickException(f"Duplicate --anvil-port for chain '{chain_name}'.")
-        external_anvil_ports[chain_name] = port
+    gateway_port = _find_available_gateway_port_or_raise(effective_host, gateway_port)
+    external_anvil_ports = _parse_anvil_port_overrides(anvil_ports)
 
     if keep_anvil and gateway_network != "anvil":
         click.echo("Warning: --keep-anvil has no effect without --network anvil or --anvil-port.")
 
     # Early-load strategy class so decorator metadata is available for chain detection.
     # This must happen before gateway startup so Anvil forks target the correct chain.
-    _early_strategy_file = Path(working_dir) / "strategy.py"
-    if _early_strategy_file.exists():
-        early_strategy_class, _early_err = load_strategy_from_file(_early_strategy_file)
-        if _early_err:
-            logger.debug(f"Early strategy load failed (will retry later): {_early_err}")
-
-    # Import get_default_chain lazily from .run to avoid circular-import.
-    from .run import get_default_chain
+    early_strategy_class = _early_load_strategy_class(working_dir)
 
     # Determine which chains need Anvil forks
     anvil_chains: list[str] = []
     anvil_funding: dict[str, float | int | str] = {}
     if gateway_network == "anvil":
-        # Quick-read config for chain info and anvil_funding
-        resolved_config_path: Path | None = Path(config_file) if config_file else None
-        if resolved_config_path is None:
-            for name in ["config.json", "config.yaml", "config.yml"]:
-                candidate = Path(working_dir) / name
-                if candidate.exists():
-                    resolved_config_path = candidate
-                    break
-        if resolved_config_path and resolved_config_path.exists():
-            # Malformed config files must not crash gateway startup. Swallow
-            # parse errors here and fall through with an empty dict; the
-            # full loader later in `_discover_and_load_config` will surface
-            # a proper user-facing error if the file is truly broken.
-            try:
-                with open(resolved_config_path) as f:
-                    if resolved_config_path.suffix.lower() in [".yaml", ".yml"]:
-                        import yaml
-
-                        quick_config = yaml.safe_load(f)
-                    else:
-                        quick_config = json.load(f)
-            except Exception as e:
-                logger.debug("Quick config probe failed for %s: %s", resolved_config_path, e)
-                quick_config = {}
-            # `yaml.safe_load` returns None for empty files, and a user-supplied
-            # config could parse to a scalar or list. Coerce anything non-dict
-            # to an empty dict so `.get()` is always safe.
-            if not isinstance(quick_config, dict):
-                quick_config = {}
-            chain_val = quick_config.get("chain")
-            chains_val = quick_config.get("chains")
-            if chains_val is not None:
-                # Normalize via helper: wraps strings into single-element lists,
-                # coerces lists to list[str], and ignores non-str/non-list values
-                # (ints, dicts) rather than silently using dict keys as chains.
-                anvil_chains = _normalize_quick_chains(chains_val)
-            elif chain_val:
-                anvil_chains = [chain_val]
-            anvil_funding = _normalize_anvil_funding(quick_config.get("anvil_funding", {}))
-
-        # Fall back to decorator metadata if config.json has no chain
-        if not anvil_chains and early_strategy_class:
-            decorator_chain = get_default_chain(early_strategy_class)
-            if decorator_chain:
-                anvil_chains = [decorator_chain]
-
-        # Add externally-specified chains to anvil_chains if not already present
-        for ext_chain in external_anvil_ports:
-            if ext_chain not in anvil_chains:
-                anvil_chains.append(ext_chain)
-
-        # Solana uses solana-test-validator (not Anvil); filter it out so
-        # ManagedGateway doesn't try to start a RollingForkManager for it.
-        # The Solana fork is started separately below in the runner setup.
-        NON_EVM_CHAINS = {"solana"}
-        evm_anvil_chains = [c for c in anvil_chains if c.lower() not in NON_EVM_CHAINS]
-        solana_anvil = any(c.lower() in NON_EVM_CHAINS for c in anvil_chains)
-        anvil_chains = evm_anvil_chains
-
-        if not anvil_chains and not solana_anvil:
-            click.echo(
-                "Warning: --network anvil specified but no chain found in config or decorator. "
-                "Gateway will start without Anvil forks."
-            )
+        anvil_chains, anvil_funding = _resolve_anvil_chains_and_funding(
+            working_dir=working_dir,
+            config_file=config_file,
+            early_strategy_class=early_strategy_class,
+            external_anvil_ports=external_anvil_ports,
+        )
 
     # Wallet isolation: derive a unique wallet per strategy on Anvil
-    isolated_wallet_address: str | None = None
-    isolated_wallet_private_key: str | None = None
-    if wallet == "isolated" and gateway_network == "anvil":
-        from almanak.gateway.managed import derive_isolated_wallet
-
-        master_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
-        if not master_key:
-            raise click.ClickException("--wallet isolated requires ALMANAK_PRIVATE_KEY to be set")
-        # Use the strategy directory name as the derivation seed
-        strategy_seed = Path(working_dir).resolve().name
-        derived_key, isolated_wallet_address = derive_isolated_wallet(master_key, strategy_seed)
-        # The derived key is plumbed via the runtime-config kwarg + gateway
-        # private_key argument below — no os.environ mutation (#2100).
-        isolated_wallet_private_key = derived_key
-        click.echo(
-            f"Wallet: isolated ({isolated_wallet_address[:10]}...{isolated_wallet_address[-4:]}) "
-            f"[derived from strategy '{strategy_seed}']"
-        )
-    elif wallet == "isolated" and gateway_network != "anvil":
-        raise click.ClickException("--wallet isolated is only supported with --network anvil")
+    isolated_wallet_address, isolated_wallet_private_key = _derive_isolated_wallet_or_none(
+        wallet=wallet,
+        gateway_network=gateway_network,
+        working_dir=working_dir,
+        runtime_private_key=runtime_private_key,
+    )
 
     # Validate --reset-fork requires --network anvil
     if reset_fork and gateway_network != "anvil":
@@ -1168,141 +1407,38 @@ def _setup_gateway(  # noqa: C901
     if reset_fork and once:
         click.echo("Note: --reset-fork has no effect with --once (fork is already fresh at startup)")
 
-    # Resolve the effective signing key once (#2100). Order: derived
-    # isolated-wallet key > caller-plumbed `runtime_private_key` kwarg
-    # (or its contextvar fallback set by `almanak strat test`) > env
-    # fallback at gateway_config_from_env. GatewaySettings reads
-    # ALMANAK_GATEWAY_PRIVATE_KEY (not ALMANAK_PRIVATE_KEY) for its prefixed
-    # env source, so an explicit kwarg is the only way to feed it the
-    # unprefixed ALMANAK_PRIVATE_KEY equivalent the CLI just resolved. The
-    # resolved value is published on `_runtime_private_key_override` so the
-    # downstream `_build_runtime_config` reads the same key — no extra
-    # return-tuple slot needed (which would have flagged every line of the
-    # destructure inside `run` against the CRAP gate).
-    if runtime_private_key is None:
-        runtime_private_key = _runtime_private_key_override.get()
-    effective_signing_key = isolated_wallet_private_key or runtime_private_key
-    if effective_signing_key is not None:
-        _runtime_private_key_override.set(effective_signing_key)
-    gateway_private_key = effective_signing_key
+    gateway_private_key = _resolve_signing_key(
+        isolated_wallet_private_key=isolated_wallet_private_key, runtime_private_key=runtime_private_key
+    )
 
     # Ensure gateway knows the strategy's chain for on-chain pricing.
     # For anvil mode, anvil_chains is already populated above.
     # For mainnet, read chain from config or decorator metadata so the MarketService
     # uses the correct Chainlink oracle chain instead of defaulting to arbitrum.
-    gateway_chains = anvil_chains
-    if not gateway_chains:
-        resolved_config_path_gw: Path | None = Path(config_file) if config_file else None
-        if resolved_config_path_gw is None:
-            for name in ["config.json", "config.yaml", "config.yml"]:
-                candidate = Path(working_dir) / name
-                if candidate.exists():
-                    resolved_config_path_gw = candidate
-                    break
-        if resolved_config_path_gw and resolved_config_path_gw.exists():
-            # Same defensive treatment as the Anvil probe above: a malformed
-            # config must not crash gateway startup at this early peek.
-            try:
-                with open(resolved_config_path_gw) as f:
-                    if resolved_config_path_gw.suffix.lower() in [".yaml", ".yml"]:
-                        import yaml
+    gateway_chains = anvil_chains or _resolve_gateway_chains_for_mainnet(
+        working_dir=working_dir, config_file=config_file, early_strategy_class=early_strategy_class
+    )
 
-                        _quick = yaml.safe_load(f)
-                    else:
-                        _quick = json.load(f)
-            except Exception as e:
-                logger.debug("Quick config probe failed for %s: %s", resolved_config_path_gw, e)
-                _quick = {}
-            if not isinstance(_quick, dict):
-                _quick = {}
-            _chains_val = _quick.get("chains")
-            _chain_val = _quick.get("chain")
-            if _chains_val is not None:
-                gateway_chains = _normalize_quick_chains(_chains_val)
-            elif _chain_val:
-                gateway_chains = [_chain_val]
+    gateway_settings, session_auth_token = _build_gateway_settings(
+        effective_host=effective_host,
+        gateway_port=gateway_port,
+        gateway_network=gateway_network,
+        gateway_chains=gateway_chains,
+        gateway_private_key=gateway_private_key,
+    )
 
-        # Fall back to decorator metadata if config has no chain
-        if not gateway_chains and early_strategy_class:
-            decorator_chain = get_default_chain(early_strategy_class)
-            if decorator_chain:
-                gateway_chains = [decorator_chain]
-
-    # Security: generate a random session token for the managed gateway so it
-    # is never running without authentication, even on mainnet (VIB-520).
-    # For anvil/sepolia we still use allow_insecure for convenience.
-    is_test_network = gateway_network in ("anvil", "sepolia")
-    session_auth_token = None if is_test_network else uuid.uuid4().hex
-
-    gateway_kwargs: dict[str, Any] = {
-        "grpc_host": effective_host,
-        "grpc_port": gateway_port,
-        "network": gateway_network,
-        "allow_insecure": is_test_network,
-        "metrics_enabled": False,
-        "audit_enabled": False,
-        "chains": gateway_chains,
-    }
-    # On test networks, force auth_token=None as an explicit kwarg so it wins
-    # over any ALMANAK_GATEWAY_AUTH_TOKEN loaded from .env. Without this, the
-    # server attaches AuthInterceptor while the client (allow_insecure=True)
-    # sends no token, producing UNAUTHENTICATED on every gRPC call (VIB-3032).
-    if is_test_network:
-        gateway_kwargs["auth_token"] = None
-    elif session_auth_token:
-        gateway_kwargs["auth_token"] = session_auth_token
-    if gateway_private_key:
-        gateway_kwargs["private_key"] = gateway_private_key
-    # Phase 1: route through the config service so unprefixed ALMANAK_* and
-    # Polymarket-ladder fallbacks resolve identically to gateway boot.
-    gateway_settings = gateway_config_from_env(**gateway_kwargs)
-
-    if anvil_chains:
-        click.echo(
-            f"Starting managed gateway on {effective_host}:{gateway_port} "
-            f"(network={gateway_network}, anvil chains: {', '.join(anvil_chains)})..."
-        )
-    else:
-        click.echo(f"Starting managed gateway on {effective_host}:{gateway_port} (network={gateway_network})...")
-    managed_gateway = ManagedGateway(
-        gateway_settings,
+    gateway_client, managed_gateway = _start_managed_gateway_and_connect(
+        gateway_settings=gateway_settings,
         anvil_chains=anvil_chains,
-        wallet_address=isolated_wallet_address,
+        isolated_wallet_address=isolated_wallet_address,
         anvil_funding=anvil_funding,
         external_anvil_ports=external_anvil_ports,
         keep_anvil=keep_anvil,
+        effective_host=effective_host,
+        gateway_port=gateway_port,
+        gateway_network=gateway_network,
+        session_auth_token=session_auth_token,
     )
-    # Per-chain Anvil startup-timeout policy lives in _anvil_timeout.py
-    # (VIB-3877) so the run + teardown CLI paths can never drift. See that
-    # module for the cold-cache-fork-vs-gRPC-race rationale this guards.
-    from ._anvil_timeout import compute_anvil_startup_timeout
-
-    startup_timeout = compute_anvil_startup_timeout(anvil_chains)
-    try:
-        managed_gateway.start(timeout=startup_timeout)
-    except RuntimeError as e:
-        click.echo()
-        click.secho(f"ERROR: Failed to start managed gateway: {e}", fg="red", bold=True)
-        click.echo()
-        raise click.ClickException("Managed gateway startup failed") from e
-
-    # Register atexit handler as safety net for sys.exit() paths that skip cleanup
-    atexit.register(managed_gateway.stop)
-
-    click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
-
-    # Connect client to the managed gateway (use same session token)
-    gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=session_auth_token)
-    gateway_client = GatewayClient(gateway_config)
-    gateway_client.connect()
-
-    click.echo("Waiting for gateway to become ready...")
-    if not gateway_client.wait_for_ready(timeout=60.0, interval=5.0):
-        managed_gateway.stop()
-        gateway_client.disconnect()
-        raise click.ClickException(
-            "Managed gateway started but health check failed. Check gateway logs above for details."
-        )
 
     return (
         gateway_client,

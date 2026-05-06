@@ -565,7 +565,253 @@ def create_market_snapshot_from_scenario(
     return market
 
 
-def trace_strategy(  # noqa: C901
+class _TraceStepRecorder:
+    """Helper that accumulates TraceStep entries with monotonic numbering."""
+
+    def __init__(self) -> None:
+        self.steps: list[TraceStep] = []
+        self._counter = 0
+
+    def add(
+        self,
+        description: str,
+        state: str,
+        intent: AnyIntent | None = None,
+        action_bundle: dict[str, Any] | None = None,
+        success: bool = True,
+        error: str | None = None,
+    ) -> None:
+        """Append a new TraceStep to the running trace."""
+        self._counter += 1
+        self.steps.append(
+            TraceStep(
+                step_number=self._counter,
+                description=description,
+                state=state,
+                intent=intent.serialize() if intent else None,
+                action_bundle=action_bundle,
+                success=success,
+                error=error,
+            )
+        )
+
+
+def _build_trace_failure(
+    *,
+    strategy_name: str,
+    scenario_file: str | None,
+    scenario: dict[str, Any],
+    steps: list[TraceStep],
+    error: str,
+    start_time: float,
+) -> TraceResult:
+    """Assemble a failed TraceResult with elapsed time."""
+    import time
+
+    return TraceResult(
+        strategy_name=strategy_name,
+        scenario_file=scenario_file,
+        scenario=scenario,
+        steps=steps,
+        final_intent=None,
+        final_action_bundle=None,
+        success=False,
+        error=error,
+        execution_time_ms=(time.time() - start_time) * 1000,
+    )
+
+
+def _try_instantiate_config(config_class: type, config_defaults: dict[str, Any]) -> Any | None:
+    """Attempt to construct a config via from_dict() then direct kwargs."""
+    if hasattr(config_class, "from_dict"):
+        try:
+            return config_class.from_dict(config_defaults)
+        except Exception:
+            pass
+    try:
+        return config_class(**config_defaults)
+    except Exception:
+        return None
+
+
+def _load_config_from_module(
+    config_module_path: Path,
+    config_defaults: dict[str, Any],
+) -> Any:
+    """Locate a *Config class in a sibling config.py and instantiate it.
+
+    Returns None if the module spec/loader cannot be obtained — callers preserve
+    the legacy behaviour of leaving config unset in that branch.
+    """
+    spec = importlib.util.spec_from_file_location("config_module", config_module_path)
+    if not (spec and spec.loader):
+        return None
+
+    config_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(config_module)
+
+    for name in dir(config_module):
+        obj = getattr(config_module, name)
+        if isinstance(obj, type) and name.endswith("Config"):
+            instance = _try_instantiate_config(obj, config_defaults)
+            if instance is not None:
+                return instance
+    raise ValueError("No config class found")
+
+
+def _make_mock_config(chain: str, wallet_address: str) -> Any:
+    """Build a minimal config dataclass for strategies without a config.py sibling.
+
+    Class bodies don't see enclosing-function locals, so we declare the fields
+    without defaults and pass the values via the constructor instead.
+    """
+
+    @dataclass
+    class MockConfig:
+        strategy_id: str
+        chain: str
+        wallet_address: str
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "strategy_id": self.strategy_id,
+                "chain": self.chain,
+                "wallet_address": self.wallet_address,
+            }
+
+    return MockConfig(
+        strategy_id="trace-test",
+        chain=chain,
+        wallet_address=wallet_address,
+    )
+
+
+def _resolve_trace_config(
+    file_path: Path,
+    scenario_config: dict[str, Any],
+    chain: str,
+    wallet_address: str,
+) -> Any:
+    """Return a config object from a sibling config.py or a generated mock.
+
+    Returns None when config.py exists but its module spec/loader is unavailable —
+    matches the legacy behaviour of leaving config unset on that branch.
+    """
+    config_module_path = file_path.parent / "config.py"
+    if not config_module_path.exists():
+        return _make_mock_config(chain, wallet_address)
+
+    config_defaults = {
+        "strategy_id": "trace-test",
+        "chain": chain,
+        "wallet_address": wallet_address,
+        **scenario_config,
+    }
+    return _load_config_from_module(config_module_path, config_defaults)
+
+
+def _resolve_intent_from_list(decide_result: list[Any]) -> AnyIntent | None:
+    """Pick the head intent out of a parallel-execution list (possibly empty)."""
+    from ..intents.vocabulary import IntentSequence
+
+    if not decide_result:
+        return Intent.hold(reason="Empty result list")
+    first_item = decide_result[0]
+    if isinstance(first_item, IntentSequence):
+        return first_item.first
+    return first_item
+
+
+def _normalize_decide_result(
+    decide_result: Any,
+    recorder: _TraceStepRecorder,
+) -> AnyIntent:
+    """Reduce a decide() return (None, single intent, list, IntentSequence) to one intent."""
+    from ..intents.vocabulary import IntentSequence
+
+    intent: AnyIntent | None
+    if decide_result is None:
+        intent = Intent.hold(reason="decide() returned None")
+    elif isinstance(decide_result, IntentSequence):
+        intent = decide_result.first
+        recorder.add(
+            f"decide() returned IntentSequence with {len(decide_result)} intents",
+            "DECIDE_MULTI",
+        )
+    elif isinstance(decide_result, list):
+        intent = _resolve_intent_from_list(decide_result)
+        recorder.add(
+            f"decide() returned list with {len(decide_result)} items for parallel execution",
+            "DECIDE_MULTI",
+        )
+    else:
+        intent = decide_result
+
+    if intent is None:
+        intent = Intent.hold(reason="No intent resolved")
+    return intent
+
+
+def _build_action_bundle_dict(compilation_result: Any) -> dict[str, Any]:
+    """Convert a successful CompilationResult into the trace dict shape."""
+    return {
+        "status": "SUCCESS",
+        "transactions": [
+            {
+                "to": tx.to,
+                "value": str(tx.value),
+                "data": tx.data[:66] + "..." if len(tx.data) > 66 else tx.data,
+                "gas_estimate": tx.gas_estimate,
+                "description": tx.description,
+            }
+            for tx in compilation_result.transactions
+        ],
+        "total_gas_estimate": compilation_result.total_gas_estimate,
+    }
+
+
+def _compile_intent_for_trace(
+    intent: AnyIntent,
+    compiler: IntentCompiler,
+    recorder: _TraceStepRecorder,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Compile the final intent (or skip for HOLD) and append trace steps.
+
+    Returns ``(bundle, error)``. ``error`` is ``None`` on success or HOLD;
+    a non-None ``error`` tells `trace_strategy` to surface the failure on the
+    `TraceResult` (so the CLI exits non-zero on compile errors).
+    """
+    if intent.intent_type == IntentType.HOLD:
+        recorder.add("HOLD intent - no compilation needed", "HOLD")
+        return None, None
+
+    recorder.add("Compiling intent to ActionBundle", "COMPILING")
+    try:
+        compilation_result = compiler.compile(intent)
+    except Exception as e:
+        recorder.add(f"Compilation error: {e}", "COMPILE_ERROR", success=False, error=str(e))
+        return None, str(e)
+
+    if compilation_result.status != CompilationStatus.SUCCESS:
+        err = compilation_result.error or "Compilation failed"
+        recorder.add(
+            f"Compilation failed: {err}",
+            "COMPILE_ERROR",
+            success=False,
+            error=err,
+        )
+        return None, err
+
+    bundle = _build_action_bundle_dict(compilation_result)
+    recorder.add(
+        f"Compilation successful: {len(compilation_result.transactions)} transaction(s)",
+        "COMPILED",
+        action_bundle=bundle,
+    )
+    return bundle, None
+
+
+def trace_strategy(
     file_path: Path,
     scenario: dict[str, Any],
     scenario_file: str | None = None,
@@ -585,246 +831,95 @@ def trace_strategy(  # noqa: C901
     import time
 
     start_time = time.time()
-    steps: list[TraceStep] = []
-    step_counter = 0
+    recorder = _TraceStepRecorder()
 
-    def add_step(
-        description: str,
-        state: str,
-        intent: AnyIntent | None = None,
-        action_bundle: dict[str, Any] | None = None,
-        success: bool = True,
-        error: str | None = None,
-    ) -> None:
-        nonlocal step_counter
-        step_counter += 1
-        steps.append(
-            TraceStep(
-                step_number=step_counter,
-                description=description,
-                state=state,
-                intent=intent.serialize() if intent else None,
-                action_bundle=action_bundle,
-                success=success,
-                error=error,
-            )
-        )
-
-    # Load strategy class
-    add_step("Loading strategy from file", "LOADING")
+    # --- 1. Load strategy class
+    recorder.add("Loading strategy from file", "LOADING")
     strategy_class, load_error = load_strategy_from_file(file_path)
     if load_error:
-        add_step("Failed to load strategy", "ERROR", success=False, error=load_error)
-        return TraceResult(
+        recorder.add("Failed to load strategy", "ERROR", success=False, error=load_error)
+        return _build_trace_failure(
             strategy_name="unknown",
             scenario_file=scenario_file,
             scenario=scenario,
-            steps=steps,
-            final_intent=None,
-            final_action_bundle=None,
-            success=False,
+            steps=recorder.steps,
             error=load_error,
-            execution_time_ms=(time.time() - start_time) * 1000,
+            start_time=start_time,
         )
 
     assert strategy_class is not None
     strategy_name = getattr(strategy_class, "STRATEGY_NAME", strategy_class.__name__)
-    add_step(f"Loaded strategy: {strategy_name}", "LOADED")
+    recorder.add(f"Loaded strategy: {strategy_name}", "LOADED")
 
-    # Get config from scenario or use defaults
+    # --- 2. Resolve config + compiler
     config_data = scenario.get("config", {})
-    config: Any = None
     wallet_address_str = config_data.get("wallet_address", "0x" + "1" * 40)
 
-    # Try to instantiate strategy
-    add_step("Initializing strategy", "INITIALIZING")
+    recorder.add("Initializing strategy", "INITIALIZING")
     try:
-        # Look for config class
-        config_module_path = file_path.parent / "config.py"
-        if config_module_path.exists():
-            spec = importlib.util.spec_from_file_location("config_module", config_module_path)
-            if spec and spec.loader:
-                config_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(config_module)
-
-                # Find config class
-                for name in dir(config_module):
-                    obj = getattr(config_module, name)
-                    if isinstance(obj, type) and name.endswith("Config"):
-                        # Create config with defaults
-                        config_defaults = {
-                            "strategy_id": "trace-test",
-                            "chain": chain,
-                            "wallet_address": wallet_address_str,
-                            **config_data,
-                        }
-                        try:
-                            # Try from_dict class method
-                            if hasattr(obj, "from_dict"):
-                                config = obj.from_dict(config_defaults)
-                                break
-                        except Exception:
-                            pass
-                        try:
-                            # Try direct instantiation
-                            config = obj(**config_defaults)
-                            break
-                        except Exception:
-                            pass
-                else:
-                    raise ValueError("No config class found")
-        else:
-            # Create a simple mock config that has the required attributes
-            @dataclass
-            class MockConfig:
-                strategy_id: str = "trace-test"
-                chain: str = chain
-                wallet_address: str = wallet_address_str
-
-                def to_dict(self) -> dict[str, Any]:
-                    return {
-                        "strategy_id": self.strategy_id,
-                        "chain": self.chain,
-                        "wallet_address": self.wallet_address,
-                    }
-
-            config = MockConfig()
-
-        # Create compiler
+        config = _resolve_trace_config(file_path, config_data, chain, wallet_address_str)
         compiler = IntentCompiler(
             chain=chain,
             wallet_address=getattr(config, "wallet_address", wallet_address_str),
         )
-
-        # Create strategy instance (simplified - may need adaptation per strategy)
-        # For now, we'll directly call decide() with mocked market data
-        add_step("Strategy initialized", "INITIALIZED")
-
+        recorder.add("Strategy initialized", "INITIALIZED")
     except Exception as e:
-        add_step("Strategy initialization failed", "ERROR", success=False, error=str(e))
-        return TraceResult(
+        recorder.add("Strategy initialization failed", "ERROR", success=False, error=str(e))
+        return _build_trace_failure(
             strategy_name=strategy_name,
             scenario_file=scenario_file,
             scenario=scenario,
-            steps=steps,
-            final_intent=None,
-            final_action_bundle=None,
-            success=False,
+            steps=recorder.steps,
             error=str(e),
-            execution_time_ms=(time.time() - start_time) * 1000,
+            start_time=start_time,
         )
 
-    # Create market snapshot from scenario
-    add_step("Creating market snapshot", "CREATING_MARKET")
+    # --- 3. Build market snapshot
+    recorder.add("Creating market snapshot", "CREATING_MARKET")
     market = create_market_snapshot_from_scenario(scenario, chain=chain, wallet_address=wallet_address_str)
-    add_step("Market snapshot created", "MARKET_READY")
+    recorder.add("Market snapshot created", "MARKET_READY")
 
-    # Try to call decide() via strategy instance
-    add_step("Executing decide()", "DECIDING")
+    # --- 4. Run decide()
+    recorder.add("Executing decide()", "DECIDING")
     try:
-        # Instantiate strategy - pass all required arguments
-        strategy = strategy_class(
-            config=config,
-            compiler=compiler,
-        )  # type: ignore[call-arg]
+        strategy = strategy_class(config=config, compiler=compiler)  # type: ignore[call-arg]
         decide_result = strategy.decide(market)
-
-        # Normalize DecideResult to single intent for trace
-        from ..intents.vocabulary import AnyIntent, IntentSequence
-
-        intent: AnyIntent | None = None
-        if decide_result is None:
-            intent = Intent.hold(reason="decide() returned None")
-        elif isinstance(decide_result, IntentSequence):
-            intent = decide_result.first
-            add_step(
-                f"decide() returned IntentSequence with {len(decide_result)} intents",
-                "DECIDE_MULTI",
-            )
-        elif isinstance(decide_result, list):
-            if not decide_result:
-                intent = Intent.hold(reason="Empty result list")
-            else:
-                first_item = decide_result[0]
-                if isinstance(first_item, IntentSequence):
-                    intent = first_item.first
-                else:
-                    intent = first_item
-            add_step(
-                f"decide() returned list with {len(decide_result)} items for parallel execution",
-                "DECIDE_MULTI",
-            )
-        else:
-            intent = decide_result
-
-        if intent is None:
-            intent = Intent.hold(reason="No intent resolved")
-
-        add_step(
+        intent = _normalize_decide_result(decide_result, recorder)
+        recorder.add(
             f"decide() returned: {intent.intent_type.value}",
             "DECIDED",
             intent=intent,
         )
-
     except Exception as e:
-        add_step(f"decide() failed: {e}", "ERROR", success=False, error=str(e))
-        return TraceResult(
+        recorder.add(f"decide() failed: {e}", "ERROR", success=False, error=str(e))
+        return _build_trace_failure(
             strategy_name=strategy_name,
             scenario_file=scenario_file,
             scenario=scenario,
-            steps=steps,
-            final_intent=None,
-            final_action_bundle=None,
-            success=False,
+            steps=recorder.steps,
             error=str(e),
-            execution_time_ms=(time.time() - start_time) * 1000,
+            start_time=start_time,
         )
 
-    # Compile intent if not HOLD
-    final_action_bundle = None
-    if intent.intent_type != IntentType.HOLD:
-        add_step("Compiling intent to ActionBundle", "COMPILING")
-        try:
-            compilation_result = compiler.compile(intent)
-            if compilation_result.status == CompilationStatus.SUCCESS:
-                final_action_bundle = {
-                    "status": "SUCCESS",
-                    "transactions": [
-                        {
-                            "to": tx.to,
-                            "value": str(tx.value),
-                            "data": tx.data[:66] + "..." if len(tx.data) > 66 else tx.data,
-                            "gas_estimate": tx.gas_estimate,
-                            "description": tx.description,
-                        }
-                        for tx in compilation_result.transactions
-                    ],
-                    "total_gas_estimate": compilation_result.total_gas_estimate,
-                }
-                add_step(
-                    f"Compilation successful: {len(compilation_result.transactions)} transaction(s)",
-                    "COMPILED",
-                    action_bundle=final_action_bundle,
-                )
-            else:
-                add_step(
-                    f"Compilation failed: {compilation_result.error}",
-                    "COMPILE_ERROR",
-                    success=False,
-                    error=compilation_result.error,
-                )
-        except Exception as e:
-            add_step(f"Compilation error: {e}", "COMPILE_ERROR", success=False, error=str(e))
-    else:
-        add_step("HOLD intent - no compilation needed", "HOLD")
+    # --- 5. Compile final intent (skipped for HOLD)
+    final_action_bundle, compile_error = _compile_intent_for_trace(intent, compiler, recorder)
+    if compile_error is not None:
+        return _build_trace_failure(
+            strategy_name=strategy_name,
+            scenario_file=scenario_file,
+            scenario=scenario,
+            steps=recorder.steps,
+            error=compile_error,
+            start_time=start_time,
+        )
 
-    add_step("Trace complete", "COMPLETE")
+    recorder.add("Trace complete", "COMPLETE")
 
     return TraceResult(
         strategy_name=strategy_name,
         scenario_file=scenario_file,
         scenario=scenario,
-        steps=steps,
+        steps=recorder.steps,
         final_intent=intent.serialize(),
         final_action_bundle=final_action_bundle,
         success=True,
@@ -838,7 +933,101 @@ def trace_strategy(  # noqa: C901
 # =============================================================================
 
 
-def print_inspection_result(result: IntentInspectionResult, verbose: bool = False) -> None:  # noqa: C901
+def _print_metadata_section(metadata: dict[str, Any]) -> None:
+    """Print the METADATA block with optional author/tags/chains/protocols rows."""
+    click.echo("-" * 40)
+    click.echo("METADATA")
+    click.echo("-" * 40)
+    click.echo(f"  Name: {metadata.get('name', 'N/A')}")
+    click.echo(f"  Version: {metadata.get('version', 'N/A')}")
+    click.echo(f"  Description: {metadata.get('description', 'N/A')}")
+    optional_rows: tuple[tuple[str, str], ...] = (
+        ("author", "Author"),
+        ("tags", "Tags"),
+        ("supported_chains", "Chains"),
+        ("supported_protocols", "Protocols"),
+    )
+    for key, label in optional_rows:
+        value = metadata.get(key)
+        if not value:
+            continue
+        if key == "author":
+            click.echo(f"  {label}: {value}")
+        else:
+            click.echo(f"  {label}: {', '.join(value)}")
+    click.echo()
+
+
+def _print_intent_types_section(intent_types: list[str]) -> None:
+    """Print the DETECTED INTENT TYPES bullet list."""
+    click.echo("-" * 40)
+    click.echo("DETECTED INTENT TYPES")
+    click.echo("-" * 40)
+    for intent_type in intent_types:
+        click.echo(f"  • {intent_type}")
+    click.echo()
+
+
+def _print_state_diagrams_section(state_diagrams: dict[str, str]) -> None:
+    """Print the STATE MACHINE DIAGRAMS section, one diagram per intent type."""
+    click.echo("-" * 40)
+    click.echo("STATE MACHINE DIAGRAMS")
+    click.echo("-" * 40)
+    for intent_type, diagram in state_diagrams.items():
+        click.echo(f"\n[{intent_type}]")
+        click.echo(diagram)
+
+
+def _print_successful_bundle(bundle: dict[str, Any], verbose: bool) -> None:
+    """Render a SUCCESS-status action bundle with transactions + total gas."""
+    click.echo(f"  Status: {click.style('SUCCESS', fg='green')}")
+    if bundle.get("transactions"):
+        click.echo(f"  Transactions: {len(bundle['transactions'])}")
+        for i, tx in enumerate(bundle["transactions"], 1):
+            click.echo(f"    {i}. {tx['description']} (gas: {tx['gas_estimate']:,})")
+            if verbose:
+                click.echo(f"       To: {tx['to']}")
+                click.echo(f"       Data: {tx['data']}")
+    if bundle.get("total_gas_estimate"):
+        click.echo(f"  Total Gas: {bundle['total_gas_estimate']:,}")
+
+
+def _print_action_bundle(bundle: dict[str, Any], verbose: bool) -> None:
+    """Render a single action bundle (success / note-only / failed)."""
+    status = bundle.get("status", "UNKNOWN")
+    if status == "SUCCESS":
+        _print_successful_bundle(bundle, verbose)
+    elif bundle.get("note"):
+        click.echo(f"  Note: {bundle['note']}")
+    else:
+        click.echo(f"  Status: {click.style('FAILED', fg='red')}")
+        click.echo(f"  Error: {bundle.get('error', 'Unknown error')}")
+
+
+def _print_action_bundles_section(action_bundles: dict[str, dict[str, Any]], verbose: bool) -> None:
+    """Print the EXAMPLE ACTION BUNDLES section."""
+    click.echo()
+    click.echo("-" * 40)
+    click.echo("EXAMPLE ACTION BUNDLES")
+    click.echo("-" * 40)
+    for intent_type, bundle in action_bundles.items():
+        click.echo(f"\n[{intent_type}]")
+        _print_action_bundle(bundle, verbose)
+
+
+def _print_inspection_errors_section(errors: list[str]) -> None:
+    """Print WARNINGS/ERRORS block when inspection produced any errors."""
+    if not errors:
+        return
+    click.echo()
+    click.echo("-" * 40)
+    click.echo(click.style("WARNINGS/ERRORS", fg="yellow"))
+    click.echo("-" * 40)
+    for error in errors:
+        click.echo(f"  ⚠ {error}")
+
+
+def print_inspection_result(result: IntentInspectionResult, verbose: bool = False) -> None:
     """Print inspection result to console."""
     click.echo()
     click.echo("=" * 70)
@@ -850,76 +1039,74 @@ def print_inspection_result(result: IntentInspectionResult, verbose: bool = Fals
     click.echo(f"File: {result.strategy_path}")
     click.echo()
 
-    # Metadata
     if result.metadata:
-        click.echo("-" * 40)
-        click.echo("METADATA")
-        click.echo("-" * 40)
-        click.echo(f"  Name: {result.metadata.get('name', 'N/A')}")
-        click.echo(f"  Version: {result.metadata.get('version', 'N/A')}")
-        click.echo(f"  Description: {result.metadata.get('description', 'N/A')}")
-        if result.metadata.get("author"):
-            click.echo(f"  Author: {result.metadata['author']}")
-        if result.metadata.get("tags"):
-            click.echo(f"  Tags: {', '.join(result.metadata['tags'])}")
-        if result.metadata.get("supported_chains"):
-            click.echo(f"  Chains: {', '.join(result.metadata['supported_chains'])}")
-        if result.metadata.get("supported_protocols"):
-            click.echo(f"  Protocols: {', '.join(result.metadata['supported_protocols'])}")
-        click.echo()
-
-    # Detected intent types
-    click.echo("-" * 40)
-    click.echo("DETECTED INTENT TYPES")
-    click.echo("-" * 40)
-    for intent_type in result.intent_types:
-        click.echo(f"  • {intent_type}")
-    click.echo()
-
-    # State diagrams
-    click.echo("-" * 40)
-    click.echo("STATE MACHINE DIAGRAMS")
-    click.echo("-" * 40)
-    for intent_type, diagram in result.state_diagrams.items():
-        click.echo(f"\n[{intent_type}]")
-        click.echo(diagram)
-
-    # Action bundles
-    click.echo()
-    click.echo("-" * 40)
-    click.echo("EXAMPLE ACTION BUNDLES")
-    click.echo("-" * 40)
-    for intent_type, bundle in result.action_bundles.items():
-        click.echo(f"\n[{intent_type}]")
-        status = bundle.get("status", "UNKNOWN")
-        if status == "SUCCESS":
-            click.echo(f"  Status: {click.style('SUCCESS', fg='green')}")
-            if bundle.get("transactions"):
-                click.echo(f"  Transactions: {len(bundle['transactions'])}")
-                for i, tx in enumerate(bundle["transactions"], 1):
-                    click.echo(f"    {i}. {tx['description']} (gas: {tx['gas_estimate']:,})")
-                    if verbose:
-                        click.echo(f"       To: {tx['to']}")
-                        click.echo(f"       Data: {tx['data']}")
-            if bundle.get("total_gas_estimate"):
-                click.echo(f"  Total Gas: {bundle['total_gas_estimate']:,}")
-        elif bundle.get("note"):
-            click.echo(f"  Note: {bundle['note']}")
-        else:
-            click.echo(f"  Status: {click.style('FAILED', fg='red')}")
-            click.echo(f"  Error: {bundle.get('error', 'Unknown error')}")
-
-    # Errors
-    if result.errors:
-        click.echo()
-        click.echo("-" * 40)
-        click.echo(click.style("WARNINGS/ERRORS", fg="yellow"))
-        click.echo("-" * 40)
-        for error in result.errors:
-            click.echo(f"  ⚠ {error}")
+        _print_metadata_section(result.metadata)
+    _print_intent_types_section(result.intent_types)
+    _print_state_diagrams_section(result.state_diagrams)
+    _print_action_bundles_section(result.action_bundles, verbose)
+    _print_inspection_errors_section(result.errors)
 
     click.echo()
     click.echo("=" * 70)
+
+
+def _print_trace_step(step: TraceStep, verbose: bool) -> None:
+    """Render one TraceStep line, plus optional verbose-intent and error rows."""
+    status_icon = "✓" if step.success else "✗"
+    status_color = "green" if step.success else "red"
+    click.echo(f"  {step.step_number:2}. [{click.style(status_icon, fg=status_color)}] {step.description}")
+    if verbose and step.intent:
+        click.echo(f"      Intent: {step.intent.get('type', 'N/A')}")
+    if step.error:
+        click.echo(f"      {click.style(f'Error: {step.error}', fg='red')}")
+
+
+def _print_trace_steps_section(steps: list[TraceStep], verbose: bool) -> None:
+    """Print the EXECUTION TRACE block."""
+    click.echo("-" * 40)
+    click.echo("EXECUTION TRACE")
+    click.echo("-" * 40)
+    for step in steps:
+        _print_trace_step(step, verbose)
+    click.echo()
+
+
+def _print_final_intent(final_intent: dict[str, Any], verbose: bool) -> None:
+    """Render the final-intent type (and verbose details) under FINAL RESULT."""
+    click.echo(f"  Intent Type: {final_intent.get('type', 'N/A')}")
+    if verbose:
+        click.echo(f"  Intent ID: {final_intent.get('intent_id', 'N/A')}")
+        click.echo(f"  Full Intent: {json.dumps(final_intent, indent=4, default=str)}")
+
+
+def _print_final_action_bundle(bundle: dict[str, Any]) -> None:
+    """Render the ActionBundle subsection of FINAL RESULT."""
+    click.echo()
+    click.echo("  ActionBundle:")
+    click.echo(f"    Status: {bundle.get('status', 'UNKNOWN')}")
+    if bundle.get("transactions"):
+        click.echo(f"    Transactions: {len(bundle['transactions'])}")
+        for i, tx in enumerate(bundle["transactions"], 1):
+            click.echo(f"      {i}. {tx['description']} (gas: {tx['gas_estimate']:,})")
+    if bundle.get("total_gas_estimate"):
+        click.echo(f"    Total Gas: {bundle['total_gas_estimate']:,}")
+
+
+def _print_trace_final_section(result: TraceResult, verbose: bool) -> None:
+    """Print the FINAL RESULT block (final intent + action bundle + status)."""
+    click.echo("-" * 40)
+    click.echo("FINAL RESULT")
+    click.echo("-" * 40)
+    if result.final_intent:
+        _print_final_intent(result.final_intent, verbose)
+    if result.final_action_bundle:
+        _print_final_action_bundle(result.final_action_bundle)
+
+    click.echo()
+    if result.success:
+        click.echo(click.style("Trace completed successfully.", fg="green"))
+    else:
+        click.echo(click.style(f"Trace failed: {result.error}", fg="red"))
 
 
 def print_trace_result(result: TraceResult, verbose: bool = False) -> None:
@@ -936,49 +1123,8 @@ def print_trace_result(result: TraceResult, verbose: bool = False) -> None:
     click.echo(f"Execution Time: {result.execution_time_ms:.2f}ms")
     click.echo()
 
-    # Steps
-    click.echo("-" * 40)
-    click.echo("EXECUTION TRACE")
-    click.echo("-" * 40)
-    for step in result.steps:
-        status_icon = "✓" if step.success else "✗"
-        status_color = "green" if step.success else "red"
-        click.echo(f"  {step.step_number:2}. [{click.style(status_icon, fg=status_color)}] {step.description}")
-        if verbose and step.intent:
-            click.echo(f"      Intent: {step.intent.get('type', 'N/A')}")
-        if step.error:
-            click.echo(f"      {click.style(f'Error: {step.error}', fg='red')}")
-
-    click.echo()
-
-    # Final intent
-    click.echo("-" * 40)
-    click.echo("FINAL RESULT")
-    click.echo("-" * 40)
-    if result.final_intent:
-        click.echo(f"  Intent Type: {result.final_intent.get('type', 'N/A')}")
-        if verbose:
-            click.echo(f"  Intent ID: {result.final_intent.get('intent_id', 'N/A')}")
-            click.echo(f"  Full Intent: {json.dumps(result.final_intent, indent=4, default=str)}")
-
-    if result.final_action_bundle:
-        click.echo()
-        click.echo("  ActionBundle:")
-        bundle = result.final_action_bundle
-        click.echo(f"    Status: {bundle.get('status', 'UNKNOWN')}")
-        if bundle.get("transactions"):
-            click.echo(f"    Transactions: {len(bundle['transactions'])}")
-            for i, tx in enumerate(bundle["transactions"], 1):
-                click.echo(f"      {i}. {tx['description']} (gas: {tx['gas_estimate']:,})")
-        if bundle.get("total_gas_estimate"):
-            click.echo(f"    Total Gas: {bundle['total_gas_estimate']:,}")
-
-    # Final status
-    click.echo()
-    if result.success:
-        click.echo(click.style("Trace completed successfully.", fg="green"))
-    else:
-        click.echo(click.style(f"Trace failed: {result.error}", fg="red"))
+    _print_trace_steps_section(result.steps, verbose)
+    _print_trace_final_section(result, verbose)
 
     click.echo()
     click.echo("=" * 70)

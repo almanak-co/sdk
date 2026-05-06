@@ -592,7 +592,7 @@ class TestSetupGatewayManaged:
         monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
         runner = CliRunner()
         with runner.isolation(), pytest.raises(
-            click.ClickException, match="ALMANAK_PRIVATE_KEY to be set"
+            click.ClickException, match="--wallet isolated requires a private key"
         ):
             run_helpers._setup_gateway(
                 working_dir=str(tmp_path),

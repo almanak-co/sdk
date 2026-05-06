@@ -24,20 +24,35 @@ from ...backtesting import (
     PaperTradingSummary,
     RollingForkManager,
 )
-from ...backtesting.paper.background import BackgroundPaperTrader, PaperTraderState, PIDFile
+from ...backtesting.paper.background import BackgroundPaperTrader
 from ...strategies import get_strategy
 from .group import backtest
 from .helpers import (
     _create_backtest_strategy,
-    _parse_duration,
     delete_paper_session_state,
     is_process_running,
-    list_paper_sessions,
-    list_strategies_fn,
     load_paper_session_state,
     load_strategy_config,
     save_paper_session_state,
     update_paper_session_status,
+)
+from .paper_helpers import (
+    abort_if_session_running,
+    apply_preset,
+    build_resume_config,
+    compute_resume_max_ticks,
+    load_funding_from_config,
+    load_resume_state,
+    merge_funding,
+    parse_initial_tokens_arg,
+    print_paper_config,
+    render_all_sessions,
+    render_single_session_status,
+    reset_dead_or_abort,
+    resolve_max_ticks_from_duration,
+    resolve_resume_rpc_url,
+    resolve_rpc_url,
+    validate_strategy_registered,
 )
 
 # =============================================================================
@@ -135,7 +150,7 @@ def paper() -> None:
         "'yield-validation': persistent fork with time advancement for lending yield measurement."
     ),
 )
-def paper_start(  # noqa: C901
+def paper_start(
     strategy: str,
     chain: str,
     initial_eth: float,
@@ -187,171 +202,28 @@ def paper_start(  # noqa: C901
         almanak strat backtest paper start -s test_strategy --foreground
     """
     # Resolve --duration into max_ticks (mutually exclusive with --max-ticks)
-    if duration is not None and max_ticks is not None:
-        click.echo("Error: --duration and --max-ticks are mutually exclusive.", err=True)
-        raise click.Abort()
+    max_ticks = resolve_max_ticks_from_duration(duration, max_ticks, tick_interval)
 
-    if duration is not None:
-        if tick_interval <= 0:
-            click.echo("Error: --tick-interval must be greater than 0.", err=True)
-            raise click.Abort()
-        duration_seconds = _parse_duration(duration)
-        if duration_seconds is None:
-            click.echo(
-                f"Error: Invalid duration '{duration}'. Use format like '30s', '5m', '1h', '2h30m'.",
-                err=True,
-            )
-            raise click.Abort()
-        # +1 because the first tick executes immediately; N ticks = (N-1) sleep intervals
-        max_ticks = max(1, duration_seconds // tick_interval + 1)
-        click.echo(f"Duration {duration} -> {max_ticks} ticks at {tick_interval}s interval")
-    # Validate strategy exists
-    available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
-        raise click.Abort()
+    validate_strategy_registered(strategy)
+    abort_if_session_running(strategy)
+    rpc_url = resolve_rpc_url(rpc_url, chain)
 
-    # Check if session already running (via BackgroundPaperTrader)
-    existing_state = load_paper_session_state(strategy)
-    if existing_state and existing_state.get("status") == "running":
-        pid = existing_state.get("pid")
-        if pid and is_process_running(pid):
-            click.echo(f"Error: Paper trading session for '{strategy}' is already running (PID: {pid})", err=True)
-            click.echo(f"Use 'almanak strat backtest paper stop -s {strategy}' to stop it first.", err=True)
-            raise click.Abort()
-
-    # Determine RPC URL
-    if rpc_url is None:
-        chain_upper = chain.upper()
-        env_var_names = [
-            f"ALMANAK_{chain_upper}_RPC_URL",
-            f"{chain_upper}_RPC_URL",
-            "ALMANAK_RPC_URL",
-            "RPC_URL",
-        ]
-        for env_var in env_var_names:
-            rpc_url = os.environ.get(env_var)
-            if rpc_url:
-                break
-
-        if not rpc_url:
-            click.echo(f"Error: No RPC URL provided for chain '{chain}'", err=True)
-            click.echo(f"Set one of: {', '.join(env_var_names[:2])}", err=True)
-            click.echo("Or use --rpc-url option", err=True)
-            raise click.Abort()
-
-    # Parse initial tokens from CLI flags
-    cli_tokens: dict[str, Decimal] = {}
-    if initial_tokens:
-        try:
-            for pair in initial_tokens.split(","):
-                pair = pair.strip()
-                if not pair:
-                    continue
-                if ":" not in pair:
-                    raise ValueError(f"Invalid token entry '{pair}'")
-                token, amount = pair.split(":", 1)
-                token_key = token.strip()
-                amount_str = amount.strip()
-                if not token_key or not amount_str:
-                    raise ValueError(f"Invalid token entry '{pair}'")
-                cli_tokens[token_key] = Decimal(amount_str)
-        except Exception as e:
-            click.echo(f"Error parsing initial-tokens: {e}", err=True)
-            click.echo("Expected format: 'TOKEN:AMOUNT,TOKEN:AMOUNT'", err=True)
-            raise click.Abort() from e
+    cli_tokens = parse_initial_tokens_arg(initial_tokens)
 
     # Load bootstrap / anvil_funding from strategy config.json (VIB-202, VIB-2375)
-    config_eth: Decimal | None = None
-    config_tokens: dict[str, Decimal] = {}
-    config_bootstrap: dict[str, dict[str, Decimal]] = {}
-    strategy_config: dict[str, Any] | None = None
-
-    def _parse_funding_dict(
-        funding: dict,
-        native_symbols: frozenset[str],
-        source: str,
-    ) -> tuple[Decimal | None, dict[str, Decimal]]:
-        """Parse a flat token->amount dict into (native_eth, erc20_tokens)."""
-        eth_val: Decimal | None = None
-        tokens: dict[str, Decimal] = {}
-        for token_name, amount in funding.items():
-            token_str = str(token_name)
-            if token_str.upper() in native_symbols:
-                eth_val = Decimal(str(amount))
-            elif token_str.startswith(("0x", "0X")) and len(token_str) == 42:
-                from eth_utils import to_checksum_address
-
-                try:
-                    tokens[to_checksum_address(token_str)] = Decimal(str(amount))
-                except (ValueError, TypeError) as e:
-                    click.echo(
-                        f"Warning: ignoring invalid token address in {source}: {token_str} ({e})",
-                        err=True,
-                    )
-                    continue
-            else:
-                tokens[token_str] = Decimal(str(amount))
-        return eth_val, tokens
-
-    try:
-        strategy_config = load_strategy_config(strategy, chain)
-        from almanak.gateway.managed import ManagedGateway
-
-        native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
-
-        paper_trading_block = strategy_config.get("paper_trading", {})
-        bootstrap_raw = paper_trading_block.get("bootstrap", {}) if isinstance(paper_trading_block, dict) else {}
-
-        if bootstrap_raw and isinstance(bootstrap_raw, dict):
-            click.echo(f"Found paper_trading.bootstrap in config: {bootstrap_raw}", err=True)
-            for chain_key, chain_tokens_raw in bootstrap_raw.items():
-                if isinstance(chain_tokens_raw, dict):
-                    chain_eth, chain_toks = _parse_funding_dict(
-                        chain_tokens_raw,
-                        native_symbols,
-                        f"paper_trading.bootstrap[{chain_key}]",
-                    )
-                    bootstrap_entry: dict[str, Decimal] = {}
-                    if chain_eth is not None:
-                        bootstrap_entry["ETH"] = chain_eth
-                    bootstrap_entry.update(chain_toks)
-                    config_bootstrap[chain_key.lower()] = bootstrap_entry
-            current_chain_bootstrap = dict(config_bootstrap.get(chain.lower(), {}))
-            if current_chain_bootstrap:
-                config_eth = current_chain_bootstrap.pop("ETH", None)
-                config_tokens.update(current_chain_bootstrap)
-
-        if not config_bootstrap:
-            anvil_funding = strategy_config.get("anvil_funding", {})
-            if anvil_funding:
-                if not isinstance(anvil_funding, dict):
-                    raise ValueError(
-                        f"anvil_funding must be an object mapping TOKEN->AMOUNT, got {type(anvil_funding).__name__}"
-                    )
-                click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
-                config_eth, config_tokens = _parse_funding_dict(anvil_funding, native_symbols, "anvil_funding")
-    except Exception as e:
-        click.echo(
-            f"Warning: ignoring invalid bootstrap/anvil_funding in strategy config: {e}",
-            err=True,
-        )
+    config_eth, config_tokens, config_bootstrap, strategy_config = load_funding_from_config(strategy, chain)
 
     # Merge: config provides defaults, CLI flags override
     ctx = click.get_current_context()
     cli_eth_explicit = ctx.get_parameter_source("initial_eth") != click.core.ParameterSource.DEFAULT
-    if config_eth is not None and not cli_eth_explicit:
-        initial_eth = float(config_eth)
-    parsed_tokens: dict[str, Decimal] = {**config_tokens, **cli_tokens}
+    initial_eth, parsed_tokens = merge_funding(initial_eth, cli_eth_explicit, config_eth, config_tokens, cli_tokens)
 
     # Prepare output path
     output_path = Path(output) if output else None
 
     # Create config
     try:
-        # Check env var for relaxed price mode (useful for tokens without price feeds,
-        # e.g. Pendle PT tokens) (VIB-2562)
+        # Env var for relaxed price mode (tokens without feeds, e.g. Pendle PT) (VIB-2562)
         relaxed_prices = os.environ.get("ALMANAK_ALLOW_HARDCODED_PRICES", "").strip() == "1"
 
         paper_config = PaperTraderConfig(
@@ -372,65 +244,21 @@ def paper_start(  # noqa: C901
         click.echo(f"Configuration error: {e}", err=True)
         raise click.Abort() from e
 
-    # Apply preset overrides (VIB-2636)
-    if preset == "yield-validation":
-        from ...backtesting.paper.config import ForkLifecycle
-
-        paper_config.fork_lifecycle = ForkLifecycle.PERSISTENT
-        paper_config.reset_fork_every_tick = False
-        paper_config.yield_poker_enabled = True
-        paper_config.use_rich_valuation = True
-        paper_config.position_reconciler_enabled = True
-        click.echo(
-            click.style(
-                "Preset: yield-validation (persistent fork, interest accrual enabled)",
-                fg="cyan",
-            )
-        )
-    else:
-        preset_label = preset or "execution-validation"
-        click.echo(
-            click.style(
-                f"Preset: {preset_label} (rolling fork reset, TX smoke testing)",
-                fg="cyan",
-            )
-        )
-
-    # Display configuration
-    click.echo("=" * 60)
-    click.echo("PAPER TRADING CONFIGURATION")
-    click.echo("=" * 60)
-    click.echo(f"Strategy: {strategy}")
-    click.echo(f"Chain: {chain} (ID: {paper_config.chain_id})")
-    click.echo(f"Initial ETH: {initial_eth}")
-    if parsed_tokens:
-        tokens_str = ", ".join(f"{k}: {v}" for k, v in parsed_tokens.items())
-        click.echo(f"Initial Tokens: {tokens_str}")
-    click.echo(f"Tick Interval: {tick_interval}s ({tick_interval / 60:.1f} min)")
-    if max_ticks:
-        click.echo(f"Max Ticks: {max_ticks}")
-        if paper_config.max_duration_minutes:
-            click.echo(f"Max Duration: ~{paper_config.max_duration_minutes:.1f} min")
-    else:
-        click.echo("Max Ticks: unlimited")
-    click.echo(f"Anvil Port: {anvil_port}")
-    click.echo(f"Reset Fork Each Tick: {not no_reset_fork}")
-    click.echo(f"Mode: {'Foreground' if foreground else 'Background'}")
-
-    if output_path:
-        click.echo(f"Output: {output_path}")
-
-    # Warn if force_action is set
-    force_action = strategy_config.get("force_action") if strategy_config else None
-    if force_action:
-        click.echo()
-        click.echo(
-            f"  WARNING: force_action='{force_action}' detected in config. "
-            f"Strategy will bypass indicator logic for every tick.",
-            err=True,
-        )
-
-    click.echo("=" * 60)
+    apply_preset(paper_config, preset)
+    print_paper_config(
+        strategy=strategy,
+        chain=chain,
+        paper_config=paper_config,
+        initial_eth=initial_eth,
+        parsed_tokens=parsed_tokens,
+        tick_interval=tick_interval,
+        max_ticks=max_ticks,
+        anvil_port=anvil_port,
+        no_reset_fork=no_reset_fork,
+        foreground=foreground,
+        output_path=output_path,
+        strategy_config=strategy_config,
+    )
 
     # Handle dry run
     if dry_run:
@@ -715,7 +543,7 @@ def paper_stop(strategy: str, force: bool) -> None:
     default=None,
     help="New max tick count (absolute, not additional). Mutually exclusive with --duration.",
 )
-def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> None:  # noqa: C901
+def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> None:
     """
     Resume a stopped paper trading session.
 
@@ -740,40 +568,13 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
         click.echo("Error: --duration and --max-ticks are mutually exclusive.", err=True)
         raise click.Abort()
 
-    # Load saved state to get config
-    bg_trader = BackgroundPaperTrader(
-        config=PaperTraderConfig(
-            chain="arbitrum",
-            rpc_url="http://placeholder",
-            strategy_id=strategy,
-        ),
-    )
-
-    if not bg_trader.state_file.exists():
-        click.echo(f"Error: No saved state found for '{strategy}'.", err=True)
-        click.echo("Use 'paper start' to begin a new session.", err=True)
-        raise click.Abort()
-
-    state = PaperTraderState.load(bg_trader.state_file)
-
-    # Handle dead process
-    if state.status == "running":
-        if state.pid and not is_process_running(state.pid):
-            click.echo(f"Process {state.pid} is no longer running. Resetting status to stopped.")
-            state.status = "stopped"
-            state.save(bg_trader.state_file)
-            pid_file = PIDFile(path=bg_trader.pid_file_path, strategy_id=strategy)
-            pid_file.release()
-        else:
-            click.echo(f"Error: Session '{strategy}' is still running (PID: {state.pid}).", err=True)
-            click.echo(f"Use 'paper stop -s {strategy}' first.", err=True)
-            raise click.Abort()
+    bg_trader, state = load_resume_state(strategy)
+    reset_dead_or_abort(state, bg_trader, strategy)
 
     if not state.can_resume():
         click.echo(f"Error: Cannot resume session (status={state.status}).", err=True)
         raise click.Abort()
 
-    # Reconstruct config from saved state
     saved_config = state.config
     if not saved_config:
         click.echo("Error: Saved state has no config. Cannot resume.", err=True)
@@ -781,50 +582,22 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
 
     chain = saved_config.get("chain", "arbitrum")
     tick_interval = saved_config.get("tick_interval_seconds", 60) or 60
+    rpc_url = resolve_resume_rpc_url(saved_config.get("rpc_url"), chain)
+    new_max_ticks = compute_resume_max_ticks(
+        duration,
+        max_ticks,
+        saved_config.get("max_ticks"),
+        state.tick_count,
+        tick_interval,
+    )
 
-    # Determine RPC URL
-    rpc_url = saved_config.get("rpc_url")
-    if not rpc_url or "***" in str(rpc_url):
-        chain_upper = chain.upper()
-        for env_var in [f"ALMANAK_{chain_upper}_RPC_URL", f"{chain_upper}_RPC_URL", "ALMANAK_RPC_URL", "RPC_URL"]:
-            rpc_url = os.environ.get(env_var)
-            if rpc_url:
-                break
-        if not rpc_url:
-            click.echo(f"Error: Saved RPC URL is masked and no env var found for '{chain}'.", err=True)
-            click.echo(f"Set ALMANAK_{chain_upper}_RPC_URL or use 'paper start' instead.", err=True)
-            raise click.Abort()
-
-    # Handle --duration -> extend max_ticks
-    new_max_ticks = saved_config.get("max_ticks")
-    if duration is not None:
-        duration_seconds = _parse_duration(duration)
-        if duration_seconds is None:
-            click.echo(f"Error: Invalid duration '{duration}'. Use format like '1h', '48h'.", err=True)
-            raise click.Abort()
-        additional_ticks = max(1, duration_seconds // tick_interval + 1)
-        new_max_ticks = state.tick_count + additional_ticks
-        click.echo(f"Duration {duration} -> {additional_ticks} additional ticks (total: {new_max_ticks})")
-    elif max_ticks is not None:
-        if max_ticks <= state.tick_count:
-            click.echo(
-                f"Error: --max-ticks ({max_ticks}) must be greater than current tick count ({state.tick_count}).",
-                err=True,
-            )
-            raise click.Abort()
-        new_max_ticks = max_ticks
-
-    # Build the resume config
-    resume_config = PaperTraderConfig(
+    resume_config = build_resume_config(
+        saved_config=saved_config,
+        strategy=strategy,
         chain=chain,
         rpc_url=rpc_url,
-        strategy_id=strategy,
-        tick_interval_seconds=tick_interval,
-        max_ticks=new_max_ticks,
-        anvil_port=saved_config.get("anvil_port", 8546),
-        reset_fork_every_tick=saved_config.get("reset_fork_every_tick", True),
-        initial_eth=Decimal(str(saved_config.get("initial_eth", "10"))),
-        initial_tokens={k: Decimal(str(v)) for k, v in saved_config.get("initial_tokens", {}).items()},
+        new_max_ticks=new_max_ticks,
+        tick_interval=tick_interval,
     )
 
     bg_trader_resume = BackgroundPaperTrader(config=resume_config)
@@ -875,7 +648,7 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
 @click.option("--strategy", "-s", required=False, default=None, help="Name of the strategy to check")
 @click.option("--all", "-a", "show_all", is_flag=True, default=False, help="Show all paper trading sessions")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed session information")
-def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:  # noqa: C901
+def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:
     """
     Check the status of paper trading sessions.
 
@@ -895,132 +668,14 @@ def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:  
         almanak strat backtest paper status -s momentum_v1 --verbose
     """
     if show_all:
-        sessions = list_paper_sessions()
-        if not sessions:
-            click.echo("No paper trading sessions found.")
-            return
-
-        click.echo("=" * 60)
-        click.echo("PAPER TRADING SESSIONS")
-        click.echo("=" * 60)
-
-        for session in sessions:
-            strategy_id = session.get("strategy_id", "unknown")
-            status = session.get("status", "unknown")
-            pid = session.get("pid", "N/A")
-            start_time = session.get("start_time", "N/A")
-
-            if pid and isinstance(pid, int):
-                if is_process_running(pid):
-                    status_display = f"running (PID: {pid})"
-                else:
-                    status_display = "stopped (process not found)"
-            else:
-                status_display = status
-
-            click.echo(f"\nStrategy: {strategy_id}")
-            click.echo(f"  Status: {status_display}")
-            click.echo(f"  Started: {start_time}")
-
-            if verbose:
-                config = session.get("config", {})
-                click.echo(f"  Chain: {config.get('chain', 'N/A')}")
-                click.echo(f"  Tick Interval: {config.get('tick_interval_seconds', 'N/A')}s")
-                click.echo(f"  Max Ticks: {config.get('max_ticks', 'unlimited')}")
-
-                summary = session.get("summary")
-                if summary:
-                    click.echo(f"  Trades: {summary.get('successful_trades', 0)}")
-                    click.echo(f"  Errors: {summary.get('failed_trades', 0)}")
-
-        click.echo()
+        render_all_sessions(verbose)
         return
 
     if not strategy:
         click.echo("Error: Please specify --strategy or use --all to list all sessions", err=True)
         raise click.Abort()
 
-    # Check specific strategy
-    bg_trader = BackgroundPaperTrader(
-        config=PaperTraderConfig(
-            chain="arbitrum",
-            rpc_url="http://localhost:8545",
-            strategy_id=strategy,
-        ),
-    )
-    bg_status = bg_trader.get_status()
-
-    if bg_status.is_running or bg_status.tick_count > 0:
-        click.echo("=" * 60)
-        click.echo(f"PAPER TRADING STATUS: {strategy}")
-        click.echo("=" * 60)
-        click.echo(f"Status: {'running' if bg_status.is_running else bg_status.status} (PID: {bg_status.pid or 'N/A'})")
-        if bg_status.session_start:
-            click.echo(f"Started: {bg_status.session_start.strftime('%Y-%m-%d %H:%M:%S')}")
-        click.echo(f"Ticks: {bg_status.tick_count}")
-        click.echo(f"Trades: {bg_status.trade_count}")
-        click.echo(f"Errors: {bg_status.error_count}")
-        if bg_status.last_save:
-            click.echo(f"Last Save: {bg_status.last_save.strftime('%Y-%m-%d %H:%M:%S')}")
-        if bg_status.can_resume:
-            click.echo(f"Can Resume: yes (resume_count: {bg_status.resume_count})")
-        return
-
-    # Fallback: check CLI session state
-    state = load_paper_session_state(strategy)
-    if not state:
-        click.echo(f"No paper trading session found for '{strategy}'")
-        click.echo()
-        click.echo("To start a session:")
-        click.echo(f"  almanak strat backtest paper start -s {strategy}")
-        return
-
-    click.echo("=" * 60)
-    click.echo(f"PAPER TRADING STATUS: {strategy}")
-    click.echo("=" * 60)
-
-    status = state.get("status", "unknown")
-    pid = state.get("pid")
-    start_time = state.get("start_time", "N/A")
-    last_updated = state.get("last_updated")
-
-    if pid and isinstance(pid, int):
-        if is_process_running(pid):
-            actual_status = f"running (PID: {pid})"
-        else:
-            actual_status = "stopped (process not found)"
-    else:
-        actual_status = status
-
-    click.echo(f"Status: {actual_status}")
-    click.echo(f"Started: {start_time}")
-
-    if last_updated:
-        click.echo(f"Last Updated: {last_updated}")
-
-    config = state.get("config", {})
-    click.echo()
-    click.echo("Configuration:")
-    click.echo(f"  Chain: {config.get('chain', 'N/A')}")
-    click.echo(f"  Tick Interval: {config.get('tick_interval_seconds', 'N/A')}s")
-    click.echo(f"  Max Ticks: {config.get('max_ticks', 'unlimited')}")
-    click.echo(f"  Initial ETH: {config.get('initial_eth', 'N/A')}")
-
-    initial_tokens = config.get("initial_tokens", {})
-    if initial_tokens:
-        tokens_str = ", ".join(f"{k}: {v}" for k, v in initial_tokens.items())
-        click.echo(f"  Initial Tokens: {tokens_str}")
-
-    summary = state.get("summary")
-    if summary:
-        click.echo()
-        click.echo("Results:")
-        click.echo(f"  Duration: {summary.get('duration', 'N/A')}")
-        click.echo(f"  Total Trades: {summary.get('total_trades', 0)}")
-        click.echo(f"  Successful: {summary.get('successful_trades', 0)}")
-        click.echo(f"  Failed: {summary.get('failed_trades', 0)}")
-        if summary.get("pnl_usd"):
-            click.echo(f"  PnL: ${float(summary['pnl_usd']):,.2f}")
+    render_single_session_status(strategy)
 
 
 def get_paper_log_file(strategy_id: str) -> Path:

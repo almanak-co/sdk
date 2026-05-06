@@ -308,6 +308,122 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
 # =============================================================================
 
 
+_TIMELINE_TYPE_COLORS = {
+    "TRADE": "green",
+    "REBALANCE": "cyan",
+    "ERROR": "red",
+    "STATE_CHANGE": "yellow",
+}
+
+
+def _validate_logs_limit(limit: int) -> None:
+    """Exit 1 when --limit is < 1, mirroring the original inline check."""
+    if limit < 1:
+        click.secho("--limit must be >= 1.", fg="red", err=True)
+        sys.exit(1)
+
+
+def _parse_since_value(since: str | None) -> int:
+    """Parse --since as epoch seconds or ISO 8601, exiting 1 on bad input."""
+    if not since:
+        return 0
+    try:
+        return int(since)
+    except ValueError:
+        pass
+    try:
+        dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    except ValueError:
+        click.secho(f"Invalid --since value: {since}. Use ISO 8601 or epoch seconds.", fg="red", err=True)
+        sys.exit(1)
+
+
+def _fetch_strategy_timeline(client, strategy_id: str, limit: int, event_type: str | None, since_ts: int):
+    """Fetch the timeline RPC, exit 1 on RPC error, disconnect in finally."""
+    from almanak.gateway.proto import gateway_pb2
+
+    try:
+        request = gateway_pb2.GetTimelineRequest(
+            strategy_id=strategy_id,
+            limit=limit,
+            event_type_filter=event_type.upper() if event_type else "",
+            since_timestamp=since_ts,
+        )
+        return client.dashboard.GetTimeline(request)
+    except Exception as e:
+        click.secho(f"Failed to get timeline: {e}", fg="red", err=True)
+        sys.exit(1)
+    finally:
+        client.disconnect()
+
+
+def _build_log_json_row(evt) -> dict:
+    """Build a single JSON row for a timeline event."""
+    row = {
+        "timestamp": evt.timestamp,
+        "time": _format_timestamp(evt.timestamp),
+        "event_type": evt.event_type,
+        "description": evt.description,
+        "chain": evt.chain,
+    }
+    if evt.tx_hash:
+        row["tx_hash"] = evt.tx_hash
+    if evt.details_json:
+        try:
+            row["details"] = json.loads(evt.details_json)
+        except json.JSONDecodeError:
+            row["details_raw"] = evt.details_json
+    return row
+
+
+def _render_logs_as_json(events) -> str:
+    """Serialize events to the JSON string emitted by `strat logs --json`."""
+    return json.dumps([_build_log_json_row(evt) for evt in events], indent=2)
+
+
+def _print_log_event_details(details_json: str) -> None:
+    """Emit the per-event details body, silently ignoring invalid JSON."""
+    try:
+        details = json.loads(details_json)
+    except json.JSONDecodeError:
+        return
+    if isinstance(details, dict):
+        for k, v in details.items():
+            click.echo(f"    {k}: {v}")
+    else:
+        click.echo(f"    {json.dumps(details, indent=2)}")
+
+
+def _print_log_event(evt) -> None:
+    """Emit one timeline event in the pretty (human) layout."""
+    ts = _format_timestamp(evt.timestamp)
+    etype = click.style(f"[{evt.event_type}]", fg=_TIMELINE_TYPE_COLORS.get(evt.event_type, "white"))
+    click.echo(f"  {ts}  {etype}  {evt.description}")
+    if evt.tx_hash:
+        click.echo(f"    tx: {evt.tx_hash}")
+    if evt.chain:
+        click.echo(f"    chain: {evt.chain}")
+    if evt.details_json:
+        _print_log_event_details(evt.details_json)
+    click.echo()
+
+
+def _render_logs_pretty(strategy_id: str, event_type: str | None, events, has_more: bool) -> None:
+    """Emit the full pretty (human) timeline output."""
+    click.echo()
+    click.echo(click.style(f"Timeline: {strategy_id}", bold=True, fg="cyan"))
+    if event_type:
+        click.echo(f"  Filter: {event_type}")
+    click.echo()
+
+    for evt in events:
+        _print_log_event(evt)
+
+    more = " (more available)" if has_more else ""
+    click.echo(f"Showing {len(events)} events{more}")
+
+
 @click.command("logs")
 @click.option(
     "--strategy-id",
@@ -336,7 +452,7 @@ def strategy_status(strategy_id, timeline, timeline_limit, as_json, gateway_host
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
 @_add_gateway_options
-def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, gateway_port):  # noqa: C901
+def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, gateway_port):
     """Show timeline events for a strategy.
 
     Displays the event log (trades, errors, state changes) from the
@@ -350,110 +466,22 @@ def strategy_logs(strategy_id, limit, event_type, since, as_json, gateway_host, 
         almanak strat logs -s my_strategy --since 2026-03-01T00:00:00Z
         almanak strat logs -s my_strategy --json
     """
-    if limit < 1:
-        click.secho("--limit must be >= 1.", fg="red", err=True)
-        sys.exit(1)
-
-    from almanak.gateway.proto import gateway_pb2
-
-    # Parse --since
-    since_ts = 0
-    if since:
-        try:
-            since_ts = int(since)
-        except ValueError:
-            try:
-                dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
-                since_ts = int(dt.timestamp())
-            except ValueError:
-                click.secho(f"Invalid --since value: {since}. Use ISO 8601 or epoch seconds.", fg="red", err=True)
-                sys.exit(1)
+    _validate_logs_limit(limit)
+    since_ts = _parse_since_value(since)
 
     client = _make_client(gateway_host, gateway_port)
-    try:
-        request = gateway_pb2.GetTimelineRequest(
-            strategy_id=strategy_id,
-            limit=limit,
-            event_type_filter=event_type.upper() if event_type else "",
-            since_timestamp=since_ts,
-        )
-        response = client.dashboard.GetTimeline(request)
-    except Exception as e:
-        click.secho(f"Failed to get timeline: {e}", fg="red", err=True)
-        sys.exit(1)
-    finally:
-        client.disconnect()
-
+    response = _fetch_strategy_timeline(client, strategy_id, limit, event_type, since_ts)
     events = list(response.events)
 
     if not events:
-        if as_json:
-            click.echo("[]")
-        else:
-            click.echo(f"No events found for strategy: {strategy_id}")
+        click.echo("[]" if as_json else f"No events found for strategy: {strategy_id}")
         return
 
     if as_json:
-        rows = []
-        for evt in events:
-            row = {
-                "timestamp": evt.timestamp,
-                "time": _format_timestamp(evt.timestamp),
-                "event_type": evt.event_type,
-                "description": evt.description,
-                "chain": evt.chain,
-            }
-            if evt.tx_hash:
-                row["tx_hash"] = evt.tx_hash
-            if evt.details_json:
-                try:
-                    row["details"] = json.loads(evt.details_json)
-                except json.JSONDecodeError:
-                    row["details_raw"] = evt.details_json
-            rows.append(row)
-        click.echo(json.dumps(rows, indent=2))
+        click.echo(_render_logs_as_json(events))
         return
 
-    # Pretty output
-    click.echo()
-    click.echo(click.style(f"Timeline: {strategy_id}", bold=True, fg="cyan"))
-    if event_type:
-        click.echo(f"  Filter: {event_type}")
-    click.echo()
-
-    type_colors = {
-        "TRADE": "green",
-        "REBALANCE": "cyan",
-        "ERROR": "red",
-        "STATE_CHANGE": "yellow",
-    }
-
-    for evt in events:
-        ts = _format_timestamp(evt.timestamp)
-        etype = click.style(
-            f"[{evt.event_type}]",
-            fg=type_colors.get(evt.event_type, "white"),
-        )
-        click.echo(f"  {ts}  {etype}  {evt.description}")
-        if evt.tx_hash:
-            click.echo(f"    tx: {evt.tx_hash}")
-        if evt.chain:
-            click.echo(f"    chain: {evt.chain}")
-        if evt.details_json:
-            try:
-                details = json.loads(evt.details_json)
-                if isinstance(details, dict):
-                    for k, v in details.items():
-                        click.echo(f"    {k}: {v}")
-                else:
-                    click.echo(f"    {json.dumps(details, indent=2)}")
-            except json.JSONDecodeError:
-                pass
-        click.echo()
-
-    shown = len(events)
-    more = " (more available)" if response.has_more else ""
-    click.echo(f"Showing {shown} events{more}")
+    _render_logs_pretty(strategy_id, event_type, events, response.has_more)
 
 
 # =============================================================================
