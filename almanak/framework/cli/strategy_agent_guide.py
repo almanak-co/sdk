@@ -257,8 +257,7 @@ def generate_strategy_agents_md(config: StrategyGuideConfig) -> str:
 - **Class:** `{config.class_name}` in `strategy.py`
 - **Config:** `config.json`
 
-This is a self-contained Python project with its own `pyproject.toml`, `.venv/`, and `uv.lock`.
-The same `pyproject.toml` + `uv.lock` drive both local development and cloud deployment.
+Dependencies are declared in `pyproject.toml`.
 
 ## Files
 
@@ -267,8 +266,6 @@ The same `pyproject.toml` + `uv.lock` drive both local development and cloud dep
 | `strategy.py` | Main strategy - edit `decide()` to change trading logic |
 | `config.json` | Runtime parameters (tokens, thresholds, chain) |
 | `pyproject.toml` | Dependencies plus metadata (`framework`, `version`, `run.interval`) |
-| `uv.lock` | Locked dependencies for reproducible builds |
-| `.venv/` | Per-strategy virtual environment (created by `uv sync`) |
 | `.env` | Secrets (private key, API keys) - never commit this |
 | `.gitignore` | Git ignore rules (excludes `.venv/`, `.env`, etc.) |
 | `.python-version` | Python version pin (3.12) |
@@ -292,13 +289,7 @@ almanak strat run --dry-run --once
 
 ## Adding Dependencies
 
-```bash
-# Add a package (updates pyproject.toml + uv.lock + .venv/)
-uv add pandas-ta
-
-# Run tests via uv
-uv run pytest tests/ -v
-```
+Edit the `dependencies` list in `pyproject.toml`.
 
 ## Config Parameters
 
@@ -341,8 +332,12 @@ See `blueprints/14-teardown-system.md` for the full teardown system reference.
 ## Testing
 
 ```bash
-# Run unit tests
-uv run pytest tests/ -v
+# Unit tests
+pytest tests/ -v
+
+# Lifecycle + teardown on a managed Anvil fork
+# (drives each force_action through the production code path, then runs teardown)
+almanak strat test --actions <csv> --teardown --json
 
 # Paper trade (Anvil fork with PnL tracking)
 almanak strat backtest paper --duration 3600 --interval 60
