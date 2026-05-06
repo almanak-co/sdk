@@ -302,11 +302,17 @@ CHAIN_CONFIGS = {
             "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
             "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
             "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+            # USDG (Gravity USD) — added so the test_uniswap_v3_swap.py shard can
+            # use the only liquid stablecoin pair on xlayer Uniswap V3
+            # (USDT0/USDG @ fee=100, ~0.02% price impact for a 100-unit swap).
+            # See issue #2106 for the on-chain liquidity audit.
+            "USDG": "0x4ae46a509F6b1D9056937BA4500cb143933D2dc8",
         },
         "balance_slots": {
             "USDC": 9,  # Native Circle USDC uses slot 9
             "WETH": 0,  # Bridged WETH
             "USDT0": 51,  # OpenZeppelin upgradeable pattern
+            "USDG": 1,  # OpenZeppelin v5 ERC-20 (verified via cast index against the USDT0/USDG pool's balance)
         },
     },
     "zerog": {
