@@ -1,7 +1,36 @@
-"""Event Timeline API for strategy event history.
+"""Event Timeline API for strategy event history — UX activity feed only.
 
-This module provides FastAPI endpoints for retrieving chronological views of
-strategy events, supporting pagination and filtering.
+Scope (PRD-TimelineEvents §6.1, VIB-4039 epic):
+
+    Timeline events are dashboard UX events. They are NOT accounting records.
+
+    Allowed: lifecycle markers (start/stop/pause/resume), risk alerts,
+    operator actions, config changes, phase breadcrumbs, custom strategy
+    notes for operator readability, teardown progress.
+
+    Forbidden: token amounts, effective price, slippage, gas USD, receipt
+    parser payloads, position attribution data, pre/post state, accounting
+    confidence, matching policy version, schema/formula versions, anything
+    a Senior DeFi Quant would query for money trail or PnL.
+
+Read paths must use:
+
+    transaction_ledger      executed-intent / tx-level money trail
+    accounting_events       typed Layer-5 facts (lending, LP, perp, …)
+    position_events         LP/perp lifecycle and attribution source
+    portfolio_snapshots     mark-to-market valuation history
+    portfolio_metrics       lifetime PnL baseline + capital flow
+
+A successful timeline write is NEVER evidence that the books are intact.
+Live-mode ledger persistence failure halts with ACCOUNTING_FAILED regardless
+of whether the timeline write for the same iteration succeeded
+(`tests/unit/runner/test_ledger_failure_not_masked.py`).
+
+Producer-side guardrail (VIB-4043 / PR4): `add_event(...)` calls must not
+include money-shaped keys in `details`. Consumer-side guardrail
+(VIB-4040 / PR1): no module under `almanak/framework/accounting/` may import
+this API or query `timeline_events`
+(`tests/static/test_timeline_scope.py`).
 """
 
 import json
@@ -141,6 +170,12 @@ class TimelineEvent:
     cycle_id: str = ""
     phase: str = ""
 
+    # VIB-4041: typed pointer to transaction_ledger.id when this event narrates
+    # an executed intent. Empty string for pure lifecycle/UX events. The money
+    # trail (gas_usd, amounts, prices, slippage) lives in the ledger row, not
+    # in `details` — see PRD-TimelineEvents §6.1 and the producer-side guard.
+    related_ledger_entry_id: str = ""
+
     # Computed field for block explorer link
     block_explorer_url: str | None = None
 
@@ -165,6 +200,8 @@ class TimelineEvent:
             d["cycle_id"] = self.cycle_id
         if self.phase:
             d["phase"] = self.phase
+        if self.related_ledger_entry_id:
+            d["related_ledger_entry_id"] = self.related_ledger_entry_id
         return d
 
 
@@ -235,6 +272,11 @@ def get_event_gateway_client() -> Any:
     return _gateway_client
 
 
+# crap-allowlist: pre-existing local-fallback path (file-cache hydrate).
+# PR2 (VIB-4041) only added a one-line ``related_ledger_entry_id`` round-trip;
+# CC=16 was already over-threshold against unit-test coverage. The function
+# is exercised in production gateway-fallback startup runs; refactoring is
+# out of scope for the typed-column change.
 def _load_events_from_file() -> None:
     """Load events from cache file into memory on startup."""
     global _event_store
@@ -287,6 +329,7 @@ def _load_events_from_file() -> None:
                     details=event_data.get("details") or event_data.get("metadata", {}),
                     cycle_id=event_data.get("cycle_id", ""),
                     phase=event_data.get("phase", ""),
+                    related_ledger_entry_id=event_data.get("related_ledger_entry_id", ""),
                 )
                 # Avoid duplicates
                 if not any(
@@ -375,6 +418,7 @@ def add_event(event: TimelineEvent) -> None:
                 timestamp=int(event.timestamp.timestamp()),
                 cycle_id=event.cycle_id or "",
                 phase=event.phase or "",
+                related_ledger_entry_id=event.related_ledger_entry_id or "",
             )
             _gateway_client.observe.RecordTimelineEvent(request, timeout=2.0)
         except Exception as e:

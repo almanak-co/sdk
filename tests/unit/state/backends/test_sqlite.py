@@ -3,23 +3,23 @@
 Tests cover:
 - CRUD operations for strategy state
 - CAS (Compare-And-Swap) conflict detection
-- Timeline event operations
 - Concurrent access patterns
 - Database maintenance operations
+
+VIB-4044 / PR5: timeline_events table and its CRUD methods are removed;
+the corresponding TestTimelineEvents and TestTimelineEventDataclass
+classes have been deleted. Gateway-side timeline events are tested in
+``tests/gateway/test_timeline_store.py``.
 """
 
 import os
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
 
-from almanak.framework.state.backends.sqlite import (
-    SQLiteConfig,
-    SQLiteStore,
-    TimelineEvent,
-)
+from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.state_manager import StateConflictError, StateData
 
 # Mark all tests in this module as async
@@ -83,17 +83,6 @@ def sample_state():
         version=1,
         state={"key": "value", "nested": {"a": 1, "b": 2}},
         schema_version=1,
-    )
-
-
-@pytest.fixture
-def sample_event():
-    """Create a sample timeline event for testing."""
-    return TimelineEvent(
-        strategy_id="test-strategy-1",
-        event_type="EXECUTION_SUCCESS",
-        event_data={"tx_hash": "0x123", "gas_used": 21000},
-        correlation_id="corr-123",
     )
 
 
@@ -356,249 +345,21 @@ class TestCASOperations:
             await memory_store.save(reader2, expected_version=1)
 
 
-# =============================================================================
-# TIMELINE EVENT TESTS
-# =============================================================================
-
-
-class TestTimelineEvents:
-    """Tests for timeline event operations."""
-
-    async def test_save_and_get_event(self, memory_store, sample_event):
-        """Test saving and retrieving events."""
-        event_id = await memory_store.save_event(sample_event)
-        assert event_id > 0
-
-        loaded = await memory_store.get_event(event_id)
-        assert loaded is not None
-        assert loaded.strategy_id == sample_event.strategy_id
-        assert loaded.event_type == sample_event.event_type
-        assert loaded.event_data == sample_event.event_data
-        assert loaded.correlation_id == sample_event.correlation_id
-
-    async def test_get_events_by_strategy(self, memory_store):
-        """Test getting events filtered by strategy."""
-        # Create events for different strategies
-        for strategy in ["strat-1", "strat-2"]:
-            for i in range(3):
-                event = TimelineEvent(
-                    strategy_id=strategy,
-                    event_type="TEST_EVENT",
-                    event_data={"index": i},
-                )
-                await memory_store.save_event(event)
-
-        events = await memory_store.get_events("strat-1")
-        assert len(events) == 3
-        for event in events:
-            assert event.strategy_id == "strat-1"
-
-    async def test_get_events_by_type(self, memory_store):
-        """Test getting events filtered by type."""
-        strategy_id = "test-strategy"
-        for event_type in ["SUCCESS", "FAILURE", "SUCCESS"]:
-            event = TimelineEvent(
-                strategy_id=strategy_id,
-                event_type=event_type,
-                event_data={},
-            )
-            await memory_store.save_event(event)
-
-        events = await memory_store.get_events(strategy_id, event_type="SUCCESS")
-        assert len(events) == 2
-        for event in events:
-            assert event.event_type == "SUCCESS"
-
-    async def test_get_events_by_correlation_id(self, memory_store):
-        """Test getting events by correlation ID."""
-        corr_id = "execution-123"
-
-        for i in range(3):
-            event = TimelineEvent(
-                strategy_id=f"strategy-{i}",
-                event_type="EVENT",
-                event_data={"index": i},
-                correlation_id=corr_id,
-            )
-            await memory_store.save_event(event)
-
-        events = await memory_store.get_events_by_correlation_id(corr_id)
-        assert len(events) == 3
-        for event in events:
-            assert event.correlation_id == corr_id
-
-    async def test_events_pagination(self, memory_store):
-        """Test event pagination."""
-        strategy_id = "test-strategy"
-        for i in range(10):
-            event = TimelineEvent(
-                strategy_id=strategy_id,
-                event_type="EVENT",
-                event_data={"index": i},
-            )
-            await memory_store.save_event(event)
-
-        # Get first page
-        page1 = await memory_store.get_events(strategy_id, limit=3, offset=0)
-        assert len(page1) == 3
-
-        # Get second page
-        page2 = await memory_store.get_events(strategy_id, limit=3, offset=3)
-        assert len(page2) == 3
-
-        # No overlap
-        page1_ids = {e.id for e in page1}
-        page2_ids = {e.id for e in page2}
-        assert page1_ids.isdisjoint(page2_ids)
-
-    async def test_count_events(self, memory_store):
-        """Test counting events."""
-        for i in range(5):
-            event = TimelineEvent(
-                strategy_id=f"strat-{i % 2}",
-                event_type="SUCCESS" if i % 2 == 0 else "FAILURE",
-                event_data={},
-            )
-            await memory_store.save_event(event)
-
-        # Count all
-        total = await memory_store.count_events()
-        assert total == 5
-
-        # Count by strategy
-        strat0_count = await memory_store.count_events(strategy_id="strat-0")
-        assert strat0_count == 3
-
-        # Count by type
-        success_count = await memory_store.count_events(event_type="SUCCESS")
-        assert success_count == 3
-
-    async def test_delete_events(self, memory_store):
-        """Test deleting events."""
-        strategy_id = "test-strategy"
-        for i in range(5):
-            event = TimelineEvent(
-                strategy_id=strategy_id,
-                event_type="EVENT",
-                event_data={"index": i},
-            )
-            await memory_store.save_event(event)
-
-        deleted = await memory_store.delete_events(strategy_id)
-        assert deleted == 5
-
-        events = await memory_store.get_events(strategy_id)
-        assert len(events) == 0
-
-    async def test_delete_events_before_date(self, memory_store):
-        """Test deleting events before a date."""
-        strategy_id = "test-strategy"
-        now = datetime.now(UTC)
-
-        # Create old events
-        for i in range(3):
-            event = TimelineEvent(
-                strategy_id=strategy_id,
-                event_type="OLD_EVENT",
-                event_data={"index": i},
-                created_at=now - timedelta(days=10),
-            )
-            await memory_store.save_event(event)
-
-        # Create recent events
-        for i in range(2):
-            event = TimelineEvent(
-                strategy_id=strategy_id,
-                event_type="NEW_EVENT",
-                event_data={"index": i},
-                created_at=now,
-            )
-            await memory_store.save_event(event)
-
-        # Delete old events
-        cutoff = now - timedelta(days=5)
-        deleted = await memory_store.delete_events(strategy_id, before=cutoff)
-        assert deleted == 3
-
-        events = await memory_store.get_events(strategy_id)
-        assert len(events) == 2
-        for event in events:
-            assert event.event_type == "NEW_EVENT"
-
-
-# =============================================================================
-# TIMELINE EVENT DATACLASS TESTS
-# =============================================================================
-
-
-class TestTimelineEventDataclass:
-    """Tests for TimelineEvent dataclass."""
-
-    def test_create_event(self):
-        """Test creating a timeline event."""
-        event = TimelineEvent(
-            strategy_id="test",
-            event_type="TEST",
-            event_data={"key": "value"},
-        )
-        assert event.strategy_id == "test"
-        assert event.event_type == "TEST"
-        assert event.event_data == {"key": "value"}
-        assert event.id is None
-        assert event.correlation_id is None
-
-    def test_to_dict(self, sample_event):
-        """Test converting event to dictionary."""
-        d = sample_event.to_dict()
-        assert d["strategy_id"] == sample_event.strategy_id
-        assert d["event_type"] == sample_event.event_type
-        assert d["event_data"] == sample_event.event_data
-        assert d["correlation_id"] == sample_event.correlation_id
-        assert "created_at" in d
-
-    def test_from_dict(self):
-        """Test creating event from dictionary."""
-        d = {
-            "strategy_id": "strat-1",
-            "event_type": "SUCCESS",
-            "event_data": {"key": "value"},
-            "correlation_id": "corr-1",
-            "created_at": "2024-01-01T00:00:00+00:00",
-        }
-        event = TimelineEvent.from_dict(d)
-        assert event.strategy_id == "strat-1"
-        assert event.event_type == "SUCCESS"
-        assert event.event_data == {"key": "value"}
-        assert event.correlation_id == "corr-1"
-
-    def test_roundtrip(self, sample_event):
-        """Test to_dict/from_dict roundtrip."""
-        d = sample_event.to_dict()
-        restored = TimelineEvent.from_dict(d)
-        assert restored.strategy_id == sample_event.strategy_id
-        assert restored.event_type == sample_event.event_type
-        assert restored.event_data == sample_event.event_data
-        assert restored.correlation_id == sample_event.correlation_id
-
-
-# =============================================================================
-# MAINTENANCE TESTS
-# =============================================================================
-
 
 class TestMaintenance:
     """Tests for database maintenance operations."""
 
-    async def test_get_stats(self, memory_store, sample_state, sample_event):
+    async def test_get_stats(self, memory_store, sample_state):
         """Test getting database statistics."""
         await memory_store.save(sample_state)
-        await memory_store.save_event(sample_event)
 
         stats = await memory_store.get_stats()
         assert stats["db_path"] == ":memory:"
         assert stats["wal_mode"] is True
         assert stats["active_states"] == 1
-        assert stats["total_events"] == 1
+        # VIB-4044 / PR5: timeline_events table removed; total_events is
+        # always 0 to preserve the stats payload shape.
+        assert stats["total_events"] == 0
 
     async def test_vacuum(self, memory_store, sample_state):
         """Test VACUUM operation."""
@@ -653,6 +414,70 @@ class TestFilePersistence:
 
         # WAL file should exist (or be empty after checkpoint)
         await store.close()
+
+    async def test_legacy_timeline_events_table_dropped_on_upgrade(self, temp_db_path):
+        """VIB-4044 / PR5 (CodeRabbit review): existing local SDK databases
+        carry the deprecated `timeline_events` table from earlier SDK versions.
+        Dropping the DDL from `SCHEMA_SQL` only affects fresh databases, so
+        upgraded users would carry the table forever. The migration in
+        `_run_migrations` must drop it on upgrade.
+        """
+        import sqlite3
+
+        # Set up a database that pre-dates PR5 by manually creating the
+        # legacy table with the old shape.
+        with sqlite3.connect(str(temp_db_path)) as legacy_conn:
+            legacy_conn.execute(
+                """
+                CREATE TABLE timeline_events (
+                    id INTEGER PRIMARY KEY,
+                    strategy_id TEXT,
+                    timestamp TEXT,
+                    event_type TEXT,
+                    description TEXT
+                )
+                """
+            )
+            legacy_conn.execute(
+                "INSERT INTO timeline_events (strategy_id, timestamp, event_type, description) "
+                "VALUES (?, ?, ?, ?)",
+                ("legacy_strategy", "2026-01-01T00:00:00Z", "TRADE", "old data"),
+            )
+            legacy_conn.commit()
+
+        # Open the store — initialize() runs SCHEMA_SQL + migrations.
+        config = SQLiteConfig(db_path=temp_db_path)
+        store = SQLiteStore(config)
+        await store.initialize()
+        await store.close()
+
+        # Confirm the migration dropped the table.
+        with sqlite3.connect(str(temp_db_path)) as conn:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'"
+            )
+            assert cursor.fetchone() is None, "legacy timeline_events table must be dropped on upgrade"
+
+    async def test_legacy_timeline_events_drop_is_idempotent(self, temp_db_path):
+        """The migration must be a no-op on fresh databases (PR5)."""
+        import sqlite3
+
+        # Fresh database: no `timeline_events` table exists at all.
+        config = SQLiteConfig(db_path=temp_db_path)
+        store = SQLiteStore(config)
+        await store.initialize()  # First run — should not raise.
+        await store.close()
+
+        # Second initialize — exercising the same migration path again.
+        store2 = SQLiteStore(config)
+        await store2.initialize()
+        await store2.close()
+
+        with sqlite3.connect(str(temp_db_path)) as conn:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'"
+            )
+            assert cursor.fetchone() is None
 
 
 # =============================================================================

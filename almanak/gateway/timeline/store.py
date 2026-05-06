@@ -56,6 +56,11 @@ class TimelineEvent:
     details: dict[str, Any] = field(default_factory=dict)
     cycle_id: str = ""
     phase: str = ""
+    # Typed pointer to transaction_ledger.id when the event narrates an executed
+    # intent (VIB-4041). The financial truth — gas, amounts, prices, slippage —
+    # lives in the ledger row, never in `details`. Empty string when the event
+    # is purely lifecycle/UX (e.g. STATE_CHANGE).
+    related_ledger_entry_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -73,6 +78,8 @@ class TimelineEvent:
             d["cycle_id"] = self.cycle_id
         if self.phase:
             d["phase"] = self.phase
+        if self.related_ledger_entry_id:
+            d["related_ledger_entry_id"] = self.related_ledger_entry_id
         return d
 
     @classmethod
@@ -95,6 +102,7 @@ class TimelineEvent:
             details=data.get("details") or {},
             cycle_id=data.get("cycle_id", ""),
             phase=data.get("phase", ""),
+            related_ledger_entry_id=data.get("related_ledger_entry_id", ""),
         )
 
 
@@ -158,6 +166,12 @@ class TimelineStore:
         self._pg_loop: asyncio.AbstractEventLoop | None = None
         self._pg_thread: threading.Thread | None = None
         self._pg_schema: str | None = None
+        # VIB-4041: detected at init against the live Postgres backend. The
+        # column is owned by the metrics-database repo's Prisma migrations
+        # (see CLAUDE.md "Database schema ownership"); this flag lets the
+        # gateway round-trip the field whenever the column is present and
+        # gracefully omit it when running against an older schema.
+        self._pg_supports_related_ledger: bool = False
 
     @property
     def _uses_postgres(self) -> bool:
@@ -259,6 +273,61 @@ class TimelineStore:
         )
         # Table DDL is owned by the metrics-database repo's Prisma migrations.
 
+        # VIB-4041: detect related_ledger_entry_id column presence so we can
+        # round-trip the typed correlation field once metrics-database adds
+        # it. Reading information_schema is cheap (one query at boot) and
+        # keeps the SDK side production-ready ahead of the cross-repo migration.
+        self._pg_supports_related_ledger = await self._async_detect_related_ledger_column()
+        if self._pg_supports_related_ledger:
+            logger.info("Postgres timeline_events.related_ledger_entry_id is present; round-trip enabled")
+        else:
+            logger.info(
+                "Postgres timeline_events.related_ledger_entry_id is absent; "
+                "field will be empty on read and omitted on write until "
+                "metrics-database migration lands"
+            )
+
+    async def _async_detect_related_ledger_column(self) -> bool:
+        """Return True if timeline_events.related_ledger_entry_id exists.
+
+        Uses the active search_path (set per-connection from `_pg_schema`).
+        Failure semantics (CodeRabbit on PR #2117):
+
+        * **Column genuinely absent** (information_schema returned no row) →
+          ``False``. This is the legitimate pre-VIB-4051 host case. The gate
+          flips off; ``related_ledger_entry_id`` is omitted on writes and reads
+          back as ``""``.
+        * **Infrastructure error** (connection lost, timeout, permission
+          denied, asyncpg internal error, …) → propagate. We do NOT silently
+          flip the gate off, because that would degrade a deployed gateway to
+          "no correlation writes" without the operator noticing — a UX-only
+          regression that would survive every SQLite-backed unit test.
+          Failing at boot is the correct production behaviour: it surfaces the
+          underlying issue (DB unreachable, schema misconfigured, …) instead
+          of papering over it.
+
+        Note: the introspection query is a SELECT against
+        ``information_schema.columns``. Column-absent does NOT raise
+        ``UndefinedColumn`` — it returns ``None``. So no narrow ``except``
+        is needed; the absent-column branch is a value check, not an
+        exception path.
+        """
+        assert self._pg_pool is not None
+        async with self._pg_pool.acquire() as conn:
+            # Scope to current_schema() so a same-named table in another
+            # schema can't false-positive the feature flag.
+            row = await conn.fetchval(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'timeline_events'
+                  AND column_name = 'related_ledger_entry_id'
+                  AND table_schema = current_schema()
+                LIMIT 1
+                """
+            )
+            return row is not None
+
     def _pg_submit(self, coro: Any) -> Any:
         """Submit coroutine to the background event loop and wait for result."""
         assert self._pg_loop is not None, "PostgreSQL event loop not initialized"
@@ -282,15 +351,27 @@ class TimelineStore:
         except Exception:
             logger.exception("Failed to load timeline events from PostgreSQL")
 
+    # crap-allowlist: Postgres-only path; unit tests exercise SQLite store.
+    # PR2 (VIB-4041) added the conditional `related_select` for the typed
+    # column round-trip; the underlying CC=10 was already over-threshold
+    # against unit-test coverage. Postgres path is covered by hosted
+    # integration runs (the column-presence introspect is verified via
+    # `_async_detect_related_ledger_column` log lines at gateway boot).
     async def _async_load_events(self) -> list[TimelineEvent]:
         assert self._pg_pool is not None
+        related_select = (
+            ", COALESCE(related_ledger_entry_id, '') as related_ledger_entry_id"
+            if self._pg_supports_related_ledger
+            else ""
+        )
         async with self._pg_pool.acquire() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT event_id, agent_id, timestamp, event_type,
                        description, tx_hash, chain, details_json,
                        COALESCE(cycle_id, '') as cycle_id,
                        COALESCE(phase, '') as phase
+                       {related_select}
                 FROM timeline_events
                 ORDER BY timestamp DESC
                 """
@@ -319,6 +400,9 @@ class TimelineStore:
                         details=details,
                         cycle_id=row["cycle_id"],
                         phase=row["phase"],
+                        related_ledger_entry_id=(
+                            row["related_ledger_entry_id"] if self._pg_supports_related_ledger else ""
+                        ),
                     )
                 )
             return events
@@ -334,32 +418,63 @@ class TimelineStore:
         assert self._pg_pool is not None
         details_json = json.dumps(event.details) if event.details else None
         async with self._pg_pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO timeline_events
-                    (event_id, agent_id, timestamp, event_type, description,
-                     tx_hash, chain, details_json, cycle_id, phase)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                ON CONFLICT (event_id) DO UPDATE SET
-                    event_type = EXCLUDED.event_type,
-                    description = EXCLUDED.description,
-                    tx_hash = EXCLUDED.tx_hash,
-                    chain = EXCLUDED.chain,
-                    details_json = EXCLUDED.details_json,
-                    cycle_id = EXCLUDED.cycle_id,
-                    phase = EXCLUDED.phase
-                """,
-                event.event_id,
-                resolved_id,
-                event.timestamp,
-                event.event_type,
-                event.description,
-                event.tx_hash,
-                event.chain,
-                details_json,
-                event.cycle_id,
-                event.phase,
-            )
+            if self._pg_supports_related_ledger:
+                await conn.execute(
+                    """
+                    INSERT INTO timeline_events
+                        (event_id, agent_id, timestamp, event_type, description,
+                         tx_hash, chain, details_json, cycle_id, phase,
+                         related_ledger_entry_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (event_id) DO UPDATE SET
+                        event_type = EXCLUDED.event_type,
+                        description = EXCLUDED.description,
+                        tx_hash = EXCLUDED.tx_hash,
+                        chain = EXCLUDED.chain,
+                        details_json = EXCLUDED.details_json,
+                        cycle_id = EXCLUDED.cycle_id,
+                        phase = EXCLUDED.phase,
+                        related_ledger_entry_id = EXCLUDED.related_ledger_entry_id
+                    """,
+                    event.event_id,
+                    resolved_id,
+                    event.timestamp,
+                    event.event_type,
+                    event.description,
+                    event.tx_hash,
+                    event.chain,
+                    details_json,
+                    event.cycle_id,
+                    event.phase,
+                    event.related_ledger_entry_id or None,
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO timeline_events
+                        (event_id, agent_id, timestamp, event_type, description,
+                         tx_hash, chain, details_json, cycle_id, phase)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (event_id) DO UPDATE SET
+                        event_type = EXCLUDED.event_type,
+                        description = EXCLUDED.description,
+                        tx_hash = EXCLUDED.tx_hash,
+                        chain = EXCLUDED.chain,
+                        details_json = EXCLUDED.details_json,
+                        cycle_id = EXCLUDED.cycle_id,
+                        phase = EXCLUDED.phase
+                    """,
+                    event.event_id,
+                    resolved_id,
+                    event.timestamp,
+                    event.event_type,
+                    event.description,
+                    event.tx_hash,
+                    event.chain,
+                    details_json,
+                    event.cycle_id,
+                    event.phase,
+                )
 
     def _clear_events_postgres(self, resolved_id: str | None) -> None:
         """Clear events from PostgreSQL using the resolved agent_id."""
@@ -403,6 +518,7 @@ class TimelineStore:
                     details_json TEXT,
                     cycle_id TEXT DEFAULT '',
                     phase TEXT DEFAULT '',
+                    related_ledger_entry_id TEXT DEFAULT '',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -413,6 +529,11 @@ class TimelineStore:
                 pass  # Column already exists
             try:
                 conn.execute("ALTER TABLE timeline_events ADD COLUMN phase TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            # VIB-4041 — typed correlation pointer to transaction_ledger.id.
+            try:
+                conn.execute("ALTER TABLE timeline_events ADD COLUMN related_ledger_entry_id TEXT DEFAULT ''")
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
@@ -428,6 +549,12 @@ class TimelineStore:
                 CREATE INDEX IF NOT EXISTS idx_timeline_event_type
                 ON timeline_events(event_type)
             """)
+            # VIB-4041 — index for compositor queries that join by ledger id.
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timeline_related_ledger
+                ON timeline_events(related_ledger_entry_id)
+                WHERE related_ledger_entry_id IS NOT NULL AND related_ledger_entry_id != ''
+            """)
             conn.commit()
 
     def _load_from_sqlite(self) -> None:
@@ -440,7 +567,7 @@ class TimelineStore:
             cursor = conn.execute("""
                 SELECT event_id, strategy_id, timestamp, event_type,
                        description, tx_hash, chain, details_json,
-                       cycle_id, phase
+                       cycle_id, phase, related_ledger_entry_id
                 FROM timeline_events
                 ORDER BY timestamp DESC
             """)
@@ -464,6 +591,7 @@ class TimelineStore:
                     details=details,
                     cycle_id=row["cycle_id"] or "",
                     phase=row["phase"] or "",
+                    related_ledger_entry_id=row["related_ledger_entry_id"] or "",
                 )
                 self._cache[event.strategy_id].append(event)
 
@@ -483,8 +611,9 @@ class TimelineStore:
                 """
                 INSERT OR REPLACE INTO timeline_events
                 (event_id, strategy_id, timestamp, event_type, description,
-                 tx_hash, chain, details_json, cycle_id, phase)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tx_hash, chain, details_json, cycle_id, phase,
+                 related_ledger_entry_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -497,6 +626,7 @@ class TimelineStore:
                     details_json,
                     event.cycle_id,
                     event.phase,
+                    event.related_ledger_entry_id,
                 ),
             )
             conn.commit()
@@ -538,6 +668,7 @@ class TimelineStore:
         limit: int = 50,
         event_type: str | None = None,
         since: datetime | None = None,
+        before: datetime | None = None,
     ) -> list[TimelineEvent]:
         """Get timeline events for a strategy.
 
@@ -547,6 +678,10 @@ class TimelineStore:
             limit: Maximum number of events to return
             event_type: Optional filter by event type
             since: Optional filter for events after this timestamp
+            before: Optional cursor — only events strictly older than this
+                timestamp. Pushed down here (not post-fetch) so paginated
+                callers can never receive a "newest N rows that don't match
+                the cursor" empty page when activity is dense.
 
         Returns:
             List of TimelineEvent objects, sorted by timestamp descending
@@ -565,6 +700,9 @@ class TimelineStore:
 
             if since:
                 events = [e for e in events if e.timestamp > since]
+
+            if before is not None:
+                events = [e for e in events if e.timestamp < before]
 
             # Apply limit
             return events[:limit]

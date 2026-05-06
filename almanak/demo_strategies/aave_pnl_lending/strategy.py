@@ -187,7 +187,6 @@ class AavePnLLendingStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.supply_amount} {self.supply_token}",
                         strategy_id=self.strategy_id,
-                        details={"action": "supply", "amount": str(self.supply_amount)},
                     )
                 )
             elif intent_type == "BORROW":
@@ -200,7 +199,6 @@ class AavePnLLendingStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self._borrowed_amount} {self.borrow_token}",
                         strategy_id=self.strategy_id,
-                        details={"action": "borrow", "amount": str(self._borrowed_amount)},
                     )
                 )
             elif intent_type == "REPAY":

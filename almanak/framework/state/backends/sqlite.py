@@ -8,11 +8,16 @@ Features:
 - Single row per agent (matches PostgreSQL model)
 - CAS (Compare-And-Swap) via optimistic locking with version field
 - WAL mode for better concurrent read performance
-- Timeline events storage for execution audit trail
 - Checksum integrity verification
 
 Important: Each strategy uses exactly one gateway and vice versa.
 No two strategies share a gateway.
+
+VIB-4044 / PR5: SDK-side `timeline_events` table and its CRUD methods are
+hard-deleted. Production timeline_events lives gateway-side in
+`almanak/gateway/timeline/store.py`. The 3-demo empirical inspection in PR1
+confirmed zero rows ever land in the SDK-side table on real runs — it was
+test-only dead code.
 
 Usage:
     config = SQLiteConfig(db_path="./state.db")
@@ -25,9 +30,6 @@ Usage:
 
     # CAS update
     await store.save(state, expected_version=1)
-
-    # Save timeline event
-    await store.save_event(event)
 """
 
 import asyncio
@@ -131,74 +133,8 @@ class SQLiteConfig:
             raise ValueError("busy_timeout must be non-negative")
 
 
-@dataclass
-class TimelineEvent:
-    """Timeline event for strategy execution audit trail.
-
-    Attributes:
-        id: Auto-generated event ID (None for new events).
-        strategy_id: Strategy that generated the event.
-        event_type: Type of event (e.g., "EXECUTION_SUCCESS", "TX_CONFIRMED").
-        event_data: JSON-serializable event payload.
-        correlation_id: ID to correlate related events.
-        created_at: When the event occurred.
-    """
-
-    strategy_id: str
-    event_type: str
-    event_data: dict[str, Any] = field(default_factory=dict)
-    correlation_id: str | None = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    id: int | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "id": self.id,
-            "strategy_id": self.strategy_id,
-            "event_type": self.event_type,
-            "event_data": self.event_data,
-            "correlation_id": self.correlation_id,
-            "created_at": self.created_at.isoformat(),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TimelineEvent":
-        """Create TimelineEvent from dictionary."""
-        created_at = data.get("created_at")
-        if isinstance(created_at, str):
-            created_at = datetime.fromisoformat(created_at)
-        elif created_at is None:
-            created_at = datetime.now(UTC)
-
-        return cls(
-            id=data.get("id"),
-            strategy_id=data["strategy_id"],
-            event_type=data["event_type"],
-            event_data=data.get("event_data", {}),
-            correlation_id=data.get("correlation_id"),
-            created_at=created_at,
-        )
-
-    @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "TimelineEvent":
-        """Create TimelineEvent from SQLite row."""
-        event_data = row["event_data"]
-        if isinstance(event_data, str):
-            event_data = json.loads(event_data)
-
-        created_at = row["created_at"]
-        if isinstance(created_at, str):
-            created_at = datetime.fromisoformat(created_at)
-
-        return cls(
-            id=row["id"],
-            strategy_id=row["strategy_id"],
-            event_type=row["event_type"],
-            event_data=event_data,
-            correlation_id=row["correlation_id"],
-            created_at=created_at,
-        )
+# NOTE (VIB-4044 / PR5): The SDK-side `TimelineEvent` dataclass is removed.
+# Gateway-side timeline events live in `almanak/gateway/timeline/store.py:TimelineEvent`.
 
 
 # =============================================================================
@@ -219,33 +155,9 @@ CREATE TABLE IF NOT EXISTS strategy_state (
     updated_at TEXT NOT NULL
 );
 
--- Timeline events table (matches PostgreSQL schema)
-CREATE TABLE IF NOT EXISTS timeline_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    event_data TEXT NOT NULL,  -- JSON string
-    correlation_id TEXT,
-    cycle_id TEXT DEFAULT '',
-    phase TEXT DEFAULT '',
-    created_at TEXT NOT NULL
-);
-
--- Index for strategy event queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_strategy_id
-ON timeline_events (strategy_id);
-
--- Index for correlation ID queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_correlation_id
-ON timeline_events (correlation_id);
-
--- Index for event type queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_event_type
-ON timeline_events (event_type);
-
--- Index for time-ordered queries
-CREATE INDEX IF NOT EXISTS idx_timeline_events_created_at
-ON timeline_events (created_at DESC);
+-- VIB-4044 / PR5: SDK-side `timeline_events` table is removed.
+-- Gateway-side timeline_events lives in ~/.config/almanak/gateway.db (local)
+-- or hosted Postgres (deployed). See almanak/gateway/timeline/store.py.
 
 -- CLOB orders table for Polymarket order tracking
 CREATE TABLE IF NOT EXISTS clob_orders (
@@ -723,6 +635,27 @@ class SQLiteStore:
                 return True
             return False
 
+        def _drop_table_if_exists(table: str, reason: str) -> None:
+            """Drop a deprecated table from upgraded databases.
+
+            Idempotent — DROP TABLE IF EXISTS is a no-op on fresh databases
+            (the SCHEMA_SQL above never created it).
+            """
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+            if cursor.fetchone() is not None:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+                logger.info(f"Migration: dropped legacy {table} table ({reason})")
+
+        # VIB-4044 / PR5: SDK-side `timeline_events` is removed. Existing
+        # local databases carry the table from earlier SDK versions; drop it
+        # here so an upgraded user converges to the new schema. Production
+        # timeline_events flow goes through the gateway-side store
+        # (almanak/gateway/timeline/store.py); the SDK-side table received
+        # zero writes (verified by the 3-demo PR1 inspection in
+        # docs/internal/TimelineScope-E2E-Findings.md), so dropping it on
+        # upgrade is safe — no user data lives in it.
+        _drop_table_if_exists("timeline_events", "VIB-4044 / PR5")
+
         # Phase 1a: total_value_usd, positions_json, cycle_id on portfolio_metrics (VIB-2765)
         _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT '0'")
         _add_column_if_missing("portfolio_metrics", "positions_json", "TEXT DEFAULT '[]'")
@@ -820,7 +753,6 @@ class SQLiteStore:
                 "portfolio_snapshots",
                 "portfolio_metrics",
                 "transaction_ledger",
-                "timeline_events",
                 "accounting_outbox",
             ]
 
@@ -1126,224 +1058,11 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # Timeline Event Operations
     # -------------------------------------------------------------------------
-
-    async def save_event(self, event: TimelineEvent) -> int:
-        """Save a timeline event.
-
-        Args:
-            event: Timeline event to save.
-
-        Returns:
-            ID of the saved event.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        event_json = json.dumps(event.event_data, sort_keys=True, default=str)
-        created_at = event.created_at.isoformat()
-
-        def _sync_save_event() -> int:
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                INSERT INTO timeline_events
-                (strategy_id, event_type, event_data, correlation_id, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    event.strategy_id,
-                    event.event_type,
-                    event_json,
-                    event.correlation_id,
-                    created_at,
-                ),
-            )
-            self._conn.commit()  # type: ignore[union-attr]
-            return cursor.lastrowid or 0
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_save_event)
-
-    async def get_events(
-        self,
-        strategy_id: str,
-        event_type: str | None = None,
-        correlation_id: str | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[TimelineEvent]:
-        """Get timeline events for a strategy.
-
-        Args:
-            strategy_id: Strategy identifier.
-            event_type: Optional filter by event type.
-            correlation_id: Optional filter by correlation ID.
-            limit: Maximum number of events to return.
-            offset: Number of events to skip for pagination.
-
-        Returns:
-            List of TimelineEvent, newest first.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_get_events() -> list[TimelineEvent]:
-            query = """
-                SELECT id, strategy_id, event_type, event_data,
-                       correlation_id, created_at
-                FROM timeline_events
-                WHERE strategy_id = ?
-            """
-            params: list[Any] = [strategy_id]
-
-            if event_type:
-                query += " AND event_type = ?"
-                params.append(event_type)
-
-            if correlation_id:
-                query += " AND correlation_id = ?"
-                params.append(correlation_id)
-
-            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-
-            cursor = self._conn.execute(query, params)  # type: ignore[union-attr]
-
-            return [TimelineEvent.from_row(row) for row in cursor.fetchall()]
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_get_events)
-
-    async def get_event(self, event_id: int) -> TimelineEvent | None:
-        """Get a specific timeline event by ID.
-
-        Args:
-            event_id: Event ID.
-
-        Returns:
-            TimelineEvent if found, None otherwise.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_get_event() -> TimelineEvent | None:
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT id, strategy_id, event_type, event_data,
-                       correlation_id, created_at
-                FROM timeline_events
-                WHERE id = ?
-                """,
-                (event_id,),
-            )
-            row = cursor.fetchone()
-            return TimelineEvent.from_row(row) if row else None
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_get_event)
-
-    async def get_events_by_correlation_id(self, correlation_id: str) -> list[TimelineEvent]:
-        """Get all events with a specific correlation ID.
-
-        Args:
-            correlation_id: Correlation ID to search for.
-
-        Returns:
-            List of TimelineEvent, newest first.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_get_events() -> list[TimelineEvent]:
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT id, strategy_id, event_type, event_data,
-                       correlation_id, created_at
-                FROM timeline_events
-                WHERE correlation_id = ?
-                ORDER BY created_at DESC
-                """,
-                (correlation_id,),
-            )
-            return [TimelineEvent.from_row(row) for row in cursor.fetchall()]
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_get_events)
-
-    async def count_events(
-        self,
-        strategy_id: str | None = None,
-        event_type: str | None = None,
-    ) -> int:
-        """Count timeline events.
-
-        Args:
-            strategy_id: Optional filter by strategy.
-            event_type: Optional filter by event type.
-
-        Returns:
-            Number of matching events.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_count() -> int:
-            query = "SELECT COUNT(*) as count FROM timeline_events WHERE 1=1"
-            params: list[Any] = []
-
-            if strategy_id:
-                query += " AND strategy_id = ?"
-                params.append(strategy_id)
-
-            if event_type:
-                query += " AND event_type = ?"
-                params.append(event_type)
-
-            cursor = self._conn.execute(query, params)  # type: ignore[union-attr]
-            row = cursor.fetchone()
-            return row["count"] if row else 0
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_count)
-
-    async def delete_events(
-        self,
-        strategy_id: str,
-        before: datetime | None = None,
-    ) -> int:
-        """Delete timeline events for a strategy.
-
-        Args:
-            strategy_id: Strategy identifier.
-            before: Optional datetime to delete events before (for retention).
-
-        Returns:
-            Number of events deleted.
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        def _sync_delete() -> int:
-            if before:
-                cursor = self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    DELETE FROM timeline_events
-                    WHERE strategy_id = ? AND created_at < ?
-                    """,
-                    (strategy_id, before.isoformat()),
-                )
-            else:
-                cursor = self._conn.execute(  # type: ignore[union-attr]
-                    """
-                    DELETE FROM timeline_events
-                    WHERE strategy_id = ?
-                    """,
-                    (strategy_id,),
-                )
-            self._conn.commit()  # type: ignore[union-attr]
-            return cursor.rowcount
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _sync_delete)
+    #
+    # VIB-4044 / PR5: removed. The SDK-side `timeline_events` table never
+    # received writes in production runs (verified empirically across 3 demos
+    # in PR1's TimelineScope-E2E-Findings.md). Gateway-side timeline events
+    # are owned by `almanak.gateway.timeline.store.TimelineStore`.
 
     # -------------------------------------------------------------------------
     # Maintenance Operations
@@ -1401,12 +1120,9 @@ class SQLiteStore:
             row = cursor.fetchone()
             stats["active_states"] = row["count"] if row else 0
 
-            # Count timeline events
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT COUNT(*) as count FROM timeline_events"
-            )
-            row = cursor.fetchone()
-            stats["total_events"] = row["count"] if row else 0
+            # VIB-4044 / PR5: timeline_events removed; total_events kept
+            # in the stats payload for back-compat but is now always 0.
+            stats["total_events"] = 0
 
             # Get page count and page size
             cursor = self._conn.execute("PRAGMA page_count")  # type: ignore[union-attr]

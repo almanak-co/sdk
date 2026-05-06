@@ -178,7 +178,6 @@ class MorphoBluePnLBacktestStrategy(IntentStrategy):
                         strategy_id=self.strategy_id,
                         details={
                             "action": "supply",
-                            "amount": str(self.supply_amount),
                             "market_id": self.market_id,
                             "protocol": "morpho_blue",
                         },

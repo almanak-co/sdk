@@ -418,6 +418,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             # TODO: Export to metrics backend
             self._metrics_buffer.clear()
 
+    # crap-allowlist: pre-existing RPC surface; PR2 (VIB-4041) only added a
+    # one-line `related_ledger_entry_id` pass-through. CC=12 was already
+    # over-threshold against unit-test coverage (the RPC is exercised end-to-end
+    # via `tests/gateway/test_observe_service*.py` integration paths and the
+    # `RecordTimelineEvent` round-trip test in
+    # `tests/gateway/test_timeline_related_ledger.py::TestProtoSurface`).
     async def RecordTimelineEvent(
         self,
         request: gateway_pb2.RecordTimelineEventRequest,
@@ -460,9 +466,35 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             except json.JSONDecodeError as e:
                 logger.warning(f"Invalid details_json: {e}")
 
-        # Use provided timestamp or current time
+        # Use provided timestamp or current time. The gateway is the security
+        # boundary — a hostile client can submit any int64; out-of-range values
+        # would otherwise raise OverflowError / ValueError / OSError out of
+        # `datetime.fromtimestamp` and surface as INTERNAL gRPC errors. Reject
+        # them as INVALID_ARGUMENT, mirroring `SaveLedgerEntry` /
+        # `SaveAccountingEvent` in state_service.py (CodeRabbit on PR #2117).
+        #
+        # CodeRabbit round 5 sibling: ``request.timestamp == 0`` is the proto
+        # default and means "client did not specify, use now()". A NEGATIVE
+        # timestamp is invalid input (can't represent it server-side, would
+        # produce a misordered activity-feed entry if rewritten silently to
+        # now()). Reject negatives explicitly instead of swallowing them.
+        if request.timestamp < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp must be non-negative (use 0 to mean now)")
+            return gateway_pb2.RecordTimelineEventResponse(
+                success=False,
+                error="timestamp must be non-negative",
+            )
         if request.timestamp > 0:
-            timestamp = datetime.fromtimestamp(request.timestamp, tz=UTC)
+            try:
+                timestamp = datetime.fromtimestamp(request.timestamp, tz=UTC)
+            except (OverflowError, ValueError, OSError):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("timestamp out of range")
+                return gateway_pb2.RecordTimelineEventResponse(
+                    success=False,
+                    error="timestamp out of range",
+                )
         else:
             timestamp = datetime.now(UTC)
 
@@ -479,6 +511,7 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             details=details,
             cycle_id=request.cycle_id if request.cycle_id else "",
             phase=request.phase if request.phase else "",
+            related_ledger_entry_id=(request.related_ledger_entry_id if request.related_ledger_entry_id else ""),
         )
 
         try:

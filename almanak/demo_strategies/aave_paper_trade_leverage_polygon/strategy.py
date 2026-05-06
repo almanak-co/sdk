@@ -226,7 +226,6 @@ class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self._supplied_amount} {self.collateral_token} to Aave V3",
                         strategy_id=self.strategy_id,
-                        details={"action": "supply", "amount": str(self._supplied_amount), "protocol": "aave_v3"},
                     )
                 )
                 logger.info("SUPPLY succeeded: %s %s to Aave V3", self._supplied_amount, self.collateral_token)
@@ -241,7 +240,6 @@ class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self._borrowed_amount} {self.borrow_token} from Aave V3",
                         strategy_id=self.strategy_id,
-                        details={"action": "borrow", "amount": str(self._borrowed_amount), "protocol": "aave_v3"},
                     )
                 )
                 logger.info("BORROW succeeded: %s %s from Aave V3", self._borrowed_amount, self.borrow_token)

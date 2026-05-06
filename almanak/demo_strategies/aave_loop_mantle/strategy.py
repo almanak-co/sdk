@@ -245,7 +245,6 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Loop {self._current_loop + 1}: Supplied {self._pending_supply_amount} {self.supply_token}",
                         strategy_id=self.strategy_id,
-                        details={"action": "supply", "loop": self._current_loop + 1, "amount": str(self._pending_supply_amount)},
                     )
                 )
 
@@ -261,7 +260,6 @@ class AaveLoopMantleStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Loop {self._current_loop + 1}: Borrowed {borrow_amount} {self.borrow_token}",
                         strategy_id=self.strategy_id,
-                        details={"action": "borrow", "loop": self._current_loop + 1, "amount": str(borrow_amount)},
                     )
                 )
 

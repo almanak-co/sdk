@@ -573,9 +573,10 @@ class TestSingleChainSlippageGuard:
         # time, which is after the error is set either way).
         captured: dict[str, str | None] = {}
 
-        def _capture(strategy, intent, *, success, result):  # noqa: ANN001
+        def _capture(strategy, intent, *, success, result, related_ledger_entry_id=""):  # noqa: ANN001
             captured["error"] = getattr(result, "error", None)
             captured["success"] = success
+            captured["related_ledger_entry_id"] = related_ledger_entry_id
 
         runner._emit_execution_timeline_event = MagicMock(side_effect=_capture)
 

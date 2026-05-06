@@ -51,6 +51,79 @@ PORTFOLIO_STALE_THRESHOLD_SECONDS = 300
 _QUANT_HEADER_LEDGER_CAP = 100_000
 
 
+# Composite cursor-key encoding for ActivityFeed items (CodeRabbit review).
+# Format: "<priority>:<kind>:<id>" where priority = "1" for LEDGER, "0" for
+# TIMELINE. The leading priority digit forces LEDGER to sort before TIMELINE
+# at tied timestamps under lex-DESC ordering ("1:..." > "0:..."), which is
+# required by the page-incremental dedup in
+# `_select_page_with_incremental_dedup`: the ledger row IS the truth, so a
+# timeline row referencing it must see the ledger row before deciding to
+# drop itself. The kind letter ("L"/"T") inside the key is preserved for
+# human-readable debugging only — it has no effect on ordering since both
+# kinds sort under their priority digit first.
+_ACTIVITY_FEED_KEY_LEDGER_PRIORITY = "1"
+_ACTIVITY_FEED_KEY_TIMELINE_PRIORITY = "0"
+
+
+def _to_timeline_feed_item(event: Any, resolved_id: str) -> tuple[gateway_pb2.ActivityFeedItem, str]:
+    """Build an ``ActivityFeedItem`` proto for a timeline event + its cursor key."""
+    ts_unix = int(event.timestamp.timestamp()) if event.timestamp else 0
+    return (
+        gateway_pb2.ActivityFeedItem(
+            kind=gateway_pb2.ActivityFeedItem.Kind.TIMELINE_EVENT,
+            timestamp=ts_unix,
+            strategy_id=resolved_id,
+            cycle_id=event.cycle_id or "",
+            timeline_event=gateway_pb2.TimelineEventInfo(
+                timestamp=ts_unix,
+                event_type=event.event_type,
+                description=event.description,
+                tx_hash=event.tx_hash or "",
+                details_json=json.dumps(event.details) if event.details else "",
+                chain=event.chain or "",
+                cycle_id=event.cycle_id or "",
+                phase=event.phase or "",
+                related_ledger_entry_id=event.related_ledger_entry_id or "",
+            ),
+        ),
+        f"{_ACTIVITY_FEED_KEY_TIMELINE_PRIORITY}:T:{event.event_id}",
+    )
+
+
+def _to_ledger_feed_item(entry: Any) -> tuple[gateway_pb2.ActivityFeedItem, str]:
+    """Build an ``ActivityFeedItem`` proto for a ledger entry + its cursor key."""
+    ts_unix = int(entry.timestamp.timestamp()) if entry.timestamp else 0
+    return (
+        gateway_pb2.ActivityFeedItem(
+            kind=gateway_pb2.ActivityFeedItem.Kind.LEDGER_ENTRY,
+            timestamp=ts_unix,
+            strategy_id=entry.strategy_id,
+            cycle_id=entry.cycle_id,
+            ledger_entry=gateway_pb2.LedgerEntryInfo(
+                id=entry.id,
+                cycle_id=entry.cycle_id,
+                strategy_id=entry.strategy_id,
+                timestamp=ts_unix,
+                intent_type=entry.intent_type,
+                token_in=entry.token_in,
+                amount_in=entry.amount_in,
+                token_out=entry.token_out,
+                amount_out=entry.amount_out,
+                effective_price=entry.effective_price,
+                slippage_bps=entry.slippage_bps or 0.0,
+                gas_used=entry.gas_used,
+                gas_usd=entry.gas_usd,
+                tx_hash=entry.tx_hash,
+                chain=entry.chain,
+                protocol=entry.protocol,
+                success=entry.success,
+                error=entry.error,
+            ),
+        ),
+        f"{_ACTIVITY_FEED_KEY_LEDGER_PRIORITY}:L:{entry.id}",
+    )
+
+
 class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     """Implements DashboardService gRPC interface.
 
@@ -880,6 +953,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             chain_health=chain_health,
         )
 
+    # crap-allowlist: pre-existing RPC. PR2 (VIB-4041) only added a one-line
+    # ``related_ledger_entry_id`` field to the per-event proto construction;
+    # CC=26 was already over-threshold against unit-test coverage. The full
+    # surface is exercised by integration tests in
+    # ``tests/gateway/test_timeline_store.py`` + the round-trip test in
+    # ``tests/gateway/test_timeline_related_ledger.py``.
     async def GetTimeline(
         self,
         request: gateway_pb2.GetTimelineRequest,
@@ -932,6 +1011,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         tx_hash=event.tx_hash or "",
                         details_json=json.dumps(event.details) if event.details else "",
                         chain=event.chain or "",
+                        cycle_id=event.cycle_id or "",
+                        phase=event.phase or "",
+                        related_ledger_entry_id=event.related_ledger_entry_id or "",
                     )
                 )
         except Exception as e:
@@ -956,6 +1038,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                                 tx_hash=event_data.get("tx_hash", ""),
                                 details_json=json.dumps(event_data.get("details", {})),
                                 chain=event_data.get("chain", ""),
+                                cycle_id=event_data.get("cycle_id", ""),
+                                phase=event_data.get("phase", ""),
+                                related_ledger_entry_id=event_data.get("related_ledger_entry_id", ""),
                             )
                         )
                 except Exception as e:
@@ -1937,3 +2022,538 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         has_more = len(ledger_entries) > len(rows)
         return gateway_pb2.GetTradeTapeResponse(rows=rows, has_more=has_more)
+
+    # ----------------------------------------------------------------------
+    # GetActivityFeed (VIB-4042 / PR3) — chronologically merged feed
+    # ----------------------------------------------------------------------
+    # Helpers for proto construction live at module level to keep
+    # ``GetActivityFeed``'s cyclomatic complexity within the project's CRAP
+    # gate (see ``scripts/ci/crap_diff_plugin.py``).
+
+    _ACTIVITY_FEED_LIMIT_DEFAULT = 50
+    _ACTIVITY_FEED_LIMIT_MAX = 200
+    # CodeRabbit: backfill loop bounds (see ``_gather_activity_feed_page``).
+    # Each attempt fetches ``limit * OVER_FETCH_FACTOR + 1`` per stream so the
+    # boundary filter and incremental dedup typically settle in one pass; the
+    # loop only re-fires when one of those drops a large enough fraction to
+    # leave the page short. ``MAX_BACKFILL_ATTEMPTS`` caps total backend
+    # round-trips so a malformed cursor or a saturated tie-second cannot fan
+    # out unbounded RPC.
+    _ACTIVITY_FEED_OVER_FETCH_FACTOR = 3
+    _ACTIVITY_FEED_MAX_BACKFILL_ATTEMPTS = 3
+
+    async def GetActivityFeed(
+        self,
+        request: gateway_pb2.GetActivityFeedRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetActivityFeedResponse:
+        """Return a chronologically merged feed of timeline events + ledger rows.
+
+        The merge rule (PRD-TimelineEvents §6.1, §9):
+          * Both streams are loaded with the same ``before_timestamp`` cursor
+            pushed DOWN into each backend (so a paginated caller can never
+            receive a "newest N rows that don't match the cursor" empty page
+            when activity is dense).
+          * Items sort by timestamp DESC, ties broken by ``(kind, item_id)``.
+          * A TIMELINE_EVENT whose ``related_ledger_entry_id`` references a
+            LEDGER_ENTRY in the same response window is dropped — the ledger
+            row IS the financial truth.
+          * The first ``limit`` items are returned. The cursor returned is
+            composite: ``next_before_timestamp`` + ``next_before_id`` so
+            multiple items at the same timestamp paginate deterministically
+            (a tied item is never returned twice nor skipped).
+        """
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as e:
+            logger.warning(f"Invalid strategy_id in GetActivityFeed: {e}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetActivityFeedResponse()
+
+        await self._ensure_initialized()
+        resolved_id = resolve_agent_id(strategy_id)
+
+        limit = min(
+            request.limit if request.limit > 0 else self._ACTIVITY_FEED_LIMIT_DEFAULT,
+            self._ACTIVITY_FEED_LIMIT_MAX,
+        )
+        before_ts = request.before_timestamp if request.before_timestamp > 0 else None
+        # CodeRabbit: ``request.before_timestamp`` is an untrusted int64. Out-of-range
+        # values (year > 9999, OS-specific overflow boundaries) raise
+        # OverflowError/OSError/ValueError from ``datetime.fromtimestamp``, which would
+        # surface as gRPC INTERNAL — leak the implementation and prevent the client
+        # from correcting their cursor. Wrap with try/except and map to
+        # INVALID_ARGUMENT so a bad cursor is unambiguously a caller bug.
+        try:
+            before_dt = datetime.fromtimestamp(before_ts, tz=UTC) if before_ts is not None else None
+        except (OverflowError, OSError, ValueError) as exc:
+            logger.warning(f"Invalid GetActivityFeed before_timestamp {before_ts!r}: {exc}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                "before_timestamp out of range (must be a valid Unix epoch second within supported datetime range)"
+            )
+            return gateway_pb2.GetActivityFeedResponse()
+        before_id = request.before_id or ""
+
+        # Validate composite cursor (CodeRabbit review). `before_id` is
+        # gateway-emitted in the form "<priority>:<kind>:<item_id>"; reject
+        # malformed pairs upfront rather than silently corrupting pagination.
+        cursor_error = self._validate_activity_feed_cursor(before_ts, before_id)
+        if cursor_error is not None:
+            logger.warning(f"Invalid GetActivityFeed cursor: {cursor_error}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(cursor_error)
+            return gateway_pb2.GetActivityFeedResponse()
+
+        store_before = self._compute_store_before(before_dt, before_id)
+
+        # CodeRabbit (heavy lift): fetch with a bounded backfill loop instead
+        # of a single ``limit + 1`` over-fetch per stream. ``_apply_boundary_filter``
+        # and ``_select_page_with_incremental_dedup`` can both drop more than
+        # one candidate (dense tie-second at the cursor; duplicate-heavy
+        # timeline window), which used to leave short pages while older rows
+        # remained in the stores. The backfill loop advances per-stream
+        # cursors until the page fills or both streams exhaust. The third
+        # tuple element is the wire-level degradation signal — True only
+        # when MAX_ATTEMPTS was hit without filling AND at least one stream
+        # still has rows (saturated tie-second).
+        page_pairs, has_more, backfill_truncated = await self._gather_activity_feed_page(
+            resolved_id=resolved_id,
+            limit=limit,
+            event_type_filter=request.event_type_filter or None,
+            intent_type_filter=request.intent_type_filter or None,
+            initial_store_before=store_before,
+            initial_before_ts=before_ts,
+            initial_before_id=before_id,
+        )
+        next_ts, next_id = (page_pairs[-1][0].timestamp, page_pairs[-1][1]) if (has_more and page_pairs) else (0, "")
+
+        return gateway_pb2.GetActivityFeedResponse(
+            items=[item for (item, _key) in page_pairs],
+            has_more=has_more,
+            next_before_timestamp=next_ts,
+            next_before_id=next_id,
+            backfill_truncated=backfill_truncated,
+        )
+
+    async def _gather_activity_feed_page(
+        self,
+        *,
+        resolved_id: str,
+        limit: int,
+        event_type_filter: str | None,
+        intent_type_filter: str | None,
+        initial_store_before: datetime | None,
+        initial_before_ts: int | None,
+        initial_before_id: str,
+    ) -> tuple[list[tuple[gateway_pb2.ActivityFeedItem, str]], bool, bool]:
+        """Backfill loop: fetch enough from each stream to fill a page after
+        merge + boundary-filter + incremental-dedup.
+
+        Each iteration:
+          1. Over-fetches ``limit * OVER_FETCH_FACTOR + 1`` from each non-exhausted stream
+             (using its independent cursor that strictly excludes already-fetched rows).
+          2. Applies the user's boundary filter (idempotent — items already
+             strictly before the cursor pass through unchanged).
+          3. Sorts the cumulative buffer and runs the page-incremental dedup.
+          4. Returns immediately if the page is full or both streams have
+             exhausted.
+
+        Bounded by ``_ACTIVITY_FEED_MAX_BACKFILL_ATTEMPTS`` so a saturated
+        tie-second cannot fan out unbounded backend round-trips.
+
+        Returns ``(page_pairs, has_more, backfill_truncated)``:
+          * ``backfill_truncated`` is True only when MAX_ATTEMPTS was hit
+            WITHOUT filling the page AND at least one stream still has more
+            rows (a saturated tie-second). Renderers surface this so
+            operators can distinguish "end of feed" from "tail of a tie
+            second was dropped" (CodeRabbit on PR #2117).
+        """
+        timeline_cursor_dt = initial_store_before
+        ledger_cursor_dt = initial_store_before
+        timeline_exhausted = False
+        ledger_exhausted = False
+
+        over_fetch = limit * self._ACTIVITY_FEED_OVER_FETCH_FACTOR + 1
+        cumulative_items: list[tuple[gateway_pb2.ActivityFeedItem, str]] = []
+        page_pairs: list[tuple[gateway_pb2.ActivityFeedItem, str]] = []
+        has_more = False
+        attempts_used = 0
+
+        for _attempt in range(self._ACTIVITY_FEED_MAX_BACKFILL_ATTEMPTS):
+            attempts_used += 1
+            new_timeline_events: list[Any] = []
+            new_ledger_entries: list[Any] = []
+
+            if not timeline_exhausted:
+                new_timeline_events = self._load_timeline_for_feed(
+                    resolved_id, over_fetch, event_type_filter, timeline_cursor_dt
+                )
+                if len(new_timeline_events) < over_fetch:
+                    timeline_exhausted = True
+
+            if not ledger_exhausted:
+                new_ledger_entries = await self._load_ledger_for_feed(
+                    resolved_id, over_fetch, intent_type_filter, ledger_cursor_dt
+                )
+                if len(new_ledger_entries) < over_fetch:
+                    ledger_exhausted = True
+
+            if not new_timeline_events and not new_ledger_entries:
+                break
+
+            new_items = self._build_feed_items(resolved_id, new_timeline_events, new_ledger_entries)
+            new_items = self._apply_boundary_filter(new_items, initial_before_ts, initial_before_id)
+            cumulative_items.extend(new_items)
+
+            # Two-stage stable sort: lex DESC on composite key, then numeric
+            # DESC on timestamp. Result: timestamp DESC primary, composite key
+            # DESC at ties.
+            cumulative_items.sort(key=lambda pair: pair[1], reverse=True)
+            cumulative_items.sort(key=lambda pair: pair[0].timestamp, reverse=True)
+            page_pairs, has_more = self._select_page_with_incremental_dedup(cumulative_items, limit)
+
+            if len(page_pairs) >= limit:
+                return page_pairs, has_more, False
+            if timeline_exhausted and ledger_exhausted:
+                return page_pairs, has_more, False
+
+            # Advance per-stream cursors strictly before each batch's oldest
+            # item so the next over-fetch returns net-new rows. Each stream's
+            # cursor only moves when that stream returned items in this attempt.
+            timeline_cursor_dt = self._advance_stream_cursor(new_timeline_events, timeline_cursor_dt)
+            ledger_cursor_dt = self._advance_stream_cursor(new_ledger_entries, ledger_cursor_dt)
+
+        # Exhausted MAX_ATTEMPTS without filling. Set the wire-level
+        # truncation signal AND log so an operator can spot the saturation.
+        backfill_truncated = (
+            attempts_used >= self._ACTIVITY_FEED_MAX_BACKFILL_ATTEMPTS
+            and not (timeline_exhausted and ledger_exhausted)
+            and len(page_pairs) < limit
+        )
+        if backfill_truncated:
+            logger.warning(
+                "GetActivityFeed: backfill loop hit MAX_ATTEMPTS without "
+                "filling page (limit=%d, page=%d, timeline_exhausted=%s, "
+                "ledger_exhausted=%s). Tie-second saturation may be present.",
+                limit,
+                len(page_pairs),
+                timeline_exhausted,
+                ledger_exhausted,
+            )
+        return page_pairs, has_more, backfill_truncated
+
+    @staticmethod
+    def _advance_stream_cursor(
+        items: list[Any],
+        fallback: datetime | None,
+    ) -> datetime | None:
+        """Return the per-stream ``before`` cursor for the next backfill attempt.
+
+        The store filters with strict ``<``: setting cursor to the oldest
+        item's timestamp yields strict ``<`` against all returned items. The
+        over-fetch (``limit * OVER_FETCH_FACTOR + 1``) is sized so that this
+        rarely loses ties at the boundary in normal traffic. When no items
+        were returned, fall back to the prior cursor.
+
+        Documented degradation (CodeRabbit on PR #2117): the cursor is
+        timestamp-only, not composite ``(timestamp, item_id)``. When a
+        single second has more than ``OVER_FETCH_FACTOR * limit + 1`` items
+        of the same stream, the unfetched tail of that second is
+        unreachable from this stream's pagination — the gateway logs
+        ``backfill loop hit MAX_ATTEMPTS without filling page`` so an
+        operator can spot the saturation case. Realistically, our
+        producers emit a few rows per minute per strategy and our default
+        ``MAX = 200`` admits 601 over-fetched items per attempt, so the
+        bound is unreachable in normal operation. The proto contract for
+        ``GetActivityFeed`` documents this explicitly so clients are not
+        promised pagination guarantees the gateway cannot meet under
+        adversarial load.
+        """
+        if not items:
+            return fallback
+        timestamps: list[datetime] = [
+            ts for ts in (getattr(item, "timestamp", None) for item in items) if isinstance(ts, datetime)
+        ]
+        if not timestamps:
+            return fallback
+        return min(timestamps)
+
+    @staticmethod
+    def _validate_activity_feed_cursor(before_ts: int | None, before_id: str) -> str | None:
+        """Reject malformed composite cursors (CodeRabbit review).
+
+        The cursor is gateway-emitted in the form ``"<priority>:<kind>:<id>"``
+        where priority ∈ {"0","1"} and kind ∈ {"T","L"}. A caller passing
+        ``before_id`` without ``before_timestamp``, or an out-of-shape string,
+        is bypassing the contract — return INVALID_ARGUMENT instead of
+        silently corrupting pagination.
+
+        Returns an error message string when the cursor is malformed, ``None``
+        when it's valid (or absent).
+        """
+        if not before_id:
+            return None  # No tie-breaker — base ``before_timestamp`` cursor is fine alone.
+        if before_ts is None:
+            return "before_id requires before_timestamp"
+        # Expected: "<priority>:<kind>:<id>" with at least three components.
+        parts = before_id.split(":", 2)
+        if len(parts) != 3:
+            return f"before_id must be '<priority>:<kind>:<id>'; got {before_id!r}"
+        priority, kind, item_id = parts
+        if priority not in (
+            _ACTIVITY_FEED_KEY_LEDGER_PRIORITY,
+            _ACTIVITY_FEED_KEY_TIMELINE_PRIORITY,
+        ):
+            return f"before_id priority must be '0' or '1'; got {priority!r}"
+        if kind not in ("L", "T"):
+            return f"before_id kind must be 'L' or 'T'; got {kind!r}"
+        if not item_id:
+            return "before_id item_id may not be empty"
+        # Cross-check: priority "1" pairs with kind "L"; priority "0" pairs with "T".
+        expected_kind = "L" if priority == _ACTIVITY_FEED_KEY_LEDGER_PRIORITY else "T"
+        if kind != expected_kind:
+            return f"before_id kind {kind!r} inconsistent with priority {priority!r}"
+        return None
+
+    @staticmethod
+    def _compute_store_before(before_dt: datetime | None, before_id: str) -> datetime | None:
+        """Translate the proto cursor to the strict-``<`` filter the stores expect.
+
+        The proto cursor is integer-second; items can carry sub-second
+        timestamps. Without a tie-breaker, a strict ``< before_dt`` push-down
+        is correct. With a tie-breaker we must include items at exactly
+        ``before_ts`` so the post-filter can pick the ones with composite
+        keys lex-less-than ``before_id``. Bumping by 1s achieves that under
+        the stores' strict-``<`` semantics.
+
+        CodeRabbit: at the extreme upper edge of ``datetime`` range
+        (``before_dt`` near year 9999 inclusive), ``+1s`` overflows
+        ``datetime.fromtimestamp`` — fall back to ``before_dt`` unchanged
+        and rely on the post-filter to handle the boundary tie. Out-of-range
+        ``before_dt`` itself is already rejected upstream at the RPC.
+        """
+        if before_dt is None or not before_id:
+            return before_dt
+        try:
+            return datetime.fromtimestamp(int(before_dt.timestamp()) + 1, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return before_dt
+
+    @staticmethod
+    def _load_timeline_for_feed(
+        resolved_id: str,
+        limit_plus_one: int,
+        event_type_filter: str | None,
+        store_before: datetime | None,
+    ) -> list[Any]:
+        try:
+            return list(
+                get_timeline_store().get_events(
+                    strategy_id=resolved_id,
+                    limit=limit_plus_one,
+                    event_type=event_type_filter,
+                    before=store_before,
+                )
+            )
+        except Exception:
+            logger.debug("GetActivityFeed: failed to load timeline events", exc_info=True)
+            return []
+
+    async def _load_ledger_for_feed(
+        self,
+        resolved_id: str,
+        limit_plus_one: int,
+        intent_type_filter: str | None,
+        store_before: datetime | None,
+    ) -> list[Any]:
+        if self._state_manager is None:
+            return []
+        try:
+            return await self._state_manager.get_ledger_entries(
+                resolved_id,
+                since=None,
+                intent_type=intent_type_filter,
+                limit=limit_plus_one,
+                before=store_before,
+            )
+        except TypeError:
+            # Backend signature may not yet accept ``before`` (mock in a unit
+            # test). Production backends all do (see
+            # SQLiteStore.get_ledger_entries / StateManager.get_ledger_entries).
+            return await self._load_ledger_fallback_no_before(
+                resolved_id, limit_plus_one, intent_type_filter, store_before
+            )
+        except Exception:
+            logger.debug("GetActivityFeed: failed to load ledger entries", exc_info=True)
+            return []
+
+    async def _load_ledger_fallback_no_before(
+        self,
+        resolved_id: str,
+        limit_plus_one: int,
+        intent_type_filter: str | None,
+        store_before: datetime | None,
+    ) -> list[Any]:
+        if self._state_manager is None:
+            return []
+        try:
+            entries = await self._state_manager.get_ledger_entries(
+                resolved_id,
+                since=None,
+                intent_type=intent_type_filter,
+                limit=limit_plus_one,
+            )
+            if store_before is not None:
+                entries = [e for e in entries if e.timestamp < store_before]
+            return entries
+        except Exception:
+            logger.debug("GetActivityFeed: ledger fallback failed", exc_info=True)
+            return []
+
+    @staticmethod
+    def _build_feed_items(
+        resolved_id: str,
+        timeline_events: list[Any],
+        ledger_entries: list[Any],
+    ) -> list[tuple[gateway_pb2.ActivityFeedItem, str]]:
+        """Compose ``ActivityFeedItem`` protos from both streams.
+
+        Composite tie-breaker key carried in the cursor:
+        ``"T:<event_id>"`` for timeline events, ``"L:<ledger_id>"`` for
+        ledger rows. Dedup of timeline events against their referenced
+        ledger row is intentionally NOT done here — it must happen during
+        page-incremental selection so a ledger row that falls in the
+        over-fetch tail can't suppress a timeline event whose ledger
+        counterpart will only appear on a later page (CodeRabbit review).
+        """
+        items: list[tuple[gateway_pb2.ActivityFeedItem, str]] = []
+        for event in timeline_events:
+            items.append(_to_timeline_feed_item(event, resolved_id))
+        for entry in ledger_entries:
+            items.append(_to_ledger_feed_item(entry))
+        return items
+
+    @staticmethod
+    def _select_page_with_incremental_dedup(
+        sorted_items: list[tuple[gateway_pb2.ActivityFeedItem, str]],
+        limit: int,
+    ) -> tuple[list[tuple[gateway_pb2.ActivityFeedItem, str]], bool]:
+        """Sort-order-resilient page selection with ledger-wins dedup
+        (CodeRabbit on PR #2117).
+
+        The contract from PRD-TimelineEvents §6.1 is "drop the timeline
+        duplicate when its ledger counterpart is on the page." The earlier
+        single-pass walk had a sort-order coupling: it only dropped a
+        timeline event if the ledger row had ALREADY been emitted earlier in
+        the walk. When the producer emits the timeline event after the
+        ledger write, the timeline's ``datetime.now()`` can be a tick newer
+        than the ledger's — so the timeline sorted FIRST in DESC order. The
+        timeline got added; then the ledger got added; both ended up on the
+        page.
+
+        Fix: track a ``pending_timeline_refs`` map of timelines whose
+        ``related_ledger_entry_id`` may still be encountered later in the
+        walk. When the matching ledger arrives, POP the pending timeline and
+        APPEND the ledger at its natural sort position (the ledger is older,
+        so it sorts later — appending preserves DESC order).
+
+        Strict page boundary: walking stops as soon as the page reaches
+        ``limit``. Items past the page boundary do NOT trigger dedup —
+        otherwise a ledger row in the over-fetch tail could promote itself
+        onto the page and drop a newer timeline that should have stayed
+        (the old ``test_ledger_in_over_fetch_tail_does_not_suppress_timeline``
+        contract). The dedup contract is "if BOTH the ledger and the timeline
+        would land in the page-sized window, the ledger wins"; if only the
+        timeline would land, the timeline survives.
+        """
+        page: list[tuple[gateway_pb2.ActivityFeedItem, str]] = []
+        seen_ledger_ids: set[str] = set()
+        # CodeRabbit on PR #2117 round 5: a single ledger row can be referenced
+        # by MULTIPLE timeline events (e.g. an LP_OPEN with two UX cards — one
+        # for "position opened", one for "fee tier set" — both pointing back
+        # at the same execution row, or duplicate rows from a re-emit). The
+        # earlier ``dict[str, int]`` shape lost all but the last reference,
+        # so when the ledger landed only ONE timeline was popped and the
+        # others leaked into the response — a silent violation of the
+        # dedup-by-`related_ledger_entry_id` contract. Track a list per ref;
+        # pop all of them in descending order so the indices of remaining
+        # pending refs only need to be decremented by the count of removals
+        # below their position.
+        pending_timeline_refs: dict[str, list[int]] = {}
+        has_more = False
+
+        def _drop_pending(lid: str) -> None:
+            """Pop every page row whose timeline event referenced ``lid`` and
+            keep ``pending_timeline_refs`` indices consistent with the
+            shifted page list."""
+            indices = pending_timeline_refs.pop(lid, None)
+            if not indices:
+                return
+            # Pop in descending order — popping a higher index does not
+            # invalidate lower indices.
+            removed_sorted = sorted(indices, reverse=True)
+            for ridx in removed_sorted:
+                page.pop(ridx)
+            # Decrement any surviving pending index by the number of removed
+            # slots that sat below it.
+            for ref, refs in list(pending_timeline_refs.items()):
+                pending_timeline_refs[ref] = [i - sum(1 for r in removed_sorted if r < i) for i in refs]
+
+        for item, key in sorted_items:
+            if len(page) >= limit:
+                # Strict page boundary — past-the-page ledgers do NOT promote.
+                has_more = True
+                break
+
+            if item.kind == gateway_pb2.ActivityFeedItem.Kind.LEDGER_ENTRY:
+                lid = item.ledger_entry.id
+                if lid in seen_ledger_ids:
+                    # Duplicate ledger id (shouldn't happen — ids are unique).
+                    continue
+                # Replace ALL pending timeline rows for this ledger id with
+                # the ledger row. The ledger sorts later than its timeline
+                # siblings (older ts), so appending after the pops preserves
+                # DESC order.
+                _drop_pending(lid)
+                seen_ledger_ids.add(lid)
+                page.append((item, key))
+                continue
+
+            # TIMELINE_EVENT
+            ref = item.timeline_event.related_ledger_entry_id
+            if ref and ref in seen_ledger_ids:
+                # Ledger already on page — drop the duplicate.
+                continue
+            idx = len(page)
+            page.append((item, key))
+            if ref:
+                pending_timeline_refs.setdefault(ref, []).append(idx)
+
+        return page, has_more
+
+    @staticmethod
+    def _apply_boundary_filter(
+        items: list[tuple[gateway_pb2.ActivityFeedItem, str]],
+        before_ts: int | None,
+        before_id: str,
+    ) -> list[tuple[gateway_pb2.ActivityFeedItem, str]]:
+        """Second-precision boundary filter at the cursor.
+
+        Items carry sub-second timestamps but the proto cursor is integer
+        seconds. ``item.timestamp`` is already int-seconds (set during item
+        construction), so comparisons are second-precise:
+          * Without ``before_id``: strict ``< before_ts``.
+          * With ``before_id`` (tie-breaker): strict ``< before_ts`` OR
+            (``== before_ts`` AND composite key lex < cursor).
+        """
+        if before_ts is None:
+            return items
+        if before_id:
+            return [
+                (item, key)
+                for (item, key) in items
+                if item.timestamp < before_ts or (item.timestamp == before_ts and key < before_id)
+            ]
+        return [(item, key) for (item, key) in items if item.timestamp < before_ts]

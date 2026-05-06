@@ -208,7 +208,6 @@ class CompoundV3PaperTradeOptimismStrategy(IntentStrategy):
                     details={
                         "action": "supply",
                         "token": self.supply_token,
-                        "amount": str(self.supply_amount),
                         "chain": "optimism",
                     },
                 )

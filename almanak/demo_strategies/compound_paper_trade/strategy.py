@@ -228,7 +228,6 @@ class CompoundPaperTradeStrategy(IntentStrategy):
                     event_type=TimelineEventType.POSITION_MODIFIED,
                     description=f"Supplied {self.supply_amount} {self.supply_token} to Compound V3",
                     strategy_id=self.strategy_id,
-                    details={"action": "supply", "token": self.supply_token, "amount": str(self.supply_amount)},
                 )
             )
 

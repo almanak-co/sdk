@@ -83,6 +83,12 @@ class TimelineEvent:
     tx_hash: str | None = None
     chain: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    cycle_id: str = ""
+    phase: str = ""
+    # VIB-4041 — typed pointer to transaction_ledger.id when this event narrates
+    # an executed intent. Renderers should look up the source-of-truth row
+    # rather than reading money-shaped keys from `details`.
+    related_ledger_entry_id: str = ""
 
 
 @dataclass
@@ -117,6 +123,46 @@ class LedgerTradeRecord:
     protocol: str
     success: bool
     error: str
+
+
+@dataclass
+class ActivityFeedItem:
+    """One row in the merged activity feed (VIB-4042 / PR3).
+
+    Exactly one of `timeline_event` / `ledger_entry` is populated. The renderer
+    switches on `kind` rather than peeking at field presence, which matches
+    the gateway's compositor contract.
+    """
+
+    kind: str  # "TIMELINE_EVENT" | "LEDGER_ENTRY"
+    timestamp: datetime | None
+    strategy_id: str
+    cycle_id: str
+    timeline_event: TimelineEvent | None = None
+    ledger_entry: LedgerTradeRecord | None = None
+
+
+@dataclass
+class ActivityFeedResponse:
+    """Paginated activity feed response.
+
+    The cursor is composite: pass both ``next_before`` and ``next_before_id``
+    back to the next ``get_activity_feed`` call. When two items share the
+    boundary timestamp, ``next_before_id`` is the tie-breaker so a tied item
+    is never returned twice nor skipped (VIB-4042 / Gemini review).
+
+    ``backfill_truncated`` is True only when the gateway hit
+    ``MAX_BACKFILL_ATTEMPTS`` without filling the page AND at least one
+    underlying stream still has rows (saturated tie-second). Renderers
+    MUST surface this distinct from "end of feed" so operators can spot
+    the pathological case (CodeRabbit on PR #2117).
+    """
+
+    items: list[ActivityFeedItem]
+    has_more: bool
+    next_before: datetime | None
+    next_before_id: str = ""
+    backfill_truncated: bool = False
 
 
 @dataclass
@@ -751,31 +797,7 @@ class GatewayDashboardClient:
         )
         response = client.dashboard.GetTransactionLedger(request)
 
-        records = []
-        for entry in response.entries:
-            records.append(
-                LedgerTradeRecord(
-                    id=entry.id,
-                    cycle_id=entry.cycle_id,
-                    strategy_id=entry.strategy_id,
-                    timestamp=datetime.fromtimestamp(entry.timestamp, tz=UTC) if entry.timestamp else None,
-                    intent_type=entry.intent_type,
-                    token_in=entry.token_in,
-                    amount_in=entry.amount_in,
-                    token_out=entry.token_out,
-                    amount_out=entry.amount_out,
-                    effective_price=entry.effective_price,
-                    slippage_bps=entry.slippage_bps,
-                    gas_used=entry.gas_used,
-                    gas_usd=entry.gas_usd,
-                    tx_hash=entry.tx_hash,
-                    chain=entry.chain,
-                    protocol=entry.protocol,
-                    success=entry.success,
-                    error=entry.error,
-                )
-            )
-        return records
+        return [self._convert_ledger_trade_record(entry) for entry in response.entries]
 
     def get_pnl_summary(self, strategy_id: str) -> "PnLSummary":
         """5-second-eyeball card via gateway (VIB-3969)."""
@@ -828,6 +850,95 @@ class GatewayDashboardClient:
         response = client.dashboard.GetTradeTape(request)
         rows = [_convert_trade_tape_row(r) for r in response.rows]
         return TradeTapeResponse(rows=rows, has_more=response.has_more)
+
+    def get_activity_feed(
+        self,
+        strategy_id: str,
+        limit: int = 50,
+        before: datetime | None = None,
+        event_type: str | None = None,
+        intent_type: str | None = None,
+        before_id: str = "",
+    ) -> ActivityFeedResponse:
+        """Get the merged activity feed (timeline + ledger) for a strategy.
+
+        Per PRD-TimelineEvents §6.1 / §9, this is the only correct way for the
+        dashboard to read a strategy's history — the gateway owns the merge,
+        the dedup, and the cursor. Don't recompose `get_timeline()` and
+        `get_transaction_ledger()` client-side; they will drift.
+
+        Args:
+            strategy_id: Strategy identifier.
+            limit: Page size (server caps at 200).
+            before: Cursor — only items at or before this timestamp.
+            event_type: Optional timeline-side event-type filter.
+            intent_type: Optional ledger-side intent-type filter.
+            before_id: Composite tie-breaker. Pass the previous response's
+                ``next_before_id`` so multiple items at the boundary timestamp
+                paginate deterministically (VIB-4042 / Gemini review).
+        """
+        client = self._ensure_connected()
+        request = gateway_pb2.GetActivityFeedRequest(
+            strategy_id=strategy_id,
+            limit=limit,
+            before_timestamp=int(before.timestamp()) if before else 0,
+            before_id=before_id,
+            event_type_filter=event_type or "",
+            intent_type_filter=intent_type or "",
+        )
+        try:
+            response = client.dashboard.GetActivityFeed(request)
+        except grpc.RpcError as e:
+            logger.exception("Failed to get activity feed")
+            raise GatewayConnectionError(f"Failed to get activity feed: {e}") from e
+
+        items: list[ActivityFeedItem] = []
+        for proto in response.items:
+            kind_value = proto.kind
+            if kind_value == gateway_pb2.ActivityFeedItem.Kind.TIMELINE_EVENT:
+                kind = "TIMELINE_EVENT"
+                timeline_event = self._convert_timeline_event(proto.timeline_event)
+                ledger_entry = None
+            elif kind_value == gateway_pb2.ActivityFeedItem.Kind.LEDGER_ENTRY:
+                kind = "LEDGER_ENTRY"
+                timeline_event = None
+                ledger_entry = self._convert_ledger_trade_record(proto.ledger_entry)
+            else:
+                # CodeRabbit on PR #2117: skip unknown kinds entirely instead of
+                # appending a blank ``ActivityFeedItem``. A placeholder with no
+                # payload still counts toward ``limit`` / pagination / renderer
+                # loops — an unexpected enum value would silently turn a full
+                # page into a partially blank one and hide real rows behind
+                # ``has_more``. Log and continue so the page accounting stays
+                # honest.
+                logger.warning(
+                    "GetActivityFeed returned unknown ActivityFeedItem.Kind=%r; "
+                    "skipping. Client and gateway proto stubs may be out of sync.",
+                    kind_value,
+                )
+                continue
+
+            items.append(
+                ActivityFeedItem(
+                    kind=kind,
+                    timestamp=datetime.fromtimestamp(proto.timestamp, tz=UTC) if proto.timestamp else None,
+                    strategy_id=proto.strategy_id,
+                    cycle_id=proto.cycle_id,
+                    timeline_event=timeline_event,
+                    ledger_entry=ledger_entry,
+                )
+            )
+
+        next_before = (
+            datetime.fromtimestamp(response.next_before_timestamp, tz=UTC) if response.next_before_timestamp else None
+        )
+        return ActivityFeedResponse(
+            items=items,
+            has_more=response.has_more,
+            next_before=next_before,
+            next_before_id=response.next_before_id,
+            backfill_truncated=response.backfill_truncated,
+        )
 
     def _convert_summary(self, proto: gateway_pb2.StrategySummary) -> StrategySummary:
         """Convert protobuf StrategySummary to dataclass."""
@@ -904,6 +1015,40 @@ class GatewayDashboardClient:
             pnl_history=pnl_history,
         )
 
+    def _convert_ledger_trade_record(self, entry: Any) -> LedgerTradeRecord:
+        """Convert protobuf ``LedgerEntry`` to ``LedgerTradeRecord`` dataclass.
+
+        CodeRabbit on PR #2117 round 5: this conversion was previously
+        duplicated across ``get_transaction_ledger`` and the
+        ``get_activity_feed`` ``LEDGER_ENTRY`` branch. A drift bug here
+        (missed proto field, type mismatch, timestamp tz handling) would
+        only surface in one of the two call sites — exactly the
+        asymmetric-write pattern that has bitten this codebase repeatedly.
+        Centralising the converter ensures the two surfaces evolve in
+        lockstep and any new ``LedgerEntry`` field added to
+        ``gateway.proto`` is mapped exactly once.
+        """
+        return LedgerTradeRecord(
+            id=entry.id,
+            cycle_id=entry.cycle_id,
+            strategy_id=entry.strategy_id,
+            timestamp=datetime.fromtimestamp(entry.timestamp, tz=UTC) if entry.timestamp else None,
+            intent_type=entry.intent_type,
+            token_in=entry.token_in,
+            amount_in=entry.amount_in,
+            token_out=entry.token_out,
+            amount_out=entry.amount_out,
+            effective_price=entry.effective_price,
+            slippage_bps=entry.slippage_bps,
+            gas_used=entry.gas_used,
+            gas_usd=entry.gas_usd,
+            tx_hash=entry.tx_hash,
+            chain=entry.chain,
+            protocol=entry.protocol,
+            success=entry.success,
+            error=entry.error,
+        )
+
     def _convert_timeline_event(self, proto: gateway_pb2.TimelineEventInfo) -> TimelineEvent:
         """Convert protobuf TimelineEventInfo to dataclass."""
         details = {}
@@ -920,6 +1065,9 @@ class GatewayDashboardClient:
             tx_hash=proto.tx_hash if proto.tx_hash else None,
             chain=proto.chain if proto.chain else None,
             details=details,
+            cycle_id=proto.cycle_id or "",
+            phase=proto.phase or "",
+            related_ledger_entry_id=proto.related_ledger_entry_id or "",
         )
 
 

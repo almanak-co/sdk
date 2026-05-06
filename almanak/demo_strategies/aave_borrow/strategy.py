@@ -411,7 +411,6 @@ class AaveBorrowStrategy(IntentStrategy):
                         strategy_id=self.strategy_id,
                         details={
                             "action": "supply",
-                            "amount": str(self.collateral_amount),
                             "token": self.collateral_token,
                         },
                     )

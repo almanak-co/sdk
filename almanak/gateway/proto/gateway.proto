@@ -808,6 +808,7 @@ message RecordTimelineEventRequest {
   int64 timestamp = 7;         // Optional: event timestamp (uses server time if 0)
   string cycle_id = 8;         // Optional: correlation ID linking events in one decide->execute cycle
   string phase = 9;            // Optional: strategy lifecycle phase (DECIDE, COMPILE, VALIDATE, EXECUTE, ENRICH)
+  string related_ledger_entry_id = 10;  // Optional: typed pointer to transaction_ledger.id (VIB-4041). Use for tx-correlated UX events (POSITION_OPENED, etc.). Money trail lives in the ledger row, not in details_json.
 }
 
 message RecordTimelineEventResponse {
@@ -1288,6 +1289,13 @@ service DashboardService {
   // Trade tape: ledger × accounting × position-event joined view, one
   // row per intent, with receipt-parsed and oracle-quote payloads.
   rpc GetTradeTape(GetTradeTapeRequest) returns (GetTradeTapeResponse);
+
+  // Activity feed: chronologically merged timeline_events (UX cards) and
+  // transaction_ledger entries (financial truth) for a single strategy.
+  // The gateway is the single source of truth for the merge — clients MUST
+  // NOT recompose by reading the two streams separately, or the timestamp
+  // cursor and dedup logic will drift. (VIB-4042 / PR3)
+  rpc GetActivityFeed(GetActivityFeedRequest) returns (GetActivityFeedResponse);
 }
 
 // =============================================================================
@@ -1402,6 +1410,22 @@ message TimelineEventInfo {
   string tx_hash = 4;
   string details_json = 5;    // JSON-encoded details
   string chain = 6;
+  string cycle_id = 7;
+  string phase = 8;
+  // Typed pointer to transaction_ledger.id (VIB-4041) — the only permitted
+  // timeline → ledger link (PRD-TimelineEvents §6.3). Non-empty: reliably
+  // means a transaction-derived UX event whose money trail is on the
+  // referenced ledger row (gas_used, amount_in/out, slippage_bps,
+  // pnl_usd, …). Empty: ambiguous on its own. It can mean either (a) the
+  // event is genuinely not transaction-derived (lifecycle / risk /
+  // operator action) or (b) the row was written on a deployed gateway
+  // whose Postgres host predates the metrics-database migration that
+  // adds the `related_ledger_entry_id` column (the staged-rollout
+  // capability gate at `_pg_supports_related_ledger` omits writes on
+  // such hosts). Clients that need to disambiguate should consult
+  // `event_type` / look for a same-cycle ledger row, not treat empty as
+  // a definitive "UX-only" marker.
+  string related_ledger_entry_id = 9;
 }
 
 message PnLDataPoint {
@@ -1740,6 +1764,109 @@ message TradeTapeRow {
   string row_wallet_delta_usd = 60;
   string row_component_usd = 61;
   string row_residual_usd = 62;
+}
+
+// =============================================================================
+// Activity feed (VIB-4042 / PR3) — chronologically merged timeline + ledger
+// =============================================================================
+//
+// The activity feed is the dashboard's render path for a strategy's history.
+// It interleaves UX cards (timeline_events: STATE_CHANGE, lifecycle markers,
+// risk alerts) with financial-truth rows (transaction_ledger entries) into
+// a single timestamp-descending stream.
+//
+// PRD-TimelineEvents §6.1 / §9: clients MUST read this feed via the gateway,
+// NOT recompose by separately calling GetTimeline + GetTransactionLedger.
+// The compositor lives gateway-side because:
+//   1) Cursor pagination over a merged stream needs server-side ordering
+//      to be correct under concurrent writes.
+//   2) related_ledger_entry_id-based dedup (drop a TIMELINE_EVENT when
+//      its referenced LEDGER_ENTRY is in the same window) is centralized
+//      here so clients do not re-derive it.
+//   3) Hosted Postgres and local SQLite share one query path; the
+//      dashboard never branches on backend.
+//
+// Dedup contract — staged rollout (CodeRabbit on PR #2117):
+//   * On backends that carry the `related_ledger_entry_id` correlation
+//     column (local SQLite always; hosted Postgres after VIB-4051), dedup
+//     is deterministic — every timeline event whose referenced ledger row
+//     appears on the same page is dropped.
+//   * On backends that do NOT carry the column yet (hosted Postgres
+//     pre-VIB-4051), the timeline rows are written with an empty
+//     correlation field, so no dedup fires. The merged feed still renders
+//     correctly: clients see the timeline card AND the ledger row for
+//     the same transaction. Renderers MUST tolerate this case rather
+//     than treating duplicates as a backend bug.
+// Clients SHOULD NOT depend on dedup as a pre-condition for correctness.
+// The ledger row is always the financial truth; the timeline card is UX.
+//
+// Pagination saturation (CodeRabbit on PR #2117): per-stream cursors
+// are timestamp-only, not composite. If a single stream produces more
+// than `OVER_FETCH_FACTOR * limit + 1` rows at exactly the same epoch
+// second, the tail of that second is unreachable on subsequent pages
+// purely from this RPC. Default limits admit 601 over-fetched rows
+// per attempt so the case is unreachable in normal operation, but
+// the gateway exposes a wire-level degradation signal —
+// `GetActivityFeedResponse.backfill_truncated` — set to true whenever
+// the backfill loop hits `MAX_BACKFILL_ATTEMPTS` without filling the
+// page or exhausting both streams. Clients MUST be able to surface
+// this distinct from "end of feed" so operators can detect the
+// pathological case (e.g., trigger a different read path or alert).
+
+message GetActivityFeedRequest {
+  string strategy_id = 1;
+  int32 limit = 2;                  // Default 50, capped server-side at 200
+  int64 before_timestamp = 3;       // Cursor: only items at-or-before this timestamp (unix; 0 = newest first)
+  string event_type_filter = 4;     // Optional: restrict timeline-side filter (intent-type filter applies to ledger side)
+  string intent_type_filter = 5;    // Optional
+  // Tie-breaker cursor (VIB-4042 / Gemini review). When multiple items share
+  // `before_timestamp`, this composite key (kind:item_id) drops items that
+  // sort lexicographically greater-than-or-equal so a tied item is never
+  // returned twice nor skipped. Pass the previous response's `next_before_id`;
+  // ignored when empty.
+  string before_id = 6;
+}
+
+message GetActivityFeedResponse {
+  repeated ActivityFeedItem items = 1;
+  bool has_more = 2;
+  int64 next_before_timestamp = 3;  // 0 when has_more=false; otherwise the timestamp to pass on next call
+  // Composite tie-breaker key of the last returned item (kind:item_id).
+  // Pair with `next_before_timestamp` on the next call. Empty when
+  // has_more=false.
+  string next_before_id = 4;
+  // CodeRabbit on PR #2117 wire-level degradation signal. Set to true
+  // ONLY when the backfill loop hit ``MAX_BACKFILL_ATTEMPTS`` without
+  // filling the page AND at least one stream still has more rows
+  // (``timeline_exhausted`` and ``ledger_exhausted`` are NOT both true).
+  // This distinguishes "end of feed" (``has_more=false`` and
+  // ``backfill_truncated=false``) from "the tail of a tie-second was
+  // dropped" (``has_more=true`` and ``backfill_truncated=true``).
+  // Clients MUST surface this in operator-visible UX (the dashboard
+  // banners "feed truncated; some rows in the same second may be
+  // missing — paginate or query the underlying ledger directly").
+  bool backfill_truncated = 5;
+}
+
+// One item in the merged feed. Exactly one of `timeline_event` or
+// `ledger_entry` is populated, enforced at the schema level via `oneof`
+// (CodeRabbit review on PR #2116). `kind` is the discriminator a renderer
+// switches on; `WhichOneof("payload")` is the protobuf-side check the
+// gateway uses for invariant assertions.
+message ActivityFeedItem {
+  enum Kind {
+    UNKNOWN = 0;
+    TIMELINE_EVENT = 1;
+    LEDGER_ENTRY = 2;
+  }
+  Kind kind = 1;
+  int64 timestamp = 2;              // Sort key, copied from the inner row
+  string strategy_id = 3;
+  string cycle_id = 4;              // For grouping in the renderer
+  oneof payload {
+    TimelineEventInfo timeline_event = 10;
+    LedgerEntryInfo ledger_entry = 11;
+  }
 }
 
 // =============================================================================

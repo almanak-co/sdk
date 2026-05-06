@@ -532,9 +532,6 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
                         "pool": self.pool,
                         "fee_tier": self.fee_tier,
                         "position_id": position_id,
-                        "liquidity": liquidity,
-                        "tick_lower": self._tick_lower,
-                        "tick_upper": self._tick_upper,
                     },
                 )
             )

@@ -202,7 +202,6 @@ class CompoundV3PnLBacktestStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.supply_amount} {self.supply_token} to Compound V3",
                         strategy_id=self.strategy_id,
-                        details={"action": "supply", "amount": str(self.supply_amount), "protocol": "compound_v3"},
                     )
                 )
                 logger.info("SUPPLY confirmed: %s %s -> state=supplied", self.supply_amount, self.supply_token)

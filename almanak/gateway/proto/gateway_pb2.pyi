@@ -2438,6 +2438,7 @@ class RecordTimelineEventRequest(_message.Message):
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     PHASE_FIELD_NUMBER: _builtins.int
+    RELATED_LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     event_type: _builtins.str
     """"TRADE", "REBALANCE", "ERROR", "STATE_CHANGE", etc."""
@@ -2454,6 +2455,8 @@ class RecordTimelineEventRequest(_message.Message):
     """Optional: correlation ID linking events in one decide->execute cycle"""
     phase: _builtins.str
     """Optional: strategy lifecycle phase (DECIDE, COMPILE, VALIDATE, EXECUTE, ENRICH)"""
+    related_ledger_entry_id: _builtins.str
+    """Optional: typed pointer to transaction_ledger.id (VIB-4041). Use for tx-correlated UX events (POSITION_OPENED, etc.). Money trail lives in the ledger row, not in details_json."""
     def __init__(
         self,
         *,
@@ -2466,8 +2469,9 @@ class RecordTimelineEventRequest(_message.Message):
         timestamp: _builtins.int = ...,
         cycle_id: _builtins.str = ...,
         phase: _builtins.str = ...,
+        related_ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "related_ledger_entry_id", b"related_ledger_entry_id", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___RecordTimelineEventRequest: _TypeAlias = RecordTimelineEventRequest  # noqa: Y015
@@ -4283,6 +4287,9 @@ class TimelineEventInfo(_message.Message):
     TX_HASH_FIELD_NUMBER: _builtins.int
     DETAILS_JSON_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    PHASE_FIELD_NUMBER: _builtins.int
+    RELATED_LEDGER_ENTRY_ID_FIELD_NUMBER: _builtins.int
     timestamp: _builtins.int
     event_type: _builtins.str
     description: _builtins.str
@@ -4290,6 +4297,10 @@ class TimelineEventInfo(_message.Message):
     details_json: _builtins.str
     """JSON-encoded details"""
     chain: _builtins.str
+    cycle_id: _builtins.str
+    phase: _builtins.str
+    related_ledger_entry_id: _builtins.str
+    """Typed pointer to transaction_ledger.id (VIB-4041). Empty string when the event is not transaction-derived."""
     def __init__(
         self,
         *,
@@ -4299,8 +4310,11 @@ class TimelineEventInfo(_message.Message):
         tx_hash: _builtins.str = ...,
         details_json: _builtins.str = ...,
         chain: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        phase: _builtins.str = ...,
+        related_ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "related_ledger_entry_id", b"related_ledger_entry_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TimelineEventInfo: _TypeAlias = TimelineEventInfo  # noqa: Y015
@@ -5421,6 +5435,202 @@ class TradeTapeRow(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TradeTapeRow: _TypeAlias = TradeTapeRow  # noqa: Y015
+
+@_typing.final
+class GetActivityFeedRequest(_message.Message):
+    """=============================================================================
+    Activity feed (VIB-4042 / PR3) — chronologically merged timeline + ledger
+    =============================================================================
+
+    The activity feed is the dashboard's render path for a strategy's history.
+    It interleaves UX cards (timeline_events: STATE_CHANGE, lifecycle markers,
+    risk alerts) with financial-truth rows (transaction_ledger entries) into
+    a single timestamp-descending stream.
+
+    PRD-TimelineEvents §6.1 / §9: clients MUST read this feed via the gateway,
+    NOT recompose by separately calling GetTimeline + GetTransactionLedger.
+    The compositor lives gateway-side because:
+      1) Cursor pagination over a merged stream needs server-side ordering
+         to be correct under concurrent writes.
+      2) related_ledger_entry_id-based dedup (drop a TIMELINE_EVENT when
+         its referenced LEDGER_ENTRY is in the same window) is centralized
+         here so clients do not re-derive it.
+      3) Hosted Postgres and local SQLite share one query path; the
+         dashboard never branches on backend.
+
+    Dedup contract — staged rollout (CodeRabbit on PR #2117):
+      * On backends that carry the `related_ledger_entry_id` correlation
+        column (local SQLite always; hosted Postgres after VIB-4051), dedup
+        is deterministic — every timeline event whose referenced ledger row
+        appears on the same page is dropped.
+      * On backends that do NOT carry the column yet (hosted Postgres
+        pre-VIB-4051), the timeline rows are written with an empty
+        correlation field, so no dedup fires. The merged feed still renders
+        correctly: clients see the timeline card AND the ledger row for
+        the same transaction. Renderers MUST tolerate this case rather
+        than treating duplicates as a backend bug.
+    Clients SHOULD NOT depend on dedup as a pre-condition for correctness.
+    The ledger row is always the financial truth; the timeline card is UX.
+
+    Pagination saturation (CodeRabbit on PR #2117): per-stream cursors
+    are timestamp-only, not composite. If a single stream produces more
+    than `OVER_FETCH_FACTOR * limit + 1` rows at exactly the same epoch
+    second, the tail of that second is unreachable on subsequent pages
+    purely from this RPC. Default limits admit 601 over-fetched rows
+    per attempt so the case is unreachable in normal operation, but
+    the gateway exposes a wire-level degradation signal —
+    `GetActivityFeedResponse.backfill_truncated` — set to true whenever
+    the backfill loop hits `MAX_BACKFILL_ATTEMPTS` without filling the
+    page or exhausting both streams. Clients MUST be able to surface
+    this distinct from "end of feed" so operators can detect the
+    pathological case (e.g., trigger a different read path or alert).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    BEFORE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
+    BEFORE_ID_FIELD_NUMBER: _builtins.int
+    strategy_id: _builtins.str
+    limit: _builtins.int
+    """Default 50, capped server-side at 200"""
+    before_timestamp: _builtins.int
+    """Cursor: only items at-or-before this timestamp (unix; 0 = newest first)"""
+    event_type_filter: _builtins.str
+    """Optional: restrict timeline-side filter (intent-type filter applies to ledger side)"""
+    intent_type_filter: _builtins.str
+    """Optional"""
+    before_id: _builtins.str
+    """Tie-breaker cursor (VIB-4042 / Gemini review). When multiple items share
+    `before_timestamp`, this composite key (kind:item_id) drops items that
+    sort lexicographically greater-than-or-equal so a tied item is never
+    returned twice nor skipped. Pass the previous response's `next_before_id`;
+    ignored when empty.
+    """
+    def __init__(
+        self,
+        *,
+        strategy_id: _builtins.str = ...,
+        limit: _builtins.int = ...,
+        before_timestamp: _builtins.int = ...,
+        event_type_filter: _builtins.str = ...,
+        intent_type_filter: _builtins.str = ...,
+        before_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_id", b"before_id", "before_timestamp", b"before_timestamp", "event_type_filter", b"event_type_filter", "intent_type_filter", b"intent_type_filter", "limit", b"limit", "strategy_id", b"strategy_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetActivityFeedRequest: _TypeAlias = GetActivityFeedRequest  # noqa: Y015
+
+@_typing.final
+class GetActivityFeedResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ITEMS_FIELD_NUMBER: _builtins.int
+    HAS_MORE_FIELD_NUMBER: _builtins.int
+    NEXT_BEFORE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    NEXT_BEFORE_ID_FIELD_NUMBER: _builtins.int
+    BACKFILL_TRUNCATED_FIELD_NUMBER: _builtins.int
+    has_more: _builtins.bool
+    next_before_timestamp: _builtins.int
+    """0 when has_more=false; otherwise the timestamp to pass on next call"""
+    next_before_id: _builtins.str
+    """Composite tie-breaker key of the last returned item (kind:item_id).
+    Pair with `next_before_timestamp` on the next call. Empty when
+    has_more=false.
+    """
+    backfill_truncated: _builtins.bool
+    """CodeRabbit on PR #2117 wire-level degradation signal. Set to true
+    ONLY when the backfill loop hit ``MAX_BACKFILL_ATTEMPTS`` without
+    filling the page AND at least one stream still has more rows
+    (``timeline_exhausted`` and ``ledger_exhausted`` are NOT both true).
+    This distinguishes "end of feed" (``has_more=false`` and
+    ``backfill_truncated=false``) from "the tail of a tie-second was
+    dropped" (``has_more=true`` and ``backfill_truncated=true``).
+    Clients MUST surface this in operator-visible UX (the dashboard
+    banners "feed truncated; some rows in the same second may be
+    missing — paginate or query the underlying ledger directly").
+    """
+    @_builtins.property
+    def items(self) -> _containers.RepeatedCompositeFieldContainer[Global___ActivityFeedItem]: ...
+    def __init__(
+        self,
+        *,
+        items: _abc.Iterable[Global___ActivityFeedItem] | None = ...,
+        has_more: _builtins.bool = ...,
+        next_before_timestamp: _builtins.int = ...,
+        next_before_id: _builtins.str = ...,
+        backfill_truncated: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["backfill_truncated", b"backfill_truncated", "has_more", b"has_more", "items", b"items", "next_before_id", b"next_before_id", "next_before_timestamp", b"next_before_timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetActivityFeedResponse: _TypeAlias = GetActivityFeedResponse  # noqa: Y015
+
+@_typing.final
+class ActivityFeedItem(_message.Message):
+    """One item in the merged feed. Exactly one of `timeline_event` or
+    `ledger_entry` is populated, enforced at the schema level via `oneof`
+    (CodeRabbit review on PR #2116). `kind` is the discriminator a renderer
+    switches on; `WhichOneof("payload")` is the protobuf-side check the
+    gateway uses for invariant assertions.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    class _Kind:
+        ValueType = _typing.NewType("ValueType", _builtins.int)
+        V: _TypeAlias = ValueType  # noqa: Y015
+
+    class _KindEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[ActivityFeedItem._Kind.ValueType], _builtins.type):
+        DESCRIPTOR: _descriptor.EnumDescriptor
+        UNKNOWN: ActivityFeedItem._Kind.ValueType  # 0
+        TIMELINE_EVENT: ActivityFeedItem._Kind.ValueType  # 1
+        LEDGER_ENTRY: ActivityFeedItem._Kind.ValueType  # 2
+
+    class Kind(_Kind, metaclass=_KindEnumTypeWrapper): ...
+    UNKNOWN: ActivityFeedItem.Kind.ValueType  # 0
+    TIMELINE_EVENT: ActivityFeedItem.Kind.ValueType  # 1
+    LEDGER_ENTRY: ActivityFeedItem.Kind.ValueType  # 2
+
+    KIND_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    TIMELINE_EVENT_FIELD_NUMBER: _builtins.int
+    LEDGER_ENTRY_FIELD_NUMBER: _builtins.int
+    kind: Global___ActivityFeedItem.Kind.ValueType
+    timestamp: _builtins.int
+    """Sort key, copied from the inner row"""
+    strategy_id: _builtins.str
+    cycle_id: _builtins.str
+    """For grouping in the renderer"""
+    @_builtins.property
+    def timeline_event(self) -> Global___TimelineEventInfo: ...
+    @_builtins.property
+    def ledger_entry(self) -> Global___LedgerEntryInfo: ...
+    def __init__(
+        self,
+        *,
+        kind: Global___ActivityFeedItem.Kind.ValueType = ...,
+        timestamp: _builtins.int = ...,
+        strategy_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        timeline_event: Global___TimelineEventInfo | None = ...,
+        ledger_entry: Global___LedgerEntryInfo | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["ledger_entry", b"ledger_entry", "payload", b"payload", "timeline_event", b"timeline_event"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "kind", b"kind", "ledger_entry", b"ledger_entry", "payload", b"payload", "strategy_id", b"strategy_id", "timeline_event", b"timeline_event", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["timeline_event", "ledger_entry"]  # noqa: Y015
+    _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
+
+Global___ActivityFeedItem: _TypeAlias = ActivityFeedItem  # noqa: Y015
 
 @_typing.final
 class PolymarketGetMarketRequest(_message.Message):

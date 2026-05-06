@@ -207,7 +207,6 @@ class MorphoPaperTradeStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Supplied {self.collateral_amount} {self.collateral_token} to Morpho Blue",
                         strategy_id=self.strategy_id,
-                        details={"action": "supply", "amount": str(self.collateral_amount)},
                     )
                 )
             elif intent_type == "BORROW":
@@ -220,7 +219,6 @@ class MorphoPaperTradeStrategy(IntentStrategy):
                         event_type=TimelineEventType.POSITION_MODIFIED,
                         description=f"Borrowed {self._borrowed_amount} {self.borrow_token} from Morpho Blue",
                         strategy_id=self.strategy_id,
-                        details={"action": "borrow", "amount": str(self._borrowed_amount)},
                     )
                 )
             elif intent_type == "REPAY":

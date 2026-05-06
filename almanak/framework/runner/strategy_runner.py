@@ -907,13 +907,30 @@ class StrategyRunner:
                     cb_result.consecutive_failures,
                 )
                 cb_state_label = cb_result.state.value  # "open" or "paused"
+                # VIB-4043 / PR4: strip cb_result.to_dict() — it carries
+                # cumulative_loss_usd which is money-shaped. The reason and
+                # state already convey the lifecycle event; loss totals live
+                # in portfolio_metrics.
+                # CodeRabbit on PR #2117 round 5: ``cb_result.reason`` is a
+                # free-form string (e.g. ``"Circuit breaker open. Cooldown:
+                # {remaining}s remaining"``) and could in the future grow to
+                # include money-shaped numbers (loss thresholds, P&L), which
+                # would re-introduce the drift the producer-side guardrail is
+                # designed to block. The TripReason enum is bucketed by
+                # construction (CONSECUTIVE_FAILURES, CUMULATIVE_LOSS,
+                # MANUAL_PAUSE, …) so the description stays UX-safe.
+                _trip_label = cb_result.trip_reason.value if cb_result.trip_reason else "blocked"
                 add_event(
                     TimelineEvent(
                         timestamp=datetime.now(UTC),
                         event_type=TimelineEventType.STRATEGY_STUCK,
-                        description=f"Circuit breaker {cb_state_label}: {cb_result.reason}",
+                        description=f"Circuit breaker {cb_state_label}: {_trip_label}",
                         strategy_id=strategy_id,
-                        details=cb_result.to_dict(),
+                        details={
+                            "circuit_breaker_state": cb_state_label,
+                            "trip_reason": cb_result.trip_reason.value if cb_result.trip_reason else None,
+                            "consecutive_failures": cb_result.consecutive_failures,
+                        },
                     )
                 )
                 # Issue #1780: count every iteration that produces an
@@ -1286,18 +1303,23 @@ class StrategyRunner:
                 f"Circuit breaker BLOCKED execution for {strategy_id}: "
                 f"state={cb_check.state.value}, reason={cb_check.reason}"
             )
+            # VIB-4043 / PR4: cumulative_loss_usd is money-shaped; loss totals
+            # live in portfolio_metrics, not in timeline UX cards.
+            # CodeRabbit on PR #2117 round 5 (sibling of the STRATEGY_STUCK
+            # path above): use the bucketed TripReason enum value instead of
+            # the free-form ``cb_check.reason`` string for the description.
+            _trip_label = cb_check.trip_reason.value if cb_check.trip_reason else "blocked"
             add_event(
                 TimelineEvent(
                     timestamp=datetime.now(UTC),
                     event_type=TimelineEventType.ERROR,
-                    description=f"Circuit breaker blocked execution: {cb_check.reason}",
+                    description=f"Circuit breaker blocked execution: {_trip_label}",
                     strategy_id=strategy_id,
                     chain=getattr(strategy, "chain", ""),
                     details={
                         "circuit_breaker_state": cb_check.state.value,
                         "trip_reason": cb_check.trip_reason.value if cb_check.trip_reason else None,
                         "consecutive_failures": cb_check.consecutive_failures,
-                        "cumulative_loss_usd": str(cb_check.cumulative_loss_usd),
                         "cooldown_remaining_seconds": cb_check.cooldown_remaining_seconds,
                     },
                 )
@@ -1875,8 +1897,16 @@ class StrategyRunner:
         intent: AnyIntent,
         success: bool,
         result: Any | None,
+        related_ledger_entry_id: str = "",
     ) -> None:
-        """Emit a timeline event for an intent execution (success or failure)."""
+        """Emit a timeline event for an intent execution (success or failure).
+
+        VIB-4043 / PR4 — UX-only event. The financial truth (gas_used, amounts,
+        prices, slippage, position attribution) lives in `transaction_ledger`
+        and is referenced via `related_ledger_entry_id`. Do NOT add money-shaped
+        keys to `details` here; the static guardrail in
+        `tests/static/test_timeline_payload_keys.py` will fail the build.
+        """
         try:
             strategy_id = strategy.strategy_id
             intent_type = getattr(intent, "intent_type", None)
@@ -1896,58 +1926,40 @@ class StrategyRunner:
             if not success:
                 event_type = TimelineEventType.TRANSACTION_FAILED
 
-            # Build description
+            # CodeRabbit on PR #2117 round 5: in multi-tx bundles
+            # (approve → swap, approve → lp_open, …) ``transaction_results[0]``
+            # is typically the approval, not the value-action. The activity
+            # feed deep-link should land on the terminal action so a user
+            # tapping the breadcrumb sees the actual swap / LP / lend tx in
+            # the explorer, not its preceding approval. Pick the last
+            # non-empty hash.
             tx_hash = ""
-            gas_used = 0
-            if result:
-                if hasattr(result, "transaction_results") and result.transaction_results:
-                    tx_hash = result.transaction_results[0].tx_hash or ""
-                gas_used = getattr(result, "total_gas_used", 0)
+            if result and hasattr(result, "transaction_results") and result.transaction_results:
+                tx_hash = next(
+                    (tr.tx_hash for tr in reversed(result.transaction_results) if getattr(tr, "tx_hash", "")),
+                    "",
+                )
 
             if success:
-                description = f"{intent_type_str} executed successfully ({gas_used:,} gas)"
+                description = f"{intent_type_str} executed"
             else:
-                error = getattr(result, "error", "Unknown error") if result else "Unknown error"
-                description = f"{intent_type_str} failed: {error}"
+                # PR4 / PRD-TimelineEvents §6.1: do NOT embed the raw error
+                # string. Slippage breach + reconciliation messages carry
+                # money-shaped data (bps, token deltas) that the activity feed
+                # is forbidden to surface. Bucket into a small set of generic
+                # reasons; the full error stays in `transaction_ledger.error`
+                # for renderers to drill into via `related_ledger_entry_id`.
+                error_str = getattr(result, "error", "") or "" if result else ""
+                description = f"{intent_type_str} failed: {self._classify_failure_reason(error_str)}"
 
+            # Lifecycle markers only — no token amounts, gas, prices, slippage,
+            # liquidity, ticks, or receipt-parser payloads. Renderers should
+            # follow `related_ledger_entry_id` to the ledger row for the money
+            # trail and `cycle_id` to position_events for attribution.
             details: dict[str, Any] = {
                 "intent_type": intent_type_str,
                 "success": success,
-                "gas_used": gas_used,
             }
-
-            # Enrich details with position/swap data extracted by ResultEnricher
-            # so downstream consumers (teardown, audits, PM dashboard) can recover
-            # position IDs and ranges directly from timeline events without
-            # reparsing receipts. Bug 4 of the 0G DogFooding report (2026-04-16).
-            if success and result is not None:
-                position_id = getattr(result, "position_id", None)
-                if position_id is not None:
-                    # NFT tokenIds can exceed JS's safe-integer range on chains
-                    # with high-throughput NPMs (Solana ALT indices, V4 salt-
-                    # derived IDs). Stringify oversized ints so dashboards
-                    # and webhooks that consume details_json as JSON don't
-                    # silently truncate them — matches the safeguard below
-                    # for liquidity / amount values.
-                    if isinstance(position_id, int) and abs(position_id) >= 2**53:
-                        details["position_id"] = str(position_id)
-                    elif isinstance(position_id, int | str):
-                        details["position_id"] = position_id
-                    else:
-                        details["position_id"] = str(position_id)
-                extracted = getattr(result, "extracted_data", None) or {}
-                for key in ("tick_lower", "tick_upper", "liquidity", "amount0", "amount1"):
-                    value = extracted.get(key)
-                    if value is None:
-                        continue
-                    # liquidity/amount0/amount1 can exceed JSON's safe integer range
-                    details[key] = str(value) if isinstance(value, int) and abs(value) >= 2**53 else value
-                lp_close_data = getattr(result, "lp_close_data", None)
-                if lp_close_data is not None and hasattr(lp_close_data, "to_dict"):
-                    details["lp_close"] = lp_close_data.to_dict()
-                swap_amounts = getattr(result, "swap_amounts", None)
-                if swap_amounts is not None and hasattr(swap_amounts, "to_dict"):
-                    details["swap"] = swap_amounts.to_dict()
 
             event = TimelineEvent(
                 timestamp=datetime.now(UTC),
@@ -1957,6 +1969,7 @@ class StrategyRunner:
                 chain=getattr(strategy, "chain", "") or getattr(self.config, "chain", ""),
                 tx_hash=tx_hash,
                 details=details,
+                related_ledger_entry_id=related_ledger_entry_id or "",
             )
             add_event(event)
         except Exception as e:  # noqa: BLE001
@@ -3276,20 +3289,28 @@ class StrategyRunner:
             from almanak.framework.observability.emitter import emit_phase_event
             from almanak.framework.observability.events import StrategyPhase
 
+            # VIB-4043 / PR4: gas_used is money-shaped — moved to
+            # transaction_ledger.gas_used / gas_usd. The phase breadcrumb
+            # carries lifecycle markers only.
+            # PR4 / PRD-TimelineEvents §6.1 (CodeRabbit review): the raw
+            # `execution_result.error` carries money-shaped data on slippage
+            # / reconciliation paths (bps, token deltas). Bucket it through
+            # `_classify_failure_reason` so the EXECUTE breadcrumb stays a
+            # lifecycle marker — full text lives in `transaction_ledger.error`.
+            details: dict[str, Any] = {
+                "success": execution_result.success,
+                "tx_count": len(execution_result.transaction_results),
+            }
+            if not execution_result.success:
+                details["failure_reason"] = self._classify_failure_reason(execution_result.error or "")
             emit_phase_event(
                 strategy_id=strategy_id,
                 phase=StrategyPhase.EXECUTE,
                 event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
-                description=f"Execution {'succeeded' if execution_result.success else 'failed'} "
-                f"(gas={execution_result.total_gas_used})",
+                description=f"Execution {'succeeded' if execution_result.success else 'failed'}",
                 chain=strategy.chain,
                 tx_hash=tx_hash,
-                details={
-                    "success": execution_result.success,
-                    "gas_used": execution_result.total_gas_used,
-                    "tx_count": len(execution_result.transaction_results),
-                    "error": execution_result.error or "",
-                },
+                details=details,
             )
 
             if execution_result.success:
@@ -3567,10 +3588,10 @@ class StrategyRunner:
             )
 
         # Clean reconciliation (or observation-mode pass-through) -> commit the success path.
-        # Emit timeline event for successful execution
-        self._emit_execution_timeline_event(strategy, intent, success=True, result=state.last_execution_result)
-        # DELEVERAGE is a notable risk event — log at WARNING so operators are
-        # alerted even when they are not actively monitoring DEBUG logs.
+        # NOTE (VIB-4043 / PR4): the timeline event is now emitted AFTER the
+        # ledger write so it can carry `related_ledger_entry_id`. The ledger
+        # row is the financial truth; the timeline event is a UX breadcrumb
+        # that points at it.
         self._maybe_warn_deleverage(intent, strategy)
         # Write structured trade record to transaction ledger (VIB-2402).
         # VIB-3658 sequel (April 30 audit #3): pass state.price_oracle so the
@@ -3622,6 +3643,16 @@ class StrategyRunner:
             price_oracle=ledger_price_oracle,
             pre_state=pre_state,
             post_state=post_state,
+        )
+        # VIB-4043 / PR4: emit the UX timeline breadcrumb now, threading the
+        # ledger_entry_id so the renderer can navigate from the card back to
+        # the financial-truth row.
+        self._emit_execution_timeline_event(
+            strategy,
+            intent,
+            success=True,
+            result=state.last_execution_result,
+            related_ledger_entry_id=ledger_entry_id or "",
         )
         # VIB-3467/3478: AccountingProcessor is the sole accounting write path (dual-write
         # period ended with removal of _try_write_* methods in VIB-3478).
@@ -3723,9 +3754,6 @@ class StrategyRunner:
         # real slippage-breach reason rather than "Unknown" (issue #1649).
         last_execution_result.error = slippage_error
 
-        # Emit timeline event for failed execution
-        self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
-
         # Notify strategy of failure due to slippage breach so strategy
         # authors can access the error on the result. Pass
         # ``framework_success=True`` because the on-chain TX itself
@@ -3750,7 +3778,7 @@ class StrategyRunner:
         # Accounting-AttemptNo17 §A4: pass pre_state too. Post-state is
         # NOT captured on this path (we entered slippage-breach before the
         # reconciliation step), so post_state_json stays empty.
-        await self._write_ledger_entry(
+        slippage_ledger_id = await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
@@ -3767,6 +3795,15 @@ class StrategyRunner:
                 state.lending_pre_state,
                 protocol=(getattr(intent, "protocol", "") or "").lower(),
             ),
+        )
+        # VIB-4043 / PR4: emit the timeline failure breadcrumb pointing at
+        # the just-written ledger row.
+        self._emit_execution_timeline_event(
+            strategy,
+            intent,
+            success=False,
+            result=last_execution_result,
+            related_ledger_entry_id=slippage_ledger_id or "",
         )
 
         # Persist state even when circuit breaker fails; on-chain state already changed.
@@ -3821,10 +3858,6 @@ class StrategyRunner:
         if last_execution_result is not None:
             last_execution_result.error = recon_error
 
-        # Emit timeline event as a failure so the strategy timeline
-        # reflects the accounting breach, not a clean success.
-        self._emit_execution_timeline_event(strategy, intent, success=False, result=last_execution_result)
-
         # Notify strategy of the failed outcome so it does not treat
         # the execution as clean. Pass ``framework_success=True`` because
         # the on-chain TX succeeded — the recon breach is an accounting
@@ -3849,7 +3882,7 @@ class StrategyRunner:
         # Accounting-AttemptNo17 §A4: pass pre/post state too. The
         # reconciliation report already has post_balances by definition
         # (we got here BECAUSE recon produced an incident).
-        await self._write_ledger_entry(
+        recon_ledger_id = await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
@@ -3879,6 +3912,15 @@ class StrategyRunner:
                 ),
                 protocol=(getattr(intent, "protocol", "") or "").lower(),
             ),
+        )
+        # VIB-4043 / PR4: emit timeline failure breadcrumb pointing at the
+        # reconciliation-failure ledger row.
+        self._emit_execution_timeline_event(
+            strategy,
+            intent,
+            success=False,
+            result=last_execution_result,
+            related_ledger_entry_id=recon_ledger_id or "",
         )
 
         # Persist strategy state even on reconciliation failure: the
@@ -3934,9 +3976,6 @@ class StrategyRunner:
         error_msg = state_machine.error or "Unknown error after retries exhausted"
         logger.error(f"Intent failed after {state_machine.retry_count} retries: {error_msg}")
 
-        # Emit timeline event for failed execution
-        timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
-        self._emit_execution_timeline_event(strategy, intent, success=False, result=timeline_result)
         # Write failed trade to transaction ledger (VIB-2402).
         # VIB-3658 sequel (April 30 audit #3): pre-execution failures have no
         # gas to convert (last_execution_result is None or carries no
@@ -3944,7 +3983,16 @@ class StrategyRunner:
         # state.price_oracle is the right source so gas_usd lands populated.
         # Accounting-AttemptNo17 §A4: pass pre_state. No post-state since
         # this path means execution itself failed (or was never attempted).
-        await self._write_ledger_entry(
+        # CodeRabbit review: backfill ``last_execution_result.error`` BEFORE
+        # building ``timeline_result`` and writing the ledger so both surfaces
+        # see the terminal state-machine reason (was previously backfilled
+        # only after the timeline emit, leaving the activity feed bucketed as
+        # "unknown error" while the ledger had the correct text on the same
+        # iteration).
+        if last_execution_result is not None and not getattr(last_execution_result, "error", ""):
+            last_execution_result.error = error_msg
+        timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
+        failed_ledger_id = await self._write_ledger_entry(
             strategy,
             intent,
             result=last_execution_result,
@@ -3960,6 +4008,15 @@ class StrategyRunner:
                 state.lending_pre_state,
                 protocol=(getattr(intent, "protocol", "") or "").lower(),
             ),
+        )
+        # VIB-4043 / PR4: emit timeline failure breadcrumb pointing at
+        # the just-written ledger row (or empty when no row was written).
+        self._emit_execution_timeline_event(
+            strategy,
+            intent,
+            success=False,
+            result=timeline_result,
+            related_ledger_entry_id=failed_ledger_id or "",
         )
 
         # Run revert diagnostics only for on-chain execution failures.
@@ -3995,12 +4052,11 @@ class StrategyRunner:
         if last_execution_result:
             await self._handle_execution_error(strategy, last_execution_result)
 
-        # Notify strategy of failed execution
-        # Ensure the result always carries the error message so strategy authors
-        # can access it via result.error or str(result) instead of getting None.
+        # Notify strategy of failed execution.
+        # ``last_execution_result.error`` is already backfilled above (before
+        # the ledger/timeline writes), so this `or SimpleNamespace(...)` only
+        # catches the pre-execution path where last_execution_result is None.
         callback_result = last_execution_result or SimpleNamespace(error=error_msg)
-        if last_execution_result and not last_execution_result.error:
-            last_execution_result.error = error_msg
         self._notify_intent_executed(strategy, intent, False, callback_result)
         self._invoke_optional_hook(
             strategy,
@@ -5381,6 +5437,53 @@ class StrategyRunner:
         return await reconcile_post_execution_balances(
             self, strategy, intent, execution_result, pre_snapshot=pre_snapshot
         )
+
+    @staticmethod
+    def _classify_failure_reason(error_str: Any) -> str:
+        """Return a money-safe bucket label for a failure error string.
+
+        PRD-TimelineEvents §6.1: timeline event payloads (and descriptions)
+        cannot carry token amounts, bps, deltas, or any money-shaped data.
+        Slippage and reconciliation error strings DO contain that data, so
+        the timeline must surface the *category* of failure only and let
+        renderers drill into ``transaction_ledger.error`` via
+        ``related_ledger_entry_id`` for the full message.
+
+        The buckets are stable, lower-case, ungrammatical-on-purpose so
+        renderers can append them after the intent_type token without
+        worrying about article agreement.
+
+        CodeRabbit: ``error_str`` arrives via ``result.error`` from many call
+        sites (orchestrator results, state-machine reasons, raw exceptions
+        bubbled up). A future refactor could leak a non-string (Exception
+        instance, ``SimpleNamespace``, bytes) — a raised ``AttributeError`` here
+        would skip the timeline emission entirely. Coerce defensively so this
+        classifier never raises; the worst case is a generic bucket.
+        """
+        if error_str is None:
+            return "unknown error"
+        if isinstance(error_str, bytes):
+            error_text = error_str.decode("utf-8", errors="replace")
+        elif isinstance(error_str, str):
+            error_text = error_str
+        else:
+            error_text = str(error_str)
+        if not error_text:
+            return "unknown error"
+        lowered = error_text.lower()
+        if "slippage" in lowered:
+            return "slippage breach"
+        if "reconciliation" in lowered or "recon " in lowered or lowered.startswith("recon"):
+            return "reconciliation incident"
+        if "circuit breaker" in lowered:
+            return "circuit breaker open"
+        if "revert" in lowered or "reverted" in lowered:
+            return "execution reverted"
+        if "timeout" in lowered:
+            return "execution timed out"
+        if "nonce" in lowered:
+            return "nonce error"
+        return "execution failed"
 
     @staticmethod
     def _format_reconciliation_error(recon: dict | None) -> str:

@@ -2929,6 +2929,11 @@ class DashboardServiceStub(object):
                 request_serializer=gateway__pb2.GetTradeTapeRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetTradeTapeResponse.FromString,
                 _registered_method=True)
+        self.GetActivityFeed = channel.unary_unary(
+                '/almanak.gateway.proto.DashboardService/GetActivityFeed',
+                request_serializer=gateway__pb2.GetActivityFeedRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetActivityFeedResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -3050,6 +3055,17 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetActivityFeed(self, request, context):
+        """Activity feed: chronologically merged timeline_events (UX cards) and
+        transaction_ledger entries (financial truth) for a single strategy.
+        The gateway is the single source of truth for the merge — clients MUST
+        NOT recompose by reading the two streams separately, or the timestamp
+        cursor and dedup logic will drift. (VIB-4042 / PR3)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -3127,6 +3143,11 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.GetTradeTape,
                     request_deserializer=gateway__pb2.GetTradeTapeRequest.FromString,
                     response_serializer=gateway__pb2.GetTradeTapeResponse.SerializeToString,
+            ),
+            'GetActivityFeed': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetActivityFeed,
+                    request_deserializer=gateway__pb2.GetActivityFeedRequest.FromString,
+                    response_serializer=gateway__pb2.GetActivityFeedResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -3538,6 +3559,33 @@ class DashboardService(object):
             '/almanak.gateway.proto.DashboardService/GetTradeTape',
             gateway__pb2.GetTradeTapeRequest.SerializeToString,
             gateway__pb2.GetTradeTapeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetActivityFeed(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.DashboardService/GetActivityFeed',
+            gateway__pb2.GetActivityFeedRequest.SerializeToString,
+            gateway__pb2.GetActivityFeedResponse.FromString,
             options,
             channel_credentials,
             insecure,
