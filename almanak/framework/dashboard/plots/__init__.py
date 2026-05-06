@@ -85,8 +85,11 @@ from almanak.framework.dashboard.plots.prediction_plots import (
 # Technical analysis plots
 from almanak.framework.dashboard.plots.ta_plots import (
     calculate_ta_metrics,
+    plot_atr_indicator,
     plot_bollinger_bands,
+    plot_cci_indicator,
     plot_macd_indicator,
+    plot_obv_indicator,
     plot_price_with_signals,
     plot_rsi_indicator,
     plot_stochastic_indicator,
@@ -131,8 +134,11 @@ __all__ = [
     "plot_probability_over_time",
     # TA plots
     "calculate_ta_metrics",
+    "plot_atr_indicator",
     "plot_bollinger_bands",
+    "plot_cci_indicator",
     "plot_macd_indicator",
+    "plot_obv_indicator",
     "plot_price_with_signals",
     "plot_rsi_indicator",
     "plot_stochastic_indicator",

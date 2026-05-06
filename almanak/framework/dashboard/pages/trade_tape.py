@@ -93,6 +93,36 @@ def _safe_decimal(s: str | None) -> Decimal:
         return Decimal("0")
 
 
+def _format_human_amount(amount: Any) -> str:
+    """Display an already-decoded token amount.
+
+    Mirrors ``format_token_amount``'s display rules (≥1 → thousands +
+    2dp, sub-1 → 4 sig figs, 0 → ``"0"``, blank → ``"—"``) but skips the
+    raw-integer-units heuristic. Accounting payload fields like
+    ``amount0/1`` and ``fees0/1_collected`` are stamped as already-decoded
+    human Decimals — feeding them to ``format_token_amount`` would
+    misclassify integral large values (e.g. ``Decimal("1000000")`` for a
+    1M USDC LP leg) as raw on-chain integers and rescale them by the
+    token's decimals, understating the headline by 10**decimals. Use this
+    helper for payload-sourced values; keep ``format_token_amount`` for
+    ledger ``amount_in/out`` strings, which are raw on-chain integers.
+    """
+    if amount in (None, "", "—"):
+        return "—"
+    try:
+        d = Decimal(str(amount))
+    except (ArithmeticError, ValueError, TypeError):
+        return str(amount)
+    if not d.is_finite():
+        return str(amount)
+    abs_d = abs(d)
+    if abs_d == 0:
+        return "0"
+    if abs_d >= Decimal("1"):
+        return f"{d:,.2f}"
+    return f"{d:.4g}"
+
+
 def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
     """Render the trade-tape tab for a strategy."""
     from almanak.framework.dashboard.data_source import (
@@ -365,6 +395,119 @@ def _get_all_tx_results(row: TradeTapeRow) -> list[dict]:
     return [tx for tx in txs if isinstance(tx, dict)]
 
 
+def _parse_accounting_payload(row: TradeTapeRow) -> dict[str, Any]:
+    """Decode ``accounting_payload_json`` for a row, or ``{}`` on any failure.
+
+    LP headlines read ``token0/token1/amount0/amount1`` (and on CLOSE,
+    ``fees0_collected/fees1_collected/fees_total_usd``) from the typed
+    payload — those are post-decoded human Decimals stamped at execution
+    block, so the dashboard does not have to re-decode raw on-chain ints.
+    """
+    if not row.accounting_payload_json:
+        return {}
+    try:
+        data = json.loads(row.accounting_payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_direction(row: TradeTapeRow) -> tuple[str, str]:
+    """Return ``(direction_html, lp_fee_line_html)`` for a tape row.
+
+    Single-asset moves (SWAP, SUPPLY, WITHDRAW, BORROW, REPAY, BRIDGE …)
+    keep the ``token_in → token_out`` shape. LP_OPEN / LP_CLOSE are
+    dual-asset and render as ``amt0 tok0 + amt1 tok1`` — both legs deposit
+    (OPEN) or both legs receive (CLOSE). LP_CLOSE adds a ``fees:`` sub-line
+    when the typed payload carries non-zero ``fees0_collected`` /
+    ``fees1_collected`` (or a USD total).
+    """
+    intent = row.intent_type or ""
+    if intent in ("LP_OPEN", "LP_CLOSE"):
+        return _format_lp_direction(row, is_close=intent == "LP_CLOSE")
+
+    if not (row.token_in or row.token_out):
+        return "", ""
+
+    amt_in = format_token_amount(row.amount_in, row.token_in, row.chain)
+    amt_out = format_token_amount(row.amount_out, row.token_out, row.chain)
+    in_part = f"<code>{_e(amt_in)}</code> {_e(row.token_in)}" if row.token_in else ""
+    out_part = f"<code>{_e(amt_out)}</code> {_e(row.token_out)}" if row.token_out else ""
+    if in_part and out_part:
+        return f"{in_part} → {out_part}", ""
+    return in_part or out_part, ""
+
+
+def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str]:
+    """Render the LP_OPEN / LP_CLOSE headline + (CLOSE only) fee sub-line.
+
+    Prefer the accounting payload's ``token0/token1/amount0/amount1`` —
+    those are post-decoded human Decimals stamped at execution block. Fall
+    back to the ledger ``token_in/amount_in/token_out/amount_out`` when the
+    payload is absent (pre-VIB-3417 rows, accounting events that haven't
+    landed yet, etc.) so the tape still renders something useful.
+    """
+    payload = _parse_accounting_payload(row)
+    token0 = payload.get("token0") or row.token_in or ""
+    token1 = payload.get("token1") or row.token_out or ""
+
+    # Payload values are already-decoded human Decimals → use the human
+    # formatter. Ledger fallback values (``row.amount_in/out``) are raw
+    # on-chain integers → keep ``format_token_amount`` so its raw-units
+    # heuristic scales them correctly.
+    if payload.get("amount0") is not None:
+        amt0_str = _format_human_amount(payload["amount0"])
+    else:
+        amt0_str = format_token_amount(row.amount_in, token0, row.chain)
+    if payload.get("amount1") is not None:
+        amt1_str = _format_human_amount(payload["amount1"])
+    else:
+        amt1_str = format_token_amount(row.amount_out, token1, row.chain)
+
+    parts: list[str] = []
+    if token0:
+        parts.append(f"<code>{_e(amt0_str)}</code> {_e(token0)}")
+    if token1:
+        parts.append(f"<code>{_e(amt1_str)}</code> {_e(token1)}")
+    direction = " + ".join(parts)
+
+    if not is_close:
+        return direction, ""
+
+    fees0 = payload.get("fees0_collected")
+    fees1 = payload.get("fees1_collected")
+    fees_usd_raw = payload.get("fees_total_usd")
+    has_token_fees = (
+        _safe_decimal(str(fees0) if fees0 is not None else None) > 0
+        or _safe_decimal(str(fees1) if fees1 is not None else None) > 0
+    )
+    fees_usd_d = _safe_decimal(str(fees_usd_raw) if fees_usd_raw is not None else None)
+    if not has_token_fees and fees_usd_d <= 0:
+        return direction, ""
+
+    # Fees are payload-only (no ledger sibling), so always already-decoded.
+    fee_parts: list[str] = []
+    if fees0 is not None and token0:
+        fee_parts.append(f"<code>{_e(_format_human_amount(fees0))}</code> {_e(token0)}")
+    if fees1 is not None and token1:
+        fee_parts.append(f"<code>{_e(_format_human_amount(fees1))}</code> {_e(token1)}")
+    fee_body = " + ".join(fee_parts) if fee_parts else ""
+
+    fee_usd_html = ""
+    if fees_usd_d > 0:
+        fee_usd_html = (
+            f"<span style='color:#00c853;font-weight:600;margin-left:0.4rem;'>({_e(format_usd(fees_usd_d))})</span>"
+        )
+
+    if not fee_body and not fee_usd_html:
+        return direction, ""
+
+    return direction, (
+        "<div style='margin-top:0.15rem;color:#bbb;font-size:0.86rem;'>"
+        f"<span style='color:#888;'>fees collected:</span> {fee_body}{fee_usd_html}</div>"
+    )
+
+
 def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     """Render a single tape row with its receipt-parsed expander."""
     icon = _INTENT_ICONS.get(row.intent_type, "•")
@@ -391,16 +534,12 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     # (SWAP amount_out 0.000868768309352546) into a Quant-readable
     # headline. Raw audit-grade amounts remain in the receipt-parsed
     # expander block.
-    direction = ""
-    if row.token_in or row.token_out:
-        amt_in = format_token_amount(row.amount_in, row.token_in, row.chain)
-        amt_out = format_token_amount(row.amount_out, row.token_out, row.chain)
-        in_part = f"<code>{_e(amt_in)}</code> {_e(row.token_in)}" if row.token_in else ""
-        out_part = f"<code>{_e(amt_out)}</code> {_e(row.token_out)}" if row.token_out else ""
-        if in_part and out_part:
-            direction = f"{in_part} → {out_part}"
-        else:
-            direction = in_part or out_part
+    #
+    # LP intents are dual-asset and use ``+`` instead of ``→`` — both legs
+    # move the same direction (deposited on OPEN, received on CLOSE), so an
+    # arrow misreads as a swap. LP_CLOSE additionally surfaces fees
+    # collected on a sub-line when the accounting payload reports them.
+    direction, lp_fee_line = _format_direction(row)
 
     # Cost line
     cost_bits = []
@@ -465,6 +604,19 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"<div style='color:#ff9800;font-size:0.78rem;margin-top:0.2rem;'>⚠️ {_e(row.unavailable_reason)}</div>"
         )
 
+    # Error reason for failed intents — surface ledger ``error`` so the
+    # operator sees the revert/raise-string without opening the expander.
+    # ``title`` carries the full message for hover when truncated.
+    error_chip = ""
+    if not row.success and row.error:
+        full = row.error.strip()
+        short = full if len(full) <= 200 else full[:197] + "…"
+        error_chip = (
+            f"<div style='color:#f44336;font-size:0.82rem;margin-top:0.25rem;"
+            f"font-family:monospace;word-break:break-word;' title='{_e(full)}'>"
+            f"<span style='font-family:inherit;'>⛔</span> {_e(short)}</div>"
+        )
+
     # icon and confidence_label/color are looked up from constant maps;
     # row.intent_type / row.protocol / time_str / chain_badge come from
     # the gateway and must be escaped before HTML interpolation.
@@ -492,11 +644,13 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
           <div style="margin-top:0.25rem;color:#ccc;font-size:0.92rem;">
             {direction}
           </div>
+          {lp_fee_line}
           <div style="margin-top:0.2rem;color:#888;font-size:0.82rem;
                       display:flex;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;">
             <span>{cost_line}</span>
             <span>{tx_link}</span>
           </div>
+          {error_chip}
           {unavailable_chip}
         </div>
         """,
@@ -744,9 +898,42 @@ def _format_value(v: Any) -> str:
         except Exception:  # noqa: BLE001
             return "<code>{...}</code>"
     s = str(v)
+    pretty = _prettify_iso_datetime(s)
+    if pretty is not None:
+        return _e(pretty)
     if len(s) > 100:
         s = s[:97] + "…"
     return _e(s)
+
+
+def _prettify_iso_datetime(s: str) -> str | None:
+    """Reformat ISO-8601 timestamps in kv blocks to a human-readable form.
+
+    The gateway serializes ``datetime`` fields on ``position_event`` /
+    accounting payloads via ``.isoformat()``, which renders as e.g.
+    ``2026-05-05T08:48:37.831059+00:00`` — unscannable for an operator.
+    Reformat to ``2026-05-05 08:48:37 UTC`` (drops microseconds, swaps
+    ``T`` for a space, and resolves ``+00:00`` to ``UTC``).
+
+    Returns ``None`` when the string is not a parseable ISO timestamp,
+    so the caller falls back to the generic str path.
+    """
+    # Cheap pre-filter: ISO timestamps are 19+ chars, contain ``T`` or
+    # ``-`` near the start, and never contain spaces. Anything else
+    # short-circuits before the costlier ``fromisoformat`` parse.
+    if not (19 <= len(s) <= 40) or "T" not in s[:11] or " " in s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    out = dt.strftime("%Y-%m-%d %H:%M:%S")
+    if dt.tzinfo is None:
+        return out
+    offset = dt.utcoffset()
+    if offset is not None and offset.total_seconds() == 0:
+        return f"{out} UTC"
+    return f"{out} {dt.strftime('%z')}"
 
 
 def _render_oracle_block(prices: Any) -> None:
