@@ -1327,16 +1327,24 @@ class RollingForkManager:
         # VIB-3666 was silently dropped by the supported-flags guard and Mantle
         # APPROVEs continued to revert (VIB-3746).
         #
-        # Guarded by _get_anvil_supported_flags() (same pattern as --cache-path)
-        # to avoid startup failures on Anvil versions that don't support the flag.
+        # Pass unconditionally for chains in _CHAIN_BLOCK_GAS_LIMITS. The flag
+        # has been stable since Foundry 1.0 and earlier; the previous
+        # _get_anvil_supported_flags() gate masked CI environments where the
+        # probe transiently returned an empty set (issue #2103 — Foundry 1.7.0
+        # in CI silently dropped the override and Mantle Agni LP txs reverted
+        # with "intrinsic gas too high"). If a future Anvil version drops this
+        # flag, surface that as a startup failure rather than silent drop.
+        #
+        # Belt-and-suspenders: also pass ``--disable-block-gas-limit`` which
+        # disables Anvil's ``tx.gas_limit <= block.gas_limit`` constraint
+        # outright. Mantle's L1-calldata-included gas accounting can produce
+        # tx-level gas estimates that exceed even a 1B block-gas-limit
+        # override (the in-CI symptom of #2103 even after dropping the
+        # supported-flags gate). With both flags present, the check is
+        # disabled regardless of how Anvil interprets ``--gas-limit``.
         if self.chain in _CHAIN_BLOCK_GAS_LIMITS:
-            if "--gas-limit" in _get_anvil_supported_flags():
-                cmd.extend(["--gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
-            else:
-                logger.warning(
-                    "Anvil does not support --gas-limit; skipping block gas limit override for chain=%s",
-                    self.chain,
-                )
+            cmd.extend(["--gas-limit", str(_CHAIN_BLOCK_GAS_LIMITS[self.chain])])
+            cmd.append("--disable-block-gas-limit")
 
         # Cache upstream RPC responses to reduce Alchemy/RPC calls
         if self.cache_path:

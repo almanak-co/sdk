@@ -163,7 +163,6 @@ class TestAgniLPOpenIntent:
     - Balance changes are correct
     """
 
-    @pytest.mark.skip(reason="#2103: Anvil --gas-limit override silently dropped on mantle (intrinsic gas too high)")
     @pytest.mark.asyncio
     async def test_lp_open_wmnt_weth(
         self,
@@ -298,7 +297,6 @@ class TestAgniLPCloseIntent:
     Test case: Close position that has liquidity (normal close).
     """
 
-    @pytest.mark.skip(reason="#2103: Anvil --gas-limit override silently dropped on mantle — LP open step required by close test reverts")
     @pytest.mark.asyncio
     async def test_lp_close_position_with_liquidity(
         self,

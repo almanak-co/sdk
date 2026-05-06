@@ -9,6 +9,20 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for lending 
 
 Aave V3 Pool on Mantle: 0x458F293454fE0d67EC0655f3672301301DD51422
 
+Mantle Aave V3 reserve configuration (verified on-chain via getReserveConfigurationData):
+
+    Token   active  frozen  ltv   borrowable  collateral
+    WETH    true    TRUE    0     true        false       <- frozen, supply reverts (#2102)
+    WMNT    true    false   4000  false       true        <- only collateral with LTV>0
+    USDC    true    false   0     true        false       <- borrow-only (LTV 0)
+    USDT0   true    false   0     true        false       <- borrow-only
+    USDe    true    false   0     true        false
+    GHO     true    false   0     true        false
+
+Tests use:
+- Supply/withdraw: USDC (active, non-frozen).
+- Borrow/repay: WMNT collateral (only reserve with non-zero LTV) + USDC borrow asset.
+
 NO MOCKING. All tests execute real on-chain transactions and verify state changes.
 
 To run:
@@ -40,7 +54,8 @@ from tests.intents.conftest import (
 
 CHAIN_NAME = "mantle"
 
-# Aave V3 Pool ABI (minimal - just getUserAccountData)
+# Aave V3 Pool ABI (minimal - getUserAccountData + getReserveData for aToken
+# address lookup, used by the Layer-4b aToken-balance receiver-side check).
 AAVE_POOL_ABI = [
     {
         "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
@@ -52,6 +67,36 @@ AAVE_POOL_ABI = [
             {"internalType": "uint256", "name": "currentLiquidationThreshold", "type": "uint256"},
             {"internalType": "uint256", "name": "ltv", "type": "uint256"},
             {"internalType": "uint256", "name": "healthFactor", "type": "uint256"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "asset", "type": "address"}],
+        "name": "getReserveData",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "data", "type": "uint256"},
+                ],
+                "internalType": "struct DataTypes.ReserveConfigurationMap",
+                "name": "configuration",
+                "type": "tuple",
+            },
+            {"internalType": "uint128", "name": "liquidityIndex", "type": "uint128"},
+            {"internalType": "uint128", "name": "currentLiquidityRate", "type": "uint128"},
+            {"internalType": "uint128", "name": "variableBorrowIndex", "type": "uint128"},
+            {"internalType": "uint128", "name": "currentVariableBorrowRate", "type": "uint128"},
+            {"internalType": "uint128", "name": "currentStableBorrowRate", "type": "uint128"},
+            {"internalType": "uint40", "name": "lastUpdateTimestamp", "type": "uint40"},
+            {"internalType": "uint16", "name": "id", "type": "uint16"},
+            {"internalType": "address", "name": "aTokenAddress", "type": "address"},
+            {"internalType": "address", "name": "stableDebtTokenAddress", "type": "address"},
+            {"internalType": "address", "name": "variableDebtTokenAddress", "type": "address"},
+            {"internalType": "address", "name": "interestRateStrategyAddress", "type": "address"},
+            {"internalType": "uint128", "name": "accruedToTreasury", "type": "uint128"},
+            {"internalType": "uint128", "name": "unbacked", "type": "uint128"},
+            {"internalType": "uint128", "name": "isolationModeTotalDebt", "type": "uint128"},
         ],
         "stateMutability": "view",
         "type": "function",
@@ -81,6 +126,21 @@ def get_user_account_data(web3: Web3, user: str) -> dict:
     }
 
 
+def get_atoken_address(web3: Web3, asset: str) -> str:
+    """Look up the aToken address for an Aave V3 reserve on Mantle.
+
+    USDC has LTV=0 on Mantle, so ``totalCollateralBase`` from
+    ``getUserAccountData`` doesn't move on supply/withdraw — using the
+    aToken's ERC-20 ``balanceOf`` instead gives the test a real Layer-4b
+    receiver-side check that doesn't rely on collateral accounting.
+    """
+    pool_address = AAVE_V3_POOL_ADDRESSES[CHAIN_NAME]
+    pool_contract = web3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=AAVE_POOL_ABI)
+    reserve_data = pool_contract.functions.getReserveData(Web3.to_checksum_address(asset)).call()
+    # aTokenAddress is the 9th field (index 8) in ReserveData.
+    return reserve_data[8]
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -107,16 +167,12 @@ def execution_context(funded_wallet: str) -> ExecutionContext:
 class TestAaveV3SupplyIntent:
     """Test Aave V3 supply operations using SupplyIntent on Mantle.
 
-    Verifies:
-    - SupplyIntent creation and compilation
-    - On-chain execution
-    - Receipt parsing for Supply events
-    - Balance changes and account data verification
+    Uses USDC (active, non-frozen) as the supply token. WETH is intentionally
+    avoided because the WETH reserve is frozen on Mantle Aave V3 (#2102).
     """
 
-    @pytest.mark.skip(reason="#2102: Aave V3 mantle WETH reserve is frozen + Safe-side supply revert (see issue)")
     @pytest.mark.asyncio
-    async def test_supply_weth_using_intent(
+    async def test_supply_usdc_using_intent(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -124,36 +180,44 @@ class TestAaveV3SupplyIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test WETH supply to Aave V3 on Mantle.
+        """Test USDC supply to Aave V3 on Mantle.
 
         4-Layer Verification:
         1. Compilation: SupplyIntent -> ActionBundle (SUCCESS)
         2. Execution: on-chain transactions succeed
         3. Receipt Parsing: Supply event parsed with correct amount
-        4. Balance Deltas: WETH decreased, totalCollateralBase increased
+        4. Balance Deltas: USDC decreased AND aUSDC (the Aave receipt token)
+           increased by the supply amount. USDC has LTV=0 on Mantle so
+           ``totalCollateralBase`` doesn't move — the aToken-balance check
+           is the real receiver-side signal.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
-        decimals = get_token_decimals(web3, weth)
+        usdc = tokens["USDC"]
+        decimals = get_token_decimals(web3, usdc)
+        ausdc = get_atoken_address(web3, usdc)
 
-        supply_amount = Decimal("0.05")  # 0.05 WETH (~$175)
+        supply_amount = Decimal("100")  # 100 USDC
 
         print(f"\n{'=' * 80}")
-        print(f"Test: Supply {supply_amount} WETH to Aave V3 on Mantle")
+        print(f"Test: Supply {supply_amount} USDC to Aave V3 on Mantle")
         print(f"{'=' * 80}")
 
         # Layer 4a: Record balances BEFORE
-        weth_before = get_token_balance(web3, weth, funded_wallet)
-        print(f"WETH before: {format_token_amount(weth_before, decimals)}")
-
-        account_data_before = get_user_account_data(web3, funded_wallet)
-        print(f"Collateral before: {account_data_before['totalCollateralBase']}")
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        ausdc_before = get_token_balance(web3, ausdc, funded_wallet)
+        print(f"USDC before: {format_token_amount(usdc_before, decimals)}")
+        print(f"aUSDC before: {format_token_amount(ausdc_before, decimals)}")
 
         # Layer 1: Create and compile SupplyIntent
+        # use_as_collateral=False is required: USDC has LTV=0 on Mantle Aave
+        # V3, so setUserUseReserveAsCollateral(USDC, true) reverts with
+        # UnderlyingCannotBeUsedAsCollateral. The supply itself succeeds; only
+        # the auto-toggle fails.
         intent = SupplyIntent(
             protocol="aave_v3",
-            token="WETH",
+            token="USDC",
             amount=supply_amount,
+            use_as_collateral=False,
             chain=CHAIN_NAME,
         )
 
@@ -198,30 +262,31 @@ class TestAaveV3SupplyIntent:
 
         assert supply_parsed, "Must find at least one Supply event in receipts"
 
-        # Layer 4b: Verify balance changes
-        weth_after = get_token_balance(web3, weth, funded_wallet)
-        weth_spent = weth_before - weth_after
+        # Layer 4b: Verify balance changes — bilateral check.
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        ausdc_after = get_token_balance(web3, ausdc, funded_wallet)
+        usdc_spent = usdc_before - usdc_after
+        ausdc_received = ausdc_after - ausdc_before
 
         print("\n--- Results ---")
-        print(f"WETH spent: {format_token_amount(weth_spent, decimals)}")
+        print(f"USDC spent: {format_token_amount(usdc_spent, decimals)}")
+        print(f"aUSDC received: {format_token_amount(ausdc_received, decimals)}")
 
-        expected_weth_spent = int(supply_amount * Decimal(10**decimals))
-        assert weth_spent == expected_weth_spent, (
-            f"WETH spent must EXACTLY equal supply amount. Expected: {expected_weth_spent}, Got: {weth_spent}"
+        expected_usdc_spent = int(supply_amount * Decimal(10**decimals))
+        assert usdc_spent == expected_usdc_spent, (
+            f"USDC spent must EXACTLY equal supply amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
-
-        account_data_after = get_user_account_data(web3, funded_wallet)
-        print(f"Collateral after: {account_data_after['totalCollateralBase']}")
-
-        assert (
-            account_data_after["totalCollateralBase"] > account_data_before["totalCollateralBase"]
-        ), "Collateral must increase after supply"
+        # aToken balance is index-scaled on each accrual; we assert the
+        # delta is at least supply_amount minus a 1-wei rounding tolerance.
+        assert ausdc_received >= expected_usdc_spent - 1, (
+            f"aUSDC received must be ≥ supply amount (modulo 1-wei index "
+            f"rounding). Expected ≥ {expected_usdc_spent - 1}, Got: {ausdc_received}"
+        )
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.skip(reason="#2102: depends on test_supply_weth happy-path (frozen reserve + Safe-side supply revert)")
     @pytest.mark.asyncio
-    async def test_withdraw_weth_using_intent(
+    async def test_withdraw_usdc_using_intent(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -229,20 +294,24 @@ class TestAaveV3SupplyIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test WETH withdraw using WithdrawIntent (after supplying).
+        """Test USDC withdraw using WithdrawIntent (after supplying).
 
         4-Layer Verification:
         1. Compilation: WithdrawIntent -> ActionBundle (SUCCESS)
         2. Execution: on-chain transactions succeed
         3. Receipt Parsing: Withdraw event parsed
-        4. Balance Deltas: WETH increased, totalCollateralBase decreased
+        4. Balance Deltas: USDC increased AND aUSDC decreased by ~the
+           withdraw amount. USDC has LTV=0 on Mantle so
+           ``totalCollateralBase`` doesn't move — the aToken-balance check
+           is the real receiver-side signal.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
-        decimals = get_token_decimals(web3, weth)
+        usdc = tokens["USDC"]
+        decimals = get_token_decimals(web3, usdc)
+        ausdc = get_atoken_address(web3, usdc)
 
-        # First supply 0.1 WETH
-        supply_amount = Decimal("0.1")
+        # First supply 200 USDC
+        supply_amount = Decimal("200")
 
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
@@ -250,10 +319,13 @@ class TestAaveV3SupplyIntent:
             price_oracle=price_oracle,
         )
 
+        # use_as_collateral=False is required: USDC has LTV=0 on Mantle Aave
+        # V3 — see test_supply_usdc_using_intent for full rationale.
         supply_intent = SupplyIntent(
             protocol="aave_v3",
-            token="WETH",
+            token="USDC",
             amount=supply_amount,
+            use_as_collateral=False,
             chain=CHAIN_NAME,
         )
 
@@ -263,23 +335,22 @@ class TestAaveV3SupplyIntent:
         supply_exec_result = await orchestrator.execute(supply_result.action_bundle, execution_context)
         assert supply_exec_result.success, f"Initial supply failed: {supply_exec_result.error}"
 
-        # Now withdraw 0.05 WETH
-        withdraw_amount = Decimal("0.05")
+        # Now withdraw 100 USDC
+        withdraw_amount = Decimal("100")
 
         print(f"\n{'=' * 80}")
-        print(f"Test: Withdraw {withdraw_amount} WETH from Aave V3 on Mantle")
+        print(f"Test: Withdraw {withdraw_amount} USDC from Aave V3 on Mantle")
         print(f"{'=' * 80}")
 
-        weth_before = get_token_balance(web3, weth, funded_wallet)
-        print(f"WETH before withdraw: {format_token_amount(weth_before, decimals)}")
-
-        account_data_before = get_user_account_data(web3, funded_wallet)
-        print(f"Collateral before: {account_data_before['totalCollateralBase']}")
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        ausdc_before = get_token_balance(web3, ausdc, funded_wallet)
+        print(f"USDC before withdraw: {format_token_amount(usdc_before, decimals)}")
+        print(f"aUSDC before withdraw: {format_token_amount(ausdc_before, decimals)}")
 
         # Layer 1: Create and compile WithdrawIntent
         intent = WithdrawIntent(
             protocol="aave_v3",
-            token="WETH",
+            token="USDC",
             amount=withdraw_amount,
             chain=CHAIN_NAME,
         )
@@ -308,24 +379,27 @@ class TestAaveV3SupplyIntent:
 
         assert withdraw_parsed, "Must find at least one Withdraw event in receipts"
 
-        # Layer 4b: Verify balance changes
-        weth_after = get_token_balance(web3, weth, funded_wallet)
-        weth_received = weth_after - weth_before
+        # Layer 4b: Verify balance changes — bilateral check.
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        ausdc_after = get_token_balance(web3, ausdc, funded_wallet)
+        usdc_received = usdc_after - usdc_before
+        ausdc_burned = ausdc_before - ausdc_after
 
-        print(f"\nWETH received: {format_token_amount(weth_received, decimals)}")
+        print(f"\nUSDC received: {format_token_amount(usdc_received, decimals)}")
+        print(f"aUSDC burned: {format_token_amount(ausdc_burned, decimals)}")
 
-        expected_weth_received = int(withdraw_amount * Decimal(10**decimals))
-        assert weth_received == expected_weth_received, (
-            f"WETH received must EXACTLY equal withdraw amount. "
-            f"Expected: {expected_weth_received}, Got: {weth_received}"
+        expected_usdc_received = int(withdraw_amount * Decimal(10**decimals))
+        assert usdc_received == expected_usdc_received, (
+            f"USDC received must EXACTLY equal withdraw amount. "
+            f"Expected: {expected_usdc_received}, Got: {usdc_received}"
         )
-
-        account_data_after = get_user_account_data(web3, funded_wallet)
-        print(f"Collateral after: {account_data_after['totalCollateralBase']}")
-
-        assert (
-            account_data_after["totalCollateralBase"] < account_data_before["totalCollateralBase"]
-        ), "Collateral must decrease after withdraw"
+        # aUSDC burned should be at least the withdraw amount (modulo the
+        # 1-wei rounding from index-scaled aToken accounting).
+        assert ausdc_burned >= expected_usdc_received - 1, (
+            f"aUSDC burned must be ≥ withdraw amount (modulo 1-wei index "
+            f"rounding). Expected ≥ {expected_usdc_received - 1}, "
+            f"Got: {ausdc_burned}"
+        )
 
         print("\nALL CHECKS PASSED")
 
@@ -343,15 +417,20 @@ class TestAaveV3SupplyIntent:
         3-Layer Verification (failure mode):
         1. Compilation: succeeds (doesn't check balance)
         2. Execution: should fail on-chain
-        3. Balance Conservation: WETH balance unchanged
+        3. Balance Conservation: USDC balance unchanged
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
-        decimals = get_token_decimals(web3, weth)
+        usdc = tokens["USDC"]
+        decimals = get_token_decimals(web3, usdc)
 
-        # Get current balance
-        weth_balance = get_token_balance(web3, weth, funded_wallet)
-        balance_decimal = Decimal(weth_balance) / Decimal(10**decimals)
+        # Get current balance — if 0, surface as a fixture/funding regression
+        # rather than silently exercising zero-amount behaviour.
+        usdc_balance = get_token_balance(web3, usdc, funded_wallet)
+        assert usdc_balance > 0, (
+            "funded_wallet must have USDC seeded; zero balance indicates a "
+            "fixture / Safe-funding regression rather than a real test scenario"
+        )
+        balance_decimal = Decimal(usdc_balance) / Decimal(10**decimals)
 
         # Try to supply more than we have
         excessive_amount = balance_decimal * Decimal("100")
@@ -359,13 +438,15 @@ class TestAaveV3SupplyIntent:
         print(f"\n{'=' * 80}")
         print("Test: SupplyIntent with Insufficient Balance")
         print(f"{'=' * 80}")
-        print(f"Balance:   {balance_decimal} WETH")
-        print(f"Trying:    {excessive_amount} WETH")
+        print(f"Balance:   {balance_decimal} USDC")
+        print(f"Trying:    {excessive_amount} USDC")
 
+        # use_as_collateral=False — USDC has LTV=0 on Mantle Aave V3.
         intent = SupplyIntent(
             protocol="aave_v3",
-            token="WETH",
+            token="USDC",
             amount=excessive_amount,
+            use_as_collateral=False,
             chain=CHAIN_NAME,
         )
 
@@ -386,8 +467,8 @@ class TestAaveV3SupplyIntent:
         print(f"Execution failed as expected: {execution_result.error}")
 
         # Verify balance unchanged
-        weth_after = get_token_balance(web3, weth, funded_wallet)
-        assert weth_after == weth_balance, "Balance must be unchanged after failed supply"
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        assert usdc_after == usdc_balance, "Balance must be unchanged after failed supply"
 
         print("\nALL CHECKS PASSED")
 
@@ -403,12 +484,14 @@ class TestAaveV3SupplyIntent:
 class TestAaveV3BorrowIntent:
     """Test Aave V3 borrow operations on Mantle.
 
-    Verifies supply WETH as collateral, then borrow USDC at ~30% LTV.
+    Uses WMNT as collateral (LTV=40%, the only Mantle Aave reserve with
+    non-zero LTV) and borrows USDC. WETH is frozen on Mantle Aave V3 (#2102),
+    USDC has LTV=0 so it cannot be used as collateral, leaving WMNT as the
+    sole viable collateral asset.
     """
 
-    @pytest.mark.skip(reason="#2102: depends on WETH collateral supply (frozen reserve + Safe-side supply revert)")
     @pytest.mark.asyncio
-    async def test_borrow_usdc_after_supply_weth(
+    async def test_borrow_usdc_with_wmnt_collateral(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -416,22 +499,38 @@ class TestAaveV3BorrowIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test USDC borrow after supplying WETH as collateral.
+        """Test USDC borrow after supplying WMNT as collateral.
+
+        Done in two intents because Aave V3's BorrowIntent compiler emits
+        ``approve + supply + borrow`` but does NOT emit
+        ``setUserUseReserveAsCollateral`` — and on Mantle's Aave V3
+        deployment, supplying WMNT does not auto-enable it as collateral
+        (likely because of isolation-mode / debt-ceiling configuration), so
+        the subsequent borrow reverts. The fix is to issue a SupplyIntent
+        first with ``use_as_collateral=True`` (which DOES emit the explicit
+        toggle) and then a borrow-only BorrowIntent with
+        ``collateral_amount=0``.
+
+        WMNT has LTV=40% on Mantle. With CoinGecko WMNT ≈ $0.65 (CI run
+        showed $0.648), 200 WMNT collateral ≈ $130 supports up to ~$52 USDC
+        borrow at 40% LTV. We borrow 20 USDC (~38% utilization of LTV cap,
+        ~15% effective LTV — well under the 30% intent-tests cap).
 
         4-Layer Verification:
-        1. Compilation: BorrowIntent -> ActionBundle (SUCCESS)
-        2. Execution: on-chain transactions succeed
-        3. Receipt Parsing: Borrow event parsed
-        4. Balance Deltas: USDC increased, totalDebtBase increased,
-           healthFactor > 1e18
+        1. Compilation: SupplyIntent + BorrowIntent each → ActionBundle (SUCCESS)
+        2. Execution: both on-chain bundles succeed
+        3. Receipt Parsing: Supply (WMNT) and Borrow (USDC) events parsed
+        4. Balance Deltas: WMNT decreased by collateral, USDC increased by
+           borrow, totalDebtBase increased, healthFactor > 1e18
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
+        wmnt = tokens["WMNT"]
         usdc = tokens["USDC"]
+        wmnt_decimals = get_token_decimals(web3, wmnt)
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        collateral_amount = Decimal("0.1")  # 0.1 WETH as collateral
-        borrow_amount = Decimal("50")  # ~28% LTV
+        collateral_amount = Decimal("200")  # 200 WMNT (~$130 at $0.65/WMNT)
+        borrow_amount = Decimal("20")  # 20 USDC (~15% effective LTV)
 
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
@@ -440,20 +539,40 @@ class TestAaveV3BorrowIntent:
         )
 
         print(f"\n{'=' * 80}")
-        print("Test: Borrow USDC with WETH collateral on Aave V3 (Mantle)")
+        print("Test: Borrow USDC with WMNT collateral on Aave V3 (Mantle)")
         print(f"{'=' * 80}")
 
-        # Layer 4a: Record balances BEFORE borrow
+        # Layer 4a: Record balances BEFORE
+        wmnt_before = get_token_balance(web3, wmnt, funded_wallet)
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
         account_data_before = get_user_account_data(web3, funded_wallet)
+        print(f"WMNT before: {format_token_amount(wmnt_before, wmnt_decimals)}")
         print(f"USDC before borrow: {format_token_amount(usdc_before, usdc_decimals)}")
         print(f"Debt before: {account_data_before['totalDebtBase']}")
 
-        # Layer 1: Compile BorrowIntent (includes collateral supply)
+        # Step 1: SupplyIntent with use_as_collateral=True — emits the
+        # explicit setUserUseReserveAsCollateral(WMNT, true) call required
+        # to make WMNT count as collateral on Mantle Aave V3.
+        supply_intent = SupplyIntent(
+            protocol="aave_v3",
+            token="WMNT",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            chain=CHAIN_NAME,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS", f"Supply compilation failed: {supply_result.error}"
+        assert supply_result.action_bundle is not None
+        print(f"\nStep 1 — Supply ActionBundle: {len(supply_result.action_bundle.transactions)} transactions")
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert supply_exec.success, f"Supply execution failed: {supply_exec.error}"
+
+        # Step 2: BorrowIntent with collateral_amount=0 — borrows USDC
+        # against existing collateral (the WMNT just supplied).
         borrow_intent = BorrowIntent(
             protocol="aave_v3",
-            collateral_token="WETH",
-            collateral_amount=collateral_amount,
+            collateral_token="WMNT",
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=borrow_amount,
             interest_rate_mode="variable",
@@ -464,18 +583,28 @@ class TestAaveV3BorrowIntent:
         assert compilation_result.status.value == "SUCCESS", f"Borrow compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
-        print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
+        print(f"Step 2 — Borrow ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
 
-        # Layer 2: Execute
+        # Layer 2: Execute borrow
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Borrow execution failed: {execution_result.error}"
         print(f"Borrow successful! {len(execution_result.transaction_results)} transactions")
 
-        # Layer 3: Parse receipts
+        # Layer 3: Parse receipts across BOTH bundles (supply + borrow).
+        supply_parsed = False
+        for tx_result in supply_exec.transaction_results:
+            if tx_result.receipt:
+                parser = AaveV3ReceiptParser()
+                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+                if parse_result.success and parse_result.supplies:
+                    supply_parsed = True
+                    for supply_event in parse_result.supplies:
+                        assert supply_event.amount > 0, "Supply amount must be > 0"
+                        print(f"  Supply amount: {supply_event.amount}")
+        assert supply_parsed, "Must find at least one Supply event in supply bundle"
+
         borrow_parsed = False
-        for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i + 1}:")
-            print(f"  Hash: {tx_result.tx_hash[:16]}...")
+        for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
                 parser = AaveV3ReceiptParser()
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
@@ -486,14 +615,23 @@ class TestAaveV3BorrowIntent:
                         print(f"  Borrow amount: {borrow_event.amount}")
                         print(f"  Reserve: {borrow_event.reserve}")
 
-        assert borrow_parsed, "Must find at least one Borrow event in receipts"
+        assert borrow_parsed, "Must find at least one Borrow event in borrow bundle"
 
-        # Layer 4b: Verify balance changes
+        # Layer 4b: Verify balance changes (across both bundles)
+        wmnt_after = get_token_balance(web3, wmnt, funded_wallet)
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        wmnt_spent = wmnt_before - wmnt_after
         usdc_received = usdc_after - usdc_before
 
         print("\n--- Results ---")
+        print(f"WMNT spent (collateral): {format_token_amount(wmnt_spent, wmnt_decimals)}")
         print(f"USDC received: {format_token_amount(usdc_received, usdc_decimals)}")
+
+        expected_wmnt_spent = int(collateral_amount * Decimal(10**wmnt_decimals))
+        assert wmnt_spent == expected_wmnt_spent, (
+            f"WMNT spent must EXACTLY equal collateral amount. "
+            f"Expected: {expected_wmnt_spent}, Got: {wmnt_spent}"
+        )
 
         expected_usdc = int(borrow_amount * Decimal(10**usdc_decimals))
         assert usdc_received == expected_usdc, (
@@ -525,10 +663,9 @@ class TestAaveV3BorrowIntent:
 class TestAaveV3RepayIntent:
     """Test Aave V3 repay operations on Mantle.
 
-    Verifies supply -> borrow -> repay flow.
+    Verifies WMNT collateral supply -> USDC borrow -> USDC repay flow.
     """
 
-    @pytest.mark.skip(reason="#2102: depends on WETH collateral supply (frozen reserve + Safe-side supply revert)")
     @pytest.mark.asyncio
     async def test_repay_usdc_after_borrow(
         self,
@@ -538,7 +675,7 @@ class TestAaveV3RepayIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test USDC repay after supply + borrow on Mantle.
+        """Test USDC repay after WMNT-collateralised borrow on Mantle.
 
         4-Layer Verification:
         1. Compilation: RepayIntent -> ActionBundle (SUCCESS)
@@ -558,18 +695,35 @@ class TestAaveV3RepayIntent:
         )
 
         print(f"\n{'=' * 80}")
-        print("Test: Repay USDC after supply + borrow on Aave V3 (Mantle)")
+        print("Test: Repay USDC after WMNT collateral + USDC borrow on Aave V3 (Mantle)")
         print(f"{'=' * 80}")
 
-        # Step 1: Supply 0.1 WETH + Borrow 30 USDC via BorrowIntent
-        print("\nStep 1: Supplying WETH and borrowing 30 USDC...")
+        # Step 1a: SupplyIntent with use_as_collateral=True so that
+        # setUserUseReserveAsCollateral(WMNT, true) actually fires (Mantle's
+        # Aave V3 does NOT auto-enable WMNT as collateral on supply — see
+        # test_borrow_usdc_with_wmnt_collateral for the rationale).
+        print("\nStep 1a: Supplying 200 WMNT as collateral...")
+        supply_intent = SupplyIntent(
+            protocol="aave_v3",
+            token="WMNT",
+            amount=Decimal("200"),
+            use_as_collateral=True,
+            chain=CHAIN_NAME,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS"
+        assert supply_result.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert supply_exec.success, f"Supply failed: {supply_exec.error}"
 
+        # Step 1b: BorrowIntent against the just-supplied WMNT collateral.
+        print("Step 1b: Borrowing 10 USDC...")
         borrow_intent = BorrowIntent(
             protocol="aave_v3",
-            collateral_token="WETH",
-            collateral_amount=Decimal("0.1"),
+            collateral_token="WMNT",
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
-            borrow_amount=Decimal("30"),
+            borrow_amount=Decimal("10"),
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
@@ -580,9 +734,9 @@ class TestAaveV3RepayIntent:
         assert borrow_exec.success, f"Borrow failed: {borrow_exec.error}"
         print("Supply + Borrow successful!")
 
-        # Step 3: Repay 30 USDC
-        repay_amount = Decimal("30")
-        print(f"\nStep 3: Repaying {repay_amount} USDC...")
+        # Step 2: Repay 10 USDC
+        repay_amount = Decimal("10")
+        print(f"\nStep 2: Repaying {repay_amount} USDC...")
 
         # Layer 4a: Record state BEFORE repay
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
@@ -692,15 +846,15 @@ class TestAaveV3FailureModes:
         # Record USDC balance BEFORE
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
 
-        # Try to borrow 1000 USDC with zero collateral
-        # Even if wallet has residual collateral from prior tests,
-        # 1000 USDC borrow should exceed any available borrowing power
+        # Try to borrow 10000 USDC with zero collateral. Even if a prior test
+        # left residual WMNT collateral, 10k USDC borrow should massively
+        # exceed any available borrowing power (4k+ WMNT @ 40% LTV needed).
         intent = BorrowIntent(
             protocol="aave_v3",
-            collateral_token="WETH",
+            collateral_token="WMNT",
             collateral_amount=Decimal("0"),
             borrow_token="USDC",
-            borrow_amount=Decimal("1000"),
+            borrow_amount=Decimal("10000"),
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )

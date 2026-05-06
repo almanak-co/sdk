@@ -55,7 +55,13 @@ class TestUniswapV3SwapIntent:
     - Balance changes match expected amounts
     """
 
-    @pytest.mark.skip(reason="#2106: USDC/WETH pool does not exist on xlayer Uniswap V3 at any fee tier")
+    @pytest.mark.skip(
+        reason="#2106: xlayer Uniswap V3 has no liquid pool reachable from "
+        "conftest tokens — verified on-chain (as of 2026-05-06): USDC/WETH "
+        "absent at every fee tier; USDT0/WETH @ 100, USDC/USDT0 @ 500, and "
+        "USDC/WOKB @ all tiers exist but exhaust their concentrated-liquidity "
+        "range below 0.001 USDC swap-in (≥99% price impact)."
+    )
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -187,7 +193,11 @@ class TestUniswapV3SwapIntent:
 
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.skip(reason="#2106: WETH/USDC pool does not exist on xlayer Uniswap V3 at any fee tier")
+    @pytest.mark.skip(
+        reason="#2106: xlayer Uniswap V3 has no liquid pool reachable from "
+        "conftest tokens — see test_swap_usdc_to_weth_using_intent for full "
+        "on-chain liquidity audit."
+    )
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,
@@ -281,7 +291,11 @@ class TestUniswapV3SwapIntent:
         print(f"USDC received: {format_token_amount(usdc_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.skip(reason="#2106: USDC/WETH pool does not exist on xlayer Uniswap V3 — compile-time pool check fails")
+    @pytest.mark.skip(
+        reason="#2106: xlayer Uniswap V3 has no liquid pool reachable from "
+        "conftest tokens — compile-time pool check fails. See "
+        "test_swap_usdc_to_weth_using_intent for full liquidity audit."
+    )
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

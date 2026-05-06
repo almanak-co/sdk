@@ -54,14 +54,23 @@ CHAIN_NAME = "xlayer"
 #
 # uniswap_v3 SWAP carries an xfail marker referencing #2106. xlayer's
 # Uniswap V3 deployment (governance-deployed at non-canonical addresses)
-# has near-zero usable liquidity on every pool involving tokens currently
-# in the xlayer test conftest: USDC/WETH has no pool at any fee tier;
-# USDC/USDT0 (fee=500), USDC/WOKB and USDT0/WETH (fee=100) all return
-# 91–100% price impact for 1–100 USDC swap-in via the QuoterV2. The case
-# is kept here (not deleted) so the negative-anchor suite still documents
-# the manifest-regression surface; ``strict=True`` will surface the
-# resolution as an ``XPASS`` failure once liquidity returns or the test
-# conftest gains a swap pair with depth.
+# has no liquid pool reachable from conftest tokens. Verified on-chain
+# 2026-05-06 against the canonical xlayer factory
+# (``0x4B2ab38DBF28D31D467aA8993f6c2585981D6804``):
+#
+# - USDC/WETH: no pool at any fee tier.
+# - USDT0/WETH @ fee=100: pool exists but pool.liquidity()=5.77e8 — 100
+#   USDT0 swap returns 1.198e13 wei WETH (≈$0.05), >99.95% price impact.
+# - USDC/USDT0 @ fee=500: pool.liquidity()=9.9e4 — 100 USDC stable swap
+#   returns 0.098 USDT0, >99.9% price impact.
+# - USDC/WOKB @ fee=500: pool.liquidity()=6.66e12 but the active tick is
+#   so far off-market that 100 USDC returns 0.0087 WOKB (≈$0.43),
+#   >99.5% price impact.
+#
+# The case is kept here (not deleted) so the negative-anchor suite still
+# documents the manifest-regression surface; ``strict=True`` will surface
+# the resolution as an ``XPASS`` failure once liquidity returns or the
+# test conftest gains a swap pair with depth.
 _CASES: list = [
     pytest.param(
         PermissionTestCase(
@@ -71,10 +80,13 @@ _CASES: list = [
             config={"from_token": "USDT0", "to_token": "WETH", "amount": "100"},
         ),
         marks=pytest.mark.xfail(
-            reason="#2106: xlayer Uniswap V3 has near-zero usable liquidity on every "
-            "pool involving conftest tokens (as of 2026-05-05). Compile-time "
-            "price-impact guard rejects the intent before authorisation can be "
-            "asserted. Strict so re-enabled liquidity surfaces as XPASS.",
+            reason="#2106: xlayer Uniswap V3 has no liquid pool reachable from "
+            "conftest tokens (as of 2026-05-06): USDC/WETH absent at every fee "
+            "tier; USDT0/WETH @ 100 / USDC/USDT0 @ 500 / USDC/WOKB @ * exist "
+            "but exhaust their concentrated-liquidity range below 0.001 USDC "
+            "swap-in (≥99% price impact). Compile-time price-impact guard "
+            "rejects the intent before authorisation can be asserted. Strict "
+            "so re-enabled liquidity surfaces as XPASS.",
             strict=True,
         ),
         id="uniswap_v3-SWAP",

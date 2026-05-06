@@ -20,13 +20,13 @@ P1 gap the issue calls out: the positive default-on path proves the
 manifest suffices on mantle, but no test on this chain proves it is
 load-bearing.
 
-This anchor closes that gap. Note the SWAP pair (USDT → WETH) and the
-SUPPLY token (WETH) deliberately mirror the existing mantle intent tests
-under ``test_uniswap_swap.py`` / ``test_aave_v3_lending.py`` rather than
-the default USDC pattern used on other chains — bridged USDC liquidity
-on mantle Uniswap V3 (Agni) pools is thinner than the USDT/WETH pair the
-existing positive tests already exercise, and Aave V3 mantle's reserve
-config makes WETH the established working collateral. The harness's
+This anchor closes that gap. The SUPPLY token is USDC — the existing
+``test_aave_v3_lending.py`` happy-path tests use USDC after #2102 surfaced
+that the WETH reserve is frozen on Mantle (LTV=0, isFrozen=true). The
+SWAP pair (USDT → WETH) mirrors ``test_uniswap_swap.py`` even though
+those tests are skipped under #2104 — the negative anchor only needs
+the manifest to generate a load-bearing target, which is independent of
+whether the underlying swap can actually execute. The harness's
 ``_auto_derive_load_bearing_selector`` picks the function-scoped,
 non-approve target deterministically from the generated manifest, so the
 anchor stays minimal — no hardcoded selector per pair.
@@ -79,13 +79,10 @@ CHAIN_NAME = "mantle"
 # will surface the resolution as ``XPASS`` once the token alignment is
 # fixed.
 #
-# SUPPLY runs without a marker — the negative-anchor test only requires
-# the call to revert when the load-bearing target is revoked. The frozen
-# WETH reserve (#2102) causes a generic revert at the Aave layer, which
-# the harness still observes as a successful negative anchor (the
-# manifest target IS the load-bearing one even when the underlying call
-# would have failed for unrelated reasons). The earlier attempt at
-# `xfail(strict=True)` on this case was wrong — CI confirmed it passes.
+# SUPPLY uses USDC: WETH is frozen on Mantle Aave V3 (#2102), so supplying
+# WETH reverts at the Aave layer for reasons unrelated to authorisation.
+# USDC is active and non-frozen, which gives the harness a clean
+# authz-revoke signal to assert against.
 _CASES: list = [
     pytest.param(
         PermissionTestCase(
@@ -108,7 +105,7 @@ _CASES: list = [
             chain=CHAIN_NAME,
             protocol="aave_v3",
             intent_type="SUPPLY",
-            config={"token": "WETH", "amount": "0.1"},
+            config={"token": "USDC", "amount": "100"},
         ),
         id="aave_v3-SUPPLY",
     ),

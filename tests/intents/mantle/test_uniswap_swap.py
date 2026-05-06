@@ -58,7 +58,18 @@ class TestUniswapV3SwapIntent:
     USDC and USDT are bridged tokens with standard addresses.
     """
 
-    @pytest.mark.skip(reason="#2104: token resolver returns USD₀0 (LZ) for 'USDT' on mantle but conftest funds the legacy bridged USDT — pool address mismatch")
+    @pytest.mark.skip(
+        reason="#2104: token resolver returns LayerZero USD₮0 "
+        "(0x779Ded0…) for 'USDT' on mantle but conftest funds the legacy "
+        "bridged USDT (0x201EBa5C…). Verified on-chain 2026-05-06 against "
+        "the canonical Uniswap V3 factory (0x0d922Fb1…): no USD₮0/WETH "
+        "pool exists at any fee tier; only the bridged-USDT/WETH @ fee=500 "
+        "pool (0x076eb72E…) has a quote-able route, and switching the "
+        "test to bridged USDT requires either a chain-specific symbol "
+        "alias (e.g. 'USDT_BRIDGED') or aligning tokens.json with the "
+        "Uniswap V3 deployment — both wider changes than the in-scope "
+        "matrix-shard cleanup."
+    )
     @pytest.mark.asyncio
     async def test_swap_usdt_to_weth_using_intent(
         self,
@@ -140,7 +151,18 @@ class TestUniswapV3SwapIntent:
         print(f"WETH received: {format_token_amount(weth_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.skip(reason="#2104: token resolver returns USD₀0 (LZ) for 'USDT' on mantle but conftest funds the legacy bridged USDT — pool address mismatch")
+    @pytest.mark.skip(
+        reason="#2104: token resolver returns LayerZero USD₮0 "
+        "(0x779Ded0…) for 'USDT' on mantle but conftest funds the legacy "
+        "bridged USDT (0x201EBa5C…). Verified on-chain 2026-05-06 against "
+        "the canonical Uniswap V3 factory (0x0d922Fb1…): no USD₮0/WETH "
+        "pool exists at any fee tier; only the bridged-USDT/WETH @ fee=500 "
+        "pool (0x076eb72E…) has a quote-able route, and switching the "
+        "test to bridged USDT requires either a chain-specific symbol "
+        "alias (e.g. 'USDT_BRIDGED') or aligning tokens.json with the "
+        "Uniswap V3 deployment — both wider changes than the in-scope "
+        "matrix-shard cleanup."
+    )
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdt_using_intent(
         self,
@@ -222,7 +244,11 @@ class TestUniswapV3SwapIntent:
         print(f"USDT received: {format_token_amount(usdt_received, out_decimals)}")
         print("\nALL CHECKS PASSED")
 
-    @pytest.mark.skip(reason="#2104: token resolver returns USD₀0 (LZ) for 'USDT' on mantle but conftest funds the legacy bridged USDT — compile-time pool quote fails")
+    @pytest.mark.skip(
+        reason="#2104: token resolver / conftest USDT mismatch; compile-time "
+        "pool quote fails. See test_swap_usdt_to_weth_using_intent for the "
+        "full on-chain diagnosis."
+    )
     @pytest.mark.asyncio
     async def test_swap_intent_with_insufficient_balance_fails(
         self,

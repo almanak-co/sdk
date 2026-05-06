@@ -87,10 +87,15 @@ class TestBuildAnvilCommand:
     """Tests for _build_anvil_command() base fee and gas flags."""
 
     def _make_manager(self) -> RollingForkManager:
+        # cache_path=None keeps these tests env-independent. The default
+        # picks up ANVIL_FORK_CACHE_PATH which would route through the
+        # subprocess probe (--cache-path support detection) and turn this
+        # into a non-unit test.
         return RollingForkManager(
             rpc_url="https://eth-mainnet.example.com",
             chain="ethereum",
             anvil_port=8545,
+            cache_path=None,
         )
 
     def test_always_includes_block_base_fee_per_gas_0(self):
@@ -114,28 +119,33 @@ class TestBuildAnvilCommand:
         assert "--retries" in cmd
         assert "--silent" in cmd
 
-    def test_gas_limit_included_for_mantle_when_supported(self):
-        """Mantle gets --gas-limit when Anvil supports the flag (VIB-3666 / VIB-3746).
+    def test_gas_limit_included_for_mantle(self):
+        """Mantle gets --gas-limit + --disable-block-gas-limit unconditionally
+        (VIB-3666 / VIB-3746 / #2103).
 
-        Foundry's Anvil exposes the block-gas-limit override as ``--gas-limit``;
-        the previous wiring under VIB-3666 used ``--block-gas-limit`` which Anvil
-        does not advertise, silently skipping the override and re-introducing the
-        Mantle "intrinsic gas too high" failure (VIB-3746).
+        ``--gas-limit`` has been a stable Foundry/Anvil flag since 1.0; the
+        previous ``_get_anvil_supported_flags()`` gate masked CI environments
+        where the help-output probe returned an empty set, silently dropping
+        the override and re-introducing the Mantle "intrinsic gas too high"
+        failure on Foundry 1.7.0 in CI (issue #2103).
+
+        Belt-and-suspenders: ``--disable-block-gas-limit`` removes Anvil's
+        ``tx.gas_limit <= block.gas_limit`` check outright, which is the
+        defense against Mantle's L1-calldata-included gas accounting
+        producing tx-level estimates that exceed even a 1B block override.
         """
         _clear_flags_cache()
         mgr = RollingForkManager(
             rpc_url="https://mantle.example.com",
             chain="mantle",
             anvil_port=8545,
+            cache_path=None,
         )
-        with patch(
-            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
-            return_value={"--gas-limit", "--cache-path", "--block-base-fee-per-gas"},
-        ):
-            cmd = mgr._build_anvil_command()
+        cmd = mgr._build_anvil_command()
         assert "--gas-limit" in cmd
         idx = cmd.index("--gas-limit")
         assert cmd[idx + 1] == "1000000000"
+        assert "--disable-block-gas-limit" in cmd
 
     def test_block_gas_limit_legacy_flag_never_used(self):
         """Sanity: legacy ``--block-gas-limit`` flag must not appear (VIB-3746).
@@ -149,48 +159,21 @@ class TestBuildAnvilCommand:
             rpc_url="https://mantle.example.com",
             chain="mantle",
             anvil_port=8545,
+            cache_path=None,
         )
-        # Even when both flag names are advertised (extremely defensive), we must
-        # only ever emit --gas-limit, never the legacy spelling.
-        with patch(
-            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
-            return_value={
-                "--gas-limit",
-                "--block-gas-limit",
-                "--cache-path",
-                "--block-base-fee-per-gas",
-            },
-        ):
-            cmd = mgr._build_anvil_command()
+        cmd = mgr._build_anvil_command()
         assert "--block-gas-limit" not in cmd
         assert "--gas-limit" in cmd
 
-    def test_gas_limit_skipped_for_mantle_when_unsupported(self):
-        """No --gas-limit when Anvil doesn't advertise support (older versions)."""
-        _clear_flags_cache()
-        mgr = RollingForkManager(
-            rpc_url="https://mantle.example.com",
-            chain="mantle",
-            anvil_port=8545,
-        )
-        with patch(
-            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
-            return_value={"--cache-path", "--block-base-fee-per-gas"},
-        ):
-            cmd = mgr._build_anvil_command()
-        assert "--gas-limit" not in cmd
-        assert "--block-gas-limit" not in cmd
-
     def test_gas_limit_not_included_for_non_override_chains(self):
-        """Ethereum (no entry in _CHAIN_BLOCK_GAS_LIMITS) never gets --gas-limit."""
+        """Ethereum (no entry in _CHAIN_BLOCK_GAS_LIMITS) never gets --gas-limit
+        or --disable-block-gas-limit — both are reserved for chains with
+        non-standard gas accounting."""
         mgr = self._make_manager()  # chain="ethereum"
-        with patch(
-            "almanak.framework.anvil.fork_manager._get_anvil_supported_flags",
-            return_value={"--gas-limit", "--cache-path", "--block-base-fee-per-gas"},
-        ):
-            cmd = mgr._build_anvil_command()
+        cmd = mgr._build_anvil_command()
         assert "--gas-limit" not in cmd
         assert "--block-gas-limit" not in cmd
+        assert "--disable-block-gas-limit" not in cmd
 
 
 class TestGetTokenBalance:
