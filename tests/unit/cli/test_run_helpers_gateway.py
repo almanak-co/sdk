@@ -169,9 +169,11 @@ class TestSetupGatewayExternal:
         assert effective_host == "127.0.0.1"
         assert gw_port == 50051
         assert gw_network == "mainnet"
-        # No session auth token or isolated wallet in external mode.
+        # No session auth token, isolated wallet, or derived key in external mode.
         assert token is None
         assert isolated_wallet is None
+        # No derived key plumbed when no_gateway + no caller-plumbed key.
+        assert run_helpers._runtime_private_key_override.get() is None
         assert early_cls is None
 
     def test_external_reads_auth_token_from_env(
@@ -538,27 +540,48 @@ class TestSetupGatewayManaged:
         strategy_dir = tmp_path / "my_strategy"
         strategy_dir.mkdir()
         self._write_config(strategy_dir, "arbitrum")
-        with runner.isolation():
-            _, _, _, _, _, _, isolated_wallet, _ = run_helpers._setup_gateway(
-                working_dir=str(strategy_dir),
-                config_file=None,
-                network="anvil",
-                gateway_host="127.0.0.1",
-                gateway_port=50051,
-                no_gateway=False,
-                anvil_ports=(),
-                wallet="isolated",
-                keep_anvil=False,
-                reset_fork=False,
-                once=False,
-            )
-        assert isolated_wallet == "0x" + "cd" * 20
-        # Seed is the strategy directory name.
-        assert captured_seeds == ["my_strategy"]
-        # ALMANAK_PRIVATE_KEY was overwritten with the derived key.
-        import os
+        # Reset the contextvar so a stale value from a prior test cannot
+        # masquerade as the derived key. Belt-and-braces with the autouse
+        # conftest fixture: explicit cleanup at the end of this test means
+        # an assertion failure mid-test still leaves the contextvar in a
+        # known state, independent of fixture teardown order.
+        run_helpers._runtime_private_key_override.set(None)
+        try:
+            with runner.isolation():
+                (
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    isolated_wallet,
+                    _,
+                ) = run_helpers._setup_gateway(
+                    working_dir=str(strategy_dir),
+                    config_file=None,
+                    network="anvil",
+                    gateway_host="127.0.0.1",
+                    gateway_port=50051,
+                    no_gateway=False,
+                    anvil_ports=(),
+                    wallet="isolated",
+                    keep_anvil=False,
+                    reset_fork=False,
+                    once=False,
+                )
+            assert isolated_wallet == "0x" + "cd" * 20
+            # Seed is the strategy directory name.
+            assert captured_seeds == ["my_strategy"]
+            # The derived key is plumbed downstream via the ContextVar so
+            # `_build_runtime_config` signs from the same identity (#2100).
+            assert run_helpers._runtime_private_key_override.get() == "0x" + "ab" * 32
+            # ALMANAK_PRIVATE_KEY remains the master key — unchanged by _setup_gateway.
+            import os
 
-        assert os.environ["ALMANAK_PRIVATE_KEY"] == "0x" + "ab" * 32
+            assert os.environ["ALMANAK_PRIVATE_KEY"] == "0x" + "11" * 32
+        finally:
+            run_helpers._runtime_private_key_override.set(None)
 
     def test_isolated_wallet_without_master_key_raises(
         self,

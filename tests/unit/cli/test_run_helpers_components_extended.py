@@ -188,12 +188,19 @@ class TestBuildRuntimeConfigErrors:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Multi-chain anvil falls back to default private key on MissingEnv (1330-1348)."""
-        call_count = {"n": 0}
+        call_count: dict[str, Any] = {"n": 0, "retry_kwargs": None}
 
-        def _from_env(chains: list[str], protocols: Any, network: str) -> Any:
+        def _from_env(
+            chains: list[str], protocols: Any, network: str, private_key: str | None = None
+        ) -> Any:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")
+            call_count["retry_kwargs"] = {
+                "chains": chains,
+                "network": network,
+                "private_key": private_key,
+            }
             return _make_fake_multichain_config(chains)
 
         _patch_runtime_config_imports(monkeypatch, multi_factory=_from_env)
@@ -216,12 +223,14 @@ class TestBuildRuntimeConfigErrors:
                 gateway_client=MagicMock(),
                 strategy_config=strategy_config,
             )
-        assert call_count["n"] == 2  # retried after env set
+        assert call_count["n"] == 2  # retried with the kwarg
         import os as _os
 
         from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
 
-        assert _os.environ["ALMANAK_PRIVATE_KEY"] == ANVIL_DEFAULT_PRIVATE_KEY
+        # Retry plumbed the Anvil-default key via the kwarg; env was NOT mutated.
+        assert call_count["retry_kwargs"]["private_key"] == ANVIL_DEFAULT_PRIVATE_KEY
+        assert _os.environ.get("ALMANAK_PRIVATE_KEY") is None
 
     def test_multi_chain_sidecar_no_private_key_exits_1(
         self, monkeypatch: pytest.MonkeyPatch
@@ -415,7 +424,7 @@ class TestBuildRuntimeConfigErrors:
         """If retry after default-key fallback still fails, exit 1 (1402-1404)."""
         call_count = {"n": 0}
 
-        def _fail_twice(chain: str, network: str) -> Any:
+        def _fail_twice(chain: str, network: str, private_key: str | None = None) -> Any:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")
@@ -448,7 +457,7 @@ class TestBuildRuntimeConfigErrors:
         """On TTY, `confirm(...)` False -> sys.exit(0) (1395-1396)."""
         call_count = {"n": 0}
 
-        def _fail_once(chain: str, network: str) -> Any:
+        def _fail_once(chain: str, network: str, private_key: str | None = None) -> Any:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")
@@ -1429,7 +1438,9 @@ class TestBuildRuntimeConfigMultiChainAnvil:
         """Multi-chain anvil: first call raises MissingEnv, retry raises RuntimeError -> exit 1."""
         call_count = {"n": 0}
 
-        def _factory(chains: list[str], protocols: Any, network: str) -> Any:
+        def _factory(
+            chains: list[str], protocols: Any, network: str, private_key: str | None = None
+        ) -> Any:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")

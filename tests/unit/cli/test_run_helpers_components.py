@@ -292,8 +292,8 @@ def _patch_runtime_config_imports(
     uses fakes while keeping `isinstance(rt, LocalRuntimeConfig)` true."""
     from almanak.framework.execution import config as execution_config
 
-    default_local = lambda chain, network: _make_fake_local_config(chain or "arbitrum")
-    default_multi = lambda chains, protocols, network: _make_fake_multichain_config(chains)
+    default_local = lambda chain, network, private_key=None: _make_fake_local_config(chain or "arbitrum")
+    default_multi = lambda chains, protocols, network, private_key=None: _make_fake_multichain_config(chains)
 
     monkeypatch.setattr(
         execution_config.LocalRuntimeConfig,
@@ -366,12 +366,13 @@ class TestBuildRuntimeConfig:
     def test_anvil_falls_back_to_default_key_when_private_key_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        calls = {"count": 0}
+        calls: dict[str, Any] = {"count": 0, "retry_kwargs": None}
 
-        def from_env_with_retry(chain: str, network: str) -> Any:
+        def from_env_with_retry(chain: str, network: str, private_key: str | None = None) -> Any:
             calls["count"] += 1
             if calls["count"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")
+            calls["retry_kwargs"] = {"chain": chain, "network": network, "private_key": private_key}
             return _make_fake_local_config(chain or "arbitrum")
 
         _patch_runtime_config_imports(monkeypatch, local_factory=from_env_with_retry)
@@ -396,11 +397,15 @@ class TestBuildRuntimeConfig:
                 strategy_config=strategy_config,
             )
         assert rt.chain == "arbitrum"
-        # Retry picked up the default anvil key (side effect)
+        # Retry was driven by the explicit kwarg, not by env mutation (#2100).
         from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
 
-        assert __import__("os").environ["ALMANAK_PRIVATE_KEY"] == ANVIL_DEFAULT_PRIVATE_KEY
         assert calls["count"] == 2
+        assert calls["retry_kwargs"]["private_key"] == ANVIL_DEFAULT_PRIVATE_KEY
+        # Boundary contract: os.environ is NOT mutated by the helper.
+        import os as _os
+
+        assert _os.environ.get("ALMANAK_PRIVATE_KEY") is None
 
     def test_safe_mode_preflight_fail_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from almanak.framework.execution.config import LocalRuntimeConfig
@@ -410,7 +415,7 @@ class TestBuildRuntimeConfig:
             def is_safe_mode(self) -> bool:  # type: ignore[override]
                 return True
 
-        def safe_from_env(chain: str, network: str) -> Any:
+        def safe_from_env(chain: str, network: str, private_key: str | None = None) -> Any:
             return _SafeLocal(
                 chain=chain or "arbitrum",
                 rpc_url="https://rpc.test",

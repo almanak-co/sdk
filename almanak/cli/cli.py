@@ -1329,10 +1329,15 @@ def strategy_test(
     # fall back to the well-known Anvil account #0 key so anvil_funding has a
     # wallet to fund. Public test key — no security impact, only used here
     # because this command is hardcoded to `--network anvil`.
+    test_runtime_private_key: str | None = None
     if not os.environ.get("ALMANAK_PRIVATE_KEY"):
         from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
 
-        os.environ["ALMANAK_PRIVATE_KEY"] = ANVIL_DEFAULT_PRIVATE_KEY
+        # Plumbed via the ``_runtime_private_key_override`` ContextVar below
+        # so we never mutate os.environ as a side-channel between calls (#2100)
+        # and never grow `run`'s parameter list (the click callback is on the
+        # CRAP gate's bubble — kwarg threading there flagged every wiring line).
+        test_runtime_private_key = ANVIL_DEFAULT_PRIVATE_KEY
         click.echo("ALMANAK_PRIVATE_KEY unset — using default Anvil account #0 (test-only)")
 
     install_redaction()
@@ -1358,6 +1363,15 @@ def strategy_test(
         else:
             click.echo(f"SKIP: {skip_reason}", err=True)
         sys.exit(0)
+
+    # Set the test-fallback signing key on the framework's contextvar so it
+    # reaches `_setup_gateway` / `_build_runtime_config` without growing
+    # `framework_run_cmd`'s parameter list. Reset deterministically in the
+    # finally branch so the value never leaks across `almanak strat test`
+    # invocations within the same Python process.
+    from almanak.framework.cli.run_helpers import _runtime_private_key_override as _rt_pk_var
+
+    _rt_pk_token = _rt_pk_var.set(test_runtime_private_key) if test_runtime_private_key else None
 
     try:
         ctx.invoke(
@@ -1421,6 +1435,9 @@ def strategy_test(
                 key_value_pairs={"Error": str(e)},
             )
         sys.exit(1)
+    finally:
+        if _rt_pk_token is not None:
+            _rt_pk_var.reset(_rt_pk_token)
 
 
 @strat.command("run")

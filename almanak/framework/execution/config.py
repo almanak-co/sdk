@@ -29,6 +29,7 @@ Example:
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -603,6 +604,7 @@ class LocalRuntimeConfig:
         network: str = "mainnet",
         dotenv_path: str | None = None,
         prefix: str = "ALMANAK_",
+        private_key: str | None = None,
     ) -> "LocalRuntimeConfig":
         """Create configuration from environment variables.
 
@@ -636,6 +638,13 @@ class LocalRuntimeConfig:
             network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
             dotenv_path: Optional path to .env file to load
             prefix: Environment variable prefix (default "ALMANAK_")
+            private_key: Optional explicit private key. When non-None, used directly
+                as the wallet signing key, bypassing the {prefix}PRIVATE_KEY env
+                lookup for that field only. Other env reads (RPC URLs, gas caps,
+                Safe addresses, etc.) keep their existing precedence. Precedence:
+                kwarg > {prefix}PRIVATE_KEY > unprefixed PRIVATE_KEY. The kwarg
+                lets callers (CLI Anvil-fallback, --wallet isolated) plumb a
+                derived key without mutating os.environ mid-run (#2100).
 
         Returns:
             LocalRuntimeConfig instance
@@ -785,29 +794,29 @@ class LocalRuntimeConfig:
         # signer creation per chain. No local private key or SAFE_ADDRESS needed.
         gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
 
-        # Solana uses a separate key env var (base58 Ed25519 instead of hex secp256k1)
-        if resolved_chain == "solana":
-            private_key = os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
-        elif execution_mode == ExecutionMode.SAFE_ZODIAC:
-            # Zodiac mode: private key is held by remote signer service, not needed locally
-            private_key = get_optional("PRIVATE_KEY", "") or ""
-        elif gateway_wallets_configured:
-            # Gateway wallets mode: private key is optional (gateway handles signing)
-            private_key = get_optional("PRIVATE_KEY", "") or ""
-        else:
-            private_key = get_required("PRIVATE_KEY")
+        # Resolve the signing key. Explicit kwarg wins over env (#2100): the CLI
+        # plumbs the Anvil-default and isolated-wallet derived keys this way
+        # instead of mutating os.environ mid-run.
+        resolved_private_key = _resolve_private_key_from_env(
+            private_key=private_key,
+            chain=resolved_chain,
+            execution_mode=execution_mode,
+            gateway_wallets_configured=gateway_wallets_configured,
+            get_required=get_required,
+            get_optional=get_optional,
+        )
         safe_signer = None
         if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
             safe_signer = _create_safe_signer_from_env(
                 execution_mode=execution_mode,
-                private_key=private_key,
+                private_key=resolved_private_key,
                 prefix=prefix,
             )
 
         return cls(
             chain=resolved_chain,
             rpc_url=rpc_url,
-            private_key=private_key,
+            private_key=resolved_private_key,
             max_gas_price_gwei=gas_cap_override
             if gas_cap_override is not None
             else get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
@@ -1639,6 +1648,7 @@ class MultiChainRuntimeConfig:
         network: str = "mainnet",
         dotenv_path: str | None = None,
         prefix: str = "ALMANAK_",
+        private_key: str | None = None,
     ) -> "MultiChainRuntimeConfig":
         """Create configuration from environment variables.
 
@@ -1668,6 +1678,12 @@ class MultiChainRuntimeConfig:
             network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
             dotenv_path: Optional path to .env file to load
             prefix: Environment variable prefix (default "ALMANAK_")
+            private_key: Optional explicit private key. When non-None, used directly
+                as the wallet signing key, bypassing the {prefix}PRIVATE_KEY env
+                lookup for that field only. Other env reads keep their existing
+                precedence. Precedence: kwarg > {prefix}PRIVATE_KEY > unprefixed
+                PRIVATE_KEY. Plumbed by the CLI Anvil-fallback path so it does
+                not have to mutate os.environ mid-run (#2100).
 
         Returns:
             MultiChainRuntimeConfig instance
@@ -1757,14 +1773,19 @@ class MultiChainRuntimeConfig:
         # or SAFE_ADDRESS — those are resolved from the registry at RegisterChains time.
         gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
 
-        # Zodiac mode: private key is held by remote signer service, not needed locally
-        if execution_mode == ExecutionMode.SAFE_ZODIAC:
-            private_key = get_optional("PRIVATE_KEY", "") or ""
-        elif gateway_wallets_configured:
-            # Gateway wallets mode: private key is optional (gateway handles signing)
-            private_key = get_optional("PRIVATE_KEY", "") or ""
-        else:
-            private_key = get_required("PRIVATE_KEY")
+        # Resolve the signing key. Explicit kwarg wins over env (#2100): the CLI
+        # plumbs the Anvil-default key this way instead of mutating os.environ.
+        # ``chain=None`` because MultiChainRuntimeConfig is multi-chain by
+        # construction — the Solana-specific env-var fallback only fires for
+        # the single-chain LocalRuntimeConfig path.
+        resolved_private_key = _resolve_private_key_from_env(
+            private_key=private_key,
+            chain=None,
+            execution_mode=execution_mode,
+            gateway_wallets_configured=gateway_wallets_configured,
+            get_required=get_required,
+            get_optional=get_optional,
+        )
 
         # Create Safe signer if needed — skip when gateway wallets are configured
         # (the gateway creates signers per chain from the WalletRegistry)
@@ -1772,7 +1793,7 @@ class MultiChainRuntimeConfig:
         if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
             safe_signer = _create_safe_signer_from_env(
                 execution_mode=execution_mode,
-                private_key=private_key,
+                private_key=resolved_private_key,
                 prefix=prefix,
             )
 
@@ -1798,7 +1819,7 @@ class MultiChainRuntimeConfig:
         return cls(
             chains=chains,
             protocols=protocols,
-            private_key=private_key,
+            private_key=resolved_private_key,
             safe_signer=safe_signer,
             network=network,
             max_gas_price_gwei=multi_gas_cap_override
@@ -2063,6 +2084,43 @@ class MultiChainRuntimeConfig:
 # =============================================================================
 # Safe Signer Factory
 # =============================================================================
+
+
+def _resolve_private_key_from_env(
+    *,
+    private_key: str | None,
+    chain: str | None,
+    execution_mode: ExecutionMode,
+    gateway_wallets_configured: bool,
+    get_required: Callable[[str], str],
+    get_optional: Callable[..., str | None],
+) -> str:
+    """Resolve the wallet signing key with kwarg-over-env precedence (#2100).
+
+    Shared between ``LocalRuntimeConfig.from_env`` and
+    ``MultiChainRuntimeConfig.from_env`` so the precedence order is encoded
+    once. Precedence: explicit ``private_key`` kwarg (incl. ``""``) >
+    ``{prefix}PRIVATE_KEY`` env (via ``get_required`` / ``get_optional``) >
+    unprefixed env (only the Solana branch reads ``SOLANA_PRIVATE_KEY``
+    directly because that name is the canonical bare env var).
+
+    ``private_key is not None`` honours an explicit empty-string override:
+    callers can pass ``private_key=""`` to force the no-local-key path even
+    when an ambient ``ALMANAK_PRIVATE_KEY`` is set in env (e.g. SAFE_ZODIAC
+    or gateway-wallets flows running on a developer box).
+    """
+    if private_key is not None:
+        return private_key
+    if chain == "solana":
+        # Solana uses base58 Ed25519 instead of hex secp256k1 — separate env var.
+        return os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
+    if execution_mode == ExecutionMode.SAFE_ZODIAC:
+        # Zodiac: private key held by the remote signer service, not needed locally.
+        return get_optional("PRIVATE_KEY", "") or ""
+    if gateway_wallets_configured:
+        # Gateway wallets mode: signing handled by the gateway, key optional locally.
+        return get_optional("PRIVATE_KEY", "") or ""
+    return get_required("PRIVATE_KEY")
 
 
 def _create_safe_signer_from_env(
