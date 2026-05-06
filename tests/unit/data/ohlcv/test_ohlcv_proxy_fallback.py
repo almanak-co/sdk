@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -21,10 +21,17 @@ from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 
 
 def _make_candles(n: int = 5) -> list[OHLCVCandle]:
-    """Create n dummy candles for testing."""
+    """Create n dummy candles ending at "now" for testing.
+
+    Timestamps are anchored to wall-clock so the youngest candle is fresh
+    relative to the router's upstream-staleness guard (ALM-2697); the
+    fixed-date fixture this replaces became stale once the project clock
+    rolled past it.
+    """
+    now = datetime.now(UTC)
     return [
         OHLCVCandle(
-            timestamp=datetime(2026, 1, 1, i, tzinfo=UTC),
+            timestamp=now - timedelta(hours=n - 1 - i),
             open=Decimal("100"),
             high=Decimal("110"),
             low=Decimal("90"),
@@ -71,7 +78,15 @@ class TestOHLCVProxyMap:
         assert OHLCV_PROXY_MAP["WMNT"] == "MNT"
 
     def test_proxy_map_contains_expected_entries(self):
-        expected = {"WMNT": "MNT", "WS": "S", "WXPL": "XPL", "WETH": "ETH", "WAVAX": "AVAX", "WMATIC": "MATIC", "WBNB": "BNB"}
+        expected = {
+            "WMNT": "MNT",
+            "WS": "S",
+            "WXPL": "XPL",
+            "WETH": "ETH",
+            "WAVAX": "AVAX",
+            "WMATIC": "MATIC",
+            "WBNB": "BNB",
+        }
         for wrapped, unwrapped in expected.items():
             assert OHLCV_PROXY_MAP.get(wrapped) == unwrapped, f"Missing or wrong: {wrapped} -> {unwrapped}"
 
@@ -185,7 +200,9 @@ class TestProxyFallback:
         with caplog.at_level(logging.DEBUG, logger="almanak.framework.data.ohlcv.ohlcv_router"):
             router.get_ohlcv("WMNT", chain="mantle")
 
-        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING and "ohlcv_proxy_fallback" in r.message]
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING and "ohlcv_proxy_fallback" in r.message
+        ]
         assert len(warning_records) >= 1
 
         caplog.clear()
@@ -194,8 +211,12 @@ class TestProxyFallback:
         with caplog.at_level(logging.DEBUG, logger="almanak.framework.data.ohlcv.ohlcv_router"):
             router.get_ohlcv("WMNT", chain="mantle")
 
-        warning_records_2 = [r for r in caplog.records if r.levelno == logging.WARNING and "ohlcv_proxy_fallback" in r.message]
-        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG and "ohlcv_proxy_fallback" in r.message]
+        warning_records_2 = [
+            r for r in caplog.records if r.levelno == logging.WARNING and "ohlcv_proxy_fallback" in r.message
+        ]
+        debug_records = [
+            r for r in caplog.records if r.levelno == logging.DEBUG and "ohlcv_proxy_fallback" in r.message
+        ]
         assert len(warning_records_2) == 0
         assert len(debug_records) >= 1
 

@@ -10,8 +10,7 @@ Covers:
 
 from __future__ import annotations
 
-import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +23,6 @@ from almanak.framework.data.ohlcv.ohlcv_router import (
     _is_transient_exc,
 )
 from almanak.framework.strategies.intent_strategy import MarketSnapshot
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -53,9 +51,17 @@ def _isolate_ohlcv_cache(tmp_path, monkeypatch):
 
 
 def _make_candles(n: int = 5) -> list[OHLCVCandle]:
+    """Build a contiguous candle series ending at wall-clock "now".
+
+    Timestamps are anchored to wall-clock so the youngest candle is fresh
+    relative to the router's upstream-staleness guard (ALM-2697); the
+    fixed-date fixture this replaces became stale once the project clock
+    rolled past it.
+    """
+    now = datetime.now(UTC)
     return [
         OHLCVCandle(
-            timestamp=datetime(2026, 1, 1, i, tzinfo=UTC),
+            timestamp=now - timedelta(hours=n - 1 - i),
             open=Decimal("100"),
             high=Decimal("110"),
             low=Decimal("90"),
@@ -123,9 +129,7 @@ class TestErrorEnvelope:
         assert "StatusCode.INTERNAL" in reason or "GeckoTerminal" in reason, (
             f"Primary Gecko error not found in reason: {reason}"
         )
-        assert "Unknown token for Binance" in reason, (
-            f"Last Binance error not found in reason: {reason}"
-        )
+        assert "Unknown token for Binance" in reason, f"Last Binance error not found in reason: {reason}"
 
     def test_only_one_provider_fails_reason_is_flat(self):
         """When only one provider is registered and fails, reason is the plain error."""
@@ -177,9 +181,7 @@ class TestClassifyGeckoPlusBinanceCombined:
         )
         market = _snapshot_with_failure(combined)
         classification = market.classify_critical_data_failures()
-        assert classification == "mixed", (
-            f"Expected 'mixed' for Gecko+Binance combined error, got '{classification}'"
-        )
+        assert classification == "mixed", f"Expected 'mixed' for Gecko+Binance combined error, got '{classification}'"
 
     def test_unknown_token_only_is_permanent(self):
         """A clean 'unknown token' error with no transient hints → 'permanent'."""
@@ -188,9 +190,7 @@ class TestClassifyGeckoPlusBinanceCombined:
 
     def test_grpc_internal_only_is_transient(self):
         """A pure gRPC INTERNAL error with no permanent hints → 'transient'."""
-        market = _snapshot_with_failure(
-            "StatusCode.INTERNAL — GeckoTerminal OHLCV request failed"
-        )
+        market = _snapshot_with_failure("StatusCode.INTERNAL — GeckoTerminal OHLCV request failed")
         assert market.classify_critical_data_failures() == "transient"
 
     def test_grpc_unavailable_only_is_transient(self):
@@ -200,12 +200,8 @@ class TestClassifyGeckoPlusBinanceCombined:
     def test_two_separate_failures_gecko_transient_binance_permanent(self):
         """Two separate recorded failures (one each) → 'mixed'."""
         market = MarketSnapshot(chain="base", wallet_address="0xtest")
-        market._record_critical_data_failure(
-            "ohlcv_router", "cbBTC_primary", "StatusCode.INTERNAL: GeckoTerminal blip"
-        )
-        market._record_critical_data_failure(
-            "ohlcv_router", "cbBTC_last", "Unknown token for Binance: 0xcbbtc"
-        )
+        market._record_critical_data_failure("ohlcv_router", "cbBTC_primary", "StatusCode.INTERNAL: GeckoTerminal blip")
+        market._record_critical_data_failure("ohlcv_router", "cbBTC_last", "Unknown token for Binance: 0xcbbtc")
         assert market.classify_critical_data_failures() == "mixed"
 
     def test_empty_failures_returns_none(self):

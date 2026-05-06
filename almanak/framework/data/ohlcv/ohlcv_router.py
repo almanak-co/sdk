@@ -243,6 +243,62 @@ _PROVIDER_CHAINS: dict[str, list[str]] = {
 # Candles older than this are considered finalized and cached immutably
 _FINALIZATION_AGE = timedelta(hours=24)
 
+# ---------------------------------------------------------------------------
+# Upstream-staleness guard (ALM-2697)
+# ---------------------------------------------------------------------------
+#
+# Without this guard, a CEX upstream that has silently stopped returning fresh
+# data — e.g. Binance after the MATIC -> POL ticker rebrand still answering
+# `MATICUSDT` requests with last-month klines — will hand back a fully populated
+# response. ``_split_by_finality`` then classifies *every* candle as "finalized"
+# (because they are all >24h old), the disk cache writes them, and on every
+# subsequent iteration the router serves the same byte-identical bag. RSI on a
+# 5-minute timeframe ends up frozen forever.
+#
+# We treat a fetch as stale when the youngest candle's *start-time* (i.e. the
+# candle's ``timestamp`` field — see ``OHLCVCandle``) is more than
+# ``_STALE_TIMEFRAME_MULTIPLE * timeframe`` behind wall-clock. Start-time is a
+# stricter signal than close-time (a candle's close-time is start-time +
+# timeframe), so any check that passes start-time also passes close-time —
+# this is intentional safety margin, not a bug. Two timeframes is generous
+# enough to absorb upstream propagation delay and weekend gaps on longer
+# intervals, while still catching "MATICUSDT hasn't traded in 2+ days but
+# Binance is happy to keep echoing 5m klines from June".
+#
+# Mapping is duplicated from ``data.qa.test_definitions.cex_historical`` rather
+# than imported to keep the router free of QA-test transitive imports — the QA
+# suite pulls in pandas + grading machinery this hot path doesn't need. Keep
+# the two in sync; the keys mirror ``GatewayOHLCVProvider._SUPPORTED_TIMEFRAMES``.
+
+_TIMEFRAME_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "8h": 28800,
+    "12h": 43200,
+    "1d": 86400,
+}
+
+# How many full timeframes the youngest candle may lag wall-clock before the
+# upstream is judged stale. Two is the smallest value that doesn't false-alarm
+# on a normal 5m fetch where the most recent in-progress candle hasn't closed
+# yet (lag < 1 timeframe) and the previous closed candle is still <2 timeframes
+# old. Three+ would let a >10-minute outage slide on 5m, which is the regime
+# where RSI stops moving.
+_STALE_TIMEFRAME_MULTIPLE = 2
+
+# Floor on the staleness budget. For ``1m`` this would otherwise be only 120s,
+# which is too tight given upstream propagation jitter on a healthy feed. We
+# never claim a feed is stale until at least this many seconds have passed
+# since the youngest candle.
+_STALE_MIN_BUDGET = timedelta(seconds=300)
+
 
 # Default disk cache directory — use home if writable, fall back to system temp
 def _resolve_cache_dir() -> Path:
@@ -350,6 +406,17 @@ class _OHLCVDiskCache:
         path.write_text(json.dumps(data))
         logger.debug("Wrote %d finalized candles to disk cache: %s", len(candles), cache_key)
 
+    def evict(self, cache_key: str) -> None:
+        """Remove a cached entry by key.
+
+        Used by the staleness guard (ALM-2697) when a previously-cached
+        snapshot is detected as poisoned by a now-silent upstream.
+        ``missing_ok=True`` keeps the operation idempotent so a concurrent
+        eviction by another process is not an error.
+        """
+        path = self._key_path(cache_key)
+        path.unlink(missing_ok=True)
+
 
 # ---------------------------------------------------------------------------
 # OHLCV Router
@@ -386,6 +453,212 @@ class OHLCVRouter:
         """
         self._providers[provider.name] = provider
         logger.debug("ohlcv_router_registered provider=%s", provider.name)
+
+    def _consume_disk_cache(
+        self,
+        disk_key: str,
+        limit: int,
+        timeframe: str,
+        now: datetime,
+    ) -> DataEnvelope | None:
+        """Disk-cache lookup with the ALM-2697 staleness guard at read time.
+
+        Returns a fresh-cache-hit envelope when the cached entry is recent
+        enough; otherwise None — either no cache entry, the entry is shorter
+        than ``limit``, or the entry is stale and has been evicted. Caller
+        falls through to the provider chain.
+        """
+        cached = self._disk_cache.get(disk_key)
+        if cached is None or len(cached) < limit:
+            return None
+
+        cached_stale, cached_lag = _is_upstream_stale(cached, timeframe, now)
+        if cached_stale:
+            cached_lag_s = cached_lag.total_seconds() if cached_lag is not None else float("nan")
+            logger.warning(
+                "ohlcv_disk_cache_stale_evict key=%s lag_s=%.0f budget_s=%.0f timeframe=%s",
+                disk_key,
+                cached_lag_s,
+                _staleness_budget(timeframe).total_seconds(),
+                timeframe,
+            )
+            self._disk_cache.evict(disk_key)
+            return None
+
+        logger.debug("ohlcv_disk_cache_hit key=%s count=%d", disk_key, len(cached))
+        return DataEnvelope(
+            value=cached[-limit:],
+            meta=DataMeta(
+                source="disk_cache",
+                observed_at=now,
+                finality="off_chain",
+                staleness_ms=0,
+                latency_ms=0,
+                confidence=1.0,
+                cache_hit=True,
+            ),
+            classification=DataClassification.INFORMATIONAL,
+        )
+
+    @staticmethod
+    def _record_miss(
+        primary_name: str | None,
+        primary_error: Exception | None,
+        provider_name: str,
+        miss: Exception,
+    ) -> tuple[str | None, Exception | None]:
+        """Update primary-provider tracking when a miss occurs.
+
+        The first retryable (DEX) provider's most-recent failure becomes the
+        "primary" error reported in the final raised ``DataSourceUnavailable``.
+        Subsequent failures of that same provider update the terminal error;
+        failures of non-retryable providers (CEX fallback) leave the primary
+        tracking untouched. Caller still updates its own ``last_error``
+        separately so the most-recent-across-all-providers view is preserved.
+        """
+        if provider_name in _RETRYABLE_PROVIDERS and (primary_name is None or primary_name == provider_name):
+            return provider_name, miss
+        return primary_name, primary_error
+
+    @staticmethod
+    def _log_and_sleep_retry_backoff(
+        provider_name: str,
+        instrument: Instrument,
+        attempt: int,
+        max_attempts: int,
+        last_provider_exc: Exception | None,
+    ) -> None:
+        """Sleep the inter-attempt delay and emit the structured retry log.
+
+        Honors any ``RetryInfo`` advisory the upstream attached to its last
+        failure (VIB-3802); falls back to ``_backoff_delay(attempt)`` when no
+        advisory is present.
+        """
+        advised = _extract_upstream_retry_delay(last_provider_exc)
+        delay = min(advised, _UPSTREAM_RETRY_MAX_DELAY) if advised is not None else _backoff_delay(attempt)
+        log_kind = "ohlcv_retry_upstream_advised" if advised is not None else "ohlcv_retry"
+        logger.info(
+            "%s provider=%s instrument=%s attempt=%d/%d delay_s=%.2f advised_s=%s",
+            log_kind,
+            provider_name,
+            instrument.pair,
+            attempt + 1,
+            max_attempts,
+            delay,
+            f"{advised:.2f}" if advised is not None else "none",
+        )
+        time.sleep(delay)
+
+    def _try_proxy_fallback(
+        self,
+        instrument: Instrument,
+        target_chain: str,
+        timeframe: str,
+        limit: int,
+        pool_address: str | None,
+        force_provider: str | None,
+        quote: str | None,
+    ) -> DataEnvelope[list[OHLCVCandle]] | None:
+        """Wrapped-token proxy retry: if every provider failed and the token
+        has a known 1:1 unwrapped equivalent (``OHLCV_PROXY_MAP``), refetch
+        under the proxy symbol and tag provenance. Returns ``None`` when no
+        proxy is registered.
+        """
+        from dataclasses import replace
+
+        proxy_symbol = OHLCV_PROXY_MAP.get(instrument.base)
+        if not proxy_symbol:
+            return None
+
+        original_symbol = instrument.base
+        if original_symbol not in self._proxy_warned:
+            self._proxy_warned.add(original_symbol)
+            logger.warning(
+                "ohlcv_proxy_fallback using %s as proxy for %s (1:1 wrapped native, no direct data source)",
+                proxy_symbol,
+                original_symbol,
+            )
+        else:
+            logger.debug(
+                "ohlcv_proxy_fallback using %s as proxy for %s",
+                proxy_symbol,
+                original_symbol,
+            )
+
+        # Build Instrument directly to bypass _canonicalize_symbol which would
+        # otherwise map MNT -> WMNT (the token we're falling back FROM).
+        proxy_instrument = Instrument(
+            base=proxy_symbol,
+            quote=instrument.quote,
+            chain=instrument.chain,
+            venue=instrument.venue,
+        )
+        proxy_envelope = self.get_ohlcv(
+            token=proxy_instrument,
+            chain=target_chain,
+            timeframe=timeframe,
+            limit=limit,
+            pool_address=pool_address,
+            force_provider=force_provider,
+            quote=quote,
+            _is_proxy_retry=True,
+        )
+        return DataEnvelope(
+            value=proxy_envelope.value,
+            meta=replace(proxy_envelope.meta, proxy_source=original_symbol),
+            classification=proxy_envelope.classification,
+        )
+
+    @staticmethod
+    def _build_stale_response_miss(
+        candles: list[OHLCVCandle],
+        timeframe: str,
+        provider_name: str,
+        instrument: Instrument,
+        target_chain: str,
+        now: datetime,
+    ) -> DataSourceUnavailable | None:
+        """ALM-2697: upstream-staleness guard for fresh provider responses.
+
+        An upstream that has silently stopped tracking a symbol (Binance +
+        MATICUSDT post-rebrand is the canonical case) will keep returning
+        fully-populated klines whose newest candle is days old. Without this
+        gate, every candle gets classified as "finalized" (>24h),
+        ``_split_by_finality`` writes the bag to the disk cache, and every
+        subsequent iteration serves the same byte-identical snapshot — RSI
+        freezes.
+
+        Returns the typed ``DataSourceUnavailable`` to record as a miss when
+        the response is stale (caller breaks to the next provider in the
+        chain), or ``None`` when the response is fresh. Logs the structured
+        ``ohlcv_upstream_stale`` warning at the staleness verdict so callers
+        do not need to.
+        """
+        is_stale, lag = _is_upstream_stale(candles, timeframe, now)
+        if not is_stale:
+            return None
+
+        budget = _staleness_budget(timeframe)
+        lag_seconds = lag.total_seconds() if lag is not None else float("nan")
+        budget_seconds = budget.total_seconds()
+        logger.warning(
+            "ohlcv_upstream_stale provider=%s instrument=%s timeframe=%s lag_s=%.0f budget_s=%.0f candles=%d",
+            provider_name,
+            instrument.pair,
+            timeframe,
+            lag_seconds,
+            budget_seconds,
+            len(candles),
+        )
+        return DataSourceUnavailable(
+            source=provider_name,
+            reason=(
+                f"{provider_name} returned stale OHLCV for {instrument.pair} on "
+                f"{target_chain}: youngest candle is {lag_seconds:.0f}s behind "
+                f"wall-clock (budget {budget_seconds:.0f}s for timeframe {timeframe}); "
+                "treating as provider miss"
+            ),
+        )
 
     def get_ohlcv(  # noqa: C901
         self,
@@ -436,27 +709,15 @@ class OHLCVRouter:
                 provider_chain,
             )
 
-        # Check disk cache for finalized candles
+        # Disk cache lookup, with the ALM-2697 staleness guard baked in. Returns
+        # a DataEnvelope on a fresh cache hit; otherwise the cache is missing,
+        # too short, or stale (and has been evicted) and we fall through to the
+        # provider chain.
         addr = (pool_address or "auto").lower()
         disk_key = f"{instrument.base}:{instrument.quote}:{target_chain}:{timeframe}:{limit}:{addr}"
-        cached = self._disk_cache.get(disk_key)
-        if cached is not None and len(cached) >= limit:
-            logger.debug("ohlcv_disk_cache_hit key=%s count=%d", disk_key, len(cached))
-            now = datetime.now(UTC)
-            meta = DataMeta(
-                source="disk_cache",
-                observed_at=now,
-                finality="off_chain",
-                staleness_ms=0,
-                latency_ms=0,
-                confidence=1.0,
-                cache_hit=True,
-            )
-            return DataEnvelope(
-                value=cached[-limit:],
-                meta=meta,
-                classification=DataClassification.INFORMATIONAL,
-            )
+        now = datetime.now(UTC)
+        if (cache_hit := self._consume_disk_cache(disk_key, limit, timeframe, now)) is not None:
+            return cache_hit
 
         # Try each provider in chain.
         # - primary_provider_name / primary_error: tracks the terminal (most recent)
@@ -493,20 +754,9 @@ class OHLCVRouter:
 
             for attempt in range(max_attempts):
                 if attempt > 0:
-                    advised = _extract_upstream_retry_delay(last_provider_exc)
-                    delay = min(advised, _UPSTREAM_RETRY_MAX_DELAY) if advised is not None else _backoff_delay(attempt)
-                    log_kind = "ohlcv_retry_upstream_advised" if advised is not None else "ohlcv_retry"
-                    logger.info(
-                        "%s provider=%s instrument=%s attempt=%d/%d delay_s=%.2f advised_s=%s",
-                        log_kind,
-                        provider_name,
-                        instrument.pair,
-                        attempt + 1,
-                        max_attempts,
-                        delay,
-                        f"{advised:.2f}" if advised is not None else "none",
+                    self._log_and_sleep_retry_backoff(
+                        provider_name, instrument, attempt, max_attempts, last_provider_exc
                     )
-                    time.sleep(delay)
 
                 start = time.monotonic()
                 try:
@@ -527,13 +777,27 @@ class OHLCVRouter:
                             reason=f"{provider_name} returned no OHLCV candles for {instrument.pair} on {target_chain}",
                         )
                         last_error = miss
-                        if provider_name in _RETRYABLE_PROVIDERS and (
-                            primary_provider_name is None or primary_provider_name == provider_name
-                        ):
-                            primary_provider_name = provider_name
-                            primary_error = miss
+                        primary_provider_name, primary_error = self._record_miss(
+                            primary_provider_name, primary_error, provider_name, miss
+                        )
                         logger.debug("ohlcv_empty_result provider=%s", provider_name)
                         break  # treat empty result as a provider miss, skip to next
+
+                    # ALM-2697: upstream-staleness guard. Stale response →
+                    # provider miss; never cached, never returned. The helper
+                    # logs the structured warning; we just record the miss and
+                    # break out to the next provider.
+                    now = datetime.now(UTC)
+                    if (
+                        stale_miss := self._build_stale_response_miss(
+                            candles, timeframe, provider_name, instrument, target_chain, now
+                        )
+                    ) is not None:
+                        last_error = stale_miss
+                        primary_provider_name, primary_error = self._record_miss(
+                            primary_provider_name, primary_error, provider_name, stale_miss
+                        )
+                        break  # fall through to next provider in the chain
 
                     # Determine if this is a CEX/DEX basis mismatch
                     is_cex_source = provider_name in ("binance", "coingecko")
@@ -552,7 +816,6 @@ class OHLCVRouter:
                         )
 
                     # Split candles into finalized and provisional
-                    now = datetime.now(UTC)
                     finalized, provisional = _split_by_finality(candles, now)
 
                     # Cache finalized candles to disk
@@ -588,11 +851,9 @@ class OHLCVRouter:
                 except Exception as exc:
                     last_error = exc
                     last_provider_exc = exc
-                    if provider_name in _RETRYABLE_PROVIDERS and (
-                        primary_provider_name is None or primary_provider_name == provider_name
-                    ):
-                        primary_provider_name = provider_name
-                        primary_error = exc
+                    primary_provider_name, primary_error = self._record_miss(
+                        primary_provider_name, primary_error, provider_name, exc
+                    )
 
                     elapsed = int((time.monotonic() - start) * 1000)
 
@@ -620,56 +881,18 @@ class OHLCVRouter:
                     )
                     break  # move to next provider
 
-        # ---------------------------------------------------------------
         # Wrapped token proxy fallback: if all providers failed and the
         # token has a known unwrapped equivalent, retry with the proxy.
-        # ---------------------------------------------------------------
-        if not _is_proxy_retry:
-            proxy_symbol = OHLCV_PROXY_MAP.get(instrument.base)
-            if proxy_symbol:
-                original_symbol = instrument.base
-                if original_symbol not in self._proxy_warned:
-                    self._proxy_warned.add(original_symbol)
-                    logger.warning(
-                        "ohlcv_proxy_fallback using %s as proxy for %s (1:1 wrapped native, no direct data source)",
-                        proxy_symbol,
-                        original_symbol,
-                    )
-                else:
-                    logger.debug(
-                        "ohlcv_proxy_fallback using %s as proxy for %s",
-                        proxy_symbol,
-                        original_symbol,
-                    )
-
-                # Build Instrument directly to bypass _canonicalize_symbol
-                # which would map MNT -> WMNT (the token we're falling back FROM)
-                proxy_instrument = Instrument(
-                    base=proxy_symbol,
-                    quote=instrument.quote,
-                    chain=instrument.chain,
-                    venue=instrument.venue,
+        if (
+            not _is_proxy_retry
+            and (
+                proxy_envelope := self._try_proxy_fallback(
+                    instrument, target_chain, timeframe, limit, pool_address, force_provider, quote
                 )
-                proxy_envelope = self.get_ohlcv(
-                    token=proxy_instrument,
-                    chain=target_chain,
-                    timeframe=timeframe,
-                    limit=limit,
-                    pool_address=pool_address,
-                    force_provider=force_provider,
-                    quote=quote,
-                    _is_proxy_retry=True,
-                )
-
-                # Tag the returned data with proxy provenance
-                from dataclasses import replace
-
-                proxied_meta = replace(proxy_envelope.meta, proxy_source=original_symbol)
-                return DataEnvelope(
-                    value=proxy_envelope.value,
-                    meta=proxied_meta,
-                    classification=proxy_envelope.classification,
-                )
+            )
+            is not None
+        ):
+            return proxy_envelope
 
         # Lead with the primary (DEX) error so logs point at the actionable
         # cause, not the trailing CEX "unknown token" from a known-futile path.
@@ -710,6 +933,53 @@ def _split_by_finality(
             provisional.append(candle)
 
     return finalized, provisional
+
+
+def _staleness_budget(timeframe: str) -> timedelta:
+    """Return the wall-clock lag budget for the youngest candle on *timeframe*.
+
+    See module-level ``_STALE_TIMEFRAME_MULTIPLE`` / ``_STALE_MIN_BUDGET``
+    notes for rationale. Unknown timeframes fall back to 1 hour, matching
+    the router's default ``timeframe="1h"`` so the floor remains meaningful
+    even when a caller passes an unsupported interval.
+    """
+    seconds = _TIMEFRAME_SECONDS.get(timeframe, 3600)
+    budget = timedelta(seconds=seconds * _STALE_TIMEFRAME_MULTIPLE)
+    return max(budget, _STALE_MIN_BUDGET)
+
+
+def _is_upstream_stale(
+    candles: list[OHLCVCandle],
+    timeframe: str,
+    now: datetime,
+) -> tuple[bool, timedelta | None]:
+    """Detect whether an upstream OHLCV response is stale relative to *now*.
+
+    A response is judged stale when its youngest candle's *start-time* (the
+    candle's ``timestamp`` field) lags wall-clock by more than the budget
+    returned by ``_staleness_budget``. Start-time is a stricter signal than
+    close-time (close-time = start-time + timeframe), so any check passing
+    start-time also passes close-time — the extra margin is intentional.
+    Empty responses are *not* flagged here — the router has a separate
+    "empty result" path (treated as a provider miss) and we don't want
+    those collapsed onto the same code branch, since the actionable signal
+    differs (empty = "upstream said nothing", stale = "upstream said
+    something old").
+
+    Returns:
+        ``(is_stale, lag)`` where ``lag`` is ``now - youngest_candle_ts``
+        when the input is non-empty, otherwise ``None``. Callers use the
+        lag value for log diagnostics; the boolean is the gate.
+    """
+    if not candles:
+        return False, None
+
+    # Candles are produced in ascending order by every provider in this
+    # codebase; defend against sloppy upstreams by taking the explicit max
+    # rather than trusting [-1].
+    youngest = max(candle.timestamp for candle in candles)
+    lag = now - youngest
+    return lag > _staleness_budget(timeframe), lag
 
 
 # =============================================================================

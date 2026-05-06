@@ -433,30 +433,41 @@ class TestOHLCVRouter:
         envelope = router.get_ohlcv("OBSCUREDEFI/USDC", chain="base")
         assert envelope.meta.source == "binance"
 
-    def test_disk_cache_used_for_finalized(self, tmp_path):
-        """Finalized candles are stored in disk cache and reused."""
+    def test_disk_cache_evicts_stale_entries_and_refetches(self, tmp_path):
+        """Disk-cache hit path enforces ALM-2697 staleness guard.
+
+        The cache wrote only finalized (>24h) candles in the first place,
+        so on subsequent calls the youngest cached candle is always >24h
+        old. For sub-daily timeframes (the staleness budget is 2 *
+        timeframe, capped to 5min floor), >24h-old cached data is
+        evicted on read and the upstream is re-queried. This is the
+        intended behaviour: never serve the strategy a poisoned cache
+        just because it's on disk. Pre-ALM-2697 the router would
+        happily serve the same byte-identical bag forever, freezing RSI.
+        """
         router = OHLCVRouter(disk_cache_dir=tmp_path)
         now = datetime.now(UTC)
-        # All candles >24h old (finalized)
-        old_candles = [
+        # Fresh response: mix of finalized + provisional (admitted).
+        candles_fresh = [
             _make_candle(now - timedelta(hours=48), close=1800.0),
             _make_candle(now - timedelta(hours=36), close=1810.0),
             _make_candle(now - timedelta(hours=25), close=1820.0),
+            _make_candle(now - timedelta(minutes=5), close=1830.0),
         ]
-        gecko = _mock_provider("geckoterminal", candles=old_candles)
+        gecko = _mock_provider("geckoterminal", candles=candles_fresh)
         router.register_provider(gecko)
 
-        # First call: fetches from provider
+        # First call writes finalized rows to the cache.
         envelope1 = router.get_ohlcv("MYTOKEN/USDC", chain="base", limit=3)
         assert envelope1.meta.source == "geckoterminal"
         assert gecko.fetch.call_count == 1
 
-        # Second call: should use disk cache
+        # Second call: cache contains only >24h-old rows, which fail the
+        # staleness gate for the default 1h timeframe — evict and refetch.
         envelope2 = router.get_ohlcv("MYTOKEN/USDC", chain="base", limit=3)
-        assert envelope2.meta.source == "disk_cache"
-        assert envelope2.meta.cache_hit is True
-        # Provider not called again
-        assert gecko.fetch.call_count == 1
+        assert envelope2.meta.source == "geckoterminal"
+        assert envelope2.meta.cache_hit is False
+        assert gecko.fetch.call_count == 2
 
 
 class TestOHLCVRouterCacheBehavior:
