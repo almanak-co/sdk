@@ -786,3 +786,231 @@ class TestWalletBasisRoundTrip:
         # signal swap_handler.py uses to leave realized_pnl_usd null.
         assert unmatched == Decimal("1")
         assert cost_consumed == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# VIB-4078 — coverage for per-event-type replay helpers (SWAP, PT_REDEEM,
+# PREDICTION_*, REPAY non-positive log path, WITHDRAW USD fallback,
+# matching_policy_version pinning).
+# ---------------------------------------------------------------------------
+
+
+def _swap_row(
+    deployment_id: str,
+    position_key: str,
+    chain: str,
+    wallet: str,
+    token_in: str,
+    token_out: str,
+    amount_in: Decimal,
+    amount_out: Decimal,
+    amount_out_usd: Decimal | None,
+    timestamp: str = "2026-04-27T10:00:00+00:00",
+) -> dict:
+    payload = {
+        "event_type": "SWAP",
+        "position_key": position_key,
+        "swap_position_key": f"swap:{chain}:{wallet}",
+        "token_in": token_in,
+        "token_out": token_out,
+        "amount_in": str(amount_in),
+        "amount_out": str(amount_out),
+        "amount_out_usd": None if amount_out_usd is None else str(amount_out_usd),
+    }
+    return {
+        "event_type": "SWAP",
+        "deployment_id": deployment_id,
+        "position_key": position_key,
+        "chain": chain,
+        "wallet_address": wallet,
+        "timestamp": timestamp,
+        "payload_json": json.dumps(payload),
+    }
+
+
+def _prediction_row(
+    event_type: str,
+    deployment_id: str,
+    position_key: str,
+    size_after: Decimal,
+    basis_after: Decimal,
+    timestamp: str = "2026-04-27T10:00:00+00:00",
+) -> dict:
+    payload = {
+        "event_type": event_type,
+        "position_key": position_key,
+        "position_size_after": str(size_after),
+        "position_basis_after": str(basis_after),
+    }
+    return {
+        "event_type": event_type,
+        "deployment_id": deployment_id,
+        "position_key": position_key,
+        "timestamp": timestamp,
+        "payload_json": json.dumps(payload),
+    }
+
+
+class TestVIB4078ReplayHelpers:
+    def test_swap_event_credits_token_out_acquisition_lot(self):
+        """SWAP replay must mint a token_out acquisition lot under the swap-key
+        so a follow-up disposal computes realized PnL against the correct cost.
+        """
+        dep = "dep-swap-recon"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        swap_pk = f"swap:{chain}:{wallet}"
+        events = [
+            _swap_row(
+                dep, swap_pk, chain, wallet,
+                token_in="USDT", token_out="USDC",
+                amount_in=Decimal("100"), amount_out=Decimal("99.5"),
+                amount_out_usd=Decimal("99.50"),
+            ),
+        ]
+        store = FIFOBasisStore()
+        replayed = store.reconstruct_from_events(events)
+        assert replayed == 1
+
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep, position_key=swap_pk, token="USDC", amount=Decimal("99.5"),
+        )
+        assert unmatched == Decimal("0")
+        assert cost_consumed == pytest.approx(Decimal("99.50"), abs=Decimal("0.001"))
+
+    def test_pt_redeem_event_falls_back_to_sy_amount_when_pt_amount_missing(self):
+        """PT_REDEEM events written when py_redeemed was missing fall back to
+        sy_amount (see build_pendle_pt_redeem_accounting_event). Replay must
+        mirror that fallback or PT redemptions written under that path are
+        silently dropped on restart.
+        """
+        dep = "dep-redeem"
+        pk = "pendle:arb:pendle:0xwallet"
+        pt_token = "0xPT_FALLBACK"
+        # Seed an open PT lot so the redeem can match.
+        buy = _pt_row("PT_BUY", dep, pk, pt_token,
+                      pt_amount_human=Decimal("100"), sy_amount_human=Decimal("95"))
+        # PT_REDEEM with pt_amount missing — builder fell back to sy_amount;
+        # values stored in human-decimal (NOT 18-decimal), unlike PT_BUY/PT_SELL.
+        redeem_payload = json.dumps({
+            "event_type": "PT_REDEEM",
+            "position_key": pk,
+            "pt_token": pt_token,
+            "pt_amount": None,
+            "sy_amount": "100",
+        })
+        redeem = {
+            "event_type": "PT_REDEEM",
+            "deployment_id": dep,
+            "position_key": pk,
+            "timestamp": "2026-04-27T11:00:00+00:00",
+            "payload_json": redeem_payload,
+        }
+        store = FIFOBasisStore()
+        replayed = store.reconstruct_from_events([buy, redeem])
+        assert replayed == 2
+        # Lot fully consumed via sy_amount fallback — remaining_pt should be 0.
+        lots = store._lots[f"{dep}:{pk}:{pt_token.lower()}"]
+        assert lots[0]["remaining_pt"] == Decimal("0")
+
+    def test_prediction_open_snapshot_replay_assigns_aggregate_directly(self):
+        """PREDICTION_* events store post-trade snapshots — replay assigns the
+        snapshot row directly (latest event wins for a given key).
+        """
+        dep = "dep-pred"
+        pk = "pred:polymarket:m1:YES"
+        events = [
+            _prediction_row("PREDICTION_OPEN", dep, pk,
+                            size_after=Decimal("1000"), basis_after=Decimal("0.55")),
+            _prediction_row("PREDICTION_INCREASE", dep, pk,
+                            size_after=Decimal("1500"), basis_after=Decimal("0.83"),
+                            timestamp="2026-04-27T11:00:00+00:00"),
+        ]
+        store = FIFOBasisStore()
+        replayed = store.reconstruct_from_events(events)
+        assert replayed == 2
+        size, basis = store.get_prediction_position(dep, pk)
+        # Latest event wins — second snapshot overrides the first.
+        assert size == Decimal("1500")
+        assert basis == Decimal("0.83")
+
+    def test_repay_with_non_positive_amount_token_logs_debug_and_skips(self, caplog):
+        """A REPAY with present-but-zero amount_token is a v2 extraction bug,
+        not a v1 schema gap — skipped with DEBUG log, not the v1 WARNING summary.
+        """
+        import logging
+
+        dep = "dep-zero-repay"
+        pk = "lending:arb:aave_v3:0xwallet:USDC"
+        # Seed a borrow so the position exists.
+        borrow = _lending_row("BORROW", dep, pk, "USDC", Decimal("100"))
+        # REPAY with amount_token = "0" — present, parsed, non-positive.
+        repay = _lending_row("REPAY", dep, pk, "USDC", Decimal("0"),
+                             timestamp="2026-04-27T11:00:00+00:00")
+        store = FIFOBasisStore()
+        with caplog.at_level(logging.DEBUG, logger="almanak.framework.accounting.basis"):
+            replayed = store.reconstruct_from_events([borrow, repay])
+        # Only BORROW counts — REPAY skipped silently (no v1 summary warning).
+        assert replayed == 1
+        assert not any("policy-v1" in r.message for r in caplog.records)
+        assert any(
+            "non-positive amount_token" in r.message and "REPAY" in r.message
+            for r in caplog.records
+        )
+
+    def test_withdraw_amount_usd_falls_back_to_principal_plus_interest(self):
+        """When ``amount_usd`` is absent, replay reconstructs the wallet-basis
+        cost from ``principal_delta_usd + interest_delta_usd`` (CodeRabbit
+        2026-05-04 — must match the live writer's full-withdraw-USD basis).
+        """
+        dep = "dep-w-fallback"
+        chain = "arbitrum"
+        wallet = "0xwallet"
+        lending_pk = f"lending:{chain}:aave_v3:{wallet}:USDC"
+        swap_pk = f"swap:{chain}:{wallet}"
+        # Build a WITHDRAW row WITHOUT amount_usd, but WITH the split fields.
+        payload = {
+            "event_type": "WITHDRAW",
+            "position_key": lending_pk,
+            "asset": "USDC",
+            "amount_token": "10",
+            # amount_usd intentionally absent — exercise the fallback.
+            "principal_delta_usd": "9.50",
+            "interest_delta_usd": "0.50",
+        }
+        row = {
+            "event_type": "WITHDRAW",
+            "deployment_id": dep,
+            "position_key": lending_pk,
+            "chain": chain,
+            "wallet_address": wallet,
+            "timestamp": "2026-04-27T10:00:00+00:00",
+            "payload_json": json.dumps(payload),
+        }
+        store = FIFOBasisStore()
+        store.reconstruct_from_events([row])
+
+        # Disposing the withdrawn token should consume basis = 9.50 + 0.50 = 10.00.
+        cost_consumed, unmatched = store.match_swap_disposal(
+            deployment_id=dep, position_key=swap_pk, token="USDC", amount=Decimal("10"),
+        )
+        assert unmatched == Decimal("0")
+        assert cost_consumed == pytest.approx(Decimal("10.00"), abs=Decimal("0.001"))
+
+    def test_match_repay_after_reconstruct_pins_matching_policy_version(self):
+        """Per CLAUDE.md: matching_policy_version is stamped on every typed
+        event. After reconstruction the basis store must continue to surface
+        the current MATCHING_POLICY_VERSION on match results so downstream
+        consumers can detect a policy change between sessions.
+        """
+        from almanak.framework.accounting.basis import MATCHING_POLICY_VERSION
+
+        dep = "dep-policy"
+        pk = "lending:arb:aave_v3:0xwallet:USDC"
+        events = [_lending_row("BORROW", dep, pk, "USDC", Decimal("1000"))]
+        store = FIFOBasisStore()
+        store.reconstruct_from_events(events)
+
+        result = store.match_repay(dep, pk, "USDC", Decimal("1004"))
+        assert result.matching_policy_version == MATCHING_POLICY_VERSION
+        assert result.matching_policy_version >= 3  # bumped by VIB-3964

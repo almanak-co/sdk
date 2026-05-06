@@ -13,12 +13,57 @@ MATCHING_POLICY_VERSION must be bumped any time the matching algorithm changes.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 MATCHING_POLICY_VERSION = 3
+
+_DECIMALS_18 = Decimal(10**18)
+
+
+def _parse_decimal(value: Any) -> Decimal | None:
+    """Safely parse a Decimal; return None on any conversion failure or non-finite value."""
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+    # Reject NaN and Infinity — downstream comparisons (e.g. <= 0) raise
+    # InvalidOperation for NaN and produce wrong results for infinities.
+    return parsed if parsed.is_finite() else None
+
+
+def _first_parsed_decimal(payload_dict: dict[str, Any], *keys: str) -> Decimal | None:
+    """Return the first key whose payload value parses to a Decimal.
+
+    Replaces ``_parse_decimal(...) or _parse_decimal(...) or ...`` chains
+    that wrongly treat a parsed ``Decimal('0')`` as falsy and fall through
+    to the next candidate (CodeRabbit 2026-05-04). Distinguishes "key
+    absent / unparseable" (try next) from "key present and parsed to 0"
+    (use it — measured zero is a valid USD basis).
+    """
+    for k in keys:
+        parsed = _parse_decimal(payload_dict.get(k))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+@dataclass
+class _ReplayContext:
+    """Normalised view of an accounting_events row used by per-type replay helpers."""
+
+    event_type: str
+    deployment_id: str
+    position_key: str
+    payload: dict[str, Any]
+    timestamp: datetime | None
+    swap_wallet_key: str
+    ledger_entry_id: str | None
 
 
 @dataclass
@@ -58,7 +103,7 @@ class FIFOBasisStore:
     def __init__(self) -> None:
         self._lots: dict[str, list[dict[str, Any]]] = {}
 
-    def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:  # noqa: C901
+    def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:
         """Replay durable accounting events to rebuild open FIFO lots.
 
         Call once on runner startup with get_accounting_events_sync() results for
@@ -74,400 +119,29 @@ class FIFOBasisStore:
         cannot be reconstructed — each such event is skipped with a WARNING so callers
         know that the FIFO store may be incomplete after restart.
         """
-        import json as _json
         import logging as _logging
 
         _log = _logging.getLogger(__name__)
 
         self._lots.clear()
 
-        _DECIMALS_18 = Decimal(10**18)
         replayed = 0
-        _v1_skipped: dict[str, int] = {}  # event_type → count, for aggregated warning at end
-
-        def _parse_decimal(value: Any) -> Decimal | None:
-            """Safely parse a Decimal; return None on any conversion failure or non-finite value."""
-            if value is None:
-                return None
-            try:
-                parsed = Decimal(str(value))
-            except Exception:  # noqa: BLE001
-                return None
-            # Reject NaN and Infinity — downstream comparisons (e.g. <= 0) raise
-            # InvalidOperation for NaN and produce wrong results for infinities.
-            return parsed if parsed.is_finite() else None
-
-        def _first_parsed_decimal(payload_dict: dict[str, Any], *keys: str) -> Decimal | None:
-            """Return the first key whose payload value parses to a Decimal.
-
-            Replaces ``_parse_decimal(...) or _parse_decimal(...) or ...`` chains
-            that wrongly treat a parsed ``Decimal('0')`` as falsy and fall through
-            to the next candidate (CodeRabbit 2026-05-04). Distinguishes "key
-            absent / unparseable" (try next) from "key present and parsed to 0"
-            (use it — measured zero is a valid USD basis).
-            """
-            for k in keys:
-                parsed = _parse_decimal(payload_dict.get(k))
-                if parsed is not None:
-                    return parsed
-            return None
+        v1_skipped: dict[str, int] = {}  # event_type → count, for aggregated warning at end
 
         for row in events:
-            event_type = row.get("event_type", "")
-            position_key = row.get("position_key", "")
-            deployment_id = row.get("deployment_id", "")
-            timestamp_str = row.get("timestamp")
-            # ledger_entry_id links a lot back to the on-chain transaction (VIB-3468).
-            ledger_entry_id: str | None = row.get("ledger_entry_id") or None
-
-            # Rows missing identity fields cannot be keyed into the lot store.
-            if not deployment_id or not position_key:
+            ctx = self._row_context(row)
+            if ctx is None:
                 continue
-
-            try:
-                payload = _json.loads(row.get("payload_json") or "{}")
-            except Exception:  # noqa: BLE001
+            replay = _REPLAY_DISPATCH.get(ctx.event_type)
+            if replay is None:
                 continue
-
-            try:
-                # Normalise UTC offset — Python <3.11 fromisoformat cannot parse trailing "Z"
-                ts_norm = timestamp_str.replace("Z", "+00:00") if timestamp_str else None
-                ts: datetime | None = datetime.fromisoformat(ts_norm) if ts_norm else None
-            except (ValueError, TypeError):
-                ts = None
-
-            # VIB-3964: derive the swap-key the BORROW / WITHDRAW credit was minted
-            # under. The accounting_events row carries `chain` and `wallet_address`
-            # at the top level, so the key is reconstructible without re-encoding it
-            # in the payload.
-            _chain_norm = (row.get("chain") or "").lower().strip()
-            _wallet_norm = (row.get("wallet_address") or "").lower().strip()
-            swap_wallet_key = f"swap:{_chain_norm}:{_wallet_norm}" if _chain_norm and _wallet_norm else ""
-
-            if event_type == "BORROW":
-                raw_amount_token = payload.get("amount_token")
-                amount_token = _parse_decimal(raw_amount_token)
-                asset = payload.get("asset", "")
-                # amount_token key absent → policy v1 event (pre-VIB-3484); count for summary.
-                # amount_token present but non-positive → v2 extraction bug; skip silently (debug).
-                if raw_amount_token is None:
-                    _v1_skipped["BORROW"] = _v1_skipped.get("BORROW", 0) + 1
-                    continue
-                if amount_token is None or amount_token <= 0:
-                    _log.debug(
-                        "FIFOBasisStore: BORROW event %s/%s has non-positive amount_token — skipping",
-                        deployment_id,
-                        position_key,
-                    )
-                    continue
-                if not asset:
-                    continue
-                # Derive principal_usd from payload so the swap-key replay lot has
-                # the same cost basis as the live-write path. Falls back to None
-                # when the payload predates VIB-3964 — the lot still mints, just
-                # without basis (downstream disposals will return cost_basis=None).
-                _borrowed_amount_usd = _first_parsed_decimal(
-                    payload, "borrowed_amount_usd", "amount_usd", "principal_delta_usd"
-                )
-                self.record_borrow(
-                    deployment_id=deployment_id,
-                    position_key=position_key,
-                    token=asset,
-                    principal_amount=amount_token,
-                    principal_usd=_borrowed_amount_usd,
-                    timestamp=ts,
-                    source_ledger_entry_id=ledger_entry_id,
-                )
-                # VIB-3964: the borrowed token also lands in the wallet — mint a
-                # swap-key acquisition lot so a SWAP that disposes the borrowed
-                # token can compute realized PnL instead of returning null.
-                if swap_wallet_key:
-                    self.record_swap_acquisition(
-                        deployment_id=deployment_id,
-                        position_key=swap_wallet_key,
-                        token=asset,
-                        amount=amount_token,
-                        cost_usd=_borrowed_amount_usd,
-                        timestamp=ts,
-                        source="BORROW",
-                    )
-                replayed += 1
-
-            elif event_type == "WITHDRAW":
-                # VIB-3964: WITHDRAW credits the wallet with collateral (principal +
-                # accrued supply interest). Two basis-store effects:
-                #   1. Mirror it as a swap-key acquisition lot so a follow-up SWAP
-                #      that disposes the withdrawn token (e.g. the USDC→USDT
-                #      swap-back leg of a teardown) gets a non-null basis.
-                #   2. Match against the supply-key principal lots so interest
-                #      accrued (withdraw - principal) is reconstructable on restart.
-                raw_amount_token = payload.get("amount_token") or payload.get("amount")
-                amount_token = _parse_decimal(raw_amount_token)
-                asset = payload.get("asset", "")
-                if amount_token is None or amount_token <= 0 or not asset:
-                    continue
-                # CodeRabbit 2026-05-04: the live writer (lending_handler.py)
-                # mints the wallet-basis lot at the FULL withdraw USD value,
-                # not just the matched-principal portion (which becomes
-                # ``principal_delta_usd`` after the split fix above). Replay
-                # must use the same total or a SWAP that disposes the
-                # withdrawn token after a runner restart computes a different
-                # ``realized_pnl_usd`` than the live path. Read ``amount_usd``
-                # if present (preferred); otherwise reconstruct the total as
-                # ``principal_delta_usd + interest_delta_usd`` so post-split
-                # payloads still replay correctly.
-                _withdraw_amount_usd = _parse_decimal(payload.get("amount_usd"))
-                if _withdraw_amount_usd is None:
-                    _principal_usd = _parse_decimal(payload.get("principal_delta_usd"))
-                    _interest_usd = _parse_decimal(payload.get("interest_delta_usd"))
-                    if _principal_usd is not None:
-                        _withdraw_amount_usd = _principal_usd + (_interest_usd or Decimal("0"))
-                if swap_wallet_key:
-                    self.record_swap_acquisition(
-                        deployment_id=deployment_id,
-                        position_key=swap_wallet_key,
-                        token=asset,
-                        amount=amount_token,
-                        cost_usd=_withdraw_amount_usd,
-                        timestamp=ts,
-                        source="WITHDRAW",
-                    )
-                # Symmetric to BORROW/REPAY: drain the supply-key principal lots.
-                self.match_repay(
-                    deployment_id=deployment_id,
-                    position_key=f"supply:{position_key}",
-                    token=asset,
-                    repay_amount=amount_token,
-                )
-                replayed += 1
-
-            elif event_type == "SUPPLY":
-                # VIB-3964: SUPPLY removes wallet inventory (the supplied token
-                # leaves the wallet for the lending pool). Two basis-store effects:
-                #   1. Dispose the swap-key acquisition lot so phantom inventory
-                #      doesn't bleed into a later WITHDRAW-then-SWAP.
-                #   2. Record a principal lot under supply:<position_key> so a
-                #      future WITHDRAW can FIFO-match and surface accrued interest.
-                raw_amount_token = payload.get("amount_token") or payload.get("amount")
-                amount_token = _parse_decimal(raw_amount_token)
-                asset = payload.get("asset", "")
-                if amount_token is None or amount_token <= 0 or not asset:
-                    continue
-                if swap_wallet_key:
-                    self.match_swap_disposal(
-                        deployment_id=deployment_id,
-                        position_key=swap_wallet_key,
-                        token=asset,
-                        amount=amount_token,
-                    )
-                _supply_amount_usd = _first_parsed_decimal(payload, "amount_usd", "principal_delta_usd")
-                self.record_borrow(
-                    deployment_id=deployment_id,
-                    position_key=f"supply:{position_key}",
-                    token=asset,
-                    principal_amount=amount_token,
-                    principal_usd=_supply_amount_usd,
-                    timestamp=ts,
-                    source_ledger_entry_id=ledger_entry_id,
-                )
-                replayed += 1
-
-            elif event_type in ("REPAY", "DELEVERAGE"):
-                # DELEVERAGE is structurally a repay — it reduces an open borrow lot.
-                raw_amount_token = payload.get("amount_token")
-                amount_token = _parse_decimal(raw_amount_token)
-                asset = payload.get("asset", "")
-                if raw_amount_token is None:
-                    _v1_skipped[event_type] = _v1_skipped.get(event_type, 0) + 1
-                    continue
-                if amount_token is None or amount_token <= 0:
-                    _log.debug(
-                        "FIFOBasisStore: %s event %s/%s has non-positive amount_token — skipping",
-                        event_type,
-                        deployment_id,
-                        position_key,
-                    )
-                    continue
-                if not asset:
-                    continue
-                self.match_repay(
-                    deployment_id=deployment_id,
-                    position_key=position_key,
-                    token=asset,
-                    repay_amount=amount_token,
-                )
-                # VIB-3964: REPAY also drains wallet inventory of the repaid
-                # token. Dispose the swap-key acquisition lot so the wallet basis
-                # pool stays consistent with actual on-chain wallet balance.
-                if swap_wallet_key:
-                    self.match_swap_disposal(
-                        deployment_id=deployment_id,
-                        position_key=swap_wallet_key,
-                        token=asset,
-                        amount=amount_token,
-                    )
-                replayed += 1
-
-            elif event_type == "PT_BUY":
-                pt_token = payload.get("pt_token", "")
-                if not pt_token:
-                    continue
-                # PT_BUY stores raw 18-decimal integers from the swap receipt.
-                pt_human = _parse_decimal(payload.get("pt_amount"))
-                sy_human = _parse_decimal(payload.get("sy_amount"))
-                if pt_human is None or sy_human is None:
-                    continue
-                pt_human = pt_human / _DECIMALS_18
-                sy_human = sy_human / _DECIMALS_18
-                if pt_human <= 0:
-                    continue
-                self.record_pt_buy(
-                    deployment_id=deployment_id,
-                    position_key=position_key,
-                    pt_token=pt_token,
-                    pt_amount=pt_human,
-                    sy_cost=sy_human,
-                    timestamp=ts,
-                    source_ledger_entry_id=ledger_entry_id,
-                )
-                replayed += 1
-
-            elif event_type == "PT_SELL":
-                # PT_SELL follows the same raw-integer convention as PT_BUY.
-                pt_token = payload.get("pt_token", "")
-                if not pt_token:
-                    continue
-                pt_raw = _parse_decimal(payload.get("pt_amount"))
-                if pt_raw is None:
-                    continue
-                pt_human = pt_raw / _DECIMALS_18
-                if pt_human <= 0:
-                    continue
-                sy_raw = _parse_decimal(payload.get("sy_amount"))
-                # sy_amount is required for PT_SELL: it's the actual market proceeds.
-                # Defaulting to pt_amount (1:1 assumption) would invent cost-basis data.
-                if sy_raw is None or sy_raw <= 0:
-                    continue
-                sy_human = sy_raw / _DECIMALS_18
-                self.match_pt_redeem(
-                    deployment_id=deployment_id,
-                    position_key=position_key,
-                    pt_token=pt_token,
-                    pt_redeemed=pt_human,
-                    sy_received=sy_human,
-                )
-                replayed += 1
-
-            elif event_type == "PT_REDEEM":
-                pt_token = payload.get("pt_token", "")
-                if not pt_token:
-                    continue
-                # PT_REDEEM events are written by build_pendle_pt_redeem_accounting_event()
-                # which converts to human-decimal before storing (unlike PT_BUY / PT_SELL).
-                # When py_redeemed was missing from the receipt, pt_amount is None and the
-                # builder fell back to sy_amount — mirror that fallback here.
-                pt_raw = _parse_decimal(payload.get("pt_amount"))
-                sy_raw = _parse_decimal(payload.get("sy_amount"))
-                if pt_raw is not None:
-                    pt_human = pt_raw
-                elif sy_raw is not None:
-                    pt_human = sy_raw
-                else:
-                    continue
-                if pt_human <= 0:
-                    continue
-                sy_human = sy_raw if sy_raw is not None else pt_human
-                self.match_pt_redeem(
-                    deployment_id=deployment_id,
-                    position_key=position_key,
-                    pt_token=pt_token,
-                    pt_redeemed=pt_human,
-                    sy_received=sy_human,
-                )
-                replayed += 1
-
-            elif event_type == "SWAP":
-                # Position key for swap lots is stored in the payload (swap:<chain>:<wallet>).
-                # Fall back to row position_key for events written before VIB-3473.
-                swap_position_key = payload.get("swap_position_key") or position_key
-                if not swap_position_key:
-                    continue
-
-                # 1. Replay disposal of token_in to consume any prior acquisition lots,
-                #    keeping the FIFO store consistent with the state before this swap.
-                token_in_r = payload.get("token_in", "")
-                amount_in_r = _parse_decimal(payload.get("amount_in"))
-                if token_in_r and amount_in_r is not None and amount_in_r > 0:
-                    self.match_swap_disposal(
-                        deployment_id=deployment_id,
-                        position_key=swap_position_key,
-                        token=token_in_r,
-                        amount=amount_in_r,
-                    )
-
-                # 2. Replay acquisition lot for token_out so future disposals can match it.
-                token_out = payload.get("token_out", "")
-                if not token_out:
-                    continue
-                amount_out = _parse_decimal(payload.get("amount_out"))
-                if amount_out is None or amount_out <= 0:
-                    continue
-                cost_usd = _parse_decimal(payload.get("amount_out_usd"))
-                self.record_swap_acquisition(
-                    deployment_id=deployment_id,
-                    position_key=swap_position_key,
-                    token=token_out,
-                    amount=amount_out,
-                    cost_usd=cost_usd,
-                    timestamp=ts,
-                )
-                replayed += 1
-
-            elif event_type in (
-                "PREDICTION_OPEN",
-                "PREDICTION_INCREASE",
-                "PREDICTION_REDUCE",
-                "PREDICTION_CLOSE",
-                "PREDICTION_REDEEM",
-            ):
-                # Replay prediction-market aggregate from the post-trade
-                # snapshot stored on the event (position_size_after,
-                # position_basis_after). We assign the snapshot directly
-                # rather than re-applying record_prediction_buy /
-                # match_prediction_sell because:
-                #   1. Events are processed in timestamp ASC order — the
-                #      latest event for a (market, outcome) wins.
-                #   2. A snapshot-based replay survives missed intermediate
-                #      events (e.g. policy-v1 records) without compounding
-                #      drift from re-derivation.
-                pos_key = payload.get("position_key") or position_key
-                if not pos_key:
-                    continue
-                size_after = _parse_decimal(payload.get("position_size_after"))
-                basis_after = _parse_decimal(payload.get("position_basis_after"))
-                if size_after is None or basis_after is None:
-                    continue
-                k = self._prediction_key(deployment_id, pos_key)
-                # Position closed (zero size) — drop the row entirely so
-                # match_prediction_sell on a closed position correctly
-                # returns "no prior basis" rather than a stale zero row.
-                if size_after <= Decimal("0"):
-                    self._lots.pop(k, None)
-                else:
-                    self._lots[k] = [
-                        {
-                            "kind": "prediction",
-                            "size": size_after,
-                            "basis": basis_after,
-                        }
-                    ]
-                replayed += 1
+            replayed += replay(self, ctx, v1_skipped, _log)
 
         if replayed:
             _log.info("FIFOBasisStore: reconstructed %d lot operations from accounting_events", replayed)
-        if _v1_skipped:
-            total = sum(_v1_skipped.values())
-            breakdown = ", ".join(f"{k}={v}" for k, v in sorted(_v1_skipped.items()))
+        if v1_skipped:
+            total = sum(v1_skipped.values())
+            breakdown = ", ".join(f"{k}={v}" for k, v in sorted(v1_skipped.items()))
             _log.warning(
                 "FIFOBasisStore: skipped %d policy-v1 event(s) during reconstruction (%s) — "
                 "amount_token missing (pre-VIB-3484); FIFO store may be incomplete on restart.",
@@ -475,6 +149,369 @@ class FIFOBasisStore:
                 breakdown,
             )
         return replayed
+
+    @staticmethod
+    def _row_context(row: dict[str, Any]) -> _ReplayContext | None:
+        """Parse a raw accounting_events row into a normalised replay context.
+
+        Returns None when the row is missing required identity fields or has an
+        unparseable payload — those rows are silently skipped by the caller.
+        """
+        import json as _json
+
+        event_type = row.get("event_type", "")
+        position_key = row.get("position_key", "")
+        deployment_id = row.get("deployment_id", "")
+        # Rows missing identity fields cannot be keyed into the lot store.
+        if not deployment_id or not position_key:
+            return None
+
+        try:
+            payload = _json.loads(row.get("payload_json") or "{}")
+        except Exception:  # noqa: BLE001
+            return None
+
+        timestamp_str = row.get("timestamp")
+        try:
+            # Normalise UTC offset — Python <3.11 fromisoformat cannot parse trailing "Z"
+            ts_norm = timestamp_str.replace("Z", "+00:00") if timestamp_str else None
+            ts: datetime | None = datetime.fromisoformat(ts_norm) if ts_norm else None
+        except (ValueError, TypeError):
+            ts = None
+
+        # VIB-3964: derive the swap-key the BORROW / WITHDRAW credit was minted
+        # under. The accounting_events row carries `chain` and `wallet_address`
+        # at the top level, so the key is reconstructible without re-encoding it
+        # in the payload.
+        chain_norm = (row.get("chain") or "").lower().strip()
+        wallet_norm = (row.get("wallet_address") or "").lower().strip()
+        swap_wallet_key = f"swap:{chain_norm}:{wallet_norm}" if chain_norm and wallet_norm else ""
+
+        # ledger_entry_id links a lot back to the on-chain transaction (VIB-3468).
+        ledger_entry_id: str | None = row.get("ledger_entry_id") or None
+
+        return _ReplayContext(
+            event_type=event_type,
+            deployment_id=deployment_id,
+            position_key=position_key,
+            payload=payload,
+            timestamp=ts,
+            swap_wallet_key=swap_wallet_key,
+            ledger_entry_id=ledger_entry_id,
+        )
+
+    def _replay_borrow(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        raw_amount_token = ctx.payload.get("amount_token")
+        amount_token = _parse_decimal(raw_amount_token)
+        asset = ctx.payload.get("asset", "")
+        # amount_token key absent → policy v1 event (pre-VIB-3484); count for summary.
+        # amount_token present but non-positive → v2 extraction bug; skip silently (debug).
+        if raw_amount_token is None:
+            v1_skipped["BORROW"] = v1_skipped.get("BORROW", 0) + 1
+            return 0
+        if amount_token is None or amount_token <= 0:
+            log.debug(
+                "FIFOBasisStore: BORROW event %s/%s has non-positive amount_token — skipping",
+                ctx.deployment_id,
+                ctx.position_key,
+            )
+            return 0
+        if not asset:
+            return 0
+        # Derive principal_usd from payload so the swap-key replay lot has
+        # the same cost basis as the live-write path. Falls back to None
+        # when the payload predates VIB-3964 — the lot still mints, just
+        # without basis (downstream disposals will return cost_basis=None).
+        borrowed_amount_usd = _first_parsed_decimal(
+            ctx.payload, "borrowed_amount_usd", "amount_usd", "principal_delta_usd"
+        )
+        self.record_borrow(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.position_key,
+            token=asset,
+            principal_amount=amount_token,
+            principal_usd=borrowed_amount_usd,
+            timestamp=ctx.timestamp,
+            source_ledger_entry_id=ctx.ledger_entry_id,
+        )
+        # VIB-3964: the borrowed token also lands in the wallet — mint a
+        # swap-key acquisition lot so a SWAP that disposes the borrowed
+        # token can compute realized PnL instead of returning null.
+        if ctx.swap_wallet_key:
+            self.record_swap_acquisition(
+                deployment_id=ctx.deployment_id,
+                position_key=ctx.swap_wallet_key,
+                token=asset,
+                amount=amount_token,
+                cost_usd=borrowed_amount_usd,
+                timestamp=ctx.timestamp,
+                source="BORROW",
+            )
+        return 1
+
+    def _replay_withdraw(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        # VIB-3964: WITHDRAW credits the wallet with collateral (principal +
+        # accrued supply interest). Two basis-store effects:
+        #   1. Mirror it as a swap-key acquisition lot so a follow-up SWAP
+        #      that disposes the withdrawn token (e.g. the USDC→USDT
+        #      swap-back leg of a teardown) gets a non-null basis.
+        #   2. Match against the supply-key principal lots so interest
+        #      accrued (withdraw - principal) is reconstructable on restart.
+        raw_amount_token = ctx.payload.get("amount_token") or ctx.payload.get("amount")
+        amount_token = _parse_decimal(raw_amount_token)
+        asset = ctx.payload.get("asset", "")
+        if amount_token is None or amount_token <= 0 or not asset:
+            return 0
+        # CodeRabbit 2026-05-04: the live writer (lending_handler.py)
+        # mints the wallet-basis lot at the FULL withdraw USD value,
+        # not just the matched-principal portion (which becomes
+        # ``principal_delta_usd`` after the split fix above). Replay
+        # must use the same total or a SWAP that disposes the
+        # withdrawn token after a runner restart computes a different
+        # ``realized_pnl_usd`` than the live path. Read ``amount_usd``
+        # if present (preferred); otherwise reconstruct the total as
+        # ``principal_delta_usd + interest_delta_usd`` so post-split
+        # payloads still replay correctly.
+        withdraw_amount_usd = _parse_decimal(ctx.payload.get("amount_usd"))
+        if withdraw_amount_usd is None:
+            principal_usd = _parse_decimal(ctx.payload.get("principal_delta_usd"))
+            interest_usd = _parse_decimal(ctx.payload.get("interest_delta_usd"))
+            if principal_usd is not None:
+                withdraw_amount_usd = principal_usd + (interest_usd or Decimal("0"))
+        if ctx.swap_wallet_key:
+            self.record_swap_acquisition(
+                deployment_id=ctx.deployment_id,
+                position_key=ctx.swap_wallet_key,
+                token=asset,
+                amount=amount_token,
+                cost_usd=withdraw_amount_usd,
+                timestamp=ctx.timestamp,
+                source="WITHDRAW",
+            )
+        # Symmetric to BORROW/REPAY: drain the supply-key principal lots.
+        self.match_repay(
+            deployment_id=ctx.deployment_id,
+            position_key=f"supply:{ctx.position_key}",
+            token=asset,
+            repay_amount=amount_token,
+        )
+        return 1
+
+    def _replay_supply(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        # VIB-3964: SUPPLY removes wallet inventory (the supplied token
+        # leaves the wallet for the lending pool). Two basis-store effects:
+        #   1. Dispose the swap-key acquisition lot so phantom inventory
+        #      doesn't bleed into a later WITHDRAW-then-SWAP.
+        #   2. Record a principal lot under supply:<position_key> so a
+        #      future WITHDRAW can FIFO-match and surface accrued interest.
+        raw_amount_token = ctx.payload.get("amount_token") or ctx.payload.get("amount")
+        amount_token = _parse_decimal(raw_amount_token)
+        asset = ctx.payload.get("asset", "")
+        if amount_token is None or amount_token <= 0 or not asset:
+            return 0
+        if ctx.swap_wallet_key:
+            self.match_swap_disposal(
+                deployment_id=ctx.deployment_id,
+                position_key=ctx.swap_wallet_key,
+                token=asset,
+                amount=amount_token,
+            )
+        supply_amount_usd = _first_parsed_decimal(ctx.payload, "amount_usd", "principal_delta_usd")
+        self.record_borrow(
+            deployment_id=ctx.deployment_id,
+            position_key=f"supply:{ctx.position_key}",
+            token=asset,
+            principal_amount=amount_token,
+            principal_usd=supply_amount_usd,
+            timestamp=ctx.timestamp,
+            source_ledger_entry_id=ctx.ledger_entry_id,
+        )
+        return 1
+
+    def _replay_repay(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        # DELEVERAGE is structurally a repay — it reduces an open borrow lot.
+        raw_amount_token = ctx.payload.get("amount_token")
+        amount_token = _parse_decimal(raw_amount_token)
+        asset = ctx.payload.get("asset", "")
+        if raw_amount_token is None:
+            v1_skipped[ctx.event_type] = v1_skipped.get(ctx.event_type, 0) + 1
+            return 0
+        if amount_token is None or amount_token <= 0:
+            log.debug(
+                "FIFOBasisStore: %s event %s/%s has non-positive amount_token — skipping",
+                ctx.event_type,
+                ctx.deployment_id,
+                ctx.position_key,
+            )
+            return 0
+        if not asset:
+            return 0
+        self.match_repay(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.position_key,
+            token=asset,
+            repay_amount=amount_token,
+        )
+        # VIB-3964: REPAY also drains wallet inventory of the repaid
+        # token. Dispose the swap-key acquisition lot so the wallet basis
+        # pool stays consistent with actual on-chain wallet balance.
+        if ctx.swap_wallet_key:
+            self.match_swap_disposal(
+                deployment_id=ctx.deployment_id,
+                position_key=ctx.swap_wallet_key,
+                token=asset,
+                amount=amount_token,
+            )
+        return 1
+
+    def _replay_pt_buy(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        pt_token = ctx.payload.get("pt_token", "")
+        if not pt_token:
+            return 0
+        # PT_BUY stores raw 18-decimal integers from the swap receipt.
+        pt_human = _parse_decimal(ctx.payload.get("pt_amount"))
+        sy_human = _parse_decimal(ctx.payload.get("sy_amount"))
+        if pt_human is None or sy_human is None:
+            return 0
+        pt_human = pt_human / _DECIMALS_18
+        sy_human = sy_human / _DECIMALS_18
+        if pt_human <= 0:
+            return 0
+        self.record_pt_buy(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.position_key,
+            pt_token=pt_token,
+            pt_amount=pt_human,
+            sy_cost=sy_human,
+            timestamp=ctx.timestamp,
+            source_ledger_entry_id=ctx.ledger_entry_id,
+        )
+        return 1
+
+    def _replay_pt_sell(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        # PT_SELL follows the same raw-integer convention as PT_BUY.
+        pt_token = ctx.payload.get("pt_token", "")
+        if not pt_token:
+            return 0
+        pt_raw = _parse_decimal(ctx.payload.get("pt_amount"))
+        if pt_raw is None:
+            return 0
+        pt_human = pt_raw / _DECIMALS_18
+        if pt_human <= 0:
+            return 0
+        sy_raw = _parse_decimal(ctx.payload.get("sy_amount"))
+        # sy_amount is required for PT_SELL: it's the actual market proceeds.
+        # Defaulting to pt_amount (1:1 assumption) would invent cost-basis data.
+        if sy_raw is None or sy_raw <= 0:
+            return 0
+        sy_human = sy_raw / _DECIMALS_18
+        self.match_pt_redeem(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.position_key,
+            pt_token=pt_token,
+            pt_redeemed=pt_human,
+            sy_received=sy_human,
+        )
+        return 1
+
+    def _replay_pt_redeem(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        pt_token = ctx.payload.get("pt_token", "")
+        if not pt_token:
+            return 0
+        # PT_REDEEM events are written by build_pendle_pt_redeem_accounting_event()
+        # which converts to human-decimal before storing (unlike PT_BUY / PT_SELL).
+        # When py_redeemed was missing from the receipt, pt_amount is None and the
+        # builder fell back to sy_amount — mirror that fallback here.
+        pt_raw = _parse_decimal(ctx.payload.get("pt_amount"))
+        sy_raw = _parse_decimal(ctx.payload.get("sy_amount"))
+        if pt_raw is not None:
+            pt_human = pt_raw
+        elif sy_raw is not None:
+            pt_human = sy_raw
+        else:
+            return 0
+        if pt_human <= 0:
+            return 0
+        sy_human = sy_raw if sy_raw is not None else pt_human
+        self.match_pt_redeem(
+            deployment_id=ctx.deployment_id,
+            position_key=ctx.position_key,
+            pt_token=pt_token,
+            pt_redeemed=pt_human,
+            sy_received=sy_human,
+        )
+        return 1
+
+    def _replay_swap(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        # Position key for swap lots is stored in the payload (swap:<chain>:<wallet>).
+        # Fall back to row position_key for events written before VIB-3473.
+        swap_position_key = ctx.payload.get("swap_position_key") or ctx.position_key
+        if not swap_position_key:
+            return 0
+
+        # 1. Replay disposal of token_in to consume any prior acquisition lots,
+        #    keeping the FIFO store consistent with the state before this swap.
+        token_in_r = ctx.payload.get("token_in", "")
+        amount_in_r = _parse_decimal(ctx.payload.get("amount_in"))
+        if token_in_r and amount_in_r is not None and amount_in_r > 0:
+            self.match_swap_disposal(
+                deployment_id=ctx.deployment_id,
+                position_key=swap_position_key,
+                token=token_in_r,
+                amount=amount_in_r,
+            )
+
+        # 2. Replay acquisition lot for token_out so future disposals can match it.
+        token_out = ctx.payload.get("token_out", "")
+        if not token_out:
+            return 0
+        amount_out = _parse_decimal(ctx.payload.get("amount_out"))
+        if amount_out is None or amount_out <= 0:
+            return 0
+        cost_usd = _parse_decimal(ctx.payload.get("amount_out_usd"))
+        self.record_swap_acquisition(
+            deployment_id=ctx.deployment_id,
+            position_key=swap_position_key,
+            token=token_out,
+            amount=amount_out,
+            cost_usd=cost_usd,
+            timestamp=ctx.timestamp,
+        )
+        return 1
+
+    def _replay_prediction(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        # Replay prediction-market aggregate from the post-trade
+        # snapshot stored on the event (position_size_after,
+        # position_basis_after). We assign the snapshot directly
+        # rather than re-applying record_prediction_buy /
+        # match_prediction_sell because:
+        #   1. Events are processed in timestamp ASC order — the
+        #      latest event for a (market, outcome) wins.
+        #   2. A snapshot-based replay survives missed intermediate
+        #      events (e.g. policy-v1 records) without compounding
+        #      drift from re-derivation.
+        pos_key = ctx.payload.get("position_key") or ctx.position_key
+        if not pos_key:
+            return 0
+        size_after = _parse_decimal(ctx.payload.get("position_size_after"))
+        basis_after = _parse_decimal(ctx.payload.get("position_basis_after"))
+        if size_after is None or basis_after is None:
+            return 0
+        k = self._prediction_key(ctx.deployment_id, pos_key)
+        # Position closed (zero size) — drop the row entirely so
+        # match_prediction_sell on a closed position correctly
+        # returns "no prior basis" rather than a stale zero row.
+        if size_after <= Decimal("0"):
+            self._lots.pop(k, None)
+        else:
+            self._lots[k] = [
+                {
+                    "kind": "prediction",
+                    "size": size_after,
+                    "basis": basis_after,
+                }
+            ]
+        return 1
 
     def _key(self, deployment_id: str, position_key: str, token: str) -> str:
         return f"{deployment_id}:{position_key}:{token.lower()}"
@@ -959,3 +996,25 @@ class FIFOBasisStore:
             return None, remaining
 
         return cost_consumed, remaining
+
+
+# Per-event-type dispatch table for reconstruct_from_events. Unknown types
+# fall through (silently skipped) so that future event types added in
+# newer schema versions don't break older runners replaying mixed history.
+_ReplayCallable = Callable[["FIFOBasisStore", _ReplayContext, dict[str, int], Any], int]
+_REPLAY_DISPATCH: dict[str, _ReplayCallable] = {
+    "BORROW": FIFOBasisStore._replay_borrow,
+    "WITHDRAW": FIFOBasisStore._replay_withdraw,
+    "SUPPLY": FIFOBasisStore._replay_supply,
+    "REPAY": FIFOBasisStore._replay_repay,
+    "DELEVERAGE": FIFOBasisStore._replay_repay,
+    "PT_BUY": FIFOBasisStore._replay_pt_buy,
+    "PT_SELL": FIFOBasisStore._replay_pt_sell,
+    "PT_REDEEM": FIFOBasisStore._replay_pt_redeem,
+    "SWAP": FIFOBasisStore._replay_swap,
+    "PREDICTION_OPEN": FIFOBasisStore._replay_prediction,
+    "PREDICTION_INCREASE": FIFOBasisStore._replay_prediction,
+    "PREDICTION_REDUCE": FIFOBasisStore._replay_prediction,
+    "PREDICTION_CLOSE": FIFOBasisStore._replay_prediction,
+    "PREDICTION_REDEEM": FIFOBasisStore._replay_prediction,
+}

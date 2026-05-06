@@ -26,6 +26,7 @@ FIFO interest attribution:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -558,7 +559,216 @@ def read_compound_v3_account_state(  # noqa: C901
         return None
 
 
-def capture_lending_pre_state(  # noqa: C901
+def _capture_aave_v3_pre_state(
+    *,
+    intent: Any,  # noqa: ARG001 — registry-uniform signature
+    chain: str,
+    wallet_address: str,
+    gateway_client: Any,
+    price_oracle: dict | None,  # noqa: ARG001 — registry-uniform signature
+) -> AaveAccountState | None:
+    """Aave V3 pre-state arm of capture_lending_pre_state."""
+    aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
+    if aave_state is None:
+        logger.debug("capture_lending_pre_state: Aave read returned None for chain=%s", chain)
+    return aave_state
+
+
+# crap-allowlist: pre-state arm for Morpho Blue, exercised by integration tests
+# in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py.
+# Unit-scope coverage is artificially low (3%) — see
+# docs/internal/coverage-w1-misplacement-audit.md §2 for the measurement-window
+# explanation. Combined-scope coverage is 73%.
+def _resolve_morpho_market_params(
+    *,
+    chain: str,
+    market_id: str,
+    collateral_token_sym: str | None,
+    loan_token_sym: str | None,
+) -> tuple[str | None, str | None, int | None, int | None, int | None]:
+    """Resolve Morpho Blue (collateral_sym, loan_sym, collateral_decimals, loan_decimals, lltv_raw).
+
+    Returns ``(None, None, None, None, None)``-shaped tuple components for any
+    field that could not be resolved; the caller decides whether to abort.
+    """
+    collateral_decimals: int | None = None
+    loan_decimals: int | None = None
+    lltv_raw: int | None = None
+
+    try:
+        from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
+
+        markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
+        # O(1) lookup using the same normalisation as _normalize_market_id_hex
+        normalized_key = "0x" + _normalize_market_id_hex(market_id)
+        market_info: dict | None = markets_for_chain.get(normalized_key)
+    except (ImportError, AttributeError, KeyError):
+        logger.debug("capture_lending_pre_state: MORPHO_MARKETS lookup failed for chain=%s", chain, exc_info=True)
+        return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
+
+    if market_info is None:
+        return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
+
+    if collateral_token_sym is None:
+        collateral_token_sym = market_info.get("collateral_token")
+    if loan_token_sym is None:
+        loan_token_sym = market_info.get("loan_token")
+    lltv_raw = market_info.get("lltv")
+
+    try:
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        if collateral_token_sym:
+            ct = resolver.resolve(collateral_token_sym, chain=chain)
+            if ct:
+                collateral_decimals = ct.decimals
+        if loan_token_sym:
+            lt = resolver.resolve(loan_token_sym, chain=chain)
+            if lt:
+                loan_decimals = lt.decimals
+    except (ImportError, TokenNotFoundError):
+        logger.debug("capture_lending_pre_state: token resolver failed for Morpho Blue", exc_info=True)
+
+    return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
+
+
+# crap-allowlist: pre-state arm for Morpho Blue, exercised by integration tests
+# in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py.
+# Unit-scope coverage is artificially low (7%) — see
+# docs/internal/coverage-w1-misplacement-audit.md §2 for the measurement-window
+# explanation. Combined-scope coverage is 73%.
+def _capture_morpho_blue_pre_state(
+    *,
+    intent: Any,
+    chain: str,
+    wallet_address: str,
+    gateway_client: Any,
+    price_oracle: dict | None,
+) -> MorphoBlueAccountState | None:
+    """Morpho Blue pre-state arm — applies for all lending intent types (parity with Aave V3)."""
+    market_id = _intent_market_id(intent)
+    if not market_id:
+        logger.debug("capture_lending_pre_state: Morpho market_id missing — skipping pre-state read")
+        return None
+
+    collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
+    loan_token_sym: str | None = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+
+    (
+        collateral_token_sym,
+        loan_token_sym,
+        collateral_decimals,
+        loan_decimals,
+        lltv_raw,
+    ) = _resolve_morpho_market_params(
+        chain=chain,
+        market_id=market_id,
+        collateral_token_sym=collateral_token_sym,
+        loan_token_sym=loan_token_sym,
+    )
+
+    if not (
+        collateral_token_sym
+        and loan_token_sym
+        and collateral_decimals is not None
+        and loan_decimals is not None
+        and lltv_raw is not None
+    ):
+        logger.debug(
+            "capture_lending_pre_state: Morpho Blue pre-state skipped (missing params) for market=%s",
+            market_id[:18] if market_id else "?",
+        )
+        return None
+
+    morpho_state = read_morpho_blue_account_state(
+        gateway_client=gateway_client,
+        chain=chain,
+        wallet_address=wallet_address,
+        market_id=market_id,
+        collateral_token=collateral_token_sym,
+        loan_token=loan_token_sym,
+        collateral_decimals=collateral_decimals,
+        loan_decimals=loan_decimals,
+        lltv_raw=lltv_raw,
+        price_oracle=price_oracle,
+    )
+    if morpho_state is None:
+        logger.debug(
+            "capture_lending_pre_state: Morpho Blue read returned None for market=%s",
+            market_id[:18] if market_id else "?",
+        )
+    return morpho_state
+
+
+# crap-allowlist: pre-state arm for Compound V3, exercised by integration tests
+# in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py and
+# tests/framework/accounting/test_compound_v3_account_state.py. Unit-scope
+# coverage is artificially low (6%) — see
+# docs/internal/coverage-w1-misplacement-audit.md §2 for the measurement-window
+# explanation. Combined-scope coverage is 73%.
+def _capture_compound_v3_pre_state(
+    *,
+    intent: Any,
+    chain: str,
+    wallet_address: str,
+    gateway_client: Any,
+    price_oracle: dict | None,
+) -> CompoundV3AccountState | None:
+    """Compound V3 pre-state arm — SUPPLY/WITHDRAW require ``intent.market_id``."""
+    intent_type_str = _intent_type_value(intent)
+    intent_market_id: str | None = getattr(intent, "market_id", None)
+
+    if intent_type_str in ("SUPPLY", "WITHDRAW"):
+        # market_id is required for SUPPLY/WITHDRAW: without it we cannot
+        # determine which Comet to query — falling back to the collateral token
+        # symbol would select the wrong market on chains with multiple Comets.
+        if not intent_market_id:
+            logger.debug(
+                "capture_lending_pre_state: Compound V3 pre-state skipped"
+                " (market_id required for SUPPLY/WITHDRAW but not set)"
+            )
+            return None
+        # intent.token is the collateral asset; market_id identifies the Comet and
+        # its base asset (used for borrowBalanceOf and debt pricing).
+        collateral_token_sym: str | None = getattr(intent, "token", None)
+        borrow_token_sym: str | None = getattr(intent, "token", None)  # overridden by market_id
+    else:
+        collateral_token_sym = getattr(intent, "collateral_token", None)
+        borrow_token_sym = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+
+    if not collateral_token_sym:
+        logger.debug("capture_lending_pre_state: Compound V3 pre-state skipped (missing collateral token)")
+        return None
+
+    compound_pre_state = read_compound_v3_account_state(
+        gateway_client=gateway_client,
+        chain=chain,
+        wallet_address=wallet_address,
+        collateral_token=collateral_token_sym,
+        borrow_token=borrow_token_sym or "",
+        price_oracle=price_oracle,
+        market_id=intent_market_id,
+    )
+    if compound_pre_state is None:
+        logger.debug("capture_lending_pre_state: Compound V3 read returned None for chain=%s", chain)
+    return compound_pre_state
+
+
+# Registry: protocol identifier → per-protocol pre-state reader.
+# Uniform keyword-only signature lets capture_lending_pre_state delegate without branching.
+_LendingState = AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None
+_PreStateReader = Callable[..., _LendingState]
+_PROTOCOL_PRE_STATE_READERS: dict[str, _PreStateReader] = {
+    "aave_v3": _capture_aave_v3_pre_state,
+    "aave": _capture_aave_v3_pre_state,  # alias
+    "morpho_blue": _capture_morpho_blue_pre_state,
+    "compound_v3": _capture_compound_v3_pre_state,
+}
+
+
+def capture_lending_pre_state(
     *,
     intent: Any,
     chain: str,
@@ -583,134 +793,21 @@ def capture_lending_pre_state(  # noqa: C901
     if gateway_client is None:
         return None
 
-    protocol = str(getattr(intent, "protocol", "") or "").lower()
-    intent_type_str = _intent_type_value(intent)
-
-    if intent_type_str not in _LENDING_INTENT_TYPES:
+    if _intent_type_value(intent) not in _LENDING_INTENT_TYPES:
         return None
 
-    # ── Aave V3 ──────────────────────────────────────────────────────────────
-    if protocol in ("aave_v3", "aave"):
-        aave_state: AaveAccountState | None = read_aave_account_state(gateway_client, chain, wallet_address)
-        if aave_state is None:
-            logger.debug("capture_lending_pre_state: Aave read returned None for chain=%s", chain)
-        return aave_state
+    protocol = str(getattr(intent, "protocol", "") or "").lower()
+    reader = _PROTOCOL_PRE_STATE_READERS.get(protocol)
+    if reader is None:
+        return None
 
-    # ── Morpho Blue (all lending intent types for parity with Aave V3) ──────
-    if protocol == "morpho_blue":
-        market_id = _intent_market_id(intent)
-        if not market_id:
-            logger.debug("capture_lending_pre_state: Morpho market_id missing — skipping pre-state read")
-            return None
-
-        collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
-        loan_token_sym: str | None = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
-
-        _collateral_decimals: int | None = None
-        _loan_decimals: int | None = None
-        _lltv_raw: int | None = None
-
-        try:
-            from almanak.framework.connectors.morpho_blue.adapter import MORPHO_MARKETS
-
-            _markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
-            # O(1) lookup using the same normalisation as _normalize_market_id_hex
-            _normalized_key = "0x" + _normalize_market_id_hex(market_id)
-            _market_info: dict | None = _markets_for_chain.get(_normalized_key)
-
-            if _market_info is not None:
-                if collateral_token_sym is None:
-                    collateral_token_sym = _market_info.get("collateral_token")
-                if loan_token_sym is None:
-                    loan_token_sym = _market_info.get("loan_token")
-                _lltv_raw = _market_info.get("lltv")
-
-                try:
-                    from almanak.framework.data.tokens.resolver import get_token_resolver
-
-                    _resolver = get_token_resolver()
-                    if collateral_token_sym:
-                        _ct = _resolver.resolve(collateral_token_sym, chain=chain)
-                        if _ct:
-                            _collateral_decimals = _ct.decimals
-                    if loan_token_sym:
-                        _lt = _resolver.resolve(loan_token_sym, chain=chain)
-                        if _lt:
-                            _loan_decimals = _lt.decimals
-                except Exception:
-                    logger.debug("capture_lending_pre_state: token resolver failed for Morpho Blue", exc_info=True)
-        except Exception:
-            logger.debug("capture_lending_pre_state: MORPHO_MARKETS lookup failed for chain=%s", chain, exc_info=True)
-
-        if not (
-            collateral_token_sym
-            and loan_token_sym
-            and _collateral_decimals is not None
-            and _loan_decimals is not None
-            and _lltv_raw is not None
-        ):
-            logger.debug(
-                "capture_lending_pre_state: Morpho Blue pre-state skipped (missing params) for market=%s",
-                market_id[:18] if market_id else "?",
-            )
-            return None
-
-        morpho_state: MorphoBlueAccountState | None = read_morpho_blue_account_state(
-            gateway_client=gateway_client,
-            chain=chain,
-            wallet_address=wallet_address,
-            market_id=market_id,
-            collateral_token=collateral_token_sym,
-            loan_token=loan_token_sym,
-            collateral_decimals=_collateral_decimals,
-            loan_decimals=_loan_decimals,
-            lltv_raw=_lltv_raw,
-            price_oracle=price_oracle,
-        )
-        if morpho_state is None:
-            logger.debug(
-                "capture_lending_pre_state: Morpho Blue read returned None for market=%s",
-                market_id[:18] if market_id else "?",
-            )
-        return morpho_state
-
-    # ── Compound V3 ──────────────────────────────────────────────────────────
-    if protocol == "compound_v3":
-        intent_market_id_c3: str | None = getattr(intent, "market_id", None)
-        if intent_type_str in ("SUPPLY", "WITHDRAW"):
-            # market_id is required for SUPPLY/WITHDRAW: without it we cannot
-            # determine which Comet to query — falling back to the collateral token
-            # symbol would select the wrong market on chains with multiple Comets.
-            if not intent_market_id_c3:
-                logger.debug(
-                    "capture_lending_pre_state: Compound V3 pre-state skipped"
-                    " (market_id required for SUPPLY/WITHDRAW but not set)"
-                )
-                return None
-            # intent.token is the collateral asset; market_id identifies the Comet and
-            # its base asset (used for borrowBalanceOf and debt pricing).
-            collateral_token_sym_c3: str | None = getattr(intent, "token", None)
-            borrow_token_sym_c3: str | None = getattr(intent, "token", None)  # overridden by market_id
-        else:
-            collateral_token_sym_c3 = getattr(intent, "collateral_token", None)
-            borrow_token_sym_c3 = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
-        if not collateral_token_sym_c3:
-            logger.debug("capture_lending_pre_state: Compound V3 pre-state skipped (missing collateral token)")
-            return None
-        compound_pre_state: CompoundV3AccountState | None = read_compound_v3_account_state(
-            gateway_client=gateway_client,
-            chain=chain,
-            wallet_address=wallet_address,
-            collateral_token=collateral_token_sym_c3,
-            borrow_token=borrow_token_sym_c3 or "",
-            price_oracle=price_oracle,
-            market_id=intent_market_id_c3,
-        )
-        if compound_pre_state is None:
-            logger.debug("capture_lending_pre_state: Compound V3 read returned None for chain=%s", chain)
-        return compound_pre_state
-
-    return None
+    return reader(
+        intent=intent,
+        chain=chain,
+        wallet_address=wallet_address,
+        gateway_client=gateway_client,
+        price_oracle=price_oracle,
+    )
 
 
 def capture_lending_post_state(
