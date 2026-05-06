@@ -586,9 +586,14 @@ class AerodromeReceiptParser:
 
             if swap_result:
                 slippage_fmt = format_slippage_bps(swap_result.slippage_bps)
+                # ``amount_*_decimal`` may be None when token decimals could
+                # not be resolved (Empty != zero invariant); fall back to "?"
+                # rather than crashing the log line.
+                in_fmt = f"{swap_result.amount_in_decimal:.4f}" if swap_result.amount_in_decimal is not None else "?"
+                out_fmt = f"{swap_result.amount_out_decimal:.4f}" if swap_result.amount_out_decimal is not None else "?"
                 logger.info(
-                    f"🔍 Parsed Aerodrome swap: {swap_result.amount_in_decimal:.4f} {swap_result.token_in_symbol or 'token0'} "
-                    f"→ {swap_result.amount_out_decimal:.4f} {swap_result.token_out_symbol or 'token1'}, "
+                    f"🔍 Parsed Aerodrome swap: {in_fmt} {swap_result.token_in_symbol or 'token0'} "
+                    f"→ {out_fmt} {swap_result.token_out_symbol or 'token1'}, "
                     f"slippage={slippage_fmt}, tx={tx_fmt}, {gas_fmt}"
                 )
             elif liquidity_result:

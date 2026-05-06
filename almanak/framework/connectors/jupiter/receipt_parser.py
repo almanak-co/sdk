@@ -36,7 +36,11 @@ class JupiterReceiptParser:
         }
         amounts = parser.extract_swap_amounts(receipt)
         if amounts:
-            print(f"Swapped {amounts.amount_in_decimal} -> {amounts.amount_out_decimal}")
+            # ``amount_*_decimal`` may be None when token decimals are
+            # unresolved; guard before printing.
+            ai = amounts.amount_in_decimal
+            ao = amounts.amount_out_decimal
+            print(f"Swapped {ai if ai is not None else '?'} -> {ao if ao is not None else '?'}")
     """
 
     SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset({"swap_amounts"})

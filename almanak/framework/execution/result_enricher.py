@@ -1273,7 +1273,13 @@ class ResultEnricher:
             return result.position_id
         if field == "swap_amounts" and result.swap_amounts:
             sa = result.swap_amounts
-            return f"{sa.amount_in_decimal} -> {sa.amount_out_decimal}"
+            # ``amount_*_decimal`` may be None when the receipt parser could
+            # not resolve token decimals (Empty != zero invariant —
+            # blueprints/27-accounting.md). Render as "?" rather than the
+            # literal "None" to keep logs readable.
+            in_str = f"{sa.amount_in_decimal}" if sa.amount_in_decimal is not None else "?"
+            out_str = f"{sa.amount_out_decimal}" if sa.amount_out_decimal is not None else "?"
+            return f"{in_str} -> {out_str}"
         if field == "lp_close_data" and result.lp_close_data:
             return f"amount0={result.lp_close_data.amount0_collected}, amount1={result.lp_close_data.amount1_collected}"
         bd = getattr(result, "bridge_data", None)

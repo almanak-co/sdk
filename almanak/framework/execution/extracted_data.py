@@ -30,9 +30,19 @@ class SwapAmounts:
     Attributes:
         amount_in: Raw input amount (in token's smallest unit)
         amount_out: Raw output amount (in token's smallest unit)
-        amount_in_decimal: Human-readable input amount
-        amount_out_decimal: Human-readable output amount
-        effective_price: Actual execution price (out/in)
+        amount_in_decimal: Human-readable input amount, or ``None`` when
+            the parser could not resolve ``token_in`` decimals. Per the
+            "Empty != zero" invariant in ``blueprints/27-accounting.md``:
+            ``Decimal(0)`` is a measured zero, ``None`` is unmeasured.
+            Never substitute one for the other.
+        amount_out_decimal: Human-readable output amount, or ``None`` when
+            unmeasured (parsers fail-close on output decimals, so this is
+            populated for every successful parse today; typed as optional
+            for consistency with ``amount_in_decimal``).
+        effective_price: Actual execution price (out/in), or ``None`` when
+            unmeasurable (e.g. unresolved input decimals). Per the
+            "Empty != zero" invariant a literal ``Decimal(0)`` here would
+            silently corrupt slippage / lot-pricing reconciliation.
         slippage_bps: Actual slippage in basis points (None if unknown)
         expected_out_decimal: Pre-slippage-discount expected output in human
             units, sourced from the compiler's ActionBundle metadata
@@ -45,8 +55,9 @@ class SwapAmounts:
         amount_in_decimal_resolved: ``True`` when ``amount_in_decimal`` was
             computed from a resolved ``decimals`` value on the token
             resolver. ``False`` means the parser could not resolve
-            decimals for ``token_in`` and fell back to ``Decimal(0)`` as a
-            sentinel — the value is NOT a measured zero (issue #1778).
+            decimals for ``token_in``; ``amount_in_decimal`` is then
+            ``None`` (the parser MUST NOT substitute a measured zero —
+            issue #1778, "Empty != zero" invariant).
             Defaults to ``True`` so existing parsers that do not populate
             the flag continue to behave as before.
         amount_out_decimal_resolved: Analogous flag for
@@ -60,8 +71,8 @@ class SwapAmounts:
 
     amount_in: int
     amount_out: int
-    amount_in_decimal: Decimal
-    amount_out_decimal: Decimal
+    amount_in_decimal: Decimal | None
+    amount_out_decimal: Decimal | None
     effective_price: Decimal | None = None
     slippage_bps: int | None = None
     expected_out_decimal: Decimal | None = None
@@ -84,8 +95,8 @@ class SwapAmounts:
         return {
             "amount_in": str(self.amount_in),
             "amount_out": str(self.amount_out),
-            "amount_in_decimal": str(self.amount_in_decimal),
-            "amount_out_decimal": str(self.amount_out_decimal),
+            "amount_in_decimal": str(self.amount_in_decimal) if self.amount_in_decimal is not None else None,
+            "amount_out_decimal": str(self.amount_out_decimal) if self.amount_out_decimal is not None else None,
             "effective_price": str(self.effective_price) if self.effective_price is not None else None,
             "slippage_bps": self.slippage_bps,
             "expected_out_decimal": str(self.expected_out_decimal) if self.expected_out_decimal is not None else None,

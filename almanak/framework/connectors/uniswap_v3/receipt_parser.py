@@ -534,9 +534,14 @@ class UniswapV3ReceiptParser:
             gas_fmt = format_gas_cost(gas_used)
             if swap_result:
                 slippage_fmt = format_slippage_bps(swap_result.slippage_bps) if swap_result.slippage_bps else "N/A"
+                # ``amount_*_decimal`` may be None when token decimals could
+                # not be resolved (Empty != zero invariant); fall back to "?"
+                # rather than crashing the log line.
+                in_fmt = f"{swap_result.amount_in_decimal:.4f}" if swap_result.amount_in_decimal is not None else "?"
+                out_fmt = f"{swap_result.amount_out_decimal:.4f}" if swap_result.amount_out_decimal is not None else "?"
                 logger.info(
-                    f"🔍 Parsed Uniswap V3 swap: {swap_result.amount_in_decimal:.4f} {swap_result.token_in_symbol or 'token0'} "
-                    f"→ {swap_result.amount_out_decimal:.4f} {swap_result.token_out_symbol or 'token1'}, "
+                    f"🔍 Parsed Uniswap V3 swap: {in_fmt} {swap_result.token_in_symbol or 'token0'} "
+                    f"→ {out_fmt} {swap_result.token_out_symbol or 'token1'}, "
                     f"slippage={slippage_fmt}, tx={tx_fmt}, {gas_fmt}"
                 )
             else:

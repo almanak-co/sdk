@@ -11,7 +11,10 @@ ExecutionResult, allowing strategy authors to access extracted data directly:
     if result.position_id:
         print(f"Position ID: {result.position_id}")
     if result.swap_amounts:
-        print(f"Swapped: {result.swap_amounts.amount_out_decimal}")
+        # ``amount_out_decimal`` may be None when the receipt parser could
+        # not resolve token decimals; guard before printing.
+        out = result.swap_amounts.amount_out_decimal
+        print(f"Swapped: {out if out is not None else 'unmeasured'}")
 """
 
 import json

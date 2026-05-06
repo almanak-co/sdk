@@ -507,15 +507,21 @@ class TestTokenDecimals:
         sa = parser.extract_swap_amounts(receipt)
         assert sa is None
 
-    def test_unresolved_input_decimals_still_returns_with_zero_amount_in(self):
-        """Pin: unresolved input decimals => amount_in_decimal = 0 (NOT None).
+    def test_unresolved_input_decimals_returns_unresolved_amounts(self):
+        """Unresolved input decimals => SwapAmounts with None for unmeasurable fields.
 
-        This is the current behavior (receipt_parser.py:386-388) — the guard
-        only fails-closed on output decimals. Input fallback is a zero.
+        The parser fails-closed only on output decimals (returns None and
+        skips the row). Unresolved INPUT decimals fall through gracefully
+        so the row is still emitted, but ``amount_in_decimal`` and
+        ``effective_price`` are ``None`` -- NOT ``Decimal(0)``.
 
-        GOTCHA: this is likely a latent bug (amount_in_decimal == 0 when
-        amount_in > 0 silently corrupts effective_price). Pinning to expose
-        it in tests; candidate for a follow-up fix.
+        Per the "Empty != zero" invariant in
+        ``blueprints/27-accounting.md``: ``Decimal(0)`` is a measured
+        zero and a literal sentinel here would silently reconcile a
+        real swap as 0% slippage in the Accountant Test. The raw integer
+        ``amount_in`` is preserved so the row carries the wallet-level
+        truth, and ``amount_in_decimal_resolved=False`` flags the row
+        for downstream consumers.
         """
         parser = PancakeSwapV3ReceiptParser(chain="bsc")
         unresolvable_in = "0x" + "02" * 20
@@ -528,15 +534,17 @@ class TestTokenDecimals:
         )
         sa = parser.extract_swap_amounts(receipt)
         assert sa is not None
-        # amount_in (raw) preserved; human amount falls back to Decimal(0)
+        # Raw integer wallet amount is preserved on both sides.
         assert sa.amount_in == 3 * 10**18
-        assert sa.amount_in_decimal == Decimal("0")
-        assert sa.amount_in_decimal_resolved is False
         assert sa.amount_out == 10**15
+        # Output decimals resolved -> human amount populated.
         assert sa.amount_out_decimal == Decimal("0.001")
-        # effective_price = amount_out / amount_in_decimal; 0 in denominator
-        # is guarded -> Decimal(0).
-        assert sa.effective_price == Decimal("0")
+        assert sa.amount_out_decimal_resolved is True
+        # Input decimals NOT resolved -> human amount + price are None,
+        # NEVER Decimal(0). Flag marks the row for the ledger writer.
+        assert sa.amount_in_decimal is None
+        assert sa.amount_in_decimal_resolved is False
+        assert sa.effective_price is None
 
 
 # ---------------------------------------------------------------------------

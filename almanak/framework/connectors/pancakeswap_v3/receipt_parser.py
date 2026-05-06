@@ -552,10 +552,11 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         Historical invariant (preserved for Phase 8.4):
         - Output decimals unknown -> return None (would corrupt PnL).
         - Input decimals unknown  -> proceed with ``decimals_in = None``;
-          ``_build_swap_amounts`` zeros out ``amount_in_decimal`` as a
-          sentinel. See char-test
-          ``test_unresolved_input_decimals_still_returns_with_zero_amount_in``
-          which pins this fail-open behavior.
+          ``_build_swap_amounts`` emits ``None`` (NOT ``Decimal(0)``) for
+          ``amount_in_decimal`` and ``effective_price`` so downstream
+          accounting can distinguish "unmeasured" from "measured zero"
+          (the "Empty != zero" invariant from blueprints/27-accounting.md).
+          ``amount_in_decimal_resolved=False`` continues to mark the row.
         """
         decimals_in = self._resolve_decimals(seed.token_in)
         decimals_out = self._resolve_decimals(seed.token_out)
@@ -573,14 +574,28 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         """Assemble the final SwapAmounts, including realized slippage."""
         from almanak.framework.execution.extracted_data import SwapAmounts
 
+        # "Empty != zero" invariant (blueprints/27-accounting.md):
+        # When input decimals could not be resolved, we cannot compute
+        # ``amount_in_decimal`` -- emit ``None`` (unmeasured), NOT
+        # ``Decimal(0)`` (measured zero). The raw integer ``amount_in``
+        # is still preserved so the row can be emitted gracefully.
+        amount_in_decimal: Decimal | None
         if seed.amount_in and decimals.decimals_in is not None:
             amount_in_decimal = Decimal(seed.amount_in) / Decimal(10**decimals.decimals_in)
         else:
-            amount_in_decimal = Decimal(0)
+            amount_in_decimal = None
 
         amount_out_decimal = Decimal(seed.amount_out) / Decimal(10**decimals.decimals_out)
 
-        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal > 0 else Decimal(0)
+        # ``effective_price`` is unmeasurable when ``amount_in_decimal`` is
+        # unmeasured -- emit ``None``, never substitute a sentinel zero.
+        # The ledger writer / swap_handler already handle ``None`` via the
+        # existing ``is not None`` guards.
+        effective_price: Decimal | None
+        if amount_in_decimal is not None and amount_in_decimal > 0:
+            effective_price = amount_out_decimal / amount_in_decimal
+        else:
+            effective_price = None
 
         # VIB-3203 Phase B: realized slippage when enricher supplies a quote.
         slippage_bps: int | None = None
@@ -588,11 +603,11 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             realized = (expected_out - amount_out_decimal) / expected_out
             slippage_bps = int(realized * Decimal(10_000))
 
-        # CodeRabbit review (PR #1798): when decimals_in could not be resolved,
-        # amount_in_decimal is a Decimal(0) SENTINEL — flag it as unresolved so
-        # downstream PnL / accounting does not treat it as a real zero amount.
-        # amount_out_decimal is always resolved here (callers have already
-        # fail-closed in _resolve_swap_decimals when decimals_out is None).
+        # ``amount_in_decimal_resolved=False`` flags the asymmetric
+        # fail-soft case where input decimals were unknown. Combined with
+        # ``amount_in_decimal=None`` and ``effective_price=None`` this
+        # preserves the "Empty != zero" invariant -- downstream consumers
+        # see "unmeasured", not a literal zero.
         return SwapAmounts(
             amount_in=seed.amount_in,
             amount_out=seed.amount_out,

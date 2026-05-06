@@ -35,6 +35,158 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _determine_confidence(
+    *,
+    has_price_in: bool,
+    has_price_out: bool,
+    token_in: str,
+    token_out: str,
+    amounts_unmeasured: bool,
+) -> tuple[AccountingConfidence, str]:
+    """Compute the SwapAccountingEvent confidence + unavailable_reason.
+
+    HIGH confidence requires that both legs have USD prices in
+    ``price_inputs_json`` AND the receipt parser resolved token decimals
+    (so ledger ``amount_in`` / ``amount_out`` are not empty strings). Any
+    gap drops the row to ESTIMATED with a typed reason composed of all
+    applicable causes — important for auditing because both gaps can
+    co-occur on the same row and downstream consumers should see all of
+    them, not just the first.
+
+    The price-presence signal is passed in as an explicit boolean rather
+    than inferred from ``amount_*_usd is None``: when ``amounts_unmeasured``
+    is True we deliberately force the USD fields to None (Empty != zero
+    propagation), so the absence-by-None test would falsely report
+    "missing prices" on a row whose prices were actually present.
+    """
+    reasons: list[str] = []
+    if not has_price_in or not has_price_out:
+        missing: list[str] = []
+        if not has_price_in:
+            missing.append(f"{token_in or 'token_in'} price")
+        if not has_price_out:
+            missing.append(f"{token_out or 'token_out'} price")
+        reasons.append(f"missing prices in price_inputs_json: {', '.join(missing)}")
+    if amounts_unmeasured:
+        # Surface the parser-side decimals failure so an auditor can see
+        # exactly why ``effective_price`` is None on this row.
+        reasons.append("swap amounts unmeasured (token decimals could not be resolved by receipt parser)")
+    if reasons:
+        return AccountingConfidence.ESTIMATED, "; ".join(reasons)
+    return AccountingConfidence.HIGH, ""
+
+
+def _parse_timestamp(raw_ts: Any) -> datetime:
+    """Parse the ledger row's timestamp; fall back to ``now(UTC)`` on
+    malformed / missing input."""
+    try:
+        ts_str = raw_ts.replace("Z", "+00:00") if isinstance(raw_ts, str) else None
+        return datetime.fromisoformat(ts_str) if ts_str else datetime.now(UTC)
+    except (ValueError, AttributeError):
+        return datetime.now(UTC)
+
+
+def _parse_slippage_bps(raw: Any) -> int | None:
+    """Parse a slippage_bps ledger value; return None on missing /
+    non-coercible input."""
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_optional_decimal(raw: Any) -> Decimal | None:
+    """Parse a decimal-or-empty ledger value; return None for None / empty."""
+    if raw is None or raw == "":
+        return None
+    return _parse_decimal(raw)
+
+
+def _select_effective_price(
+    raw_ep: Any,
+    amount_in: Decimal | None,
+    amount_out: Decimal | None,
+    amounts_unmeasured: bool,
+) -> Decimal | None:
+    """Pick the SwapAccountingEvent ``effective_price`` from the ledger row.
+
+    Order of precedence:
+    1. If amounts are unmeasured, force None — a stale or non-empty
+       ``effective_price`` field cannot rescue an unmeasured row (Empty
+       != zero, blueprints/27-accounting.md).
+    2. If the ledger row carries a non-empty ``effective_price``, use it.
+    3. Otherwise compute ``amount_out / amount_in`` when both sides are
+       measured and ``amount_in > 0``.
+    4. Otherwise None (unmeasured / unrecoverable).
+    """
+    if amounts_unmeasured:
+        return None
+    if raw_ep and raw_ep != "":
+        return _parse_decimal(raw_ep)
+    if amount_in is not None and amount_out is not None and amount_in > 0:
+        return amount_out / amount_in
+    return None
+
+
+def _record_basis_lots(
+    *,
+    basis_store: FIFOBasisStore,
+    deployment_id: str,
+    cycle_id: str,
+    swap_position_key: str,
+    token_in: str,
+    token_out: str,
+    amount_in: Decimal | None,
+    amount_out: Decimal | None,
+    amount_in_usd: Decimal | None,
+    amount_out_usd: Decimal | None,
+    timestamp: datetime,
+    tx_hash: str,
+    ledger_entry_id: str,
+) -> tuple[Decimal | None, bool]:
+    """Consume token_in lots (FIFO) and record token_out acquisition.
+
+    Returns ``(realized_pnl_usd, cost_basis_recorded)``. Skips silently
+    when ``amount_in`` / ``amount_out`` is ``None`` or the position key
+    is empty — caller filters most of these cases up front, this is
+    belt-and-braces.
+    """
+    realized_pnl_usd: Decimal | None = None
+    cost_basis_recorded = False
+
+    # 1. Consume token_in lots to compute realized PnL.
+    if amount_in is not None and amount_in > 0 and token_in:
+        cost_basis_consumed, _unmatched = basis_store.match_swap_disposal(
+            deployment_id=deployment_id,
+            position_key=swap_position_key,
+            token=token_in,
+            amount=amount_in,
+        )
+        if cost_basis_consumed is not None and amount_in_usd is not None and _unmatched == Decimal("0"):
+            realized_pnl_usd = amount_in_usd - cost_basis_consumed
+
+    # 2. Record acquisition lot for token_out (only when a positive amount was acquired).
+    if token_out and amount_out is not None and amount_out > 0:
+        _lot_seed = tx_hash or ledger_entry_id
+        lot_id = (
+            make_accounting_event_id(deployment_id, cycle_id, "SWAP_LOT", _lot_seed, token_out) if _lot_seed else ""
+        )
+        basis_store.record_swap_acquisition(
+            deployment_id=deployment_id,
+            position_key=swap_position_key,
+            token=token_out,
+            amount=amount_out,
+            cost_usd=amount_out_usd,
+            timestamp=timestamp,
+            lot_id=lot_id,
+        )
+        cost_basis_recorded = True
+
+    return realized_pnl_usd, cost_basis_recorded
+
+
 def handle_swap(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
@@ -73,50 +225,60 @@ def handle_swap(
     ledger_entry_id = ledger_row.get("id") or ""
     wallet_address = outbox_row.get("wallet_address") or ""
 
-    # ── Timestamp ────────────────────────────────────────────────────────────
-    raw_ts = ledger_row.get("timestamp")
-    try:
-        ts_str = raw_ts.replace("Z", "+00:00") if isinstance(raw_ts, str) else None
-        timestamp = datetime.fromisoformat(ts_str) if ts_str else datetime.now(UTC)
-    except (ValueError, AttributeError):
-        timestamp = datetime.now(UTC)
+    timestamp = _parse_timestamp(ledger_row.get("timestamp"))
 
     # ── Token / amount fields ────────────────────────────────────────────────
     token_in = (ledger_row.get("token_in") or "").upper()
     token_out = (ledger_row.get("token_out") or "").upper()
 
-    amount_in = _parse_decimal(ledger_row.get("amount_in")) or Decimal("0")
-    amount_out = _parse_decimal(ledger_row.get("amount_out")) or Decimal("0")
+    raw_amount_in = ledger_row.get("amount_in")
+    raw_amount_out = ledger_row.get("amount_out")
+    parsed_in = _parse_decimal(raw_amount_in)
+    parsed_out = _parse_decimal(raw_amount_out)
 
-    # Effective price from ledger row; recompute from amounts if missing / empty.
-    raw_ep = ledger_row.get("effective_price")
-    effective_price: Decimal
-    if raw_ep and raw_ep != "":
-        effective_price = _parse_decimal(raw_ep) or Decimal("0")
-    else:
-        effective_price = amount_out / amount_in if amount_in > 0 else Decimal("0")
+    # An empty string OR an unparsable string (e.g. ``"NaN"``) in the
+    # ledger row means the receipt parser could not resolve a usable
+    # decimal-converted amount (see ``observability/ledger.py:_extract_from_swap_amounts``
+    # — gated on ``amount_*_decimal_resolved``). Both sides must be flagged
+    # as unmeasured because computing USD value, FIFO realized PnL, or
+    # ``effective_price`` against ``Decimal(0)`` would silently emit a
+    # measured-zero row that auditors cannot distinguish from a real
+    # zero-amount swap. Per blueprints/27-accounting.md "Empty != zero" —
+    # never conflate.
+    amounts_unmeasured = parsed_in is None or parsed_out is None
 
-    slippage_bps_raw = ledger_row.get("slippage_bps")
-    slippage_bps: int | None = None
-    if slippage_bps_raw is not None:
-        try:
-            slippage_bps = int(slippage_bps_raw)
-        except (TypeError, ValueError):
-            pass
+    # ``amount_in`` / ``amount_out`` flow into the SwapAccountingEvent as
+    # ``Decimal | None``. ``None`` propagates the unmeasured signal end-to-
+    # end (FIFO matching, USD conversion, lot recording all skip below).
+    amount_in: Decimal | None = parsed_in
+    amount_out: Decimal | None = parsed_out
 
-    # ── Gas ──────────────────────────────────────────────────────────────────
-    gas_usd: Decimal | None = None
-    gas_usd_raw = ledger_row.get("gas_usd")
-    if gas_usd_raw is not None and gas_usd_raw != "":
-        gas_usd = _parse_decimal(gas_usd_raw)
+    effective_price = _select_effective_price(
+        ledger_row.get("effective_price"),
+        amount_in,
+        amount_out,
+        amounts_unmeasured,
+    )
+
+    slippage_bps = _parse_slippage_bps(ledger_row.get("slippage_bps"))
+    gas_usd = _parse_optional_decimal(ledger_row.get("gas_usd"))
 
     # ── USD pricing from price_inputs_json (VIB-3885) ───────────────────────
     # ``parse_price_inputs`` accepts both the canonical nested shape
     # ({symbol: {price_usd, oracle_source, ...}}) and the legacy flat
     # shape ({symbol: price}); see ``_price_helpers.py`` for context.
+    # Skip USD conversion when amounts are unmeasured — pricing a
+    # ``Decimal(0)`` placeholder would produce ``$0`` and conflate with a
+    # measured zero-USD swap.
     price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
-    amount_in_usd = _token_usd(token_in, amount_in, price_oracle)
-    amount_out_usd = _token_usd(token_out, amount_out, price_oracle)
+    # Capture price-presence as separate booleans BEFORE the USD conversion,
+    # so the confidence helper can distinguish "no price in
+    # price_inputs_json" from "price was present but USD was forced to None
+    # because amounts were unmeasured" (Empty != zero propagation).
+    has_price_in = bool(token_in) and token_in in price_oracle
+    has_price_out = bool(token_out) and token_out in price_oracle
+    amount_in_usd = _token_usd(token_in, amount_in, price_oracle) if amount_in is not None else None
+    amount_out_usd = _token_usd(token_out, amount_out, price_oracle) if amount_out is not None else None
 
     # ── Position key for FIFO lot store ─────────────────────────────────────
     # Swap lots are keyed per-chain per-wallet (not per-protocol) so that a USDC
@@ -125,51 +287,36 @@ def handle_swap(
     wallet_norm = wallet_address.lower().strip()
     swap_position_key = f"swap:{chain_norm}:{wallet_norm}" if chain_norm and wallet_norm else ""
 
-    # ── FIFO lot matching ────────────────────────────────────────────────────
+    # FIFO matching + lot recording require measured amounts (Decimal | None
+    # contract); skip both legs when either amount is unmeasured to avoid
+    # consuming/recording fake-zero lots.
     realized_pnl_usd: Decimal | None = None
     cost_basis_recorded = False
-
-    if basis_store is not None and swap_position_key:
-        # 1. Consume token_in lots to compute realized PnL.
-        if amount_in > 0 and token_in:
-            cost_basis_consumed, _unmatched = basis_store.match_swap_disposal(
-                deployment_id=deployment_id,
-                position_key=swap_position_key,
-                token=token_in,
-                amount=amount_in,
-            )
-            if cost_basis_consumed is not None and amount_in_usd is not None and _unmatched == Decimal("0"):
-                realized_pnl_usd = amount_in_usd - cost_basis_consumed
-
-        # 2. Record acquisition lot for token_out (only when a positive amount was acquired).
-        if token_out and amount_out > 0:
-            _lot_seed = tx_hash or ledger_entry_id
-            lot_id = (
-                make_accounting_event_id(deployment_id, cycle_id, "SWAP_LOT", _lot_seed, token_out) if _lot_seed else ""
-            )
-            basis_store.record_swap_acquisition(
-                deployment_id=deployment_id,
-                position_key=swap_position_key,
-                token=token_out,
-                amount=amount_out,
-                cost_usd=amount_out_usd,
-                timestamp=timestamp,
-                lot_id=lot_id,
-            )
-            cost_basis_recorded = True
+    if basis_store is not None and swap_position_key and not amounts_unmeasured:
+        realized_pnl_usd, cost_basis_recorded = _record_basis_lots(
+            basis_store=basis_store,
+            deployment_id=deployment_id,
+            cycle_id=cycle_id,
+            swap_position_key=swap_position_key,
+            token_in=token_in,
+            token_out=token_out,
+            amount_in=amount_in,
+            amount_out=amount_out,
+            amount_in_usd=amount_in_usd,
+            amount_out_usd=amount_out_usd,
+            timestamp=timestamp,
+            tx_hash=tx_hash,
+            ledger_entry_id=ledger_entry_id,
+        )
 
     # ── Confidence ───────────────────────────────────────────────────────────
-    if amount_in_usd is not None and amount_out_usd is not None:
-        confidence = AccountingConfidence.HIGH
-        unavailable_reason = ""
-    else:
-        confidence = AccountingConfidence.ESTIMATED
-        missing: list[str] = []
-        if amount_in_usd is None:
-            missing.append(f"{token_in or 'token_in'} price")
-        if amount_out_usd is None:
-            missing.append(f"{token_out or 'token_out'} price")
-        unavailable_reason = f"missing prices in price_inputs_json: {', '.join(missing)}"
+    confidence, unavailable_reason = _determine_confidence(
+        has_price_in=has_price_in,
+        has_price_out=has_price_out,
+        token_in=token_in,
+        token_out=token_out,
+        amounts_unmeasured=amounts_unmeasured,
+    )
 
     # ── Event identity ───────────────────────────────────────────────────────
     _id_seed = tx_hash or ledger_entry_id

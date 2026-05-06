@@ -185,7 +185,16 @@ def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmou
     amt_out_resolved = getattr(swap_amounts, "amount_out_decimal_resolved", True)
     amount_in = str(amt_in) if amt_in is not None and amt_in_resolved else ""
     amount_out = str(amt_out) if amt_out is not None and amt_out_resolved else ""
-    effective_price = str(swap_amounts.effective_price) if swap_amounts.effective_price is not None else ""
+    # ``effective_price`` mirrors ``amount_in`` / ``amount_out``: an
+    # unresolved input-decimals row carries ``effective_price=None`` from
+    # the parser, but we also gate on ``amt_in_resolved`` so any future
+    # parser that emits a non-None ``effective_price`` while
+    # ``amount_in_decimal_resolved=False`` still falls through to ``""``
+    # (the "Empty != zero" invariant — issue #1778).
+    if swap_amounts.effective_price is not None and amt_in_resolved:
+        effective_price = str(swap_amounts.effective_price)
+    else:
+        effective_price = ""
     return (
         token_in,
         token_out,

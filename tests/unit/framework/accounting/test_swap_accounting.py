@@ -164,6 +164,138 @@ class TestHandleSwapBasic:
         assert event is not None
         assert event.effective_price == Decimal("0.000500")
 
+    def test_unmeasured_amounts_yield_none_throughout(self) -> None:
+        """Empty != zero — unmeasured ledger amounts must propagate as None
+        through every field of the SwapAccountingEvent (not just
+        effective_price). Previously the swap handler treated empty strings
+        as zeros and emitted a row with ``amount_in=Decimal(0)``,
+        ``amount_in_usd=Decimal(0)``, ``effective_price=Decimal(0)`` — a
+        sentinel indistinguishable from a measured zero swap. Pin the
+        corrected contract: ``None`` for every measured-amount field, plus
+        ``confidence=ESTIMATED`` with a clear ``unavailable_reason``.
+        """
+        basis = FIFOBasisStore()
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in="USDC",
+            amount_in="",  # ledger marks unmeasured per Empty != zero
+            token_out="WETH",
+            amount_out="",
+            effective_price="",
+            price_inputs_json=_price_json({"USDC": "1.0", "WETH": "2000.0"}),
+        )
+        event = handle_swap(outbox, ledger, basis)
+        assert event is not None
+        # Every measured-amount field must be None — no fake measured zero.
+        assert event.amount_in is None, "amount_in must be None when ledger is unmeasured"
+        assert event.amount_out is None, "amount_out must be None when ledger is unmeasured"
+        assert event.amount_in_usd is None, "USD conversion must skip when amount is None"
+        assert event.amount_out_usd is None
+        assert event.effective_price is None
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert "unmeasured" in event.unavailable_reason
+        # FIFO matching + lot recording must skip on unmeasured rows so we
+        # don't consume or record fake-zero lots.
+        assert event.realized_pnl_usd is None
+        assert event.cost_basis_recorded is False
+
+    def test_unmeasured_with_prices_present_does_not_falsely_report_missing_prices(self) -> None:
+        """When amounts are unmeasured we force amount_*_usd to None for the
+        Empty != zero contract. The confidence helper must still distinguish
+        that case from "prices were genuinely missing in price_inputs_json"
+        — otherwise the unavailable_reason on a perfectly-priced exotic-token
+        swap would falsely claim the price oracle was missing inputs it
+        actually had. Pin: when both prices are present and amounts are
+        unmeasured, unavailable_reason mentions "unmeasured" but does NOT
+        mention "missing prices".
+        """
+        basis = FIFOBasisStore()
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in="USDC",
+            amount_in="",
+            token_out="WETH",
+            amount_out="",
+            effective_price="",
+            # Both prices ARE present in the row — pricing was not the gap.
+            price_inputs_json=_price_json({"USDC": "1.0", "WETH": "2000.0"}),
+        )
+        event = handle_swap(outbox, ledger, basis)
+        assert event is not None
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert "unmeasured" in event.unavailable_reason
+        assert "missing prices" not in event.unavailable_reason, (
+            "Forcing amount_*_usd to None on unmeasured rows must NOT cause "
+            "the confidence helper to falsely report missing prices when "
+            "the prices were actually present in price_inputs_json."
+        )
+
+    def test_unmeasured_amounts_override_stale_effective_price(self) -> None:
+        """A stale or non-empty ``effective_price`` in the ledger row must
+        NOT leak into an unmeasured event. Unmeasured amounts make any
+        ``effective_price`` unverifiable, so the row's measured-state
+        contract requires None — not the upstream-emitted value.
+
+        Pin: when ``amount_in`` is unparsable (unmeasured) but the ledger
+        row carries ``effective_price="1000"``, the resulting event has
+        ``effective_price=None``. Empty != zero applies to leak-through too.
+        """
+        basis = FIFOBasisStore()
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in="USDC",
+            amount_in="not-a-number",  # unmeasured
+            token_out="WETH",
+            amount_out="0.05",
+            effective_price="1000",  # stale upstream value
+            price_inputs_json=_price_json({"USDC": "1.0", "WETH": "2000.0"}),
+        )
+        event = handle_swap(outbox, ledger, basis)
+        assert event is not None
+        assert event.amount_in is None
+        assert event.effective_price is None, (
+            "An unmeasured row must NOT propagate a stale ledger "
+            "effective_price; the unmeasured contract overrides the upstream "
+            "value. See blueprints/27-accounting.md 'Empty != zero'."
+        )
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert "unmeasured" in event.unavailable_reason
+
+    def test_unparsable_amount_in_yields_none_amount_in(self) -> None:
+        """Empty != zero applies to unparsable strings, not just empty ones.
+
+        A ledger row with ``amount_in="NaN"`` (or any non-decimal-parseable
+        string) historically coerced to ``Decimal(0)`` via
+        ``_parse_decimal(...) or Decimal("0")`` — flagging the row as a
+        measured-zero swap. After this fix, parse failure is treated
+        identically to empty string: the row is unmeasured.
+        """
+        basis = FIFOBasisStore()
+        outbox = _make_outbox_row()
+        ledger = _make_ledger_row(
+            token_in="USDC",
+            amount_in="not-a-number",  # parse failure
+            token_out="WETH",
+            amount_out="0.05",
+            effective_price="",
+            price_inputs_json=_price_json({"USDC": "1.0", "WETH": "2000.0"}),
+        )
+        event = handle_swap(outbox, ledger, basis)
+        assert event is not None
+        assert event.amount_in is None
+        # amount_out parses fine; only the unparsable side is None.
+        assert event.amount_out == Decimal("0.05")
+        # But effective_price must still be None — we cannot compute
+        # amount_out / amount_in when one side is unmeasured.
+        assert event.effective_price is None
+        # USD on the unmeasured side is None; the parsed side is fine.
+        assert event.amount_in_usd is None
+        # FIFO must skip on unmeasured to avoid wrong lot consumption.
+        assert event.realized_pnl_usd is None
+        assert event.cost_basis_recorded is False
+        assert event.confidence == AccountingConfidence.ESTIMATED
+        assert "unmeasured" in event.unavailable_reason
+
     def test_cost_basis_recorded_with_basis_store(self) -> None:
         """Token_out acquisition lot is recorded when basis_store is provided."""
         basis = FIFOBasisStore()
@@ -384,6 +516,72 @@ class TestSwapPayloadRoundtrip:
         assert restored.gas_usd == Decimal("0.50")
         assert restored.confidence == AccountingConfidence.HIGH
         assert restored.swap_position_key == event.swap_position_key
+
+    def test_payload_roundtrip_preserves_unmeasured_none(self) -> None:
+        """An unmeasured swap (decimals could not be resolved by the receipt
+        parser) MUST roundtrip through to/from_payload_json without
+        substituting None back into ``Decimal(0)``. The "Empty != zero"
+        invariant from blueprints/27-accounting.md says ``None`` =
+        unmeasured and ``Decimal(0)`` = measured zero — persistence cannot
+        silently conflate them.
+        """
+        from almanak.framework.accounting.models import AccountingIdentity
+
+        identity = AccountingIdentity(
+            id="test-id-unmeasured",
+            deployment_id="dep-1",
+            strategy_id="strat-1",
+            cycle_id="cycle-1",
+            execution_mode="live",
+            timestamp=datetime.now(UTC),
+            chain="arbitrum",
+            protocol="pancakeswap_v3",
+            wallet_address=_WALLET,
+            tx_hash=_TX_HASH,
+            ledger_entry_id="led-1",
+        )
+        event = SwapAccountingEvent(
+            identity=identity,
+            event_type=SwapEventType.SWAP,
+            protocol="pancakeswap_v3",
+            token_in="EXOTIC",
+            token_out="WETH",
+            # Unmeasured row: every measured-amount field is None per the
+            # Empty != zero contract.
+            amount_in=None,
+            amount_out=None,
+            amount_in_usd=None,
+            amount_out_usd=None,
+            effective_price=None,
+            slippage_bps=None,
+            realized_pnl_usd=None,
+            cost_basis_recorded=False,
+            gas_usd=Decimal("0.25"),
+            confidence=AccountingConfidence.ESTIMATED,
+            unavailable_reason="swap amounts unmeasured (token decimals could not be resolved by receipt parser)",
+            swap_position_key=f"swap:{_CHAIN.lower()}:{_WALLET.lower()}",
+        )
+
+        payload = event.to_payload_json()
+        restored = SwapAccountingEvent.from_payload_json(identity, payload)
+
+        # Every nullable measured field MUST come back as None — never Decimal(0).
+        assert restored.amount_in is None, (
+            "amount_in roundtrip must preserve None (unmeasured); got "
+            f"{restored.amount_in!r}. See blueprints/27-accounting.md "
+            "'Empty != zero'."
+        )
+        assert restored.amount_out is None
+        assert restored.amount_in_usd is None
+        assert restored.amount_out_usd is None
+        assert restored.effective_price is None
+        assert restored.realized_pnl_usd is None
+        # Belt-and-braces: a measured field (gas_usd) must continue to
+        # roundtrip correctly so we know the test's None expectations
+        # aren't a false negative from a broader serialization bug.
+        assert restored.gas_usd == Decimal("0.25")
+        assert restored.confidence == AccountingConfidence.ESTIMATED
+        assert "unmeasured" in restored.unavailable_reason
 
 
 class TestRecordSwapAcquisitionAndMatchDisposal:

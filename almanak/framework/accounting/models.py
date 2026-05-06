@@ -365,11 +365,21 @@ class SwapAccountingEvent:
     protocol: str  # "enso" | "uniswap_v3" | "jupiter" | etc.
     token_in: str
     token_out: str
-    amount_in: Decimal
-    amount_out: Decimal
+    # ``None`` when the receipt parser could not resolve token decimals (or the
+    # ledger row's amount field is empty / unparsable). ``Decimal(0)`` is a
+    # measured zero. Per blueprints/27-accounting.md "Empty != zero" — never
+    # conflate.
+    amount_in: Decimal | None
+    amount_out: Decimal | None
     amount_in_usd: Decimal | None
     amount_out_usd: Decimal | None
-    effective_price: Decimal  # amount_out / amount_in (0 if amount_in is 0)
+    # ``None`` when amounts are unmeasured (token decimals could not be resolved
+    # by the receipt parser — see ``observability/ledger.py`` and
+    # ``connectors/pancakeswap_v3/receipt_parser.py``). ``Decimal(0)`` is a
+    # measured zero (e.g. ``amount_in == 0`` and the swap legitimately had a
+    # zero numerator). Per blueprints/27-accounting.md "Empty != zero" — never
+    # conflate.
+    effective_price: Decimal | None
     slippage_bps: int | None
     realized_pnl_usd: Decimal | None  # amount_in_usd - cost_basis_consumed; None if no prior lot
     cost_basis_recorded: bool  # True if acquisition lot was recorded for token_out
@@ -421,11 +431,11 @@ class SwapAccountingEvent:
             protocol=d.get("protocol", ""),
             token_in=d.get("token_in", ""),
             token_out=d.get("token_out", ""),
-            amount_in=Decimal(d["amount_in"]) if d.get("amount_in") is not None else Decimal("0"),
-            amount_out=Decimal(d["amount_out"]) if d.get("amount_out") is not None else Decimal("0"),
+            amount_in=Decimal(d["amount_in"]) if d.get("amount_in") is not None else None,
+            amount_out=Decimal(d["amount_out"]) if d.get("amount_out") is not None else None,
             amount_in_usd=_dec(d.get("amount_in_usd")),
             amount_out_usd=_dec(d.get("amount_out_usd")),
-            effective_price=Decimal(d["effective_price"]) if d.get("effective_price") is not None else Decimal("0"),
+            effective_price=Decimal(d["effective_price"]) if d.get("effective_price") is not None else None,
             slippage_bps=d.get("slippage_bps"),
             realized_pnl_usd=_dec(d.get("realized_pnl_usd")),
             cost_basis_recorded=bool(d.get("cost_basis_recorded", False)),
