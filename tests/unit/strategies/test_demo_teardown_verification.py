@@ -29,7 +29,6 @@ from almanak.framework.intents.vocabulary import (
     IntentType,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers — bypass IntentStrategy.__init__ so tests can exercise pure logic
 # without booting a gateway.
@@ -78,6 +77,7 @@ def _make_balancer_strategy() -> BalancerFlashArbStrategy:
         s.max_slippage_pct = 1.0
         s.base_token = "WETH"
         s.quote_token = "USDC"
+        s.teardown_protocol = "uniswap_v3"
         s.force_action = "swap"
         s._trades_executed = 1
         s._fell_back_to_swap = False
@@ -252,7 +252,6 @@ class TestMorphoTeardownVerification:
     def test_retry_with_no_market_and_snapshot_failure_emits_swap(self):
         """If neither the runner nor `create_market_snapshot()` provide a usable
         market, conservatively emit the swap rather than silently skipping."""
-        from almanak.framework.intents.vocabulary import SwapIntent
         from almanak.framework.teardown import TeardownMode
 
         s = _make_morpho_strategy()
@@ -306,8 +305,11 @@ class TestBalancerTeardownVerification:
         assert len(summary.positions) == 1
         position = summary.positions[0]
         assert position.value_usd == Decimal("1700")
+        assert position.protocol == "uniswap_v3"
         assert position.details["asset"] == "WETH"
         assert position.details["balance"] == "0.5"
+        assert position.details["source_protocol"] == "enso"
+        assert position.details["teardown_protocol"] == "uniswap_v3"
 
     def test_query_failure_with_cached_trade_reports_position(self):
         """RPC failure + recorded trade → fail closed and report position.
@@ -328,6 +330,9 @@ class TestBalancerTeardownVerification:
         assert len(summary.positions) == 1
         position = summary.positions[0]
         assert position.details["valuation_source"] == "cached_fallback_estimate"
+        assert position.protocol == "uniswap_v3"
+        assert position.details["source_protocol"] == "enso"
+        assert position.details["teardown_protocol"] == "uniswap_v3"
         # value_usd must be non-zero so safety_guard derives a sensible
         # acceptable-loss floor (CodeRabbit PR #1964).
         assert position.value_usd > Decimal("0")
@@ -371,6 +376,7 @@ class TestBalancerTeardownVerification:
         intents = s.generate_teardown_intents(TeardownMode.SOFT, market=market)
         assert len(intents) == 1
         assert intents[0].from_token == "WETH"
+        assert intents[0].protocol == "uniswap_v3"
 
     def test_teardown_intents_emitted_when_balance_present(self):
         from almanak.framework.teardown import TeardownMode
@@ -384,6 +390,7 @@ class TestBalancerTeardownVerification:
         assert len(intents) == 1
         assert intents[0].from_token == "WETH"
         assert intents[0].to_token == "USDC"
+        assert intents[0].protocol == "uniswap_v3"
 
 
 # ---------------------------------------------------------------------------

@@ -26,17 +26,26 @@ time with a clear error. To run this strategy, deploy a compatible flash-loan
 receiver contract.
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.framework.intents import Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_usd
 
+if TYPE_CHECKING:
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+
 logger = logging.getLogger(__name__)
+
+_ACTION_SWAP_PROTOCOL = "enso"
+_DEFAULT_TEARDOWN_PROTOCOL = "uniswap_v3"
+_SUPPORTED_TEARDOWN_PROTOCOLS = frozenset({_ACTION_SWAP_PROTOCOL, _DEFAULT_TEARDOWN_PROTOCOL})
 
 
 @almanak_strategy(
@@ -47,7 +56,7 @@ logger = logging.getLogger(__name__)
     tags=["demo", "balancer", "flash-loan", "arbitrage", "enso"],
     supported_chains=["arbitrum"],
     default_chain="arbitrum",
-    supported_protocols=["balancer", "enso"],
+    supported_protocols=["balancer", "enso", "uniswap_v3"],
     intent_types=["FLASH_LOAN", "SWAP", "HOLD"],
 )
 class BalancerFlashArbStrategy(IntentStrategy):
@@ -58,6 +67,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
         max_slippage_pct: Max slippage for swap callbacks
         base_token: Token to trade (e.g., "WETH")
         quote_token: Quote token (e.g., "USDC")
+        teardown_protocol: Protocol used only for teardown exit swap
         force_action: Force "flash_loan" or "swap" for testing
     """
 
@@ -71,6 +81,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
         self.max_slippage_pct = float(self.get_config("max_slippage_pct", 1.0))
         self.base_token = self.get_config("base_token", "WETH")
         self.quote_token = self.get_config("quote_token", "USDC")
+        self.teardown_protocol = self._resolve_teardown_protocol()
         # Normalize force_action once: boolean/truthy -> "swap", strings lowercased
         raw_action = self.get_config("force_action", None)
         if raw_action is None:
@@ -96,8 +107,20 @@ class BalancerFlashArbStrategy(IntentStrategy):
         logger.info(
             f"BalancerFlashArbStrategy initialized: "
             f"flash_loan={format_usd(self.flash_loan_amount_usd)}, "
-            f"pair={self.base_token}/{self.quote_token}"
+            f"pair={self.base_token}/{self.quote_token}, "
+            f"teardown_protocol={self.teardown_protocol}"
         )
+
+    def _resolve_teardown_protocol(self) -> str:
+        raw_protocol = self.get_config("teardown_protocol", _DEFAULT_TEARDOWN_PROTOCOL)
+        protocol = str(raw_protocol).strip().lower()
+        if protocol not in _SUPPORTED_TEARDOWN_PROTOCOLS:
+            supported = ", ".join(sorted(_SUPPORTED_TEARDOWN_PROTOCOLS))
+            raise ValueError(
+                f"Unsupported balancer teardown_protocol={raw_protocol!r}; "
+                f"expected one of: {supported}"
+            )
+        return protocol
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """Decide: emit flash loan intent or simple swap for testing.
@@ -195,14 +218,14 @@ class BalancerFlashArbStrategy(IntentStrategy):
                     to_token=self.base_token,
                     amount=self.flash_loan_amount_usd,
                     max_slippage=max_slippage,
-                    protocol="enso",
+                    protocol=_ACTION_SWAP_PROTOCOL,
                 ),
                 Intent.swap(
                     from_token=self.base_token,
                     to_token=self.quote_token,
                     amount="all",
                     max_slippage=max_slippage,
-                    protocol="enso",
+                    protocol=_ACTION_SWAP_PROTOCOL,
                 ),
             ],
             chain="arbitrum",
@@ -217,14 +240,16 @@ class BalancerFlashArbStrategy(IntentStrategy):
             to_token=self.base_token,
             amount_usd=Decimal("3"),
             max_slippage=max_slippage,
-            protocol="enso",
+            protocol=_ACTION_SWAP_PROTOCOL,
         )
 
     def get_status(self) -> dict[str, Any]:
         return {
             "strategy": "demo_balancer_flash_arb",
             "chain": self.chain,
+            "action_protocol": _ACTION_SWAP_PROTOCOL,
             "trades_executed": self._trades_executed,
+            "teardown_protocol": self.teardown_protocol,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -287,7 +312,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
         """
         return self._trades_executed > 0 and (self.force_action == "swap" or self._fell_back_to_swap)
 
-    def get_open_positions(self) -> "TeardownPositionSummary":
+    def get_open_positions(self) -> TeardownPositionSummary:
         """Detect open positions via on-chain wallet balance, with cached
         fallback when the query fails.
 
@@ -326,10 +351,12 @@ class BalancerFlashArbStrategy(IntentStrategy):
                         position_type=PositionType.TOKEN,
                         position_id="balancer_flash_arb_token_0",
                         chain=self.chain,
-                        protocol="enso",
+                        protocol=self.teardown_protocol,
                         value_usd=estimated_value_usd,
                         details={
                             "asset": self.base_token,
+                            "source_protocol": _ACTION_SWAP_PROTOCOL,
+                            "teardown_protocol": self.teardown_protocol,
                             "valuation_source": "cached_fallback_estimate",
                         },
                     )
@@ -342,9 +369,14 @@ class BalancerFlashArbStrategy(IntentStrategy):
                         position_type=PositionType.TOKEN,
                         position_id="balancer_flash_arb_token_0",
                         chain=self.chain,
-                        protocol="enso",
+                        protocol=self.teardown_protocol,
                         value_usd=balance_usd,
-                        details={"asset": self.base_token, "balance": str(balance_amount)},
+                        details={
+                            "asset": self.base_token,
+                            "balance": str(balance_amount),
+                            "source_protocol": _ACTION_SWAP_PROTOCOL,
+                            "teardown_protocol": self.teardown_protocol,
+                        },
                     )
                 )
 
@@ -354,7 +386,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: TeardownMode, market=None) -> list[Intent]:
         from almanak.framework.teardown import TeardownMode
 
         # Skip the teardown swap only if we KNOW the wallet has no base_token
@@ -387,7 +419,7 @@ class BalancerFlashArbStrategy(IntentStrategy):
                 to_token=self.quote_token,
                 amount="all",
                 max_slippage=max_slippage,
-                protocol="enso",
+                protocol=self.teardown_protocol,
                 chain=self.chain,
             )
         ]

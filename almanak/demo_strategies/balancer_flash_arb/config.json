@@ -20,6 +20,7 @@
     "max_slippage_pct": 1.0,
     "base_token": "WETH",
     "quote_token": "USDC",
+    "teardown_protocol": "uniswap_v3",
     "force_action": "swap",
     "anvil_funding": {
         "ETH": 100,

@@ -1,7 +1,7 @@
 {
     "min_stake_amount": "0.5",
     "gas_reserve": "0.05",
-    "receive_wrapped": false,
+    "receive_wrapped": true,
     "force_action": "",
     "chain": "ethereum",
     "anvil_funding": {
