@@ -2615,9 +2615,8 @@ class StateManager:
         self._unimplemented_logged.add(key)
         logger.warning(
             "StateManager: warm backend %s does not implement %s — "
-            "returning empty result for identity=%s. This is the silent "
-            "fallthrough that VIB-3933 was filed for; if this is hosted "
-            "Postgres the read path is missing.",
+            "returning empty result for identity=%s. This is a silent "
+            "fallthrough; if this is hosted Postgres, the read path is missing.",
             backend_name,
             method,
             identity or "<empty>",

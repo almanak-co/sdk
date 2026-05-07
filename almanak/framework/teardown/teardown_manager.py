@@ -670,6 +670,7 @@ class TeardownManager:
             market=market,
         )
 
+    # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
     async def _execute_intents(  # noqa: C901
         self,
         teardown_id: str,
@@ -1123,7 +1124,7 @@ class TeardownManager:
                             strategy._framework_record_intent_execution(intent, True, exec_result)
                         except Exception as fhook_err:  # noqa: BLE001
                             logger.warning(
-                                "VIB-3922: framework intent-execution hook raised in teardown lane (non-fatal): %s",
+                                "framework intent-execution hook raised in teardown lane (non-fatal): %s",
                                 fhook_err,
                             )
                     if hasattr(strategy, "on_intent_executed"):

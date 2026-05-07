@@ -144,7 +144,7 @@ class FIFOBasisStore:
             breakdown = ", ".join(f"{k}={v}" for k, v in sorted(v1_skipped.items()))
             _log.warning(
                 "FIFOBasisStore: skipped %d policy-v1 event(s) during reconstruction (%s) — "
-                "amount_token missing (pre-VIB-3484); FIFO store may be incomplete on restart.",
+                "amount_token missing (legacy schema); FIFO store may be incomplete on restart.",
                 total,
                 breakdown,
             )

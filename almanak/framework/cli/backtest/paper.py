@@ -145,7 +145,7 @@ def paper() -> None:
     "--strict-bootstrap",
     is_flag=True,
     default=False,
-    help="Abort if any token has zero balance after wallet bootstrap (VIB-2377)",
+    help="Abort if any token has zero balance after wallet bootstrap",
 )
 @click.option(
     "--preset",

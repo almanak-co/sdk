@@ -577,7 +577,7 @@ class CtfSDK:
                 native_allowance_onramp = native_contract.functions.allowance(wallet, self.collateral_onramp).call()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "Native USDC allowance read failed for %s; treating as 0 (VIB-3770): %s",
+                    "Native USDC allowance read failed for %s; treating as 0: %s",
                     wallet,
                     exc,
                 )
@@ -687,7 +687,7 @@ class CtfSDK:
                 usdc_native_bal = native_contract.functions.balanceOf(wallet).call()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "Native USDC balance read failed for %s; reporting 0 (VIB-3770): %s",
+                    "Native USDC balance read failed for %s; reporting 0: %s",
                     wallet,
                     exc,
                 )

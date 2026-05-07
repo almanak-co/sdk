@@ -1299,6 +1299,6 @@ def update_teardown_requests_lifecycle(
         tsm.update_request(existing)
     except Exception:  # noqa: BLE001 — never block CLI exit on bookkeeping
         logger.debug(
-            "VIB-3920: failed to update teardown_requests post-execute",
+            "failed to update teardown_requests post-execute",
             exc_info=True,
         )

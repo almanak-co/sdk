@@ -608,10 +608,10 @@ def teardown():
         "Skip wiring the augmentation pipeline. None of "
         "transaction_ledger / accounting_events / position_events / "
         "portfolio_snapshots / portfolio_metrics will be updated, and the "
-        "VIB-3839 pre/post snapshot brackets are skipped. Use only for "
-        "known-broken environments — the books and on-chain reality will "
-        "diverge. Default is to hard-fail when wiring fails so the operator "
-        "never moves real funds without books."
+        "pre/post snapshot brackets are skipped. Use only for known-broken "
+        "environments — the books and on-chain reality will diverge. Default "
+        "is to hard-fail when wiring fails so the operator never moves real "
+        "funds without books."
     ),
 )
 def execute_teardown(  # noqa: C901

@@ -37,8 +37,7 @@ _DEPRECATION_MESSAGE = (
     "Joe Lend (Banker Joe) was wound down by its governance and is no longer "
     "operational on Avalanche. All supply/borrow/repay/withdraw calls revert "
     "on-chain with 'Error: wind down'. The connector has been retired from "
-    "the Almanak SDK supported-protocol surface (VIB-3960). Full removal "
-    "tracked in VIB-3963."
+    "the Almanak SDK supported-protocol surface."
 )
 
 

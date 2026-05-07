@@ -418,7 +418,7 @@ class ManagedGateway:
         else:
             logger.info(
                 f"No anvil_funding in config for {wallet[:10]}...; "
-                f"applying default {self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT} native gas per chain (VIB-3752)"
+                f"applying default {self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT} native gas per chain"
             )
 
         # Separate native tokens (per-symbol) from ERC-20s
@@ -472,7 +472,7 @@ class ManagedGateway:
 
                 if native_amount > 0:
                     await manager.fund_wallet(wallet, native_amount)
-                    suffix = " (default; VIB-3752)" if applied_default else ""
+                    suffix = " (default)" if applied_default else ""
                     native_label = chain_native or f"<unknown native for {chain}>"
                     logger.info(f"Funded native {native_label}: {native_amount}{suffix}")
                 if erc20_tokens:

@@ -237,7 +237,7 @@ def _maybe_render_beta_banner(p: PnLSummary) -> None:
         return
     primitive_label = {"lending": "Lending", "perp": "Perpetuals"}[kind]
     blocker = {
-        "lending": "VIB-3474 (lending pre/post-state pipeline)",
+        "lending": "lending pre/post-state pipeline",
         "perp": "Track C (position_state_snapshots materialiser)",
     }[kind]
     st.markdown(
@@ -284,7 +284,7 @@ def render_money_trail(p: PnLSummary) -> None:
             format_usd(p.deployed_usd),
             help=(
                 "Money put in. Wallet pre-state at first action × oracle prices "
-                "+ deposits − withdrawals (VIB-3914 wallet-anchored)."
+                "+ deposits − withdrawals (wallet-anchored)."
             ),
         )
     with c2:
@@ -296,7 +296,7 @@ def render_money_trail(p: PnLSummary) -> None:
                 f"Net Asset Value = open positions + cash. "
                 f"Confidence: {p.value_confidence}. HIGH = oracle "
                 "quotes available; ESTIMATED = derived from latest "
-                "snapshot (CONF / VIB-3886)."
+                "snapshot."
             ),
         )
     with c3:

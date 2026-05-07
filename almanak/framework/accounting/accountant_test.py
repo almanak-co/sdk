@@ -1279,8 +1279,7 @@ def _cell_g14_sdk_eq_onchain(
             "G14",
             "SDK ≡ on-chain reconciliation",
             "XFAIL",
-            "position_state_snapshots not yet wired (Track C); cell is xfail by design "
-            "until materializer lands — VIB-3866 truth correction",
+            "position_state_snapshots not yet wired (Track C); cell is xfail by design until materializer lands",
         )
 
     # Track C is wired: evaluate the 1-bp tolerance.
@@ -1337,8 +1336,7 @@ def _cell_g15_multi_period_self_consistency(
             "G15",
             "Multi-period MtM self-consistency",
             "XFAIL",
-            "position_state_snapshots not yet wired (Track C); cell is xfail by design "
-            "until materializer lands — VIB-3866 truth correction",
+            "position_state_snapshots not yet wired (Track C); cell is xfail by design until materializer lands",
         )
 
     # Coverage check: every snapshot that reported open positions must
@@ -1659,7 +1657,7 @@ def _cells_lending(  # noqa: C901
                     "HF / LTV trajectory",
                     "FAIL",
                     f"{len(lending_state_rows)} lending track-c rows but none has health_factor — "
-                    "lending observer is not reading HF (depends on VIB-3474)",
+                    "lending observer is not reading HF (depends on lending pre/post-state pipeline)",
                 )
             )
     else:
@@ -1877,7 +1875,7 @@ def _cells_lending(  # noqa: C901
                     "Loop-leg attribution",
                     "FAIL",
                     f"{null_loop_leg_pnl}/{len(loop_leg_payloads)} loop-leg SWAPs have realized_pnl_usd=null — "
-                    "wallet basis store missed a BORROW/WITHDRAW credit (VIB-3964 regression)",
+                    "wallet basis store missed a BORROW/WITHDRAW credit",
                 )
             )
         else:

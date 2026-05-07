@@ -624,7 +624,7 @@ class TestUpdateTeardownRequestsLifecycle:
         # Create was attempted but the row was never persisted.
         tsm.create_request.assert_not_called()
         tsm.update_request.assert_not_called()
-        assert any("VIB-3920: failed to update teardown_requests" in r.message for r in caplog.records)
+        assert any("failed to update teardown_requests" in r.message for r in caplog.records)
 
     def test_updates_existing_request(self):
         from almanak.framework.teardown import TeardownStatus

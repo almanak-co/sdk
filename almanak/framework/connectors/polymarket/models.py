@@ -964,7 +964,7 @@ class OrderResponse(BaseModel):
             "On-chain setup transactions (approvals + source-asset → pUSD wrap) "
             "submitted by the gateway before this order. Empty when allowances "
             "were already in place AND no wrap was needed. Populated exactly "
-            "once per order (VIB-3710)."
+            "once per order."
         ),
     )
     fee_pusd: Decimal | None = Field(
@@ -974,7 +974,7 @@ class OrderResponse(BaseModel):
             "None when the order did not match (no fee charged) or when the "
             "CLOB response did not carry a fee field. Distinct from any "
             "signed-order fee — V2 fees are operator-set, not part of the "
-            "EIP-712 payload (VIB-3710)."
+            "EIP-712 payload."
         ),
     )
 

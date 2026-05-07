@@ -1162,7 +1162,6 @@ class TestJoeLendDormant:
 
         assert result.status == CompilationStatus.FAILED
         assert "wound down" in result.error.lower()
-        assert "VIB-3960" in result.error
 
     def test_dispatch_short_circuits_before_solana_fallback(self):
         """A misconfigured (joelend, solana) intent must NOT route to Kamino.

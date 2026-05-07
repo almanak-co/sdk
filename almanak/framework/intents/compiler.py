@@ -103,7 +103,7 @@ def _warn_pcs_perps_protocol_key_once() -> None:
         "Intent protocol='pancakeswap_perps' is deprecated; route through "
         "'aster_perps' (canonical, broker_id=0) unless you explicitly need "
         "PancakeSwap attribution (broker_id=2). This compiler path will be "
-        "removed once pancakeswap_delta_neutral_lp migrates (VIB-3044 Phase 4)."
+        "removed once pancakeswap_delta_neutral_lp migrates."
     )
 
 
@@ -4296,6 +4296,7 @@ class IntentCompiler:
         else:
             warnings.append(f"Position #{token_id} appears already closed (0 liquidity, 0 tokens owed) - skipping burn")
 
+    # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
     def _compile_lp_close_traderjoe_v2(self, intent: LPCloseIntent) -> CompilationResult:
         """Compile LP_CLOSE intent for TraderJoe V2 Liquidity Book.
 
@@ -4479,7 +4480,7 @@ class IntentCompiler:
                         "price drift and can leave liquidity stranded on-chain. Capture "
                         "bin_ids from the LP_OPEN result and pass them on close: "
                         "Intent.lp_close(..., protocol_params={'bin_ids': captured_bin_ids}). "
-                        "See blueprints/05-connectors.md (TraderJoe V2 section) and VIB-3742.",
+                        "See blueprints/05-connectors.md (TraderJoe V2 section).",
                         intent.pool,
                         self.chain,
                     )
@@ -5388,7 +5389,7 @@ class IntentCompiler:
             status=CompilationStatus.FAILED,
             intent_id=intent.intent_id,
             error=(
-                "Fluid DEX connector is disabled (VIB-2822): all 20 Arbitrum T1 pools "
+                "Fluid DEX connector is disabled: all 20 Arbitrum T1 pools "
                 "currently reject swaps at any amount (FluidDexSwapTooSmall / "
                 "FluidDexLiquidityLimit). This is a protocol-level issue, not a "
                 "compiler bug. Use uniswap_v3, sushiswap_v3, or camelot instead."

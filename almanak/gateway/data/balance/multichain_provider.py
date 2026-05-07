@@ -118,9 +118,7 @@ class MultiChainWeb3BalanceProvider:
             )
 
         if skipped_chains:
-            logger.info(
-                f"MultiChainWeb3BalanceProvider skipping non-EVM chains (VIB-3896 EVM-only guard): {skipped_chains}"
-            )
+            logger.info(f"MultiChainWeb3BalanceProvider skipping non-EVM chains (EVM-only guard): {skipped_chains}")
 
         self._rpc_urls = evm_rpc_urls
         self._wallet_address = wallet_address

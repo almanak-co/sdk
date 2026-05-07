@@ -680,10 +680,9 @@ def test_strat_pnl_computes_breakdown_from_persisted_data(seeded_db: Path) -> No
     assert "Gross PnL:" in result.output
     assert "Gas costs:" in result.output
     assert "Protocol fees:" in result.output
-    assert "(requires VIB-3204)" in result.output
+    assert "(not yet implemented)" in result.output
     assert "Slippage:" in result.output
     assert "Impermanent loss:" in result.output
-    assert "(requires VIB-3205)" in result.output
     assert "Net PnL:" in result.output
     assert "Win rate:" in result.output
     assert "Avg trade size:" in result.output

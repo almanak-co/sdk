@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         "--working-dir",
         dest="working_dir",
         default=None,
-        help="Strategy folder. Falls back to cwd. Folder must contain almanak_state.db (VIB-3761).",
+        help="Strategy folder. Falls back to cwd. Folder must contain almanak_state.db.",
     )
     p.add_argument("--db", default=None, help="Explicit path to a sqlite DB file (overrides -d).")
     p.add_argument(

@@ -1428,7 +1428,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                             )
                         )
             except Exception as e:  # noqa: BLE001 — fail-open
-                logger.debug(f"VIB-3937 native gas-token fetch failed: {e}")
+                logger.debug(f"native gas-token fetch failed: {e}")
 
             return PortfolioSnapshot(
                 timestamp=datetime.now(UTC),

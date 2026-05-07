@@ -345,8 +345,8 @@ def lifecycle_handle_stop(runner: Any, strategy_id: str, strategy: Any) -> None:
     if is_hosted():
         logger.info(
             "Hosted-mode STOP for %s: requesting clean runner shutdown. "
-            "Position unwind (if any) is a separate hosted teardown channel "
-            "(VIB-3777) — STOP does not implicitly unwind positions in hosted mode.",
+            "Position unwind (if any) is a separate hosted teardown channel — "
+            "STOP does not implicitly unwind positions in hosted mode.",
             strategy_id,
         )
         runner._shutdown_requested = True

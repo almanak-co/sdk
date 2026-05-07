@@ -309,10 +309,10 @@ class EnsoRouterRevertError(EnsoError):
             # VIB-3828 / BUG-43 — leverage_loop_cross_chain on Base
             "0xef3dcb2f": (
                 "Likely a router-side route-validation custom error (under "
-                "investigation; see VIB-3828). May be triggered by a token "
-                "address not recognized by Enso's chain-specific token map "
-                "(sister of BUG-55), an empty / shallow route, or a tolerance "
-                "setting the route's natural fee tier cannot satisfy."
+                "investigation). May be triggered by a token address not "
+                "recognized by Enso's chain-specific token map, an empty / "
+                "shallow route, or a tolerance setting the route's natural "
+                "fee tier cannot satisfy."
             ),
         }
     )

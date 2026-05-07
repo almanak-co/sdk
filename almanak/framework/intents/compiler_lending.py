@@ -40,7 +40,7 @@ _JOELEND_DORMANT_MESSAGE = (
     "Joe Lend (Banker Joe) was wound down by its governance and is no longer "
     "operational on Avalanche. All on-chain calls revert with 'Error: wind "
     "down'. The connector has been retired from the Almanak SDK supported-"
-    "protocol surface (VIB-3960). Full removal tracked in VIB-3963."
+    "protocol surface."
 )
 
 

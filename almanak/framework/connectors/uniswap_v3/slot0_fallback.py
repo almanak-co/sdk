@@ -116,7 +116,7 @@ def enrich_lp_open_with_slot0(
     if tick is None:
         return lp_open
     logger.info(
-        "VIB-3893: filled LP_OPEN current_tick from slot0() fallback (chain=%s pool=%s tick=%d)",
+        "filled LP_OPEN current_tick from slot0() fallback (chain=%s pool=%s tick=%d)",
         chain,
         lp_open.pool_address,
         tick,
@@ -161,7 +161,7 @@ def enrich_lp_close_with_slot0(
     if tick is None:
         return lp_close
     logger.info(
-        "VIB-3940: filled LP_CLOSE current_tick from slot0() fallback (chain=%s pool=%s tick=%d)",
+        "filled LP_CLOSE current_tick from slot0() fallback (chain=%s pool=%s tick=%d)",
         chain,
         lp_close.pool_address,
         tick,

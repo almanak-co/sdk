@@ -654,7 +654,7 @@ class SQLiteStore:
         # zero writes (verified by the 3-demo PR1 inspection in
         # docs/internal/TimelineScope-E2E-Findings.md), so dropping it on
         # upgrade is safe — no user data lives in it.
-        _drop_table_if_exists("timeline_events", "VIB-4044 / PR5")
+        _drop_table_if_exists("timeline_events", "moved to gateway-side store")
 
         # Phase 1a: total_value_usd, positions_json, cycle_id on portfolio_metrics (VIB-2765)
         _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT '0'")

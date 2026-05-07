@@ -42,7 +42,6 @@ class TestFluidSwapDeprecationGuard:
 
         assert result.status == CompilationStatus.FAILED
         assert result.error is not None
-        assert "VIB-2822" in result.error
         assert "Fluid DEX connector is disabled" in result.error
 
     def test_fluid_swap_fails_fast_without_rpc(self):
@@ -69,5 +68,4 @@ class TestFluidSwapDeprecationGuard:
         assert result.status == CompilationStatus.FAILED
         assert result.action_bundle is None
         assert result.error is not None
-        assert "VIB-2822" in result.error
         assert "Fluid DEX connector is disabled" in result.error

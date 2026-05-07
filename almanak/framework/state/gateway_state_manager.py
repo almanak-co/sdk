@@ -73,7 +73,7 @@ def _apply_synth_position_guard(snapshot: "PortfolioSnapshot") -> None:
         # NOT degrade.
         if isinstance(cb, Decimal) and cb == Decimal("0") and v is not None and v > Decimal("0"):
             logger.warning(
-                "VIB-3917: snapshot for %s carries HIGH+measured-zero-basis "
+                "snapshot for %s carries HIGH+measured-zero-basis "
                 "position (value_usd=%s, cost_basis_usd=%s) — degrading to ESTIMATED",
                 snapshot.strategy_id,
                 v,

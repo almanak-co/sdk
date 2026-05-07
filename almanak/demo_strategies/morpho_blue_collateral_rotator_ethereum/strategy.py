@@ -64,7 +64,7 @@ MARKET_WSTETH_WETH = "0xc54d7acf14de29e0e5527cabd7a576506870346a78a11a6762e2cca6
         "First paper trade to validate multi-step lending rotation on Ethereum."
     ),
     version="1.0.0",
-    author="Kitchen Loop (VIB-1551)",
+    author="Kitchen Loop",
     tags=["demo", "paper-trading", "lending", "morpho-blue", "rotation", "ethereum", "backtesting"],
     supported_chains=["ethereum"],
     default_chain="ethereum",

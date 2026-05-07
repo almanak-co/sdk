@@ -75,7 +75,7 @@ def _legacy_warn(parser: Any, field: str) -> None:
     _LEGACY_WARNED.add(key)
     warnings.warn(
         f"Receipt parser {type(parser).__name__}.extract_{field}() returns a raw value "
-        f"instead of ExtractOk/ExtractMissing/ExtractError (VIB-3159). Parse errors and "
+        f"instead of ExtractOk/ExtractMissing/ExtractError. Parse errors and "
         f"missing events are indistinguishable — migrate to the tagged variant.",
         DeprecationWarning,
         stacklevel=3,

@@ -107,10 +107,6 @@ class TestFluidSwapCompileGuard:
         )
         assert result.error, "FAILED result must carry an error message"
         error = result.error
-        assert "VIB-2822" in error, (
-            f"Error message must reference VIB-2822 so a regression points at "
-            f"the right ticket. Got: {error!r}"
-        )
         assert "Fluid" in error, (
             f"Error message must name the connector. Got: {error!r}"
         )

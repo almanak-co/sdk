@@ -120,10 +120,10 @@ class SiloV2LendingLifecycleAvalancheStrategy(IntentStrategy):
 
             # Step 2: HOLD (WITHDRAW blocked on Anvil — see docstring / VIB-2726)
             if self._loop_state == SUPPLIED:
-                logger.info("Step 2: HOLD — WITHDRAW blocked on Anvil fork (VIB-2726)")
+                logger.info("Step 2: HOLD — WITHDRAW blocked on Anvil fork")
                 self._transition(COMPLETE)
                 return Intent.hold(
-                    reason="Supply deposited. WITHDRAW blocked on Anvil fork (VIB-2726)"
+                    reason="Supply deposited. WITHDRAW blocked on Anvil fork"
                 )
 
             # Done

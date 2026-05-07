@@ -84,8 +84,7 @@ def _emit_deprecation() -> None:
     warnings.warn(
         "almanak.framework.connectors.pancakeswap_perps is deprecated; "
         "use almanak.framework.connectors.aster_perps instead "
-        "(PancakeSwap Perps is broker id=2 on the Aster Diamond). "
-        "See VIB-3044 for the migration plan.",
+        "(PancakeSwap Perps is broker id=2 on the Aster Diamond).",
         DeprecationWarning,
         stacklevel=3,
     )

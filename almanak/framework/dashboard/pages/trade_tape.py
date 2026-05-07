@@ -727,7 +727,7 @@ def _render_expander_blocks(
         st.markdown(
             "<div style='color:#666;font-style:italic;'>"
             "no typed accounting event for this intent (likely a bookkeeping-only "
-            "or pre-VIB-3417 row)</div>",
+            "or legacy row)</div>",
             unsafe_allow_html=True,
         )
 
@@ -1013,7 +1013,7 @@ def _render_state_block(state_json: str) -> None:
     if not state_json:
         st.markdown(
             "<div style='color:#ff9800;font-style:italic;font-size:0.84rem;'>"
-            "NULL — connector pre/post-state pipeline not wired (VIB-3474 pending)"
+            "NULL — connector pre/post-state pipeline not wired"
             "</div>",
             unsafe_allow_html=True,
         )

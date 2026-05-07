@@ -1272,7 +1272,6 @@ class TestJoeLendDormant:
         # reaching the Solana fallback (which would have invoked
         # compiler._compile_kamino_repay). Locks Codex P2 #1 from the PR audit.
         compiler._compile_kamino_repay.assert_not_called()
-        assert "VIB-3960" in result.error
 
     def test_dispatch_short_circuits_before_solana_fallback(self):
         """A misconfigured (joelend, solana) intent must NOT route to Kamino.

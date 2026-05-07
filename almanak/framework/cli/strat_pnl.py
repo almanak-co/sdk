@@ -507,7 +507,7 @@ def render_text(breakdown: PnLBreakdown) -> str:
     lines.append(f"Gross PnL:        {_fmt_money(breakdown.gross_pnl_usd)}")
     lines.append(f"Gas costs:        {_fmt_money(-breakdown.gas_usd) if breakdown.gas_usd is not None else _MISSING}")
     if breakdown.protocol_fees_usd is None:
-        lines.append(f"Protocol fees:    {_MISSING}        (requires VIB-3204)")
+        lines.append(f"Protocol fees:    {_MISSING}        (not yet implemented)")
     else:
         lines.append(f"Protocol fees:    {_fmt_money(-breakdown.protocol_fees_usd)}")
     if breakdown.slippage_usd is None:
@@ -515,7 +515,7 @@ def render_text(breakdown: PnLBreakdown) -> str:
     else:
         lines.append(f"Slippage:         {_fmt_money(-breakdown.slippage_usd)}")
     if breakdown.impermanent_loss_usd is None:
-        lines.append(f"Impermanent loss: {_MISSING}        (requires VIB-3205)")
+        lines.append(f"Impermanent loss: {_MISSING}        (not yet implemented)")
     else:
         lines.append(f"Impermanent loss: {_fmt_money(-breakdown.impermanent_loss_usd)}")
     lines.append(f"Net PnL:          {_fmt_money(breakdown.net_pnl_usd)}")

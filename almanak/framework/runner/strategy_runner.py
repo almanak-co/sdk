@@ -3125,7 +3125,7 @@ class StrategyRunner:
                 # Older market snapshots without the with_sources kwarg.
                 nested_with_sources = None
             except Exception:
-                logger.debug("VIB-3889: get_price_oracle_dict(with_sources=True) raised", exc_info=True)
+                logger.debug("get_price_oracle_dict(with_sources=True) raised", exc_info=True)
                 nested_with_sources = None
 
         if nested_with_sources:
@@ -4320,9 +4320,9 @@ class StrategyRunner:
                 raise
             logger.warning(
                 "_check_teardown_requested[%s]: hosted mode — local teardown "
-                "state manager unavailable. Defaulting to SOFT mode (VIB-3810 "
-                "tracks adding the gateway-backed lookup so HARD requests "
-                "made via the dashboard API reach hosted runners).",
+                "state manager unavailable. Defaulting to SOFT mode "
+                "(gateway-backed lookup not yet wired, so HARD requests made "
+                "via the dashboard API do not reach hosted runners).",
                 strategy_id,
             )
             request = None

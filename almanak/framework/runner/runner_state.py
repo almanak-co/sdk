@@ -811,7 +811,7 @@ async def _build_metrics_for_snapshot(
                     initial = allocation_dec
                     logger.info(
                         "Portfolio baseline anchored to strategy.allocation_usd=$%.2f for %s "
-                        "(VIB-3882: explicit allocation contract)",
+                        "(explicit allocation contract)",
                         initial,
                         strategy_id,
                     )
@@ -1292,6 +1292,7 @@ async def detect_stuck_and_alert(runner: Any, strategy: StrategyProtocol, result
 # -------------------------------------------------------------------------
 
 
+# crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
 def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | None = None) -> None:  # noqa: C901
     """Emit a structured iteration_summary log record for JSONL analysis.
 
@@ -1412,7 +1413,7 @@ def emit_iteration_summary(runner: Any, result: IterationResult, chain: str | No
             "captured — iteration produced no trade-effective output"
         )
         logger.warning(
-            "Faux SUCCESS detected (VIB-3754): re-classifying iteration_summary status to "
+            "Faux SUCCESS detected: re-classifying iteration_summary status to "
             "EXECUTION_NOOP — strategy_id=%s decision=%s txs_sent=0",
             result.strategy_id,
             intent_type,

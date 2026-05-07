@@ -708,7 +708,7 @@ def docs_agent_skill(dump):
         "Required when starting the gateway outside any strategy folder for ad-hoc "
         "use (e.g., `almanak ax`). Without this flag, the gateway refuses to start "
         "outside a strategy folder so it cannot silently write to the per-user "
-        "utility DB instead of the strategy-anchored one (VIB-3761)."
+        "utility DB instead of the strategy-anchored one."
     ),
 )
 def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, standalone):
@@ -775,7 +775,7 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
                     "  Run `almanak gateway` from a strategy folder (one with config.json),\n"
                     "  or set ALMANAK_STRATEGY_FOLDER / ALMANAK_STATE_DB,\n"
                     "  or pass --standalone for ad-hoc utility-DB use (e.g. `almanak ax`).\n"
-                    "  Background: 1 strategy = 1 folder = 1 DB = 1 gateway (VIB-3761).",
+                    "  Background: 1 strategy = 1 folder = 1 DB = 1 gateway.",
                     fg="red",
                     bold=True,
                 ),

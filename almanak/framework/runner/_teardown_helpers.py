@@ -389,7 +389,7 @@ async def execute_and_verify(
             raise RuntimeError(
                 f"Manual-approval teardown is not yet supported in hosted mode "
                 f"(strategy_id={strategy_id}). The SQLite approval channel is "
-                f"unavailable and a hosted-equivalent has not been wired (VIB-3777). "
+                f"unavailable and a hosted-equivalent has not been wired. "
                 f"This call path should not be reachable today; if you see this in "
                 f"logs, the hosted teardown lookup has been wired without a hosted "
                 f"approval channel."

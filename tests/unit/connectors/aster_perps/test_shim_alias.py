@@ -138,7 +138,6 @@ def test_shim_emits_deprecation_warning_exactly_once_per_process():
     deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
     assert len(deprecation_warnings) == 1
     assert "aster_perps" in str(deprecation_warnings[0].message)
-    assert "VIB-3044" in str(deprecation_warnings[0].message)
 
     # Second call is suppressed.
     with warnings.catch_warnings(record=True) as w2:
