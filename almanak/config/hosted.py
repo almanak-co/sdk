@@ -17,16 +17,23 @@ landing in later phases.
   config across deployment modes. In hosted mode the strategy container
   has no direct egress, so most consumers route through the gateway —
   but the typed shape stays uniform.
+* Phase 6 — ``agent_tools`` and ``framework``: same shape as
+  ``LocalConfig.agent_tools`` / ``LocalConfig.framework``. The hosted
+  surface mirrors the same env reads so the strategy container's CLI
+  surfaces (which can run inside operator debug shells) and the few
+  framework-tier toggles read off a single typed config.
 
 See ``docs/internal/config-service-plan.md`` for the full migration order.
 """
 
 from pydantic import Field
 
+from almanak.config.agent_tools import AgentToolsConfig, agent_tools_config_from_env
 from almanak.config.backtest import BacktestConfig, backtest_config_from_env
 from almanak.config.base import BaseConfig
 from almanak.config.cli_runtime import CliRuntimeConfig, cli_runtime_config_from_env
 from almanak.config.connectors import ConnectorsConfig, connectors_config_from_env
+from almanak.config.framework import FrameworkConfig, framework_config_from_env
 
 
 class HostedConfig(BaseConfig):
@@ -49,11 +56,20 @@ class HostedConfig(BaseConfig):
     but the same env keys are read by the few CLI-shaped helpers that
     do execute on hosted (e.g. ``almanak ax`` invoked from operator
     debug shells), so the field shape stays uniform.
+
+    ``agent_tools`` mirrors :attr:`LocalConfig.agent_tools` — the
+    hosted surface ships the same ``almanak ax --natural`` command for
+    operator debug shells, so the LLM-config shape must stay uniform.
+    ``framework`` mirrors :attr:`LocalConfig.framework` for the same
+    reason: the framework-tier toggles (log emojis, fork timeouts,
+    token-resolver knobs) apply identically in either mode.
     """
 
     connectors: ConnectorsConfig = Field(default_factory=connectors_config_from_env)
     backtest: BacktestConfig = Field(default_factory=backtest_config_from_env)
     cli: CliRuntimeConfig = Field(default_factory=cli_runtime_config_from_env)
+    agent_tools: AgentToolsConfig = Field(default_factory=agent_tools_config_from_env)
+    framework: FrameworkConfig = Field(default_factory=framework_config_from_env)
 
 
 __all__ = ["HostedConfig"]

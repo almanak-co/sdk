@@ -27,7 +27,6 @@ Example:
 """
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,6 +34,8 @@ from decimal import Decimal
 from typing import Any
 
 import aiohttp
+
+from almanak.config.backtest import backtest_config_from_env
 
 from ..interfaces import (
     DataSourceUnavailable,
@@ -171,7 +172,7 @@ class CoinGeckoOHLCVProvider:
             cache_ttl: Cache time-to-live in seconds. Default 300 (5 minutes).
             request_timeout: HTTP request timeout in seconds. Default 30.
         """
-        self._api_key = api_key or os.environ.get("COINGECKO_API_KEY", "")
+        self._api_key = api_key or (backtest_config_from_env().coingecko_api_key or "")
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
 

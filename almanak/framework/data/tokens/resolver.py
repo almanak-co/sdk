@@ -397,20 +397,13 @@ class TokenResolver:
         # Operators can tune both without subclassing. Long-lived
         # platforms (kitchen loop, backtester) may want a longer TTL;
         # tests may want a tiny TTL for fast expiry checks.
-        import os
+        from almanak.config.framework import framework_config_from_env
 
-        try:
-            env_ttl = float(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S", ""))
-            if env_ttl > 0:
-                self._negative_cache_ttl_seconds = env_ttl
-        except ValueError:
-            pass
-        try:
-            env_cap = int(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_MAX", ""))
-            if env_cap > 0:
-                self._negative_cache_max_size = env_cap
-        except ValueError:
-            pass
+        fc = framework_config_from_env()
+        if fc.token_negative_cache_ttl_s is not None:
+            self._negative_cache_ttl_seconds = fc.token_negative_cache_ttl_s
+        if fc.token_negative_cache_max is not None:
+            self._negative_cache_max_size = fc.token_negative_cache_max
 
     def _build_static_indices(self) -> None:
         """Build indices for fast static registry lookups.

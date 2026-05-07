@@ -155,6 +155,20 @@ class BacktestConfig(BaseModel):
     client targets the anonymous public tier (lower rate limits).
     """
 
+    alchemy_api_key: str | None = Field(default=None, repr=False)
+    """Alchemy RPC API key (``ALCHEMY_API_KEY``).
+
+    Optional — used by the perps-position-reader legacy / fallback
+    path (``framework/valuation/perps_position_reader.py``) to build
+    an Alchemy RPC URL when no gateway client is supplied. Hosted-mode
+    callers always pass ``gateway_client``; this field is read only by
+    paper-trading + backtest harnesses that bypass the gateway.
+
+    The gateway-tier copy lives at ``GatewayConfig.alchemy_api_key``
+    (read by the gateway server's RPC plumbing). Both fields read the
+    same env var; they exist on different sides of the gateway boundary.
+    """
+
     # -------------------------------------------------------------------------
     # Archive RPC URLs — borderline secret (some providers carry a key
     # in the path). ``repr=False`` preserves the legacy redaction
@@ -326,6 +340,7 @@ def backtest_config_from_env(
     kwargs: dict[str, Any] = {
         "coingecko_api_key": os.environ.get("COINGECKO_API_KEY") or None,
         "thegraph_api_key": os.environ.get("THEGRAPH_API_KEY") or None,
+        "alchemy_api_key": os.environ.get("ALCHEMY_API_KEY") or None,
         "archive_rpc_urls": archive_rpc_urls,
         "gas_api": GasApiConfig(api_keys=gas_api_keys),
         "ssl_cert_file": _resolve_ssl_cert_file(),

@@ -6,7 +6,6 @@ execution) goes through this client.
 """
 
 import logging
-import os
 from dataclasses import dataclass
 
 import grpc
@@ -202,25 +201,33 @@ class GatewayClientConfig:
 
     @classmethod
     def from_env(cls) -> "GatewayClientConfig":
-        """Load configuration from environment variables.
+        """Load configuration from the typed config service.
 
-        Environment variables (preferred names with fallback):
-            ALMANAK_GATEWAY_HOST: Gateway hostname (preferred, falls back to GATEWAY_HOST)
-            ALMANAK_GATEWAY_PORT: Gateway port (preferred, falls back to GATEWAY_PORT)
-            ALMANAK_GATEWAY_TIMEOUT: RPC timeout in seconds (preferred, falls back to GATEWAY_TIMEOUT)
-            ALMANAK_GATEWAY_AUTH_TOKEN: Authentication token (preferred, falls back to GATEWAY_AUTH_TOKEN)
+        The precedence ladder ``ALMANAK_GATEWAY_*`` →
+        ``GATEWAY_*`` → hardcoded default is encoded once in
+        :func:`almanak.config.cli_runtime.cli_runtime_config_from_env`
+        and exposed here as the ``gateway_client_*_resolved`` fields:
+
+        * ``ALMANAK_GATEWAY_HOST`` > ``GATEWAY_HOST`` > ``"localhost"``
+        * ``ALMANAK_GATEWAY_PORT`` > ``GATEWAY_PORT`` > ``50051``
+        * ``ALMANAK_GATEWAY_TIMEOUT`` > ``GATEWAY_TIMEOUT`` > ``30.0``
+        * ``ALMANAK_GATEWAY_AUTH_TOKEN`` > ``GATEWAY_AUTH_TOKEN``
+          > ``None``
+
+        The legacy unprefixed forms remain operator-supported for one
+        release; ``warn_legacy_gateway_envvars`` (called at the Click
+        main group) emits a deprecation warning when they are set.
         """
-        # Read each config value: prefer ALMANAK_* names, fallback to legacy GATEWAY_* names
-        host = os.environ.get("ALMANAK_GATEWAY_HOST") or os.environ.get("GATEWAY_HOST", "localhost")
-        port_str = os.environ.get("ALMANAK_GATEWAY_PORT") or os.environ.get("GATEWAY_PORT", "50051")
-        timeout_str = os.environ.get("ALMANAK_GATEWAY_TIMEOUT") or os.environ.get("GATEWAY_TIMEOUT", "30.0")
-        auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
+        # Imported lazily so this dataclass module stays cheap to import
+        # in test contexts that never hit the env path.
+        from almanak.config.cli_runtime import cli_runtime_config_from_env
 
+        cli = cli_runtime_config_from_env()
         return cls(
-            host=host,
-            port=int(port_str),
-            timeout=float(timeout_str),
-            auth_token=auth_token,
+            host=cli.gateway_client_host_resolved,
+            port=cli.gateway_client_port_resolved,
+            timeout=cli.gateway_client_timeout_resolved,
+            auth_token=cli.gateway_client_auth_token_resolved,
         )
 
 

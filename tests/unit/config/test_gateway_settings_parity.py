@@ -151,3 +151,45 @@ def test_config_factory_returns_hosted(
     config = config_factory(mode="hosted", gateway={"network": "anvil"})
     assert isinstance(config, HostedConfig)
     assert config.gateway.network == "anvil"
+
+
+# =============================================================================
+# Timeout > 0 validator (CodeRabbit review on PR 2156).
+# =============================================================================
+
+
+def test_timeout_zero_rejected(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    """``timeout=0`` would collapse every gRPC call into an immediate
+    deadline failure; reject at the model boundary so the typo
+    surfaces at boot rather than after first request."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="timeout must be > 0"):
+        GatewaySettings(timeout=0)
+
+
+def test_timeout_negative_rejected(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="timeout must be > 0"):
+        GatewaySettings(timeout=-5.0)
+
+
+def test_timeout_positive_accepted(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    settings = GatewaySettings(timeout=15.0)
+    assert settings.timeout == 15.0
+
+
+def test_timeout_default_passes_validator(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    """The hard-coded 30.0 default must survive the validator unchanged."""
+    settings = GatewaySettings()
+    assert settings.timeout == 30.0
+
+
+def test_timeout_zero_via_env_rejected(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    """Env-derived ``ALMANAK_GATEWAY_TIMEOUT=0`` also goes through the validator."""
+    from pydantic import ValidationError
+
+    gateway_env_scrub.setenv("ALMANAK_GATEWAY_TIMEOUT", "0")
+    with pytest.raises(ValidationError, match="timeout must be > 0"):
+        GatewaySettings()

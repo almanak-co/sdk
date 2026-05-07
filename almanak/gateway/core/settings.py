@@ -50,6 +50,13 @@ class GatewaySettings(BaseSettings):
     grpc_port: int = 50051
     grpc_max_workers: int = 10
 
+    # Default RPC timeout for gateway client calls (seconds). Read by
+    # ``GatewayClientConfig.from_env`` on the strategy-side gRPC client;
+    # the gateway server itself does not enforce this timeout — it is the
+    # client's deadline. Surfaced on this model so the env reader stays
+    # at the service boundary (binds ``ALMANAK_GATEWAY_TIMEOUT``).
+    timeout: float = 30.0
+
     # Network settings - "mainnet" for production, "anvil" for local testing
     network: str = "mainnet"
 
@@ -159,6 +166,17 @@ class GatewaySettings(BaseSettings):
         # ``GatewaySettings()`` reads only the live ``os.environ``.
         "extra": "ignore",
     }
+
+    @field_validator("timeout")
+    @classmethod
+    def _validate_timeout(cls, value: float) -> float:
+        # CodeRabbit review on PR 2156: a non-positive timeout would
+        # collapse every gRPC client call into an immediate deadline
+        # failure. Reject at the model boundary so the misconfiguration
+        # surfaces at boot rather than after first request.
+        if value <= 0:
+            raise ValueError(f"timeout must be > 0 (got {value})")
+        return value
 
     @field_validator("chains", mode="before")
     @classmethod

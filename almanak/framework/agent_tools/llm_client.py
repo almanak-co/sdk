@@ -10,11 +10,12 @@ first-class framework dependency (used by ``almanak ax --natural``).
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
+
+from almanak.config.agent_tools import agent_tools_config_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +40,19 @@ class LLMConfig:
 
     @classmethod
     def from_env(cls) -> LLMConfig:
-        """Load config from environment variables."""
+        """Load config from the typed agent-tools config.
+
+        :class:`AgentToolsConfig.llm_api_key` is a :class:`SecretStr`;
+        the consumer surfaces the raw string here because the existing
+        :class:`LLMConfig` shape pre-dates ``SecretStr`` and the rest
+        of the LLM client reads ``self._config.api_key`` as plaintext.
+        Wrapping into ``SecretStr`` end-to-end is a follow-up.
+        """
+        atc = agent_tools_config_from_env()
         return cls(
-            api_key=os.environ.get("AGENT_LLM_API_KEY", ""),
-            base_url=os.environ.get("AGENT_LLM_BASE_URL", "https://api.openai.com/v1"),
-            model=os.environ.get("AGENT_LLM_MODEL", "gpt-4o"),
+            api_key=atc.llm_api_key.get_secret_value() if atc.llm_api_key is not None else "",
+            base_url=atc.llm_base_url,
+            model=atc.llm_model,
         )
 
 

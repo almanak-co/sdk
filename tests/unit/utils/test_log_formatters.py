@@ -45,15 +45,31 @@ from almanak.framework.utils.log_formatters import (
 
 
 @pytest.fixture
-def emojis_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force emoji mode on."""
+def emojis_enabled(monkeypatch: pytest.MonkeyPatch):
+    """Force emoji mode on. Clears the ``_emojis_enabled`` lru_cache before
+    AND after the test (CodeRabbit review on PR 2156): clearing only on
+    setup leaks the cached ``True`` value to the next test in any other
+    module that calls a format helper without going through this fixture.
+    """
     monkeypatch.setenv("ALMANAK_LOG_EMOJIS", "true")
+    _emojis_enabled.cache_clear()
+    try:
+        yield
+    finally:
+        _emojis_enabled.cache_clear()
 
 
 @pytest.fixture
-def emojis_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force emoji mode off."""
+def emojis_disabled(monkeypatch: pytest.MonkeyPatch):
+    """Force emoji mode off. Same setup+teardown cache_clear as
+    :func:`emojis_enabled` to prevent the cached ``False`` from leaking
+    into unrelated tests."""
     monkeypatch.setenv("ALMANAK_LOG_EMOJIS", "false")
+    _emojis_enabled.cache_clear()
+    try:
+        yield
+    finally:
+        _emojis_enabled.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +608,20 @@ class TestFormatAddress:
 
 
 class TestEmojisEnabled:
+    @pytest.fixture(autouse=True)
+    def _clear_emoji_cache(self):
+        """Reset the lru_cache between cases so each test reads its env value.
+
+        ``_emojis_enabled`` is module-level cached for hot-path performance
+        (Gemini review on PR 2156) — every test that mutates the env via
+        ``monkeypatch`` must clear the cache so the next call re-reads.
+        """
+        _emojis_enabled.cache_clear()
+        try:
+            yield
+        finally:
+            _emojis_enabled.cache_clear()
+
     def test_default_is_enabled(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("ALMANAK_LOG_EMOJIS", raising=False)
         assert _emojis_enabled() is True

@@ -26,7 +26,6 @@ Usage:
 
 import asyncio
 import logging
-import os
 import re
 import socket
 import subprocess
@@ -35,7 +34,25 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from almanak.config.framework import framework_config_from_env
+
 logger = logging.getLogger(__name__)
+
+
+def _default_fork_cache_path() -> str | None:
+    """Resolve the Anvil fork cache path from the typed framework config."""
+    cache = framework_config_from_env().anvil_fork_cache_path
+    return str(cache) if cache is not None else None
+
+
+def _default_fork_rpc_timeout() -> float:
+    """Resolve the Anvil fork RPC timeout from the typed framework config."""
+    return framework_config_from_env().anvil_fork_rpc_timeout_seconds
+
+
+def _default_fork_health_timeout() -> float:
+    """Resolve the Anvil fork health timeout from the typed framework config."""
+    return framework_config_from_env().anvil_fork_health_timeout_seconds
 
 
 _cached_anvil_flags: set[str] | None = None
@@ -353,7 +370,7 @@ class ForkManagerConfig:
     auto_impersonate: bool = True
     block_time: int | None = None
     fork_block_number: int | None = None
-    cache_path: str | None = field(default_factory=lambda: os.environ.get("ANVIL_FORK_CACHE_PATH"))
+    cache_path: str | None = field(default_factory=_default_fork_cache_path)
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -451,13 +468,11 @@ class RollingForkManager:
     auto_impersonate: bool = True
     block_time: int | None = None
     fork_block_number: int | None = None
-    cache_path: str | None = field(default_factory=lambda: os.environ.get("ANVIL_FORK_CACHE_PATH"))
+    cache_path: str | None = field(default_factory=_default_fork_cache_path)
 
     # Timeout defaults (env-overridable)
-    rpc_timeout_seconds: float = field(default_factory=lambda: float(os.environ.get("ALMANAK_FORK_RPC_TIMEOUT", "8.0")))
-    health_timeout_seconds: float = field(
-        default_factory=lambda: float(os.environ.get("ALMANAK_FORK_HEALTH_TIMEOUT", "5.0"))
-    )
+    rpc_timeout_seconds: float = field(default_factory=_default_fork_rpc_timeout)
+    health_timeout_seconds: float = field(default_factory=_default_fork_health_timeout)
 
     # Internal state (not initialized in __init__)
     _process: subprocess.Popen[bytes] | None = field(default=None, repr=False, init=False)

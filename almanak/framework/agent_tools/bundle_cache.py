@@ -81,9 +81,14 @@ class BundleCacheEntry:
 
 
 def default_cache_dir() -> Path:
-    """Return the default cache directory, honouring ``XDG_CACHE_HOME``."""
-    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "almanak" / "bundles"
+    """Return the default cache directory, honouring ``XDG_CACHE_HOME``.
+
+    Delegates to :func:`almanak.config.agent_tools.cache_dir`, which is
+    the single allowlisted reader for the ``XDG_CACHE_HOME`` env var.
+    """
+    from almanak.config.agent_tools import cache_dir
+
+    return cache_dir(Path.home())
 
 
 class BundleCache:

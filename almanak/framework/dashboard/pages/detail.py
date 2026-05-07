@@ -13,6 +13,7 @@ from typing import Any
 import requests
 import streamlit as st
 
+from almanak.config.framework import framework_config_from_env
 from almanak.framework.dashboard.components import render_operator_card
 from almanak.framework.dashboard.config import API_BASE_URL, API_TIMEOUT, check_system_health
 from almanak.framework.dashboard.data_source import execute_strategy_action
@@ -110,8 +111,8 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
             return {"success": False, "error": str(e)}
 
     # Fallback to REST API for non-migrated actions.
-    api_key = os.environ.get("ALMANAK_DASHBOARD_API_KEY")
-    if not api_key:
+    dashboard_secret = framework_config_from_env().dashboard_api_key
+    if dashboard_secret is None:
         logger.error(
             "ALMANAK_DASHBOARD_API_KEY is not set. "
             "Refusing to call the strategy action REST API with an unauthenticated request."
@@ -125,7 +126,7 @@ def call_strategy_action(strategy_id: str, action: str, payload: dict[str, Any] 
         }
 
     url = f"{API_BASE_URL}/api/strategies/{strategy_id}/{action}"
-    headers = {"Content-Type": "application/json", "X-API-Key": api_key}
+    headers = {"Content-Type": "application/json", "X-API-Key": dashboard_secret.get_secret_value()}
 
     try:
         response = requests.post(
@@ -714,7 +715,6 @@ def _find_state_db(strategy_id: str) -> str | None:
     dashboard stays usable, but the operator is alerted to the ambiguity
     instead of the old code silently picking one path.
     """
-    import os
 
     # 1. Canonical local-DB resolver — single source of truth across the SDK.
     try:

@@ -36,9 +36,11 @@ Usage:
     '+2.00% (better)'
 """
 
-import os
 from decimal import Decimal
+from functools import lru_cache
 from typing import TYPE_CHECKING
+
+from almanak.config.framework import framework_config_from_env
 
 if TYPE_CHECKING:
     pass
@@ -521,9 +523,24 @@ def format_address(address: str, truncate: bool = True) -> str:
     return format_tx_hash(address, truncate)
 
 
+@lru_cache(maxsize=1)
 def _emojis_enabled() -> bool:
-    """Check if emoji log output is enabled via ALMANAK_LOG_EMOJIS env var."""
-    return os.environ.get("ALMANAK_LOG_EMOJIS", "true").strip().lower() not in ("false", "0", "no")
+    """Check if emoji log output is enabled via the typed framework config.
+
+    Reads :attr:`FrameworkConfig.log_emojis`, which encodes the legacy
+    ``ALMANAK_LOG_EMOJIS`` truthy / falsy ladder
+    (``"false" / "0" / "no"`` are off, everything else is on).
+
+    Cached for the process lifetime: this function is called on every log
+    line via the ``format_intent_type_emoji`` / ``format_status_emoji``
+    helpers, and rebuilding a Pydantic model + re-reading env on every
+    log call is significantly more expensive than the legacy single
+    ``os.environ.get`` (Gemini review on PR 2156). The setting is a
+    boot-time config that nothing mutates at runtime; tests that toggle
+    ``ALMANAK_LOG_EMOJIS`` between cases must clear the cache via
+    ``_emojis_enabled.cache_clear()`` (see ``TestEmojisEnabled``).
+    """
+    return framework_config_from_env().log_emojis
 
 
 def format_intent_type_emoji(intent_type: str) -> str:

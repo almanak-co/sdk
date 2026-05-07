@@ -28,6 +28,7 @@ from almanak.config.cli_runtime import (
     DEFAULT_SOLANA_RPC_URL,
     DEFAULT_SOLANA_VALIDATOR_PORT,
     CliRuntimeConfig,
+    anvil_port_for_chain,
     chain_rpc_url_from_env,
     cli_runtime_config_from_env,
     gas_risk_override_presence,
@@ -39,9 +40,15 @@ from almanak.config.cli_runtime import (
 # addition that forgets to wire up the scrub fails loudly here rather
 # than as an order-dependent flake elsewhere.
 _CLI_RUNTIME_ENV_VARS: tuple[str, ...] = (
-    # Gateway client auth.
+    # Gateway client auth + legacy host/port/timeout aliases (Phase 6).
     "GATEWAY_AUTH_TOKEN",
     "ALMANAK_GATEWAY_AUTH_TOKEN",
+    "GATEWAY_HOST",
+    "ALMANAK_GATEWAY_HOST",
+    "GATEWAY_PORT",
+    "ALMANAK_GATEWAY_PORT",
+    "GATEWAY_TIMEOUT",
+    "ALMANAK_GATEWAY_TIMEOUT",
     # Gateway-wallets discriminator + Safe-mode preflight.
     "ALMANAK_GATEWAY_WALLETS",
     "ALMANAK_GATEWAY_SAFE_MODE",
@@ -256,6 +263,157 @@ class TestEnvReads:
         assert cli_runtime_config_from_env().is_ci is True
         monkeypatch.setenv("CI", "")
         assert cli_runtime_config_from_env().is_ci is False
+
+
+# =============================================================================
+# gRPC client resolved values — Phase 6 ``ALMANAK_GATEWAY_*`` >
+# ``GATEWAY_*`` > hardcoded ladder
+# =============================================================================
+
+
+class TestGatewayClientResolved:
+    """The resolved fields encode the precedence ladder once so
+    :meth:`GatewayClientConfig.from_env` doesn't have to re-read env.
+    """
+
+    def test_defaults_match_legacy_hardcoded_ladder(self):
+        cfg = cli_runtime_config_from_env()
+        assert cfg.gateway_client_host_resolved == "localhost"
+        assert cfg.gateway_client_port_resolved == 50051
+        assert cfg.gateway_client_timeout_resolved == 30.0
+        assert cfg.gateway_client_auth_token_resolved is None
+
+    def test_almanak_prefix_wins_over_legacy(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_HOST", "almanak.local")
+        monkeypatch.setenv("GATEWAY_HOST", "legacy.local")
+        monkeypatch.setenv("ALMANAK_GATEWAY_PORT", "60051")
+        monkeypatch.setenv("GATEWAY_PORT", "50052")
+        monkeypatch.setenv("ALMANAK_GATEWAY_TIMEOUT", "120.0")
+        monkeypatch.setenv("GATEWAY_TIMEOUT", "60.0")
+        monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "almanak-token")
+        monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "legacy-token")
+
+        cfg = cli_runtime_config_from_env()
+        assert cfg.gateway_client_host_resolved == "almanak.local"
+        assert cfg.gateway_client_port_resolved == 60051
+        assert cfg.gateway_client_timeout_resolved == 120.0
+        assert cfg.gateway_client_auth_token_resolved == "almanak-token"
+
+    def test_legacy_used_when_almanak_unset(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("GATEWAY_HOST", "legacy.local")
+        monkeypatch.setenv("GATEWAY_PORT", "50052")
+        monkeypatch.setenv("GATEWAY_TIMEOUT", "60.0")
+        monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "legacy-token")
+
+        cfg = cli_runtime_config_from_env()
+        assert cfg.gateway_client_host_resolved == "legacy.local"
+        assert cfg.gateway_client_port_resolved == 50052
+        assert cfg.gateway_client_timeout_resolved == 60.0
+        assert cfg.gateway_client_auth_token_resolved == "legacy-token"
+
+    def test_legacy_aliases_populated_independently(self, monkeypatch: pytest.MonkeyPatch):
+        # The legacy_*/resolved fields are independent — operators
+        # diagnosing a deprecation warning need to know which env var
+        # was actually set, not just the resolved value.
+        monkeypatch.setenv("GATEWAY_HOST", "legacy.local")
+        monkeypatch.setenv("GATEWAY_PORT", "50052")
+        monkeypatch.setenv("GATEWAY_TIMEOUT", "60.0")
+        cfg = cli_runtime_config_from_env()
+        assert cfg.legacy_gateway_host == "legacy.local"
+        assert cfg.legacy_gateway_port == 50052
+        assert cfg.legacy_gateway_timeout == 60.0
+
+    def test_gateway_client_auth_token_repr_suppressed(self):
+        cfg = CliRuntimeConfig(gateway_client_auth_token_resolved="VERY-SECRET-VALUE")
+        assert "VERY-SECRET-VALUE" not in repr(cfg)
+
+    def test_malformed_legacy_port_raises(self, monkeypatch: pytest.MonkeyPatch):
+        # Codex review on PR 2156: silent fallback on a present-but-malformed
+        # port value is unsafe — a typo could make a strategy dial the
+        # default localhost gateway already serving another strategy.
+        monkeypatch.setenv("GATEWAY_PORT", "not-a-number")
+        with pytest.raises(ValueError, match="GATEWAY_PORT"):
+            cli_runtime_config_from_env()
+
+    def test_malformed_almanak_port_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_PORT", "garbage")
+        with pytest.raises(ValueError, match="ALMANAK_GATEWAY_PORT"):
+            cli_runtime_config_from_env()
+
+    def test_malformed_legacy_timeout_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("GATEWAY_TIMEOUT", "abc")
+        with pytest.raises(ValueError, match="GATEWAY_TIMEOUT"):
+            cli_runtime_config_from_env()
+
+    def test_legacy_port_zero_raises(self, monkeypatch: pytest.MonkeyPatch):
+        # CodeRabbit review on PR 2156: port=0 is meaningless and would
+        # later become a socket failure; reject at boot.
+        monkeypatch.setenv("GATEWAY_PORT", "0")
+        with pytest.raises(ValueError, match="must be in 1..65535"):
+            cli_runtime_config_from_env()
+
+    def test_legacy_port_too_large_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("GATEWAY_PORT", "70000")
+        with pytest.raises(ValueError, match="must be in 1..65535"):
+            cli_runtime_config_from_env()
+
+    def test_almanak_port_negative_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_PORT", "-1")
+        with pytest.raises(ValueError, match="must be in 1..65535"):
+            cli_runtime_config_from_env()
+
+    def test_legacy_timeout_zero_raises(self, monkeypatch: pytest.MonkeyPatch):
+        # CodeRabbit review on PR 2156: timeout <= 0 collapses every
+        # gRPC call into an immediate deadline failure; reject at boot.
+        monkeypatch.setenv("GATEWAY_TIMEOUT", "0")
+        with pytest.raises(ValueError, match="must be > 0"):
+            cli_runtime_config_from_env()
+
+    def test_almanak_timeout_negative_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_GATEWAY_TIMEOUT", "-5.0")
+        with pytest.raises(ValueError, match="must be > 0"):
+            cli_runtime_config_from_env()
+
+
+# =============================================================================
+# anvil_port_for_chain — direct env helper for hot paths
+# =============================================================================
+
+
+class TestAnvilPortForChain:
+    """Gemini review on PR 2156: the intent compiler called
+    ``cli_runtime_config_from_env()`` on every chain RPC resolution,
+    rebuilding a Pydantic model just to read a single env var. The
+    direct helper is a cheap variant that preserves the dynamic env
+    read (``managed.py`` mutates ``ANVIL_<CHAIN>_PORT`` at runtime).
+    """
+
+    def test_unset_returns_none(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("ANVIL_ARBITRUM_PORT", raising=False)
+        assert anvil_port_for_chain("arbitrum") is None
+
+    def test_whitespace_returns_none(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ANVIL_BASE_PORT", "   ")
+        assert anvil_port_for_chain("base") is None
+
+    def test_uppercases_chain_name(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ANVIL_OPTIMISM_PORT", "8545")
+        assert anvil_port_for_chain("optimism") == 8545
+        # Mixed case in caller — the helper still normalises.
+        assert anvil_port_for_chain("Optimism") == 8545
+
+    def test_malformed_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ANVIL_POLYGON_PORT", "not-an-int")
+        with pytest.raises(ValueError, match="ANVIL_POLYGON_PORT"):
+            anvil_port_for_chain("polygon")
+
+    def test_observes_runtime_mutation(self, monkeypatch: pytest.MonkeyPatch):
+        # ``managed.py`` writes the port AFTER the strategy process
+        # starts. The compiler must see the post-mutation value.
+        monkeypatch.delenv("ANVIL_BSC_PORT", raising=False)
+        assert anvil_port_for_chain("bsc") is None
+        monkeypatch.setenv("ANVIL_BSC_PORT", "8546")
+        assert anvil_port_for_chain("bsc") == 8546
 
 
 # =============================================================================

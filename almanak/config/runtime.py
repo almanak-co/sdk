@@ -1177,6 +1177,26 @@ def _normalise_multi_protocols(chains: list[str], protocols: dict[str, list[str]
     return normalised
 
 
+def private_key_from_env(*, prefix: str = "ALMANAK_") -> str:
+    """Read the bare ``{prefix}PRIVATE_KEY`` env var; ``""`` if unset.
+
+    Side-effect-free reader for callers that want the resolved private
+    key but cannot pay the cost of building a full :class:`RuntimeConfig`
+    (which probes RPC URLs and gas caps as part of construction). The
+    typical caller is the ``almanak ax`` CLI bootstrap, which derives a
+    wallet address from the key but degrades cleanly to the no-wallet
+    read-only mode when the env var is unset.
+
+    Mirrors the no-chain branch of
+    :func:`_resolve_private_key_from_env` — no Solana, Zodiac, or
+    gateway-wallets fallbacks; just the prefixed env. Callers that need
+    those fallbacks should construct a full :class:`RuntimeConfig` via
+    :func:`runtime_config_from_env`.
+    """
+    _load_dotenv_once()
+    return os.environ.get(f"{prefix}PRIVATE_KEY", "") or ""
+
+
 __all__ = [
     "CHAIN_IDS",
     "ConfigurationError",
@@ -1184,5 +1204,6 @@ __all__ = [
     "ExecutionMode",
     "MissingEnvironmentVariableError",
     "RuntimeConfig",
+    "private_key_from_env",
     "runtime_config_from_env",
 ]

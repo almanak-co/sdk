@@ -11,13 +11,13 @@ ToolExecutor + GatewayClient pair.
 from __future__ import annotations
 
 import logging
-import os
 from decimal import Decimal
 
 import click
 
 logger = logging.getLogger(__name__)
 
+from almanak.config.runtime import private_key_from_env
 from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
@@ -124,12 +124,19 @@ def create_cli_executor(
 
 
 def _resolve_wallet_address() -> str:
-    """Derive wallet address from ALMANAK_PRIVATE_KEY env var.
+    """Derive wallet address from the typed runtime config.
+
+    Reads ``ALMANAK_PRIVATE_KEY`` via
+    :func:`almanak.config.runtime.private_key_from_env` — the
+    side-effect-free reader for the same env var
+    :attr:`RuntimeConfig.private_key` resolves. We avoid building the
+    full :class:`RuntimeConfig` here because it probes RPC URLs / gas
+    caps that read-only ``ax`` subcommands don't need.
 
     Returns empty string if no key is set (some read-only commands
     don't need a wallet).
     """
-    pk = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+    pk = private_key_from_env()
     if not pk:
         return ""
     try:

@@ -17,16 +17,22 @@ attached as later phases land them.
   config the moment they are constructed (CoinGecko / TheGraph keys,
   the ``ARCHIVE_RPC_URL_<CHAIN>`` cluster as a typed dict, gas-API
   per-chain keys, and the SSL-cert hint for paper-trading subprocesses).
+* Phase 6 — ``agent_tools`` and ``framework``: typed agent-tools cluster
+  (LLM client config + ``XDG_CACHE_HOME`` resolver) and typed framework
+  toggles (log emojis, strategy / accounting paths, API-key validator
+  list, dashboard auth, Anvil fork timeouts, token-resolver knobs).
 
 See ``docs/internal/config-service-plan.md`` for the full migration order.
 """
 
 from pydantic import Field
 
+from almanak.config.agent_tools import AgentToolsConfig, agent_tools_config_from_env
 from almanak.config.backtest import BacktestConfig, backtest_config_from_env
 from almanak.config.base import BaseConfig
 from almanak.config.cli_runtime import CliRuntimeConfig, cli_runtime_config_from_env
 from almanak.config.connectors import ConnectorsConfig, connectors_config_from_env
+from almanak.config.framework import FrameworkConfig, framework_config_from_env
 from almanak.config.runtime import RuntimeConfig
 
 
@@ -60,12 +66,20 @@ class LocalConfig(BaseConfig):
     consumers reach for ``cli_runtime_config_from_env()`` for stateless
     re-reads (truthy boolean toggles flip mid-process during tests),
     or ``load_config().cli`` for boot-time reads.
+
+    ``agent_tools`` (Phase 6) carries the LLM client config consumed by
+    ``framework/agent_tools/llm_client.py``. ``framework`` (Phase 6)
+    carries the framework-toggle cluster (log emojis, strategy /
+    accounting dirs, API-key validator list, dashboard auth, Anvil fork
+    timeouts, token-resolver negative-cache knobs).
     """
 
     runtime: RuntimeConfig | None = None
     connectors: ConnectorsConfig = Field(default_factory=connectors_config_from_env)
     backtest: BacktestConfig = Field(default_factory=backtest_config_from_env)
     cli: CliRuntimeConfig = Field(default_factory=cli_runtime_config_from_env)
+    agent_tools: AgentToolsConfig = Field(default_factory=agent_tools_config_from_env)
+    framework: FrameworkConfig = Field(default_factory=framework_config_from_env)
 
 
 __all__ = ["LocalConfig"]

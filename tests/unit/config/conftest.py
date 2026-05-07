@@ -59,6 +59,7 @@ _GATEWAY_ENV_VARS: tuple[str, ...] = (
     "ALMANAK_GATEWAY_POLYMARKET_PASSPHRASE",
     "ALMANAK_GATEWAY_DATABASE_URL",
     "ALMANAK_GATEWAY_AUTH_TOKEN",
+    "ALMANAK_GATEWAY_TIMEOUT",
     "ALMANAK_GATEWAY_ALLOW_INSECURE",
     # Unprefixed ALMANAK_* fallbacks consumed by ``_fallback_env_vars`` and
     # ``_resolve_polymarket_credentials``.
@@ -170,6 +171,24 @@ _GATEWAY_ENV_VARS: tuple[str, ...] = (
     "ALMANAK_SIMULATION_ENABLED",
     "ALMANAK_DATA_FRESHNESS_POLICY",
     "ALMANAK_STALE_DATA_THRESHOLD_SECONDS",
+    # Phase 6 — agent_tools (LLM client) + framework (toggles + paths)
+    # env vars. Same eager-factory rationale as Phase 5: bare
+    # ``LocalConfig()`` construction in tests would silently pick up
+    # whatever the developer's ``.env`` carries.
+    "AGENT_LLM_API_KEY",
+    "AGENT_LLM_BASE_URL",
+    "AGENT_LLM_MODEL",
+    "XDG_CACHE_HOME",
+    "ALMANAK_LOG_EMOJIS",
+    "ALMANAK_STRATEGIES_DIR",
+    "ALMANAK_ACCOUNTING_DIR",
+    "ALMANAK_API_KEYS",
+    "ALMANAK_DASHBOARD_API_KEY",
+    "ANVIL_FORK_CACHE_PATH",
+    "ALMANAK_FORK_RPC_TIMEOUT",
+    "ALMANAK_FORK_HEALTH_TIMEOUT",
+    "ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S",
+    "ALMANAK_TOKEN_NEGATIVE_CACHE_MAX",
 )
 
 

@@ -10,7 +10,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -18,6 +17,8 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+
+from almanak.config.framework import framework_config_from_env
 
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.hot_reload_config import HotReloadableConfig
@@ -62,17 +63,11 @@ class EnvironmentApiKeyValidator:
     """
 
     def __init__(self) -> None:
-        """Initialize validator with keys from environment."""
-        keys_str = os.environ.get("ALMANAK_API_KEYS", "")
-        self._valid_keys: set[str] = set()
+        """Initialize validator with keys from the typed framework config."""
+        api_keys = framework_config_from_env().api_keys
+        self._valid_keys: set[str] = {self._hash_key(key) for key in api_keys}
 
-        if keys_str:
-            # Split by comma, strip whitespace, filter empty
-            for key in keys_str.split(","):
-                key = key.strip()
-                if key:
-                    # Store hash of key for secure comparison
-                    self._valid_keys.add(self._hash_key(key))
+        if self._valid_keys:
             logger.info(f"API key validator initialized with {len(self._valid_keys)} valid key(s)")
         else:
             logger.warning(

@@ -182,13 +182,16 @@ class PerpsPositionReader:
 
 
 def _get_rpc_url_from_env(chain: str) -> str | None:
-    """Build an RPC URL from environment variables.
+    """Build an RPC URL from the typed backtest config.
 
-    Uses the same ALCHEMY_API_KEY that the gateway uses for RPC access.
+    Uses the same ALCHEMY_API_KEY that the gateway uses for RPC access,
+    sourced via :attr:`BacktestConfig.alchemy_api_key`. The legacy
+    fallback path is preserved bit-for-bit; the env read moves to the
+    config service boundary.
     """
-    import os
+    from almanak.config.backtest import backtest_config_from_env
 
-    api_key = os.environ.get("ALCHEMY_API_KEY")
+    api_key = backtest_config_from_env().alchemy_api_key
     if not api_key:
         return None
 

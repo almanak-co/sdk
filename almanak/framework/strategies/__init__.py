@@ -32,10 +32,11 @@ import importlib
 import importlib.machinery
 import importlib.util
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+from almanak.config.framework import framework_config_from_env
 
 # Import IntentSequence and DecideResult for multi-intent support
 from ..intents import DecideResult, IntentSequence
@@ -202,10 +203,10 @@ def _auto_discover_strategies() -> None:  # noqa: C901
     - Tiered: strategies/<tier>/<name>/strategy.py (poster_child, production, incubating, demo)
     """
     _auto_discover_cwd_strategy()
-    # Check for ALMANAK_STRATEGIES_DIR env var first
-    strategies_dir_env = os.environ.get("ALMANAK_STRATEGIES_DIR")
-    if strategies_dir_env:
-        strategies_dir = Path(strategies_dir_env)
+    # Check for ALMANAK_STRATEGIES_DIR via the typed framework config
+    strategies_dir_override = framework_config_from_env().strategies_dir
+    if strategies_dir_override is not None:
+        strategies_dir = strategies_dir_override
         # If relative, resolve from current working directory
         if not strategies_dir.is_absolute():
             strategies_dir = Path.cwd() / strategies_dir

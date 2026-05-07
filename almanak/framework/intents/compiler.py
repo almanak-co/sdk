@@ -21,7 +21,6 @@ Example:
 """
 
 import logging
-import os
 import re
 import time
 from datetime import UTC, datetime
@@ -29,6 +28,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import grpc
+
+from almanak.config.cli_runtime import anvil_port_for_chain
 
 # Note: FlashLoanSelector import is done lazily in _compile_flash_loan to avoid circular import
 # Note: PolymarketAdapter import is done lazily in __init__ to avoid circular import and allow optional usage
@@ -549,12 +550,12 @@ class IntentCompiler:
         # This MUST take priority over mainnet RPC so that protocol adapters
         # (e.g., TraderJoe, Aerodrome) query on-chain state from the fork
         # where LP positions actually exist, not mainnet.
-        anvil_port_var = f"ANVIL_{self.chain.upper()}_PORT"
-        anvil_port = os.environ.get(anvil_port_var)
+        anvil_port = anvil_port_for_chain(self.chain)
         if anvil_port:
             anvil_url = f"http://127.0.0.1:{anvil_port}"
             logger.debug(
-                f"Anvil fork detected for {self.chain} ({anvil_port_var}={anvil_port}), using fork URL: {anvil_url}"
+                f"Anvil fork detected for {self.chain} (ANVIL_{self.chain.upper()}_PORT={anvil_port}), "
+                f"using fork URL: {anvil_url}"
             )
             return anvil_url
 
@@ -8666,8 +8667,7 @@ class IntentCompiler:
             return self._get_chain_rpc_url()
 
         # Check for managed Anvil fork on the target chain
-        anvil_port_var = f"ANVIL_{chain.upper()}_PORT"
-        anvil_port = os.environ.get(anvil_port_var)
+        anvil_port = anvil_port_for_chain(chain)
         if anvil_port:
             return f"http://127.0.0.1:{anvil_port}"
 

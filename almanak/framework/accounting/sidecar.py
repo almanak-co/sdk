@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from almanak.config.framework import framework_config_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,9 @@ def _sidecar_dir() -> Path:
     writing; this function only returns the *intended* directory path.
     """
     # Explicit override wins (useful in containers where HOME may be /).
-    override = os.environ.get("ALMANAK_ACCOUNTING_DIR")
-    if override:
-        return Path(override)
+    override = framework_config_from_env().accounting_dir
+    if override is not None:
+        return override
     home = Path.home()
     # Path.home() returns "/" when no HOME is set — not a writable user dir.
     if home == Path("/"):

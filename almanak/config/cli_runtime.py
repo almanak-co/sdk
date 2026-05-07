@@ -182,6 +182,75 @@ class CliRuntimeConfig(BaseModel):
     convention rely on this fallback.
     """
 
+    legacy_gateway_host: str | None = None
+    """Unprefixed gateway host (``GATEWAY_HOST``).
+
+    Legacy bare-name fallback the gRPC client honours alongside the
+    typed :attr:`GatewayConfig.host` (which reads
+    ``ALMANAK_GATEWAY_HOST`` via pydantic-settings). Same precedence
+    ladder as :attr:`legacy_gateway_auth_token`: typed gateway >
+    legacy bare-name. ``None`` means "no legacy override; use the
+    typed default".
+    """
+
+    legacy_gateway_port: int | None = None
+    """Unprefixed gateway port (``GATEWAY_PORT``).
+
+    Legacy bare-name fallback the gRPC client honours alongside the
+    typed :attr:`GatewayConfig.grpc_port`. Missing/whitespace values
+    resolve to ``None`` (the typed default takes over). Present-but-
+    invalid values — non-integer or out of the ``1..65535`` port range
+    — raise ``ValueError`` so env typos fail loud at boot rather than
+    silently dialing the wrong gateway (Codex / CodeRabbit review on
+    PR 2156).
+    """
+
+    legacy_gateway_timeout: float | None = None
+    """Unprefixed gateway client RPC timeout (``GATEWAY_TIMEOUT``).
+
+    Legacy bare-name fallback alongside the typed
+    :attr:`GatewayConfig.timeout`. Missing/whitespace values resolve
+    to ``None``. Present-but-invalid values — non-numeric or
+    non-positive (``<= 0``) — raise ``ValueError`` so a typo or a
+    nonsensical setting can't collapse every client call into an
+    immediate deadline failure.
+    """
+
+    # -------------------------------------------------------------------------
+    # Gateway-client resolved values — prefixed-then-unprefixed precedence
+    # already applied. The gRPC client reads these instead of constructing
+    # its own ladder, so the env-presence check stays at the service boundary.
+    # -------------------------------------------------------------------------
+
+    gateway_client_host_resolved: str = "localhost"
+    """Resolved gRPC client host — ``ALMANAK_GATEWAY_HOST`` →
+    ``GATEWAY_HOST`` → ``"localhost"`` (the gRPC-client legacy
+    default, distinct from the gateway-server default
+    ``"127.0.0.1"``).
+
+    Default ``"localhost"`` matches the legacy
+    :meth:`GatewayClientConfig.from_env` behaviour: the gateway server
+    binds to ``127.0.0.1`` but the strategy-side gRPC client dials
+    ``localhost`` because that resolves identically on every platform
+    SDK developers run. Callers that need the typed gateway-server
+    host should read :attr:`GatewayConfig.host` directly.
+    """
+
+    gateway_client_port_resolved: int = 50051
+    """Resolved gRPC client port — ``ALMANAK_GATEWAY_PORT`` →
+    ``GATEWAY_PORT`` → ``50051``.
+    """
+
+    gateway_client_timeout_resolved: float = 30.0
+    """Resolved gRPC client timeout in seconds — ``ALMANAK_GATEWAY_TIMEOUT``
+    → ``GATEWAY_TIMEOUT`` → ``30.0``.
+    """
+
+    gateway_client_auth_token_resolved: str | None = Field(default=None, repr=False)
+    """Resolved gRPC client auth token — ``ALMANAK_GATEWAY_AUTH_TOKEN``
+    → ``GATEWAY_AUTH_TOKEN`` → ``None``. Repr-suppressed.
+    """
+
     # -------------------------------------------------------------------------
     # Gateway-wallets discriminator + Safe-mode preflight (non-secret addresses).
     # -------------------------------------------------------------------------
@@ -385,8 +454,33 @@ def cli_runtime_config_from_env(
             continue
         anvil_ports[chain.lower()] = _require_int_env(env_var, raw)
 
+    # Gateway-client resolved values — preserve the legacy
+    # prefixed-then-unprefixed precedence ladder at the service boundary
+    # so ``GatewayClientConfig.from_env`` doesn't have to read env itself.
+    legacy_host = os.environ.get("GATEWAY_HOST")
+    legacy_port = _parse_optional_port_or_none("GATEWAY_PORT", os.environ.get("GATEWAY_PORT"))
+    legacy_timeout = _parse_optional_positive_float_or_none("GATEWAY_TIMEOUT", os.environ.get("GATEWAY_TIMEOUT"))
+    legacy_auth = os.environ.get("GATEWAY_AUTH_TOKEN")
+    almanak_host = os.environ.get("ALMANAK_GATEWAY_HOST")
+    almanak_port = _parse_optional_port_or_none("ALMANAK_GATEWAY_PORT", os.environ.get("ALMANAK_GATEWAY_PORT"))
+    almanak_timeout = _parse_optional_positive_float_or_none(
+        "ALMANAK_GATEWAY_TIMEOUT", os.environ.get("ALMANAK_GATEWAY_TIMEOUT")
+    )
+    almanak_auth = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN")
+
     kwargs: dict[str, Any] = {
-        "legacy_gateway_auth_token": os.environ.get("GATEWAY_AUTH_TOKEN") or None,
+        "legacy_gateway_auth_token": legacy_auth or None,
+        "legacy_gateway_host": legacy_host or None,
+        "legacy_gateway_port": legacy_port,
+        "legacy_gateway_timeout": legacy_timeout,
+        "gateway_client_host_resolved": almanak_host or legacy_host or "localhost",
+        "gateway_client_port_resolved": (
+            almanak_port if almanak_port is not None else (legacy_port if legacy_port is not None else 50051)
+        ),
+        "gateway_client_timeout_resolved": (
+            almanak_timeout if almanak_timeout is not None else (legacy_timeout if legacy_timeout is not None else 30.0)
+        ),
+        "gateway_client_auth_token_resolved": almanak_auth or legacy_auth or None,
         "gateway_wallets_configured": bool(os.environ.get("ALMANAK_GATEWAY_WALLETS")),
         "gateway_safe_mode": (safe_mode_raw.lower() if safe_mode_raw else None) or None,
         "gateway_safe_address": os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS") or None,
@@ -431,6 +525,97 @@ def _require_int_env(env_var: str, raw: str) -> int:
         return int(raw.strip())
     except ValueError as exc:
         raise ValueError(f"Invalid integer for env var {env_var}={raw!r}: must be an integer port number") from exc
+
+
+def _require_float_env(env_var: str, raw: str) -> float:
+    """Coerce a non-empty env-var string to ``float`` or raise a typed error."""
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid float for env var {env_var}={raw!r}: must be a number") from exc
+
+
+def _parse_optional_int_or_none(env_var: str, value: str | None) -> int | None:
+    """Parse an optional int env value.
+
+    Returns ``None`` when ``value`` is ``None`` or whitespace-only —
+    legacy-only field semantics: "not configured, use the typed default".
+
+    Raises ``ValueError`` on a present-but-malformed value. Silent
+    fallback is unsafe for ports because a typo in ``GATEWAY_PORT``
+    could make a strategy dial the default localhost gateway already
+    serving another strategy (Codex review on PR 2156).
+    """
+    if value is None or not value.strip():
+        return None
+    return _require_int_env(env_var, value)
+
+
+def _parse_optional_port_or_none(env_var: str, value: str | None) -> int | None:
+    """Parse an optional gateway-port env value with range validation.
+
+    Same fall-through as :func:`_parse_optional_int_or_none`: ``None``
+    for missing/whitespace, raise on malformed. In addition, raises
+    ``ValueError`` when the integer is outside the valid TCP port
+    range ``1..65535`` — a typo like ``GATEWAY_PORT=70000`` becomes a
+    later socket failure that's far harder to diagnose than a clean
+    boot-time error (CodeRabbit review on PR 2156).
+    """
+    parsed = _parse_optional_int_or_none(env_var, value)
+    if parsed is not None and not (1 <= parsed <= 65535):
+        raise ValueError(f"Invalid port for env var {env_var}={parsed}: must be in 1..65535")
+    return parsed
+
+
+def _parse_optional_float(env_var: str, value: str | None) -> float | None:
+    """Parse an optional float env value.
+
+    Same strict fall-through as :func:`_parse_optional_int_or_none`:
+    ``None`` for missing/whitespace, raise on malformed.
+    """
+    if value is None or not value.strip():
+        return None
+    return _require_float_env(env_var, value)
+
+
+def _parse_optional_positive_float_or_none(env_var: str, value: str | None) -> float | None:
+    """Parse an optional positive float env value.
+
+    Same fall-through as :func:`_parse_optional_float`: ``None`` for
+    missing/whitespace, raise on malformed. In addition, raises
+    ``ValueError`` when the value is non-positive — a non-positive
+    timeout would collapse every gRPC client call into an immediate
+    deadline failure, which is harder to diagnose than a boot-time
+    error (CodeRabbit review on PR 2156).
+    """
+    parsed = _parse_optional_float(env_var, value)
+    if parsed is not None and parsed <= 0:
+        raise ValueError(f"Invalid value for env var {env_var}={parsed}: must be > 0")
+    return parsed
+
+
+def anvil_port_for_chain(chain: str) -> int | None:
+    """Read ``ANVIL_<CHAIN>_PORT`` directly without rebuilding the full config.
+
+    Minimal-cost variant of
+    ``cli_runtime_config_from_env().anvil_ports.get(chain.lower())``,
+    intended for hot paths in the intent compiler where rebuilding the
+    full :class:`CliRuntimeConfig` model on every chain RPC resolution
+    is wasteful.
+
+    The dynamic env read is mandatory: ``managed.py`` mutates this env
+    var at runtime when starting a fork, and the compiler must observe
+    the post-mutation value, so caching is not an option.
+
+    Returns ``None`` when the env var is unset or whitespace; raises
+    ``ValueError`` on a present-but-malformed integer (same strictness
+    as the typed config path).
+    """
+    env_var = f"ANVIL_{chain.upper()}_PORT"
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        return None
+    return _require_int_env(env_var, raw)
 
 
 def subprocess_env_with_overrides(overrides: dict[str, str]) -> dict[str, str]:
