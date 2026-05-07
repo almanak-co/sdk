@@ -2024,6 +2024,12 @@ class StrategyRunner:
                 # here saves a state-manager round-trip at CLOSE time
                 # and keeps the fields populated even when the close
                 # receipt parser doesn't re-emit them.
+                # VIB-4086 — also stamp ``token0`` / ``token1`` for the
+                # same reason: the LP_CLOSE receipt parser doesn't
+                # re-emit the pair, leaving the CLOSE row with empty
+                # token columns and breaking ``_apply_lp_close_value_usd``
+                # (which reads ``event.token0`` / ``event.token1`` to
+                # resolve decimals + prices).
                 self._recent_open_events[key] = {
                     "value_usd": str(getattr(pos_event, "value_usd", "") or ""),
                     "ledger_entry_id": str(getattr(pos_event, "ledger_entry_id", "") or ""),
@@ -2031,6 +2037,8 @@ class StrategyRunner:
                     "tick_lower": getattr(pos_event, "tick_lower", None),
                     "tick_upper": getattr(pos_event, "tick_upper", None),
                     "liquidity": str(getattr(pos_event, "liquidity", "") or ""),
+                    "token0": str(getattr(pos_event, "token0", "") or ""),
+                    "token1": str(getattr(pos_event, "token1", "") or ""),
                 }
             elif event_type == "CLOSE":
                 self._recent_open_events.pop(key, None)
@@ -2198,115 +2206,26 @@ class StrategyRunner:
                 # backend-specific NotImplementedError escape hatch remains.
                 await self.state_manager.save_ledger_entry(entry)
 
-            # Emit position event for LP/perp intents (Phase 2, VIB-2775)
-            if success and self.state_manager and hasattr(self.state_manager, "save_position_event"):
-                try:
-                    from ..observability.position_events import build_position_event_from_intent
-
-                    # VIB-3893: slot0 enrichment now runs before
-                    # ``build_ledger_entry`` (see top of this method) so
-                    # the ledger row's extracted_data_json carries
-                    # current_tick at write time. ``result.extracted_data``
-                    # is already enriched in-place by the time we reach
-                    # build_position_event_from_intent — no second call
-                    # needed here.
-                    pos_event = build_position_event_from_intent(
-                        deployment_id=deployment_id,
-                        intent=intent,
-                        result=result,
-                        ledger_entry_id=entry.id,
-                        chain=chain,
-                        price_oracle=price_oracle,
-                        # VIB-3919 — thread the recent-open cache so
-                        # LP_CLOSE events can backfill the immutable
-                        # bracket (tick_lower/upper/liquidity) from the
-                        # matching OPEN event without a state-manager
-                        # round-trip. Cache is updated below; pop on
-                        # CLOSE happens AFTER the close event is built,
-                        # so the lookup here still finds the OPEN row.
-                        recent_open_events=self._recent_open_events,
-                    )
-                    if pos_event is not None:
-                        # Phase 4: stamp cycle_id and execution_mode (VIB-2835/2837)
-                        pos_event.cycle_id = cycle_id
-                        pos_event.execution_mode = execution_mode
-                        saved = await self.state_manager.save_position_event(pos_event)
-                        if not saved:
-                            # Position events are the cost-basis and IL attribution source
-                            # for LP/perp. A failed save means close-time PnL enrichment
-                            # will silently produce None.
-                            # In live mode this is a fatal accounting gap — raise so the
-                            # cycle halts and operators are alerted, symmetric with the
-                            # ledger-write fail-closed behaviour.
-                            if self._is_live_mode():
-                                from ..state.exceptions import AccountingWriteKind
-
-                                raise AccountingPersistenceError(
-                                    write_kind=AccountingWriteKind.ACCOUNTING,
-                                    strategy_id=getattr(strategy, "strategy_id", ""),
-                                    message=(
-                                        f"Position event save failed for {pos_event.event_type} "
-                                        f"{pos_event.position_type} position={pos_event.position_id} "
-                                        "— IL/PnL enrichment lost"
-                                    ),
-                                )
-                            logger.error(
-                                "Position event save returned False for %s %s (position=%s) "
-                                "— IL/PnL enrichment for this position will be incomplete",
-                                pos_event.event_type,
-                                pos_event.position_type,
-                                pos_event.position_id,
-                            )
-                        else:
-                            logger.debug(
-                                "Position event %s emitted for %s (position=%s)",
-                                pos_event.event_type,
-                                pos_event.position_type,
-                                pos_event.position_id,
-                            )
-                            # VIB-3894 — keep the runner-side recent-open cache
-                            # in sync with the on-disk position_events table so
-                            # the same-iteration snapshot can read cost basis
-                            # without a get_position_events_sync round-trip.
-                            # ONLY update on save success: a cache entry without
-                            # a backing row would surface cost_basis_usd for a
-                            # position the books don't know about.
-                            if pos_event.position_id:
-                                self._update_recent_open_events_cache(pos_event)
-                        # VIB-3205: stamp entry_state on OPEN events so subsequent
-                        # CLOSE-time IL attribution can evaluate HODL value.
-                        if pos_event.event_type == "OPEN" and pos_event.position_id:
-                            try:
-                                from ..observability.pnl_attributor import stamp_entry_state_on_open
-
-                                await stamp_entry_state_on_open(
-                                    self.state_manager,
-                                    pos_event,
-                                    price_oracle=self.price_oracle,
-                                )
-                            except Exception:  # noqa: BLE001
-                                logger.warning(
-                                    "Entry-state stamp failed (non-blocking) for position=%s",
-                                    pos_event.position_id,
-                                    exc_info=True,
-                                )
-                        # Run PnL attribution on CLOSE events (VIB-2776, v2 VIB-3205)
-                        if pos_event.event_type == "CLOSE" and pos_event.position_id:
-                            try:
-                                from ..observability.pnl_attributor import run_attribution_on_close
-
-                                await run_attribution_on_close(self.state_manager, pos_event)
-                            except Exception as attr_err:  # noqa: BLE001
-                                logger.debug("Attribution failed (non-blocking): %s", attr_err)
-                except AccountingPersistenceError:
-                    # Fail-closed: re-raise so run_iteration routes to ACCOUNTING_FAILED.
-                    raise
-                except Exception as pe:  # noqa: BLE001
-                    logger.error(
-                        "Failed to emit position event for %s (position PnL enrichment lost): %s",
-                        getattr(intent, "intent_type", "unknown"),
-                        pe,
-                    )
+            # Emit position event whenever the chain TX succeeded — the framework
+            # ``success`` verdict can be False on slippage-breach / reconciliation-
+            # failure paths even though the on-chain state already changed. Without
+            # this, ledger.success=False rows whose underlying TX landed leave
+            # ``position_events`` and ``_recent_open_events`` desynced from chain
+            # reality, and close-time IL attribution loses its OPEN bracket.
+            chain_success = bool(getattr(result, "success", False))
+            if chain_success and self.state_manager and hasattr(self.state_manager, "save_position_event"):
+                await self._emit_position_event_for_intent(
+                    strategy=strategy,
+                    intent=intent,
+                    result=result,
+                    entry=entry,
+                    chain=chain,
+                    deployment_id=deployment_id,
+                    execution_mode=execution_mode,
+                    cycle_id=cycle_id,
+                    price_oracle=price_oracle,
+                    post_state=post_state,
+                )
 
             # Signal that this iteration executed a trade — forces snapshot
             if success:
@@ -2334,6 +2253,156 @@ class StrategyRunner:
                 ) from e
             logger.error(f"Failed to write ledger entry (non-live): {e}")
         return None
+
+    async def _emit_position_event_for_intent(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any | None,
+        entry: Any,
+        chain: str,
+        deployment_id: str,
+        execution_mode: str,
+        cycle_id: str,
+        price_oracle: dict | None,
+        post_state: dict | None,
+    ) -> None:
+        """VIB-2775 / VIB-3919 / VIB-4085 — build a position_event from a
+        successful intent result and persist it, then run the OPEN/CLOSE
+        side-effects (entry_state stamp, IL attribution, runner cache).
+
+        Extracted out of ``_write_ledger_entry`` to keep that method's
+        cyclomatic complexity down. Live-mode save failures raise
+        ``AccountingPersistenceError`` so the cycle halts and operators
+        are alerted; paper/dry-run modes log ERROR and continue.
+        """
+        try:
+            from ..observability.position_events import build_position_event_from_intent
+
+            # VIB-4085 — wallet address scopes lending position_id. Try the
+            # runtime config first (the runner-side source of truth) and
+            # fall back to the strategy's declared wallet so dry-run /
+            # paper paths still produce a deterministic position_id.
+            wallet_address = (
+                getattr(getattr(self, "_runtime_config", None), "wallet_address", "")
+                or getattr(strategy, "wallet_address", "")
+                or ""
+            )
+            pos_event = build_position_event_from_intent(
+                deployment_id=deployment_id,
+                intent=intent,
+                result=result,
+                ledger_entry_id=entry.id,
+                chain=chain,
+                price_oracle=price_oracle,
+                # VIB-3919: LP_CLOSE bracket carry-forward.
+                # VIB-4085: lending OPEN-vs-INCREASE refinement.
+                recent_open_events=self._recent_open_events,
+                # VIB-4085: lending CLOSE-vs-DECREASE refinement.
+                post_state=post_state,
+                wallet_address=wallet_address,
+            )
+            if pos_event is None:
+                return
+
+            pos_event.cycle_id = cycle_id
+            pos_event.execution_mode = execution_mode
+            saved = await self.state_manager.save_position_event(pos_event)
+
+            if not saved:
+                # Live mode raises inside _handle_position_event_save_failure;
+                # paper/dry-run logs ERROR and continues. In the latter case
+                # we must NOT run attribution side-effects: stamping
+                # entry-state for a position event that isn't on disk leaves
+                # ``position_state_snapshots`` referencing a non-existent
+                # event row and makes the degraded path driftier than it
+                # needs to be.
+                self._handle_position_event_save_failure(strategy, pos_event)
+                return
+
+            logger.debug(
+                "Position event %s emitted for %s (position=%s)",
+                pos_event.event_type,
+                pos_event.position_type,
+                pos_event.position_id,
+            )
+            # VIB-3894 — only update cache on save success so we don't
+            # surface cost_basis_usd for a position the books don't know about.
+            if pos_event.position_id:
+                self._update_recent_open_events_cache(pos_event)
+
+            await self._run_position_event_attribution(pos_event)
+        except AccountingPersistenceError:
+            # Fail-closed: re-raise so run_iteration routes to ACCOUNTING_FAILED.
+            raise
+        except Exception as pe:  # noqa: BLE001
+            logger.error(
+                "Failed to emit position event for %s (position PnL enrichment lost): %s",
+                getattr(intent, "intent_type", "unknown"),
+                pe,
+            )
+
+    def _handle_position_event_save_failure(
+        self,
+        strategy: StrategyProtocol,
+        pos_event: Any,
+    ) -> None:
+        """Save returned False — fail closed in live mode, log ERROR otherwise.
+
+        Position events are the cost-basis and IL attribution source for
+        LP/perp; a silent failure produces null PnL at close-time.
+        """
+        if self._is_live_mode():
+            from ..state.exceptions import AccountingWriteKind
+
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.ACCOUNTING,
+                strategy_id=getattr(strategy, "strategy_id", ""),
+                message=(
+                    f"Position event save failed for {pos_event.event_type} "
+                    f"{pos_event.position_type} position={pos_event.position_id} "
+                    "— IL/PnL enrichment lost"
+                ),
+            )
+        logger.error(
+            "Position event save returned False for %s %s (position=%s) "
+            "— IL/PnL enrichment for this position will be incomplete",
+            pos_event.event_type,
+            pos_event.position_type,
+            pos_event.position_id,
+        )
+
+    async def _run_position_event_attribution(self, pos_event: Any) -> None:
+        """VIB-2776 / VIB-3205 — run OPEN/CLOSE attribution side-effects.
+
+        Both calls are best-effort: failures degrade attribution accuracy
+        but do not block the iteration.
+        """
+        if not pos_event.position_id:
+            return
+        if pos_event.event_type == "OPEN":
+            try:
+                from ..observability.pnl_attributor import stamp_entry_state_on_open
+
+                await stamp_entry_state_on_open(
+                    self.state_manager,
+                    pos_event,
+                    price_oracle=self.price_oracle,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Entry-state stamp failed (non-blocking) for position=%s",
+                    pos_event.position_id,
+                    exc_info=True,
+                )
+        elif pos_event.event_type == "CLOSE":
+            try:
+                from ..observability.pnl_attributor import run_attribution_on_close
+
+                await run_attribution_on_close(self.state_manager, pos_event)
+            except Exception as attr_err:  # noqa: BLE001
+                logger.debug("Attribution failed (non-blocking): %s", attr_err)
 
     async def _write_outbox_and_fire_processor(
         self,

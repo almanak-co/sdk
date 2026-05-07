@@ -1,11 +1,19 @@
-"""Position lifecycle events for LP and perps tracking.
+"""Position lifecycle events for LP, perps, and lending.
 
 Immutable-ID positions (LP NFTs, perp positions) have a lifecycle:
 OPEN -> SNAPSHOT* -> CLOSE.  Each state change is recorded as a
 PositionEvent with raw observables (amounts, prices, fees).
 
-Fungible positions (lending supply/borrow, staking) are tracked via
-enriched snapshot deltas (Phase 1d), not lifecycle events.
+VIB-4085 — fungible lending positions (Aave V3 supply/borrow, Morpho
+markets) also produce PositionEvents with lifecycle states OPEN /
+INCREASE / DECREASE / CLOSE keyed on a non-NFT
+``position_id = "lending:<chain>:<protocol>:<wallet>:<asset>"``. The
+runner's ``_recent_open_events`` cache decides OPEN vs INCREASE on a
+new SUPPLY/BORROW; the ledger row's ``post_state`` decides DECREASE vs
+CLOSE on a REPAY/WITHDRAW (collateral or debt value <= dust threshold
+=> CLOSE). This mirrors the data already captured in Layer 5
+``accounting_events`` so the dashboard can render the lifecycle without
+re-deriving it.
 
 Phase 5i — helper extraction layout
 -----------------------------------
@@ -52,7 +60,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
@@ -66,23 +74,45 @@ class PositionEventType(StrEnum):
     CLOSE = "CLOSE"
     COLLECT_FEES = "COLLECT_FEES"
     SNAPSHOT = "SNAPSHOT"
+    # VIB-4085 — lending lifecycle is non-monotonic (a loop adds collateral
+    # and debt repeatedly before unwinding), so OPEN/CLOSE alone don't tell
+    # the dashboard whether the leg is being grown or shrunk. INCREASE /
+    # DECREASE record additive / subtractive actions on an already-open leg.
+    INCREASE = "INCREASE"
+    DECREASE = "DECREASE"
 
 
 class PositionType(StrEnum):
-    """Types of tracked positions (immutable-ID only)."""
+    """Types of tracked positions."""
 
     LP = "LP"
     PERP = "PERP"
+    # VIB-4085 — fungible lending legs. Both share the same FIFO-keyed
+    # ``position_id`` shape (`lending:<chain>:<protocol>:<wallet>:<asset>`)
+    # but are tracked as separate position types so the dashboard can
+    # render the collateral leg and the debt leg side-by-side without
+    # joining on intent_type.
+    LENDING_COLLATERAL = "LENDING_COLLATERAL"
+    LENDING_DEBT = "LENDING_DEBT"
 
 
-# Intent types that map to position events (LP + perps only).
-# Fungible positions (SUPPLY, BORROW, STAKE, etc.) are excluded.
+# Intent types that map to position events.
+# VIB-4085 — lending intents (SUPPLY/BORROW/REPAY/WITHDRAW) now produce
+# events as well; the static dispatch below maps them to OPEN / CLOSE
+# defaults that ``_apply_lending`` refines into INCREASE / DECREASE
+# based on lifecycle state read from the ledger row's ``post_state``.
 INTENT_TO_EVENT_TYPE: dict[str, PositionEventType] = {
     "LP_OPEN": PositionEventType.OPEN,
     "LP_CLOSE": PositionEventType.CLOSE,
     "LP_COLLECT_FEES": PositionEventType.COLLECT_FEES,
     "PERP_OPEN": PositionEventType.OPEN,
     "PERP_CLOSE": PositionEventType.CLOSE,
+    # Lending — defaults; ``_apply_lending`` refines based on lifecycle.
+    "SUPPLY": PositionEventType.OPEN,  # → INCREASE on cache hit
+    "BORROW": PositionEventType.OPEN,  # → INCREASE on cache hit
+    "REPAY": PositionEventType.CLOSE,  # → DECREASE when debt_value_after > dust
+    "WITHDRAW": PositionEventType.CLOSE,  # → DECREASE when collateral_value_after > dust
+    "DELEVERAGE": PositionEventType.CLOSE,  # mirrors REPAY refinement
 }
 
 INTENT_TO_POSITION_TYPE: dict[str, PositionType] = {
@@ -91,7 +121,18 @@ INTENT_TO_POSITION_TYPE: dict[str, PositionType] = {
     "LP_COLLECT_FEES": PositionType.LP,
     "PERP_OPEN": PositionType.PERP,
     "PERP_CLOSE": PositionType.PERP,
+    "SUPPLY": PositionType.LENDING_COLLATERAL,
+    "WITHDRAW": PositionType.LENDING_COLLATERAL,
+    "BORROW": PositionType.LENDING_DEBT,
+    "REPAY": PositionType.LENDING_DEBT,
+    "DELEVERAGE": PositionType.LENDING_DEBT,
 }
+
+# VIB-4085 — dust threshold for lending CLOSE detection. A leg with
+# remaining value <= this threshold is treated as fully closed. Aave V3
+# accrues sub-cent residuals from interest indices; treating exact-zero
+# as the only close signal would fragment the lifecycle.
+LENDING_CLOSE_DUST_USD = "0.01"
 
 
 @dataclass
@@ -212,6 +253,23 @@ class IntentEventContext:
     chain: str
     ledger_entry_id: str
     price_oracle: dict | None = None
+    # VIB-4085 — lending lifecycle decisions read post-state (collateral,
+    # debt, HF, LTV, APR) to refine OPEN→INCREASE / CLOSE→DECREASE. The
+    # runner computes ``post_state`` already (it's persisted to
+    # ``transaction_ledger.post_state_json``); threading it through the
+    # context lets the position_event seeder reuse the same data without
+    # round-tripping back through the gateway.
+    post_state: dict[str, Any] | None = None
+    # VIB-4085 — wallet address scopes the lending position_id so two
+    # strategies on different wallets don't collide on the same chain +
+    # protocol + asset.
+    wallet_address: str = ""
+    # VIB-4085 — the runner's in-memory recent-open cache (populated by
+    # ``_update_recent_open_events_cache`` on every successful save) is
+    # the authority on whether a SUPPLY/BORROW is the FIRST action on a
+    # position (→ OPEN) or a subsequent action (→ INCREASE). Pre-fix
+    # there was no signal at all and lending events weren't emitted.
+    recent_open_events: dict | None = None
 
 
 def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
@@ -604,6 +662,284 @@ def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.protocol_fees_usd = str(total_usd)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-4085 — lending lifecycle helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def lending_position_id(*, chain: str, protocol: str, wallet: str, asset: str) -> str:
+    """Canonical lending position_id shape — must match
+    ``LendingAccountingEvent.position_key`` so Layer 3 (position_events)
+    and Layer 5 (accounting_events) are joinable on a single column.
+
+    All segments are lower-cased; an empty wallet (e.g. dry_run with no
+    signer) becomes ``unknown`` rather than producing a malformed key
+    like ``lending:arbitrum:aave_v3::usdc``.
+    """
+    chain_n = (chain or "unknown").strip().lower() or "unknown"
+    proto_n = (protocol or "unknown").strip().lower() or "unknown"
+    wallet_n = (wallet or "unknown").strip().lower() or "unknown"
+    asset_n = (asset or "unknown").strip().lower() or "unknown"
+    return f"lending:{chain_n}:{proto_n}:{wallet_n}:{asset_n}"
+
+
+def _lending_amount(intent: Any, extracted: dict[str, Any], intent_type: str) -> str:
+    """Extract the principal token amount for a lending intent.
+
+    Tries the receipt-parser-extracted field first (authoritative —
+    reflects what actually moved on-chain), falling back to the intent's
+    declared amount. Returns "" when neither is available; downstream
+    readers treat "" as unknown distinct from "0" (measured zero).
+    """
+    field_map = {
+        "SUPPLY": ("supply_amount",),
+        "BORROW": ("borrow_amount",),
+        "REPAY": ("repay_amount", "repaid_amount"),
+        "WITHDRAW": ("withdraw_amount", "withdrawn_amount"),
+        "DELEVERAGE": ("repay_amount", "repaid_amount"),
+    }
+    for key in field_map.get(intent_type, ()):
+        v = extracted.get(key)
+        # SupplyAmounts / BorrowAmounts dataclasses expose ``.amount`` or are
+        # the raw int themselves; tolerate both.
+        if v is not None:
+            inner = getattr(v, "amount", None)
+            if inner is not None:
+                return str(inner)
+            if isinstance(v, int | str):
+                return str(v)
+    declared = getattr(intent, "amount", None)
+    return str(declared) if declared is not None else ""
+
+
+_LENDING_FLAT_KEYS = (
+    "collateral_value_usd",
+    "debt_value_usd",
+    "collateral_usd",
+    "debt_usd",
+)
+
+
+def _resolve_lending_post_state(post_state: dict | None) -> dict[str, Any]:
+    """Some capture pipelines wrap lending post-state under a protocol
+    key (``post_state["aave_v3"]["collateral_value_usd"]``); others write
+    the fields flat. Return a dict normalised to the canonical keys
+    (``collateral_value_usd``, ``debt_value_usd``, ``liquidation_threshold``),
+    falling back to ``{}`` so callers can use ``.get`` unconditionally.
+
+    Connectors emit either canonical names (``collateral_value_usd`` etc.)
+    or compact aliases (``collateral_usd``, ``debt_usd``,
+    ``liquidation_threshold_bps``). The aliases are preserved verbatim
+    on the returned dict alongside the canonical keys so the projection
+    is non-destructive and round-trippable.
+    """
+    if not isinstance(post_state, dict):
+        return {}
+
+    # Start from the root-level fields; promoting nested protocol-keyed values
+    # must NOT drop sibling root keys like ``health_factor`` / APR / liquidation
+    # metadata that the connector may emit at the outer scope.
+    out: dict[str, Any] = dict(post_state)
+    if not any(k in post_state for k in _LENDING_FLAT_KEYS):
+        for v in post_state.values():
+            if isinstance(v, dict) and any(k in v for k in _LENDING_FLAT_KEYS):
+                # Merge nested into root, preferring nested for overlapping keys
+                # (the wrapping protocol dict is the more specific source).
+                for k, val in v.items():
+                    out.setdefault(k, val)
+                # Promote nested overrides for the canonical lending keys we
+                # branch on below — root-level proxies (if any) should not
+                # win over the protocol-scoped value.
+                for k in _LENDING_FLAT_KEYS:
+                    if k in v:
+                        out[k] = v[k]
+                break
+
+    if "collateral_value_usd" not in out and "collateral_usd" in out:
+        out["collateral_value_usd"] = out["collateral_usd"]
+    if "debt_value_usd" not in out and "debt_usd" in out:
+        out["debt_value_usd"] = out["debt_usd"]
+    if "liquidation_threshold" not in out and "liquidation_threshold_bps" in out:
+        bps = out["liquidation_threshold_bps"]
+        try:
+            out["liquidation_threshold"] = str(Decimal(str(bps)) / Decimal(10000))
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+    return out
+
+
+def _refine_lending_event_type(
+    event: PositionEvent,
+    intent_type: str,
+    leg_value: Any,
+    cache: dict,
+) -> None:
+    """OPEN→INCREASE / CLOSE→DECREASE refinement keyed on cache + leg_value."""
+    if intent_type in ("SUPPLY", "BORROW"):
+        cache_key = (event.position_id, str(event.position_type))
+        if cache_key in cache:
+            event.event_type = PositionEventType.INCREASE.value
+        return
+    if intent_type not in ("REPAY", "WITHDRAW", "DELEVERAGE"):
+        return
+    if leg_value is None:
+        event.event_type = PositionEventType.DECREASE.value
+        logger.debug(
+            "lending lifecycle: post-state missing for %s on %s; "
+            "defaulting to DECREASE (would have been CLOSE if leg_value <= dust)",
+            intent_type,
+            event.position_id,
+        )
+        return
+    # NaN/Infinity round-trip cleanly through Decimal(str(...)) but break the
+    # ``<= dust`` comparison: NaN raises InvalidOperation, +/-Infinity returns
+    # False. Either misroute would silently misclassify the lifecycle event,
+    # so reject non-finite values the same way we handle a missing leg_value.
+    try:
+        value_d = Decimal(str(leg_value))
+        if not value_d.is_finite():
+            raise InvalidOperation(f"non-finite leg_value: {leg_value!r}")
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        event.event_type = PositionEventType.DECREASE.value
+        logger.debug(
+            "lending lifecycle: unparseable leg_value=%r for %s on %s (%s); "
+            "defaulting to DECREASE (would have been CLOSE if value <= dust)",
+            leg_value,
+            intent_type,
+            event.position_id,
+            exc,
+        )
+        return
+    dust = Decimal(LENDING_CLOSE_DUST_USD)
+    event.event_type = PositionEventType.CLOSE.value if value_d <= dust else PositionEventType.DECREASE.value
+
+
+def _build_lending_attribution(event: PositionEvent, post: dict, asset: str, intent_type: str) -> None:
+    """v1 lending attribution. Fully derivable from the ledger row's
+    post_state — no FIFO replay required. Schema-version-stamped so a
+    future v2 producer (e.g. a dedicated lending PnL attributor that
+    splits principal vs interest the way the FIFO basis store does for
+    swaps) is distinguishable from this seed-time payload."""
+    if not post:
+        return
+    attribution = {
+        "version": 1,
+        "schema": "lending_v1",
+        "position_type": str(event.position_type),
+        "collateral_value_after_usd": _stringify_or_none(post.get("collateral_value_usd")),
+        "debt_value_after_usd": _stringify_or_none(post.get("debt_value_usd")),
+        "health_factor_after": _stringify_or_none(post.get("health_factor")),
+        "liquidation_threshold": _stringify_or_none(post.get("liquidation_threshold")),
+        "supply_apr_bps": post.get("supply_apr_bps"),
+        "borrow_apr_bps": post.get("borrow_apr_bps"),
+        "asset": asset or None,
+        "intent_type": intent_type or None,
+    }
+    try:
+        event.attribution_json = json.dumps(attribution, default=str)
+    except (TypeError, ValueError):  # noqa: BLE001 — defensive; payload is small + flat
+        logger.warning(
+            "Failed to serialise lending attribution for %s; leaving attribution_json empty",
+            event.position_id,
+        )
+
+
+def _apply_lending(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """Phase φ — lending lifecycle enrichment (VIB-4085).
+
+    Refines the static OPEN/CLOSE event_type from
+    ``INTENT_TO_EVENT_TYPE`` into one of OPEN / INCREASE / DECREASE /
+    CLOSE based on:
+
+    * For SUPPLY / BORROW: the runner's ``recent_open_events`` cache.
+      Cache hit on ``(position_id, position_type)`` → INCREASE; miss →
+      OPEN. Across process restarts a SUPPLY may incorrectly emit a
+      second OPEN, but the dashboard reads max-timestamp-OPEN-without-
+      a-following-CLOSE so lifecycle still resolves correctly.
+    * For REPAY / WITHDRAW: the leg's own post-state value
+      (``collateral_value_usd`` for LENDING_COLLATERAL,
+      ``debt_value_usd`` for LENDING_DEBT). Below
+      ``LENDING_CLOSE_DUST_USD`` ⇒ CLOSE; above ⇒ DECREASE.
+
+    Populates ``position_id`` (canonical join key with Layer 5
+    ``accounting_events.position_key``), ``token0`` = asset symbol,
+    ``amount0`` = principal in token-smallest-unit, ``value_usd`` =
+    post-state value of THIS leg, and ``attribution_json`` (lending v1)
+    when post_state is present. No-op for non-lending events.
+    """
+    if event.position_type not in (PositionType.LENDING_COLLATERAL, PositionType.LENDING_DEBT):
+        return
+
+    intent = ctx.intent
+    intent_type_raw = ""
+    if hasattr(intent, "intent_type"):
+        it = intent.intent_type
+        intent_type_raw = it.value if hasattr(it, "value") else str(it)
+    intent_type = (intent_type_raw or "").upper()
+
+    # Resolution order is position-type-aware because lending intents have
+    # asymmetric field names: BorrowIntent / RepayIntent identify the debt
+    # leg via ``borrow_token``; SupplyIntent / WithdrawIntent identify the
+    # collateral leg via ``token``. A naive single-field resolver would
+    # populate LENDING_DEBT with the (collateral) ``token`` if the intent
+    # carried both — semantically wrong for the debt-leg event.
+    if event.position_type == PositionType.LENDING_DEBT:
+        asset = (
+            getattr(intent, "borrow_token", None)
+            or getattr(intent, "amount_token", None)
+            or getattr(intent, "token", None)
+            or getattr(intent, "asset", None)
+            or ""
+        )
+    else:
+        asset = (
+            getattr(intent, "amount_token", None)
+            or getattr(intent, "token", None)
+            or getattr(intent, "collateral_token", None)
+            or getattr(intent, "token_in", None)
+            or getattr(intent, "asset", None)
+            or ""
+        )
+    asset = str(asset or "").upper()
+
+    event.position_id = lending_position_id(
+        chain=ctx.chain,
+        protocol=event.protocol or getattr(intent, "protocol", "") or "",
+        wallet=ctx.wallet_address,
+        asset=asset,
+    )
+    if asset and not event.token0:
+        event.token0 = asset
+
+    amount = _lending_amount(intent, ctx.extracted, intent_type)
+    if amount and not event.amount0:
+        event.amount0 = amount
+
+    post = _resolve_lending_post_state(ctx.post_state)
+    leg_value = (
+        post.get("collateral_value_usd")
+        if event.position_type == PositionType.LENDING_COLLATERAL
+        else post.get("debt_value_usd")
+    )
+    if leg_value is not None and not event.value_usd:
+        event.value_usd = str(leg_value)
+
+    _refine_lending_event_type(event, intent_type, leg_value, ctx.recent_open_events or {})
+    _build_lending_attribution(event, post, asset, intent_type)
+
+
+def _stringify_or_none(v: Any) -> str | None:
+    """Coerce numerics / Decimals to strings for stable JSON; pass None
+    through unchanged. ``""`` becomes None — empty string in lending
+    payloads means "unmeasured" and should not survive into JSON as a
+    string that downstream readers can't distinguish from "0"."""
+    if v is None:
+        return None
+    if isinstance(v, str) and v == "":
+        return None
+    return str(v)
+
+
 def build_position_event_from_intent(
     *,
     deployment_id: str,
@@ -613,14 +949,16 @@ def build_position_event_from_intent(
     chain: str = "",
     price_oracle: dict | None = None,
     recent_open_events: dict | None = None,
+    post_state: dict | None = None,
+    wallet_address: str = "",
 ) -> PositionEvent | None:
     """Build a PositionEvent from an intent and execution result.
 
     Returns None if the intent type doesn't produce position events
-    (e.g., SWAP, SUPPLY, BORROW).
+    (e.g., SWAP, ENSURE_BALANCE, BRIDGE).
 
-    Sequences the phase helpers α → γ → δ → ε → ζ → η → θ. Ordering is
-    load-bearing (see module docstring).
+    Sequences the phase helpers α → γ → δ → ε → ζ → η → φ → θ. Ordering
+    is load-bearing (see module docstring).
 
     ``price_oracle`` (VIB-3883): mapping ``{SYMBOL: price}`` (Decimal /
     str / float — coerced internally) used to populate
@@ -631,6 +969,14 @@ def build_position_event_from_intent(
     column. Callers that don't have a price oracle in scope omit it —
     the field stays empty and downstream readers degrade as they
     already do.
+
+    ``post_state`` / ``wallet_address`` (VIB-4085): drives lending
+    lifecycle refinement. ``post_state`` is the dict the runner
+    serialises into ``transaction_ledger.post_state_json``; passing it
+    in lets ``_apply_lending`` decide CLOSE vs DECREASE without a
+    state-manager round-trip. ``wallet_address`` scopes the lending
+    ``position_id`` so two strategies on different wallets don't
+    collide on the same chain + protocol + asset.
     """
     extracted = getattr(result, "extracted_data", {}) if result else {}
     ctx = IntentEventContext(
@@ -641,6 +987,9 @@ def build_position_event_from_intent(
         chain=chain,
         ledger_entry_id=ledger_entry_id,
         price_oracle=price_oracle,
+        post_state=post_state,
+        wallet_address=wallet_address,
+        recent_open_events=recent_open_events,
     )
 
     # α + β — dispatch + seed.
@@ -648,18 +997,22 @@ def build_position_event_from_intent(
     if event is None:
         return None
 
-    # Short-circuit: without extracted_data we can't enrich. Only emit the
-    # bare event if it already has a joinable position_id.
-    if not extracted:
+    # Short-circuit: without extracted_data AND no post_state we can't
+    # enrich. Lending events specifically need post_state, not extracted,
+    # so don't short-circuit purely on missing extracted_data when this
+    # is a lending intent.
+    is_lending = event.position_type in (PositionType.LENDING_COLLATERAL, PositionType.LENDING_DEBT)
+    if not extracted and not is_lending:
         return event if event.position_id else None
 
-    # γ → δ → δ-alt → ε → ζ → η (ordering load-bearing).
+    # γ → δ → δ-alt → ε → ζ → η → φ (ordering load-bearing).
     _apply_lp_open(event, ctx)
     _apply_lp_close(event, ctx)
     _apply_collect_fees(event, ctx)  # VIB-3494: COLLECT_FEES enrichment
     _apply_swap_fallback(event, ctx)
     _apply_perp(event, ctx)
     _apply_protocol_fees(event, ctx)
+    _apply_lending(event, ctx)  # VIB-4085: lending lifecycle refinement
 
     # ι — VIB-3883: populate value_usd for LP_OPEN so deployed_capital_usd
     # on portfolio_snapshots reflects the deployed position size. Must run
@@ -714,6 +1067,19 @@ def _apply_lp_close_columns(
                 event.tick_upper = tu
             if not event.liquidity and liq is not None:
                 event.liquidity = str(liq)
+            # VIB-4086 — pair tokens are also immutable across the
+            # position lifecycle. Carry them forward so
+            # ``_apply_lp_close_value_usd`` below can resolve decimals
+            # and look up close-time prices, and so the CLOSE row's
+            # token columns are populated for dashboard / Accountant Test
+            # reads. Pre-fix the close row landed with token0='' /
+            # token1='' even though the OPEN had them.
+            t0 = cached.get("token0")
+            t1 = cached.get("token1")
+            if not event.token0 and t0:
+                event.token0 = str(t0)
+            if not event.token1 and t1:
+                event.token1 = str(t1)
     # in_range is unambiguously False post-close (NFT burned / liquidity
     # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
     # ``False`` as "out of range". Either is honest; False is more

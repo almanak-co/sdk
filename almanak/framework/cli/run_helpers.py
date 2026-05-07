@@ -3215,13 +3215,24 @@ def _run_once(  # noqa: C901
             # Phase 2 teardown REPAYs land with no matching BORROW lot and the
             # writer cannot emit interest_delta_usd → L4 Accountant Test fails.
             # Run AFTER setup_gateway_integration so the gRPC channel is up.
-            from ..runner._run_loop_helpers import reconstruct_lending_basis_store
+            from ..runner._run_loop_helpers import (
+                hydrate_recent_open_events_cache,
+                reconstruct_lending_basis_store,
+            )
 
             reconstruct_lending_basis_store(
                 runner,
                 strategy_instance,
                 strategy_instance.strategy_id or strategy_instance.STRATEGY_NAME,
             )
+
+            # VIB-4086 — same cross-process restart hole for the
+            # position_events recent-open cache. Without hydration, the
+            # ``--once --teardown-after`` Phase 2 process closes a position
+            # opened in a prior process with no in-memory bracket /
+            # tokens to carry forward, landing the CLOSE row with empty
+            # token0/token1/value_usd (the LP6 ship gate this PR closes).
+            await hydrate_recent_open_events_cache(runner, strategy_instance)
 
             # VIB-3762: route --once snapshot persistence through the
             # mode-aware wrapper so accounting failures surface the same
@@ -3440,13 +3451,20 @@ def _run_test_lifecycle(  # noqa: C901
             # test-lifecycle path drives multiple force_action iterations + an
             # optional teardown in a single CLI invocation, but the in-memory
             # FIFO store is empty if a previous CLI process opened the borrow.
-            from ..runner._run_loop_helpers import reconstruct_lending_basis_store
+            from ..runner._run_loop_helpers import (
+                hydrate_recent_open_events_cache,
+                reconstruct_lending_basis_store,
+            )
 
             reconstruct_lending_basis_store(
                 runner,
                 strategy_instance,
                 getattr(strategy_instance, "strategy_id", "") or getattr(strategy_instance, "STRATEGY_NAME", "") or "",
             )
+
+            # VIB-4086 — symmetric cache hydration for the test-lifecycle
+            # path. See `_run_once` above for the full rationale.
+            await hydrate_recent_open_events_cache(runner, strategy_instance)
 
             # Single predicate: an action passes iff status is SUCCESS or HOLD.
             # Used identically by per-step failure_logs, fail-fast, and the final

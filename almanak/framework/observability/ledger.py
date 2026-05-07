@@ -456,7 +456,20 @@ def _extract_tx_and_gas(
     tx_hash = ""
     tx_results = getattr(result, "transaction_results", None)
     if tx_results:
-        tx_hash = tx_results[0].tx_hash or ""
+        # VIB-4087 — parent ``transaction_ledger.tx_hash`` MUST point at
+        # the ACTION transaction, not an APPROVAL or INCIDENTAL leg.
+        # Pre-fix the writer always picked tx_results[0], which for a
+        # SUPPLY = approve+supply bundle pointed at the approval — making
+        # the parent tx_hash useless for "what was the action?" audits.
+        # ``_classify_sub_tx_role`` uses the same Approval-event-signature
+        # heuristic ``_build_sub_transactions`` does, so the parent and
+        # the sub_transactions[role=ACTION] entry are guaranteed to agree.
+        action_tx = next(
+            (tr for tr in tx_results if _classify_sub_tx_role(tr) == "ACTION"),
+            None,
+        )
+        chosen = action_tx if action_tx is not None else tx_results[0]
+        tx_hash = chosen.tx_hash or ""
 
     gas_used = getattr(result, "total_gas_used", 0) or 0
 
@@ -498,29 +511,185 @@ def _coalesce_error(success: bool, error: str, result: Any) -> str:
     return error
 
 
+# VIB-4087 — ERC20 Approval event topic (`keccak("Approval(address,address,uint256)")`).
+# A receipt that emits this is an APPROVAL transaction; non-Approval-emitting
+# receipts are classified as ACTION. INCIDENTAL is reserved for future
+# heuristic refinement (e.g. nonce-bump-only transactions).
+_ERC20_APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+
+
+def _classify_sub_tx_role(tx_result: Any) -> str:
+    """VIB-4087 — APPROVAL / ACTION / INCIDENTAL classification.
+
+    Heuristic: a receipt whose logs contain ONLY Approval events is an
+    APPROVAL transaction. A receipt with at least one non-Approval event
+    (Transfer, Mint, Swap, Burn, Supply, Borrow, etc.) is an ACTION.
+    Receipts with no logs default to ACTION (safe default — never
+    silently elevate an unclassified leg to APPROVAL).
+
+    Why "only-Approval" instead of "any-Approval"? ERC20 and ERC721 emit
+    the same canonical ``Approval(address,address,uint256)`` topic
+    (``0x8c5be1e5...``) — the same signature is reused for ERC721's
+    ``Approval(owner, approved, tokenId)``. An LP_OPEN that mints a
+    Uniswap V3 NFT therefore emits an ERC721 Approval as a side-effect
+    of the mint, and the naive "any-Approval-event => APPROVAL" rule
+    misclassified the action transaction as APPROVAL — the very bug
+    that breaks the parent-tx_hash invariant.
+
+    Why event-signature classification (not function-selector)? The
+    TransactionResult envelope carries the receipt + logs but not the
+    original calldata. Function selector lives on the unsigned
+    transaction, which is gone by the time ledger writing runs.
+    """
+    receipt = getattr(tx_result, "receipt", None)
+    logs = []
+    if receipt is not None:
+        # logs may be on the TransactionResult directly or nested on the receipt.
+        receipt_logs = getattr(receipt, "logs", None)
+        if receipt_logs:
+            logs = receipt_logs
+    if not logs:
+        logs = getattr(tx_result, "logs", []) or []
+    if not logs:
+        # No logs at all (e.g. value-transfer or revert handled upstream)
+        # — default to ACTION rather than fabricate APPROVAL.
+        return "ACTION"
+
+    saw_approval = False
+    saw_other = False
+    for log in logs:
+        # log entries are dicts with a "topics" list whose first entry is the event signature.
+        if not isinstance(log, dict):
+            topics = getattr(log, "topics", None) or []
+        else:
+            topics = log.get("topics") or []
+        if not topics:
+            # An event with no topics is technically valid but never an
+            # Approval — count it as "other" to flip the row to ACTION.
+            saw_other = True
+            continue
+        first = topics[0]
+        # Topic values arrive in three shapes across providers:
+        #   * ``HexBytes`` / ``bytes`` — ``.hex()`` returns no leading "0x"
+        #   * ``str`` already prefixed (``"0x..."`` / ``"0X..."``)
+        #   * ``str`` without prefix (some custom RPC clients)
+        # Normalise to a single ``0x...`` lowercase form before comparing,
+        # otherwise either the unprefixed-bytes case or the upper-case-prefix
+        # case slips through and the row gets misclassified as ACTION.
+        first_str = first.hex() if hasattr(first, "hex") else str(first)
+        first_str = first_str.lower()
+        if not first_str.startswith("0x"):
+            first_str = f"0x{first_str}"
+        if first_str == _ERC20_APPROVAL_TOPIC:
+            saw_approval = True
+        else:
+            saw_other = True
+
+    # Only-Approval ⇒ pure ERC20 / ERC721 approve() call ⇒ APPROVAL.
+    # Approval-plus-other or other-only ⇒ ACTION. This correctly classifies:
+    #   - approve(WETH, router) → only Approval ⇒ APPROVAL
+    #   - mint NFT (emits Transfer + Approval(0x0,owner,tokenId)) ⇒ ACTION
+    #   - swap (emits Swap + Approval reset) ⇒ ACTION
+    if saw_approval and not saw_other:
+        return "APPROVAL"
+    return "ACTION"
+
+
+def _function_selector_from_receipt(tx_result: Any) -> str:
+    """Best-effort 4-byte selector. Pre VIB-4087 the selector lived only
+    on the original unsigned-transaction calldata and is not preserved on
+    TransactionResult; until that plumbing lands, we leave it empty. The
+    sub-transactions JSON contract still includes the key so consumers
+    can rely on the shape; readers treat ``""`` as unknown."""
+    return ""
+
+
+def _build_sub_transactions(tx_results: list[Any]) -> list[dict[str, Any]]:
+    """VIB-4087 — build the typed ``sub_transactions`` array.
+
+    See `_classify_sub_tx_role` for the role-detection contract. The
+    returned shape is the contract documented on VIB-4087 and pinned by
+    `accounting_regression_assert.gate_sub_transactions`.
+    """
+    out: list[dict[str, Any]] = []
+    for tr in tx_results:
+        receipt = getattr(tr, "receipt", None)
+        # status: prefer receipt.status (1/0) when present; otherwise infer
+        # from the result's success flag. Both forms map to "success" / "failure".
+        status: str
+        if receipt is not None and getattr(receipt, "status", None) is not None:
+            status = "success" if int(receipt.status) == 1 else "failure"
+        else:
+            status = "success" if getattr(tr, "success", True) else "failure"
+        target_contract = getattr(receipt, "to_address", None) if receipt is not None else None
+        out.append(
+            {
+                "tx_hash": getattr(tr, "tx_hash", "") or "",
+                "target_contract": str(target_contract or ""),
+                "function_selector": _function_selector_from_receipt(tr),
+                "gas_used": getattr(tr, "gas_used", 0) or 0,
+                "status": status,
+                "role": _classify_sub_tx_role(tr),
+            }
+        )
+    return out
+
+
 def _build_extracted_data_json(result: Any) -> str:
     """Phase epsilon -- serialize ``result.extracted_data`` with type tags,
-    and for multi-tx bundles augment the payload with an ``all_tx_results``
-    array capturing every leg's hash/gas/success.
+    and for every result with a transaction list augment the payload with a
+    ``sub_transactions`` array capturing each leg's hash, target, gas,
+    status, and role (APPROVAL / ACTION / INCIDENTAL).
 
     Returns ``""`` when the result lacks extracted_data (attribute absent or
-    dict empty). Single-tx results skip the augmentation branch.
+    dict empty). VIB-4087: the ``sub_transactions`` array is always emitted
+    when the result has at least one transaction — even single-tx results
+    — so consumers can rely on the key existing on every successful row.
+    Pre-fix only multi-tx results were augmented (``all_tx_results``), and
+    operators couldn't tell "single tx" from "missing data."
 
     Defensive ``try/except`` around the augmentation keeps the original
     serialization on any JSON decode failure (today unreachable from prod,
     but the safety net is cheap and matches the pre-refactor contract).
     """
-    if not result or not getattr(result, "extracted_data", None):
+    if not result:
         return ""
 
-    extracted_data_json = serialize_extracted_data(result.extracted_data)
-
+    extracted = getattr(result, "extracted_data", None) or {}
     tx_results = getattr(result, "transaction_results", None) or []
-    if not extracted_data_json or len(tx_results) <= 1:
+
+    # No extracted payload AND no tx receipts → nothing to record.
+    if not extracted and not tx_results:
+        return ""
+
+    extracted_data_json = serialize_extracted_data(extracted) if extracted else ""
+
+    if not tx_results:
+        # No tx receipts (e.g., a value-transfer or compile-failure path that
+        # set extracted_data without executing) — return what we have.
         return extracted_data_json
 
+    # VIB-4087 — always emit sub_transactions when tx_results exist, even on
+    # rows where the connector didn't populate extracted_data. Operators
+    # rely on the key being present to distinguish "single tx" from
+    # "missing data," so a payload-less successful row must still get the
+    # sub_transactions array (otherwise the audit trail loses the
+    # APPROVAL/ACTION/INCIDENTAL leg breakdown for that intent class).
     try:
-        parsed = json.loads(extracted_data_json)
+        parsed = json.loads(extracted_data_json) if extracted_data_json else {}
+    except (json.JSONDecodeError, TypeError):
+        return extracted_data_json  # keep existing serialization on failure
+
+    if not isinstance(parsed, dict):
+        # Defensive: serialize_extracted_data should always produce a dict
+        # but if a stub returned a list/scalar, fall through without
+        # augmentation rather than crashing.
+        return extracted_data_json
+
+    parsed["sub_transactions"] = _build_sub_transactions(tx_results)
+    # Back-compat: keep ``all_tx_results`` for any reader still on the
+    # pre-VIB-4087 schema. Strictly cheaper than coordinating a removal.
+    if len(tx_results) > 1:
         parsed["all_tx_results"] = [
             {
                 "tx_hash": getattr(tr, "tx_hash", "") or "",
@@ -529,9 +698,10 @@ def _build_extracted_data_json(result: Any) -> str:
             }
             for tr in tx_results
         ]
+    try:
         return json.dumps(parsed)
-    except (json.JSONDecodeError, TypeError):
-        return extracted_data_json  # keep existing serialization on failure
+    except (TypeError, ValueError):
+        return extracted_data_json
 
 
 def build_ledger_entry(
@@ -822,6 +992,20 @@ def _reconstruct_dataclass(cls: type, data: dict[str, Any]) -> Any:
                 kwargs[name] = val.lower() in ("true", "1", "yes")
             else:
                 kwargs[name] = bool(val)
+        elif "SlippageSource" in ann:
+            # VIB-4087 — string round-trip back to the StrEnum so consumers
+            # that compare ``swap_amounts.slippage_source == SlippageSource.RECEIPT_DECODED``
+            # see the typed instance, not a bare string.
+            from almanak.framework.execution.extracted_data import SlippageSource
+
+            try:
+                kwargs[name] = SlippageSource(val) if isinstance(val, str) else val
+            except ValueError:
+                # Unknown enum value (older serialised payload, hand-crafted
+                # JSON, etc.) — degrade to NONE rather than raise. The
+                # contract is "slippage_source is always a known value at
+                # read time"; rejecting would break replay of older DBs.
+                kwargs[name] = SlippageSource.NONE
         else:
             kwargs[name] = val
 

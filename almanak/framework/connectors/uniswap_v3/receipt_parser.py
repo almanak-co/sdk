@@ -1300,6 +1300,16 @@ class UniswapV3ReceiptParser:
                 realized_slippage = (expected_out - sr.amount_out_decimal) / expected_out
                 slippage_bps = int(realized_slippage * Decimal(10_000))
 
+            # VIB-4087 — slippage_bps came from on-chain Swap event log
+            # decoding (parse_receipt) plus, optionally, the compiler-supplied
+            # ``expected_out`` for realized-slippage refinement. Both branches
+            # are RECEIPT_DECODED. ``NONE`` only applies when the parser
+            # could not extract a swap event at all (caught by the early
+            # return above).
+            from almanak.framework.execution.extracted_data import SlippageSource
+
+            slippage_source = SlippageSource.RECEIPT_DECODED if slippage_bps is not None else SlippageSource.NONE
+
             return SwapAmounts(
                 amount_in=sr.amount_in,
                 amount_out=sr.amount_out,
@@ -1310,6 +1320,7 @@ class UniswapV3ReceiptParser:
                 expected_out_decimal=expected_out,
                 token_in=sr.token_in_symbol or sr.token_in,
                 token_out=sr.token_out_symbol or sr.token_out,
+                slippage_source=slippage_source,
             )
 
         except Exception as e:

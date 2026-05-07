@@ -1181,9 +1181,18 @@ class TestMultiTxBundle:
         parsed = json.loads(entry.extracted_data_json)
         assert "all_tx_results" not in parsed
 
-    def test_multi_tx_without_extracted_data_does_not_synthesize_json(self):
-        """If extracted_data is empty, `extracted_data_json` is ""; the
-        multi-tx augmentation branch is gated on a truthy json string.
+    def test_multi_tx_without_extracted_data_still_emits_sub_transactions(self):
+        """VIB-4087 / CodeRabbit follow-up — when ``extracted_data`` is empty
+        but ``transaction_results`` exist, the row must still carry the
+        ``sub_transactions`` array so the APPROVAL / ACTION / INCIDENTAL
+        leg breakdown survives for connectors that don't emit a typed
+        payload. Pre-fix this returned ``""`` and the audit trail for
+        such intents was lost.
+
+        Operators previously distinguished "single tx" from "missing
+        data" by an empty ``extracted_data_json``; that distinction now
+        moves to ``json_extract(extracted_data_json, '$.sub_transactions')``
+        — present when tx_results exist, absent otherwise.
         """
         result = SimpleNamespace(
             swap_amounts=None,
@@ -1192,6 +1201,25 @@ class TestMultiTxBundle:
                 _make_tx_result("0xb"),
             ],
             total_gas_used=200,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent("SWAP")
+        entry = build_ledger_entry(strategy_id="s", cycle_id="c", intent=intent, result=result)
+        assert entry.extracted_data_json != ""
+        parsed = json.loads(entry.extracted_data_json)
+        assert "sub_transactions" in parsed
+        assert len(parsed["sub_transactions"]) == 2
+        assert parsed["sub_transactions"][0]["tx_hash"] == "0xa"
+        assert parsed["sub_transactions"][1]["tx_hash"] == "0xb"
+
+    def test_no_tx_results_and_no_extracted_data_returns_empty(self):
+        """The empty-empty case stays empty — neither receipts nor a parsed
+        payload exist, so there's no audit content to record."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
             gas_cost_usd=None,
             extracted_data={},
         )

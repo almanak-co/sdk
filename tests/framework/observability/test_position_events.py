@@ -99,24 +99,41 @@ class TestBuildPositionEvent:
         )
         assert event is None
 
-    def test_supply_produces_no_event(self):
+    def test_supply_produces_lending_collateral_event(self):
+        """VIB-4085 — SUPPLY now emits a LENDING_COLLATERAL position event.
+        Pre-fix this returned None (lending was explicitly excluded)."""
         intent = MockIntent("SUPPLY")
+        # MockResult doesn't carry lending extracted_data; the event is
+        # still emitted with position_id derived from chain+protocol+
+        # wallet+asset. Without ``extracted`` the helper short-circuits
+        # only for non-lending intents.
         result = MockResult()
         event = build_position_event_from_intent(
             deployment_id="strat:abc",
             intent=intent,
             result=result,
+            chain="arbitrum",
+            wallet_address="0xtestwallet",
+            post_state={"collateral_value_usd": "1.0", "debt_value_usd": "0"},
         )
-        assert event is None
+        assert event is not None
+        assert event.position_type == "LENDING_COLLATERAL"
+        assert event.event_type == "OPEN"
 
-    def test_borrow_produces_no_event(self):
+    def test_borrow_produces_lending_debt_event(self):
+        """VIB-4085 — BORROW emits a LENDING_DEBT position event."""
         intent = MockIntent("BORROW")
         event = build_position_event_from_intent(
             deployment_id="strat:abc",
             intent=intent,
             result=MockResult(),
+            chain="arbitrum",
+            wallet_address="0xtestwallet",
+            post_state={"collateral_value_usd": "1.0", "debt_value_usd": "0.5"},
         )
-        assert event is None
+        assert event is not None
+        assert event.position_type == "LENDING_DEBT"
+        assert event.event_type == "OPEN"
 
     def test_no_event_when_position_id_empty(self):
         """LP_OPEN with no position_id resolved returns None (guard)."""
@@ -212,8 +229,17 @@ class TestIntentToEventMapping:
         assert "PERP_OPEN" in INTENT_TO_EVENT_TYPE
         assert "PERP_CLOSE" in INTENT_TO_EVENT_TYPE
 
-    def test_fungible_intents_not_mapped(self):
-        for intent_type in ("SWAP", "SUPPLY", "WITHDRAW", "BORROW", "REPAY", "STAKE", "UNSTAKE", "HOLD"):
+    def test_lending_intents_mapped(self):
+        """VIB-4085 — SUPPLY/BORROW/REPAY/WITHDRAW/DELEVERAGE are now
+        mapped (previously the intent map was LP+PERP only)."""
+        for intent_type in ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DELEVERAGE"):
+            assert intent_type in INTENT_TO_EVENT_TYPE
+
+    def test_non_position_intents_not_mapped(self):
+        """SWAP / STAKE / UNSTAKE / HOLD remain excluded — generic swaps
+        and staking are not lifecycle-tracked here. Spot/SWAP lifecycle
+        is parked under VIB-4088 pending design alignment."""
+        for intent_type in ("SWAP", "STAKE", "UNSTAKE", "HOLD"):
             assert intent_type not in INTENT_TO_EVENT_TYPE
 
 
@@ -954,16 +980,18 @@ class TestLPOpenLPCloseCoexistence:
 
 
 class TestIntentDispatch:
-    """Phase α — INTENT_TO_EVENT_TYPE dispatch (all non-LP/non-PERP → None)."""
+    """Phase α — INTENT_TO_EVENT_TYPE dispatch.
+
+    Non-position-tracked intents (SWAP, STAKE, UNSTAKE, HOLD, BRIDGE,
+    UNWRAP, unregistered) → None. Lending intents (SUPPLY/BORROW/REPAY/
+    WITHDRAW/DELEVERAGE) DO produce events as of VIB-4085 — see
+    ``test_position_events_lending_vib4085.py`` for that contract.
+    """
 
     @pytest.mark.parametrize(
         "intent_type",
         [
             "SWAP",
-            "SUPPLY",
-            "WITHDRAW",
-            "BORROW",
-            "REPAY",
             "STAKE",
             "UNSTAKE",
             "HOLD",

@@ -1832,6 +1832,17 @@ class PortfolioValuer:
         # bypass value().
         events = self._events_for_position_key(position_key)
         if not events:
+            # VIB-4085 / VIB-3917 — accounting_events lookup may miss when
+            # the BORROW just landed and the outbox processor hasn't
+            # flushed it to the table yet (snapshot fires same iteration
+            # as the BORROW write). Fall back to the in-memory
+            # ``_recent_open_events`` cache populated synchronously by
+            # ``save_position_event`` (Layer 3 is wired without an
+            # outbox). Without this, the snapshot row carries
+            # ``value_confidence=HIGH`` AND a synthesised position with
+            # ``cost_basis_usd=null`` — exactly the contract VIB-3917 G6
+            # forbids.
+            self._enrich_lending_pnl_from_open_event(position_value, position_info, chain)
             return
 
         # P2 fix: filter events to those relevant for this position side so that a
@@ -1865,6 +1876,95 @@ class PortfolioValuer:
         position_value.entry_timestamp = pnl.entry_timestamp
         position_value.last_update_timestamp = pnl.latest_timestamp
         position_value.ledger_entry_id = pnl.latest_ledger_entry_id
+
+    @staticmethod
+    def _resolve_lending_wallet_and_asset(position_info: "PositionInfo") -> tuple[str, str]:
+        """Pluck the lending wallet/asset out of details, tolerant to the
+        three legacy field names (wallet / wallet_address / owner)."""
+        details = position_info.details
+        wallet = details.get("wallet") or details.get("wallet_address") or details.get("owner") or ""
+        asset = details.get("asset") or ""
+        return wallet, asset
+
+    def _lookup_open_event_cost_basis(
+        self,
+        position_id: str,
+        position_type_str: str,
+    ) -> tuple[Decimal, dict] | None:
+        """Read the OPEN event from ``_recent_open_events`` and parse its
+        ``value_usd`` into a positive Decimal. Returns ``None`` for any
+        miss (no cache, no entry, unparseable value, non-positive)."""
+        cache = getattr(self, "_recent_open_events", None) or {}
+        cached = cache.get((position_id, position_type_str))
+        if cached is None:
+            return None
+        try:
+            cost_basis = Decimal(str(cached.get("value_usd") or "0"))
+        except Exception:  # noqa: BLE001
+            return None
+        if cost_basis <= Decimal("0"):
+            return None
+        return cost_basis, cached
+
+    def _enrich_lending_pnl_from_open_event(
+        self,
+        position_value: PositionValue,
+        position_info: "PositionInfo",
+        chain: str,
+    ) -> None:
+        """VIB-4085 / VIB-3917 — same-iteration fallback for lending cost
+        basis when the accounting_events outbox hasn't flushed yet.
+
+        Layer 5 (``accounting_events``) writes go through the outbox +
+        async processor (VIB-3467); Layer 3 (``position_events``) writes
+        are synchronous. So when a snapshot fires in the same iteration
+        as a SUPPLY/BORROW, the position_events OPEN row is on disk and
+        the runner's ``_recent_open_events`` cache has it, but the
+        accounting_events row doesn't exist yet. Reading
+        ``value_usd`` off the OPEN event is exactly the cost-basis
+        semantics the SUPPLY/BORROW principal carries: USD value of the
+        capital deployed at the moment the position opened.
+
+        The accounting_events path remains preferred because it carries
+        the principal/interest split that ``compute_position_pnl``
+        derives. This fallback only runs when that path returns no
+        events at all.
+        """
+        from almanak.framework.observability.position_events import lending_position_id
+        from almanak.framework.teardown.models import PositionType
+
+        wallet, asset = self._resolve_lending_wallet_and_asset(position_info)
+        if not wallet or not asset or not chain:
+            return
+
+        position_id = lending_position_id(
+            chain=chain,
+            protocol=position_info.protocol or "",
+            wallet=wallet,
+            asset=asset,
+        )
+        is_debt = position_info.position_type == PositionType.BORROW
+        position_type_str = "LENDING_DEBT" if is_debt else "LENDING_COLLATERAL"
+
+        lookup = self._lookup_open_event_cost_basis(position_id, position_type_str)
+        if lookup is None:
+            return
+        cost_basis, cached = lookup
+
+        position_value.cost_basis_usd = cost_basis
+        # BORROW is a liability (value_usd negative), SUPPLY is an asset —
+        # signage mirrors _enrich_lending_pnl.
+        if is_debt:
+            position_value.unrealized_pnl_usd = position_value.value_usd + cost_basis
+        else:
+            position_value.unrealized_pnl_usd = position_value.value_usd - cost_basis
+
+        ts = cached.get("timestamp") or ""
+        if isinstance(ts, str):
+            position_value.entry_timestamp = ts
+        ledger_id = cached.get("ledger_entry_id") or ""
+        if ledger_id:
+            position_value.ledger_entry_id = ledger_id
 
     def _enrich_lp_pnl(
         self,

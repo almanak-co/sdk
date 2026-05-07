@@ -17,7 +17,29 @@ Example:
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
+
+
+class SlippageSource(StrEnum):
+    """VIB-4087 — provenance of a ``slippage_bps`` value.
+
+    A bare integer is ambiguous: a 0-bps reading from on-chain log
+    decoding (RECEIPT_DECODED) is not the same as a 0-bps reading from
+    a pre/post wallet-balance reconciliation (BALANCE_DELTA), and
+    neither is the same as "no source" (NONE — slippage is undefined,
+    not zero). Persisting the source alongside the value lets
+    downstream consumers (Accountant Test, dashboard, audit) treat each
+    case correctly.
+
+    Receipt parsers MUST stamp this whenever they emit ``slippage_bps``.
+    Parsers that genuinely cannot measure slippage emit ``slippage_bps``
+    of None and ``slippage_source = NONE``.
+    """
+
+    RECEIPT_DECODED = "RECEIPT_DECODED"
+    BALANCE_DELTA = "BALANCE_DELTA"
+    NONE = "NONE"
 
 
 @dataclass(frozen=True)
@@ -80,6 +102,13 @@ class SwapAmounts:
     token_out: str | None = None
     amount_in_decimal_resolved: bool = True
     amount_out_decimal_resolved: bool = True
+    # VIB-4087 — provenance of ``slippage_bps``. Defaults to NONE so a
+    # parser that emits SwapAmounts without explicitly stamping the
+    # source produces a self-describing ``slippage_source=NONE`` row
+    # rather than a silently-misleading 0-bps reading. Connectors must
+    # set this to RECEIPT_DECODED or BALANCE_DELTA when they have a
+    # measured value.
+    slippage_source: SlippageSource = SlippageSource.NONE
 
     # Aliases: amount_in_human / amount_out_human (VIB-295)
     # Strategy authors naturally reach for _human instead of _decimal.
@@ -99,6 +128,12 @@ class SwapAmounts:
             "amount_out_decimal": str(self.amount_out_decimal) if self.amount_out_decimal is not None else None,
             "effective_price": str(self.effective_price) if self.effective_price is not None else None,
             "slippage_bps": self.slippage_bps,
+            # VIB-4087 — slippage_source provenance. ``slippage_bps`` value alone
+            # is ambiguous: receipt-decoded vs balance-delta-fallback vs none-
+            # available all read identically as integers. Persisting the source
+            # alongside the value lets downstream consumers (Accountant Test,
+            # dashboard, audit) treat each case correctly.
+            "slippage_source": str(self.slippage_source),
             "expected_out_decimal": str(self.expected_out_decimal) if self.expected_out_decimal is not None else None,
             "token_in": self.token_in,
             "token_out": self.token_out,
@@ -759,6 +794,7 @@ class ProtocolFees:
 # =============================================================================
 
 __all__ = [
+    "SlippageSource",
     "SwapAmounts",
     "LPCloseData",
     "LPOpenData",

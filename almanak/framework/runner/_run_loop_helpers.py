@@ -109,6 +109,103 @@ def reconstruct_lending_basis_store(
         return 0
 
 
+def _open_event_payload(ev: dict) -> dict:
+    """Project a position_events row into the runner's cache shape."""
+    return {
+        "value_usd": str(ev.get("value_usd") or ""),
+        "ledger_entry_id": str(ev.get("ledger_entry_id") or ""),
+        "timestamp": str(ev.get("timestamp") or ""),
+        "tick_lower": ev.get("tick_lower"),
+        "tick_upper": ev.get("tick_upper"),
+        "liquidity": str(ev.get("liquidity") or ""),
+        "token0": str(ev.get("token0") or ""),
+        "token1": str(ev.get("token1") or ""),
+    }
+
+
+def _collect_open_positions(
+    events: list[dict],
+) -> dict[tuple[str, str], dict]:
+    """Group ``position_events`` rows into the still-open set.
+
+    A position is "still open" when its most-recent event is NOT a CLOSE.
+    Events arrive timestamp-ASC, so later rows correctly overwrite earlier
+    ones for the same key.
+    """
+    by_position: dict[tuple[str, str], dict] = {}
+    for ev in events:
+        pid = str(ev.get("position_id") or "")
+        ptype = str(ev.get("position_type") or "")
+        if not pid or not ptype:
+            continue
+        key = (pid, ptype)
+        et = str(ev.get("event_type") or "").upper()
+        if et == "CLOSE":
+            by_position.pop(key, None)
+        elif et == "OPEN":
+            by_position[key] = _open_event_payload(ev)
+    return by_position
+
+
+async def hydrate_recent_open_events_cache(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+) -> int:
+    """VIB-4086 / VIB-4085 — pre-populate ``runner._recent_open_events`` from disk.
+
+    The cache is the authority for two lifecycle decisions made at write time:
+
+    * LP_CLOSE column carry-forward (VIB-3919 / VIB-4086): tick_lower /
+      tick_upper / liquidity / token0 / token1 are immutable across the
+      position lifetime; the close-receipt parser doesn't re-emit them, so
+      the runner reads them from this cache when building the CLOSE event.
+    * Lending OPEN-vs-INCREASE (VIB-4085): a SUPPLY/BORROW emits OPEN on
+      cache miss and INCREASE on cache hit.
+
+    Without this hydration, a fresh process that closes a position opened
+    by a prior process (operator restart mid-strategy, the harness's
+    ``--once --teardown-after`` two-phase invocation, hosted scheduler
+    restart, etc.) lands the CLOSE row with empty token columns and
+    misclassifies a 2nd SUPPLY post-restart as an unrelated OPEN.
+
+    Returns the number of cache entries populated. Non-fatal: any error
+    is logged at WARN and the runner continues with an empty cache —
+    in-process flows still work, only cross-process continuity degrades.
+    """
+    state_manager = getattr(runner, "state_manager", None)
+    if state_manager is None or not hasattr(state_manager, "get_position_events_sync"):
+        # GatewayStateManager (hosted) doesn't expose the sync getter.
+        # Hosted mode runs without restart-mid-position semantics today
+        # (VIB-3866 truth correction §15a.3), so this is acceptable.
+        return 0
+
+    deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+    if not deployment_id:
+        return 0
+
+    try:
+        all_events = state_manager.get_position_events_sync(deployment_id)
+    except Exception as e:  # noqa: BLE001 — best-effort startup hydration
+        logger.warning("Failed to hydrate recent_open_events cache: %s", e)
+        return 0
+
+    if not all_events:
+        return 0
+
+    by_position = _collect_open_positions(all_events)
+    for key, payload in by_position.items():
+        runner._recent_open_events[key] = payload
+    populated = len(by_position)
+
+    if populated:
+        logger.info(
+            "Hydrated %d open position(s) into recent_open_events cache for %s",
+            populated,
+            deployment_id,
+        )
+    return populated
+
+
 # =============================================================================
 # Pre-loop initialization
 # =============================================================================
@@ -150,6 +247,19 @@ async def initialize_run_loop(  # noqa: C901
     # which bypass run_loop entirely, can reuse the same rebuild step.
     if state_manager_ready:
         reconstruct_lending_basis_store(runner, strategy, strategy_id)
+
+    # VIB-4086 — hydrate the runner's ``_recent_open_events`` cache from
+    # disk so a process-restart between OPEN and CLOSE preserves
+    # lifecycle continuity. Without this, an LP_OPEN written in process A
+    # then closed in process B (the canonical operator-restart-mid-
+    # position scenario AND the harness's ``--once`` pattern) lands the
+    # CLOSE row with empty token0/token1/value_usd — the carry-forward
+    # path in ``_apply_lp_close_columns`` has no in-memory bracket to
+    # carry forward. Shared with VIB-4085's lending lifecycle: a SUPPLY
+    # after a process restart correctly emits INCREASE rather than a
+    # second OPEN when the prior open leg is on disk.
+    if state_manager_ready:
+        await hydrate_recent_open_events_cache(runner, strategy)
 
     # VIB-3467: drain pending/failed outbox rows from the previous run.
     if runner.config.enable_state_persistence and state_manager_ready:

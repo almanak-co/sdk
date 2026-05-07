@@ -216,3 +216,129 @@ def test_runner_cache_updates_on_open_and_close():
     )
     runner._update_recent_open_events_cache(close_event)
     assert ("5464283", "LP") not in runner._recent_open_events
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-4086 — token0/token1 carry-forward across the LP lifecycle
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_runner_cache_stamps_tokens_on_open():
+    """OPEN events stamp ``token0`` / ``token1`` into the cache so the
+    matching LP_CLOSE row can carry them forward when the close-receipt
+    parser doesn't re-emit the pair."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._recent_open_events = {}
+
+    open_event = SimpleNamespace(
+        event_type="OPEN",
+        position_id="5471740",
+        position_type="LP",
+        value_usd="1873.66",
+        ledger_entry_id="ledger-1",
+        timestamp="2026-05-04T00:00:00Z",
+        tick_lower=-204000,
+        tick_upper=-203000,
+        liquidity="123456789",
+        token0="WETH",
+        token1="USDC",
+    )
+    runner._update_recent_open_events_cache(open_event)
+
+    cached = runner._recent_open_events[("5471740", "LP")]
+    assert cached["token0"] == "WETH"
+    assert cached["token1"] == "USDC"
+
+
+def test_lp_close_columns_carry_forward_tokens_from_cache():
+    """``_apply_lp_close_columns`` populates ``event.token0/token1`` from
+    the ``recent_open_events`` cache when the CLOSE receipt parser
+    doesn't carry them. Pre-VIB-4086 the CLOSE row landed with token
+    columns empty even though the OPEN had them — breaking
+    ``_apply_lp_close_value_usd`` (which gates on
+    ``token0 and token1``) and the dashboard's lifecycle render.
+    """
+    from almanak.framework.observability.position_events import (
+        IntentEventContext,
+        PositionEvent,
+        _apply_lp_close_columns,
+    )
+
+    event = PositionEvent(
+        deployment_id="dep-1",
+        position_id="5471740",
+        position_type="LP",
+        event_type="CLOSE",
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        amount0="373299496677784068",
+        amount1="988019899",
+    )
+    ctx = IntentEventContext(
+        intent=SimpleNamespace(),
+        result=None,
+        extracted={},
+        deployment_id="dep-1",
+        chain="arbitrum",
+        ledger_entry_id="ledger-2",
+        price_oracle=None,
+    )
+    cache = {
+        ("5471740", "LP"): {
+            "value_usd": "1873.66",
+            "ledger_entry_id": "ledger-1",
+            "timestamp": "2026-05-04T00:00:00Z",
+            "tick_lower": -204000,
+            "tick_upper": -203000,
+            "liquidity": "1000",
+            "token0": "WETH",
+            "token1": "USDC",
+        }
+    }
+
+    _apply_lp_close_columns(event, ctx, cache, price_oracle=None)
+
+    assert event.token0 == "WETH", "CLOSE event must carry token0 forward from OPEN cache"
+    assert event.token1 == "USDC", "CLOSE event must carry token1 forward from OPEN cache"
+    # bracket carry-forward (VIB-3919) still works
+    assert event.tick_lower == -204000
+    assert event.tick_upper == -203000
+
+
+def test_lp_close_does_not_overwrite_existing_tokens():
+    """If the CLOSE receipt parser DOES emit token0/token1, the carry-
+    forward must not clobber them. The existing-value guard (``not
+    event.token0``) lets the receipt-parser-supplied values win."""
+    from almanak.framework.observability.position_events import (
+        IntentEventContext,
+        PositionEvent,
+        _apply_lp_close_columns,
+    )
+
+    event = PositionEvent(
+        deployment_id="dep-1",
+        position_id="5471740",
+        position_type="LP",
+        event_type="CLOSE",
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        token0="RECEIPT_TOKEN0",
+        token1="RECEIPT_TOKEN1",
+    )
+    ctx = IntentEventContext(
+        intent=SimpleNamespace(),
+        result=None,
+        extracted={},
+        deployment_id="dep-1",
+        chain="arbitrum",
+        ledger_entry_id="ledger-2",
+        price_oracle=None,
+    )
+    cache = {("5471740", "LP"): {"token0": "CACHE_TOKEN0", "token1": "CACHE_TOKEN1"}}
+
+    _apply_lp_close_columns(event, ctx, cache, price_oracle=None)
+
+    assert event.token0 == "RECEIPT_TOKEN0"
+    assert event.token1 == "RECEIPT_TOKEN1"
