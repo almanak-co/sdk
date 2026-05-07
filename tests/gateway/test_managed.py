@@ -917,3 +917,89 @@ class TestAnvilFundingDefaultNativeGas:
         mock_manager.fund_wallet.assert_awaited_once()
         funded_amount = mock_manager.fund_wallet.await_args.args[1]
         assert funded_amount == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
+
+
+class TestAnvilFundingPrivateKeyResolution:
+    """Wallet-address resolution in ``_fund_anvil_wallets``: env > settings >
+    skip. Regression: ``almanak strat test`` plumbs ANVIL_DEFAULT_PRIVATE_KEY
+    via ``GatewaySettings.private_key`` (#1975 path through #2100), but the
+    funding code originally only read ``os.environ`` — so the test-only key
+    reached the signer but not the funder, and every test run silently
+    skipped Anvil funding.
+    """
+
+    ANVIL_DEFAULT_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # gitleaks:allow
+    ANVIL_DEFAULT_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    OTHER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"  # gitleaks:allow
+    OTHER_ADDRESS = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+    def _make_gateway(self, *, settings_private_key: str | None) -> "ManagedGateway":
+        settings = GatewaySettings(
+            host="127.0.0.1",
+            port=59990,
+            rpc_url="http://localhost:8545",
+            chain="base",
+            private_key=settings_private_key,
+        )
+        # No explicit ``wallet_address`` — exercise the fallback path.
+        return ManagedGateway(settings, anvil_chains=["base"], anvil_funding={"ETH": 10})
+
+    @pytest.mark.asyncio
+    async def test_settings_private_key_used_when_env_unset(self, monkeypatch):
+        """``strat test`` path: env empty, settings carries the Anvil default."""
+        monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
+        gw = self._make_gateway(settings_private_key=self.ANVIL_DEFAULT_KEY)
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["base"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        # Funding must have run against the Anvil-default address derived from
+        # ``settings.private_key``. Without the settings consult, this test
+        # would observe ``fund_wallet`` never awaited and a "skipping Anvil
+        # funding" warning instead.
+        mock_manager.fund_wallet.assert_awaited_once()
+        assert mock_manager.fund_wallet.await_args.args[0] == self.ANVIL_DEFAULT_ADDRESS
+
+    @pytest.mark.asyncio
+    async def test_env_wins_over_settings(self, monkeypatch):
+        """Explicit env export at funding time overrides the cached settings
+        value — preserves the historical env-wins-at-funding semantic so a
+        human override remains a hard override."""
+        monkeypatch.setenv("ALMANAK_PRIVATE_KEY", self.OTHER_KEY)
+        gw = self._make_gateway(settings_private_key=self.ANVIL_DEFAULT_KEY)
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["base"] = mock_manager
+
+        await gw._fund_anvil_wallets()
+
+        mock_manager.fund_wallet.assert_awaited_once()
+        assert mock_manager.fund_wallet.await_args.args[0] == self.OTHER_ADDRESS
+
+    @pytest.mark.asyncio
+    async def test_skip_when_neither_env_nor_settings_has_key(self, monkeypatch):
+        """Neither env nor settings → keep the existing skip-with-warning
+        behaviour. No silent funding of an arbitrary address."""
+        monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
+        gw = self._make_gateway(settings_private_key=None)
+
+        mock_manager = AsyncMock()
+        mock_manager.fund_wallet = AsyncMock()
+        mock_manager.fund_tokens = AsyncMock()
+        gw._anvil_managers["base"] = mock_manager
+
+        with patch("almanak.gateway.managed.logger") as mock_logger:
+            await gw._fund_anvil_wallets()
+
+        mock_manager.fund_wallet.assert_not_called()
+        mock_manager.fund_tokens.assert_not_called()
+        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+        assert any("skipping Anvil funding" in w for w in warning_calls), (
+            f"Expected the skip-funding warning, got: {warning_calls}"
+        )

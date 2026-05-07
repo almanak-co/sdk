@@ -397,10 +397,21 @@ class ManagedGateway:
                     re-funding after a watchdog restart to avoid resetting
                     paper-trading state on healthy forks.
         """
-        # Determine wallet address
+        # Determine wallet address. Resolution order:
+        #   1. Caller-set ``self._wallet_address`` (e.g. ``--wallet isolated``).
+        #   2. ``ALMANAK_PRIVATE_KEY`` env var — preserves the historical
+        #      env-wins-at-funding-time semantic so an explicit export remains
+        #      a hard override.
+        #   3. ``self.settings.private_key`` — the typed gateway config,
+        #      populated by ``_build_gateway_settings`` from the
+        #      ``runtime_private_key`` kwarg / ``_runtime_private_key_override``
+        #      ContextVar. This is the channel ``almanak strat test`` uses to
+        #      plumb ANVIL_DEFAULT_PRIVATE_KEY when env is unset (#1975); without
+        #      consulting it here the test-only key reaches the signer but not
+        #      the funding code, and Anvil funding silently skips every wallet.
         wallet = self._wallet_address
         if not wallet:
-            pk = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+            pk = os.environ.get("ALMANAK_PRIVATE_KEY", "") or (getattr(self.settings, "private_key", None) or "")
             if not pk:
                 logger.warning("No wallet address or ALMANAK_PRIVATE_KEY set -- skipping Anvil funding")
                 return
