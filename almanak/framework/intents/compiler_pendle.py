@@ -48,7 +48,485 @@ def _resolve_pt_from_yt(adapter: Any, yt_address: str) -> str | None:
         return None
 
 
-def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
+def _failed(intent_id: str, error: str) -> CompilationResult:
+    """Build a FAILED CompilationResult with the given error message."""
+    return CompilationResult(status=CompilationStatus.FAILED, error=error, intent_id=intent_id)
+
+
+def _resolve_pendle_from_token(compiler, intent: SwapIntent) -> TokenInfo | None:
+    """Resolve the SWAP from_token, falling back to PT/YT static info dicts.
+
+    Returns ``None`` when the token cannot be resolved by any path.
+    """
+    from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
+
+    from_token = compiler._resolve_token(intent.from_token)
+    if from_token is not None:
+        return from_token
+
+    from_token_name = intent.from_token.upper()
+    if from_token_name.startswith("PT-"):
+        pt_info = PT_TOKEN_INFO.get(compiler.chain, {})
+        pt_data = pt_info.get(from_token_name) or pt_info.get(intent.from_token)
+        if pt_data:
+            pt_address, pt_decimals = pt_data
+            return TokenInfo(symbol=intent.from_token, address=pt_address, decimals=pt_decimals, is_native=False)
+    elif from_token_name.startswith("YT-"):
+        yt_info = YT_TOKEN_INFO.get(compiler.chain, {})
+        yt_data = yt_info.get(from_token_name) or yt_info.get(intent.from_token)
+        if yt_data:
+            yt_address, yt_decimals = yt_data
+            return TokenInfo(symbol=intent.from_token, address=yt_address, decimals=yt_decimals, is_native=False)
+    return None
+
+
+def _compute_pendle_amount_in(intent: SwapIntent, compiler, from_token: TokenInfo) -> int | CompilationResult:
+    """Convert intent amount/amount_usd to a wei integer; return FAILED result on error."""
+    if intent.amount_usd is not None:
+        return compiler._usd_to_token_amount(intent.amount_usd, from_token)
+    if intent.amount is not None:
+        if intent.amount == "all":
+            return _failed(
+                intent.intent_id,
+                "amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
+            )
+        amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
+        return int(amount_decimal * Decimal(10**from_token.decimals))
+    return _failed(intent.intent_id, "Either amount_usd or amount must be provided")
+
+
+def _resolve_pendle_adapter_inputs(compiler, intent_id: str) -> tuple[Any, str | None] | CompilationResult:
+    """Pick gateway_client + rpc_url for the Pendle adapter.
+
+    Pendle adapter accepts either a connected gateway_client (production path) or an RPC URL
+    (local/backtest fallback). A disconnected gateway_client is normalized to None.
+    """
+    gateway_client = compiler._gateway_client
+    if gateway_client is not None and not gateway_client.is_connected:
+        gateway_client = None
+
+    rpc_url = None if gateway_client is not None else compiler._get_chain_rpc_url()
+    if gateway_client is None and not rpc_url:
+        return _failed(
+            intent_id,
+            f"Pendle requires either a connected gateway_client or an RPC URL "
+            f"for {compiler.chain}. Configure gateway client or provide rpc_url.",
+        )
+    return gateway_client, rpc_url
+
+
+def _classify_pendle_swap_type(intent: SwapIntent) -> tuple[str, str] | CompilationResult:
+    """Return (swap_type, side) where side is one of {buying_pt, selling_pt, buying_yt, selling_yt}."""
+    to_name = intent.to_token.upper()
+    from_name = intent.from_token.upper()
+
+    flags = {
+        "buying_pt": to_name.startswith("PT-"),
+        "selling_pt": from_name.startswith("PT-"),
+        "buying_yt": to_name.startswith("YT-"),
+        "selling_yt": from_name.startswith("YT-"),
+    }
+    if sum(flags.values()) > 1:
+        return _failed(intent.intent_id, "Pendle swaps do not support direct PT/YT to PT/YT transfers")
+
+    if flags["buying_pt"]:
+        return "token_to_pt", "buying_pt"
+    if flags["selling_pt"]:
+        return "pt_to_token", "selling_pt"
+    if flags["buying_yt"]:
+        return "token_to_yt", "buying_yt"
+    if flags["selling_yt"]:
+        return "yt_to_token", "selling_yt"
+    return _failed(
+        intent.intent_id,
+        "Pendle swaps require either from_token or to_token to be a PT or YT token (e.g., PT-wstETH, YT-wstETH)",
+    )
+
+
+def _resolve_pendle_market(intent: SwapIntent, compiler, side: str) -> str | CompilationResult:
+    """Look up the Pendle market address for the given swap side."""
+    from almanak.framework.connectors.pendle.sdk import MARKET_BY_PT_TOKEN, MARKET_BY_YT_TOKEN
+
+    is_pt = side in ("buying_pt", "selling_pt")
+    is_buy = side in ("buying_pt", "buying_yt")
+    token_name = (intent.to_token if is_buy else intent.from_token).upper()
+    markets = (MARKET_BY_PT_TOKEN if is_pt else MARKET_BY_YT_TOKEN).get(compiler.chain, {})
+    market = markets.get(token_name) or markets.get(token_name.upper())
+    if market:
+        return market
+    label = "PT" if is_pt else "YT"
+    return _failed(
+        intent.intent_id,
+        f"No Pendle market found for {token_name} on {compiler.chain}. "
+        f"Available {label} tokens: {', '.join(sorted(markets.keys()))}",
+    )
+
+
+def _compute_pendle_min_out(
+    swap_type: str, amount_in: int, slippage_bps: int, post_preswap: bool = False
+) -> tuple[int, str]:
+    """Compute (min_amount_out, estimation_method) for the Pendle step.
+
+    The Pendle SDK methods apply slippage_bps internally on top of min_amount_out;
+    do NOT pre-apply slippage here (VIB-576).
+
+    BUY (token_to_pt/yt): PT/YT is cheaper than the underlying so a 1:1 estimate is a safe minimum.
+    SELL (pt_to_token): PT trades at a discount; use a 50% floor (VIB-1366).
+    SELL (yt_to_token): YT decays toward zero near expiry. Scale the floor by slippage so
+        TeardownManager escalation can actually widen tolerance (VIB-2174):
+        - <500bps: 1% floor
+        - >=500bps: 1 wei floor (SDK's slippage_bps is the only protection).
+    """
+    suffix = ", post-pre-swap" if post_preswap else ""
+    if swap_type == "yt_to_token":
+        if slippage_bps >= 500:
+            return 1, f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry{suffix})"
+        return amount_in // 100, f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps{suffix})"
+    if swap_type == "pt_to_token":
+        return amount_in // 2, f"50% floor (PT discount safe{suffix})"
+    return amount_in, f"1:1 estimate (BUY direction{suffix})"
+
+
+def _select_v3_pre_swap_router(compiler) -> tuple[str | None, str | None]:
+    """Return (protocol_key, router_address) of a V3-compatible DEX on this chain, or (None, None)."""
+    from almanak.framework.connectors.protocol_aliases import is_uniswap_v3_fork
+
+    chain_routers = compiler_constants.PROTOCOL_ROUTERS.get(compiler.chain, {})
+    # Prefer compiler.default_protocol if it's a V3 fork on this chain
+    if compiler.default_protocol in chain_routers and is_uniswap_v3_fork(compiler.default_protocol):
+        return compiler.default_protocol, chain_routers[compiler.default_protocol]
+    for proto_key, router_addr in chain_routers.items():
+        if is_uniswap_v3_fork(proto_key):
+            return proto_key, router_addr
+    return None, None
+
+
+def _estimate_pre_swap_output(compiler, amount_in: int, from_token: TokenInfo, mint_sy_token: TokenInfo) -> int:
+    """Estimate tokenIn -> tokenMintSy output, falling back to 1:1 decimal-adjusted (VIB-2561)."""
+    try:
+        return compiler._calculate_expected_output(amount_in, from_token, mint_sy_token)
+    except (ValueError, KeyError, ZeroDivisionError):
+        # Many Pendle SY mint tokens (aEthPYUSD, sUSDai, USDG) are yield-bearing stablecoin
+        # wrappers where 1:1 is a safe conservative estimate. The 2% buffer applied by
+        # callers and Pendle's own slippage protection guard against estimation inaccuracy.
+        from_decimals = from_token.decimals or 6
+        to_decimals = mint_sy_token.decimals or 18
+        estimated = int(Decimal(str(amount_in)) * Decimal(10**to_decimals) / Decimal(10**from_decimals))
+        logger.info(
+            f"Pre-swap price fallback: {from_token.symbol} -> {mint_sy_token.symbol}, "
+            f"using 1:1 decimal-adjusted estimate ({amount_in} -> {estimated})"
+        )
+        return estimated
+
+
+def _build_pre_swap_tx(
+    compiler,
+    intent: SwapIntent,
+    from_token: TokenInfo,
+    mint_sy_token: TokenInfo,
+    token_mint_sy: str,
+    amount_in: int,
+    estimated_mint_sy_output: int,
+    v3_protocol: str,
+    v3_router: str,
+) -> tuple[list[TransactionData], int, TransactionData] | CompilationResult:
+    """Build the V3 pre-swap approval(s) + swap tx and return (approvals, buffered_pendle_input, tx)."""
+    from almanak.framework.connectors.protocol_aliases import display_protocol
+
+    # Apply 2% safety buffer on the estimated output for the Pendle step. This ensures
+    # the Pendle transaction doesn't try to spend more tokenMintSy than the pre-swap
+    # actually produces.
+    buffered_mint_sy_amount = int(Decimal(str(estimated_mint_sy_output)) * Decimal("0.98"))
+
+    # Handle native ETH: SwapRouter02 accepts msg.value for native swaps
+    actual_from_address = from_token.address
+    pre_swap_value = 0
+    if from_token.is_native:
+        pre_swap_value = amount_in
+        weth_address = compiler._get_wrapped_native_address()
+        if not weth_address:
+            return _failed(
+                intent.intent_id,
+                f"Cannot resolve wrapped native token address for {compiler.chain}. "
+                f"Native ETH pre-swap routing requires a configured wrapped native address.",
+            )
+        actual_from_address = weth_address
+
+    approvals: list[TransactionData] = []
+    if not from_token.is_native:
+        approvals.extend(compiler._build_approve_tx(from_token.address, v3_router, amount_in))
+
+    from .compiler_adapters import DefaultSwapAdapter
+
+    pre_swap_adapter = DefaultSwapAdapter(
+        chain=compiler.chain,
+        protocol=v3_protocol,
+        pool_selection_mode=compiler._config.swap_pool_selection_mode,
+        fixed_fee_tier=compiler._config.fixed_swap_fee_tier,
+        rpc_url=compiler._get_chain_rpc_url(),
+        rpc_timeout=compiler.rpc_timeout,
+        gateway_client=compiler._gateway_client,
+    )
+
+    pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))
+    # Cap Pendle input to the guaranteed pre-swap minimum. When max_slippage > 2%, the V3
+    # DEX swap may legally return less than the 2%-buffered estimate, so the Pendle step
+    # must not try to spend more than the swap guarantees.
+    buffered_mint_sy_amount = min(buffered_mint_sy_amount, pre_swap_min_out)
+    if buffered_mint_sy_amount <= 0:
+        return _failed(
+            intent.intent_id,
+            f"Pre-swap routing failed: computed Pendle input amount is {buffered_mint_sy_amount} "
+            f"(max_slippage={intent.max_slippage} too high for pre-swap path). "
+            f"Use {mint_sy_token.symbol} directly as from_token or reduce max_slippage.",
+        )
+
+    deadline = int(datetime.now(UTC).timestamp()) + compiler.default_deadline_seconds
+    pre_swap_calldata = pre_swap_adapter.get_swap_calldata(
+        from_token=actual_from_address,
+        to_token=token_mint_sy,
+        amount_in=amount_in,
+        min_amount_out=pre_swap_min_out,
+        recipient=compiler.wallet_address,
+        deadline=deadline,
+    )
+    pre_swap_tx = TransactionData(
+        to=v3_router,
+        value=pre_swap_value,
+        data="0x" + pre_swap_calldata.hex(),
+        gas_estimate=200_000,
+        description=f"Pre-swap: {from_token.symbol} -> {mint_sy_token.symbol} via {display_protocol(compiler.chain, v3_protocol)}",
+        tx_type="swap",
+    )
+    logger.info(
+        f"Pendle pre-swap routing: {from_token.symbol} -> {mint_sy_token.symbol} -> {intent.to_token}, "
+        f"estimated output={estimated_mint_sy_output}, using {buffered_mint_sy_amount} "
+        f"(capped to min of 2% buffer and {intent.max_slippage:.1%} slippage floor)"
+    )
+    return approvals, buffered_mint_sy_amount, pre_swap_tx
+
+
+def _apply_pendle_pre_swap_routing(
+    compiler,
+    intent: SwapIntent,
+    from_token: TokenInfo,
+    amount_in: int,
+    token_mint_sy: str,
+) -> tuple[list[TransactionData], TokenInfo, int, TokenInfo, int] | CompilationResult:
+    """Build the Uniswap V3 pre-swap that converts tokenIn -> tokenMintSy.
+
+    When the input token differs from the token that mints SY (e.g., WETH input but wstETH
+    mints SY), the Pendle router cannot route internally — we insert a V3 pre-swap step.
+
+    Returns ``(transactions, new_from_token, new_amount_in, original_from_token, original_amount_in)``.
+    """
+    mint_sy_token = compiler._resolve_token(token_mint_sy)
+    if mint_sy_token is None:
+        return _failed(
+            intent.intent_id,
+            f"Cannot resolve tokenMintSy address {token_mint_sy} for pre-swap routing on {compiler.chain}. "
+            f"Use the SY-minting token directly as from_token instead.",
+        )
+
+    v3_protocol, v3_router = _select_v3_pre_swap_router(compiler)
+    if not v3_router or not v3_protocol:
+        return _failed(
+            intent.intent_id,
+            f"Pre-swap routing from {from_token.symbol} to {mint_sy_token.symbol} requires "
+            f"a V3-compatible DEX, but none is configured for {compiler.chain}. "
+            f"Use {mint_sy_token.symbol} directly as from_token instead.",
+        )
+
+    estimated_output = _estimate_pre_swap_output(compiler, amount_in, from_token, mint_sy_token)
+
+    built = _build_pre_swap_tx(
+        compiler, intent, from_token, mint_sy_token, token_mint_sy, amount_in, estimated_output, v3_protocol, v3_router
+    )
+    if isinstance(built, CompilationResult):
+        return built
+    approvals, buffered_pendle_input, pre_swap_tx = built
+
+    return [*approvals, pre_swap_tx], mint_sy_token, buffered_pendle_input, from_token, amount_in
+
+
+def _resolve_pendle_token_out(intent: SwapIntent, compiler) -> tuple[str, int | None] | CompilationResult:
+    """Resolve (token_out_address, to_token_decimals) for the swap output.
+
+    For BUY directions the out token is a PT/YT looked up in the static info dicts; for SELL
+    directions it is the underlying resolved via ``compiler._resolve_token``.
+    """
+    from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
+
+    to_name_upper = intent.to_token.upper()
+    if to_name_upper.startswith("PT-"):
+        pt_info = PT_TOKEN_INFO.get(compiler.chain, {})
+        pt_data = pt_info.get(to_name_upper) or pt_info.get(intent.to_token)
+        if not pt_data:
+            return _failed(
+                intent.intent_id,
+                f"Cannot resolve PT token '{intent.to_token}' - not found in PT_TOKEN_INFO for chain {compiler.chain}",
+            )
+        return pt_data[0], pt_data[1]
+    if to_name_upper.startswith("YT-"):
+        yt_info = YT_TOKEN_INFO.get(compiler.chain, {})
+        yt_data = yt_info.get(to_name_upper) or yt_info.get(intent.to_token)
+        if not yt_data:
+            return _failed(
+                intent.intent_id,
+                f"Cannot resolve YT token '{intent.to_token}' - not found in YT_TOKEN_INFO for chain {compiler.chain}",
+            )
+        return yt_data[0], yt_data[1]
+    # Selling PT/YT — out token is the underlying.
+    to_token = compiler._resolve_token(intent.to_token)
+    if to_token is None:
+        return _failed(
+            intent.intent_id,
+            f"Cannot resolve output token '{intent.to_token}' - token not found in registry for chain {compiler.chain}",
+        )
+    return to_token.address, to_token.decimals
+
+
+def _check_pendle_chain_supported(compiler, intent_id: str, label: str) -> CompilationResult | None:
+    """Return a FAILED CompilationResult when chain is not Pendle-supported, else None."""
+    if compiler.chain in ("arbitrum", "ethereum", "plasma"):
+        return None
+    return _failed(intent_id, f"{label} on {compiler.chain}")
+
+
+def _resolve_pendle_rpc_url(compiler, intent_id: str) -> str | CompilationResult:
+    """Return the chain RPC URL for Pendle, or a FAILED CompilationResult."""
+    rpc_url = compiler._get_chain_rpc_url()
+    if not rpc_url:
+        return _failed(intent_id, f"RPC URL not available for {compiler.chain}")
+    return rpc_url
+
+
+def _parse_pendle_lp_open_pool(pool_str: str, intent_id: str) -> tuple[str, str] | CompilationResult:
+    """Split LPOpen pool field 'TOKEN/0xmarket_or_PT_name' into (token_symbol, market_part)."""
+    if "/" in pool_str:
+        token_symbol, market_part = (p.strip() for p in pool_str.split("/", 1))
+        return token_symbol, market_part
+    if pool_str.startswith("0x"):
+        return _failed(intent_id, f"Pendle LP pool must be 'TOKEN/0xmarket_address' format. Got: {pool_str}")
+    return _failed(intent_id, f"Invalid Pendle pool format: {pool_str}. Expected: TOKEN/0xmarket_address")
+
+
+def _resolve_pendle_lp_open_market(compiler, market_part: str, intent_id: str) -> str | CompilationResult:
+    """Resolve a Pendle LP_OPEN market: 0x address pass-through or PT-name lookup."""
+    from almanak.framework.connectors.pendle.sdk import MARKET_BY_PT_TOKEN
+
+    if market_part.startswith("0x"):
+        return market_part
+    pt_markets = MARKET_BY_PT_TOKEN.get(compiler.chain, {})
+    found_market = pt_markets.get(market_part) or pt_markets.get(market_part.upper())
+    if found_market:
+        return found_market
+    return _failed(
+        intent_id,
+        f"Invalid Pendle market: {market_part}. Must be a 0x address or known PT token name.",
+    )
+
+
+def _compute_pendle_lp_open_amount(intent: LPOpenIntent, token: TokenInfo) -> int | CompilationResult:
+    """Convert ``intent.amount0`` (token terms) to a wei integer."""
+    amount_decimal: Decimal = intent.amount0
+    if amount_decimal <= 0:
+        return _failed(intent.intent_id, "amount0 must be positive for Pendle LP")
+    return int(amount_decimal * Decimal(10**token.decimals))
+
+
+def _resolve_pendle_lp_open_inputs(compiler, intent: LPOpenIntent) -> tuple[TokenInfo, str, int] | CompilationResult:
+    """Parse LP_OPEN pool, resolve token + market, and compute the wei deposit amount."""
+    parsed = _parse_pendle_lp_open_pool(intent.pool or "", intent.intent_id)
+    if isinstance(parsed, CompilationResult):
+        return parsed
+    token_symbol, market_part = parsed
+
+    token = compiler._resolve_token(token_symbol)
+    if token is None:
+        return _failed(intent.intent_id, f"Unknown token: {token_symbol}")
+
+    market_or_err = _resolve_pendle_lp_open_market(compiler, market_part, intent.intent_id)
+    if isinstance(market_or_err, CompilationResult):
+        return market_or_err
+
+    amount_or_err = _compute_pendle_lp_open_amount(intent, token)
+    if isinstance(amount_or_err, CompilationResult):
+        return amount_or_err
+    return token, market_or_err, amount_or_err
+
+
+def _resolve_pendle_lp_close_out_token(compiler, intent: LPCloseIntent) -> TokenInfo | CompilationResult:
+    """Resolve LPClose output token from protocol_params (canonical) or legacy attrs."""
+    params = getattr(intent, "protocol_params", None) or {}
+    out_token_name: str = (
+        params.get("token")
+        or params.get("token_out")
+        or getattr(intent, "token_a", None)
+        or getattr(intent, "token", None)
+        or ""
+    )
+    if not out_token_name:
+        return _failed(intent.intent_id, "Pendle LP close requires an output token. Specify via intent metadata.")
+    out_token = compiler._resolve_token(out_token_name)
+    if out_token is None:
+        return _failed(intent.intent_id, f"Unknown output token: {out_token_name}")
+    return out_token
+
+
+def _parse_pendle_lp_close_amount(intent: LPCloseIntent) -> int | CompilationResult:
+    """Parse LP token amount from ``intent.position_id`` (wei integer)."""
+    try:
+        return int(intent.position_id)
+    except (ValueError, TypeError):
+        return _failed(
+            intent.intent_id,
+            f"Invalid LP amount (position_id): {intent.position_id}. Must be LP token amount in wei.",
+        )
+
+
+def _resolve_pendle_redeem_pt_address(compiler, adapter: Any, yt_address: str) -> str | None:
+    """Resolve PT address for a YT — static reverse-lookup with on-chain fallback."""
+    from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO as _PT_TOKEN_INFO
+    from almanak.framework.connectors.pendle.sdk import YT_TOKEN_INFO as _YT_TOKEN_INFO
+
+    yt_addr_lower = yt_address.lower()
+    for _pt_name, (_pt_addr, _) in _PT_TOKEN_INFO.get(compiler.chain, {}).items():
+        _yt_name = _pt_name.replace("PT-", "YT-", 1)
+        _yt_entry = _YT_TOKEN_INFO.get(compiler.chain, {}).get(_yt_name)
+        if _yt_entry and _yt_entry[0].lower() == yt_addr_lower:
+            logger.debug("compile_pendle_redeem: resolved PT %s via static config for YT %s", _pt_addr, yt_address)
+            return _pt_addr
+    return _resolve_pt_from_yt(adapter, yt_address)
+
+
+def _build_pendle_redeem_pt_approval(pt_address: str, router_address: str) -> TransactionData:
+    """Build an unconditional infinite-approve TX for the PT token to the Pendle router.
+
+    Unconditional infinite approve — ``_build_approve_tx`` skips txs when the simulated
+    allowance already seems sufficient, but Anvil simulates each tx in isolation (without
+    prior txs' state changes), which can cause it to see allowance=0 for the redeem and
+    flag it as broken. Building the approve calldata directly avoids this ordering
+    sensitivity.
+    """
+    from web3 import Web3
+
+    from .compiler_constants import MAX_UINT256
+
+    approve_data = (
+        "0x095ea7b3" + Web3.to_checksum_address(router_address)[2:].lower().zfill(64) + hex(MAX_UINT256)[2:].zfill(64)
+    )
+    return TransactionData(
+        to=pt_address,
+        value=0,
+        data=approve_data,
+        gas_estimate=60_000,
+        description=f"Approve PT ({pt_address[:10]}…) for Pendle Router",
+        tx_type="approve",
+    )
+
+
+def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
     """Compile SWAP intent for Pendle Protocol (yield tokenization).
 
     Pendle enables swapping tokens to PT (Principal Tokens) and YT (Yield Tokens).
@@ -64,106 +542,32 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:  # n
         CompilationResult with Pendle swap ActionBundle
     """
     from almanak.framework.connectors.pendle import PendleAdapter, PendleSwapParams
-    from almanak.framework.connectors.pendle.sdk import (
-        MARKET_BY_PT_TOKEN,
-        MARKET_BY_YT_TOKEN,
-        MARKET_TOKEN_MINT_SY,
-        PT_TOKEN_INFO,
-        YT_TOKEN_INFO,
-    )
+    from almanak.framework.connectors.pendle.sdk import MARKET_TOKEN_MINT_SY
 
-    result = CompilationResult(
-        status=CompilationStatus.SUCCESS,
-        intent_id=intent.intent_id,
-    )
+    result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
     transactions: list[TransactionData] = []
 
     try:
-        # Check chain support
         if compiler.chain not in ("arbitrum", "ethereum", "plasma"):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Pendle is only available on Arbitrum, Ethereum, and Plasma, not {compiler.chain}",
-                intent_id=intent.intent_id,
+            return _failed(
+                intent.intent_id,
+                f"Pendle is only available on Arbitrum, Ethereum, and Plasma, not {compiler.chain}",
             )
 
-        # Pre-detect PT/YT tokens before resolution
-        from_token_name = intent.from_token.upper()
-        is_from_pt = from_token_name.startswith("PT-")
-        is_from_yt = from_token_name.startswith("YT-")
-
-        # Resolve from token - handle PT/YT tokens specially
-        from_token = compiler._resolve_token(intent.from_token)
-        if from_token is None and is_from_pt:
-            # Try to resolve PT token from Pendle SDK mappings
-            pt_info = PT_TOKEN_INFO.get(compiler.chain, {})
-            pt_data = pt_info.get(from_token_name) or pt_info.get(intent.from_token)
-            if pt_data:
-                pt_address, pt_decimals = pt_data
-                from_token = TokenInfo(
-                    symbol=intent.from_token,
-                    address=pt_address,
-                    decimals=pt_decimals,
-                    is_native=False,
-                )
-        elif from_token is None and is_from_yt:
-            # Try to resolve YT token from Pendle SDK mappings
-            yt_info = YT_TOKEN_INFO.get(compiler.chain, {})
-            yt_data = yt_info.get(from_token_name) or yt_info.get(intent.from_token)
-            if yt_data:
-                yt_address, yt_decimals = yt_data
-                from_token = TokenInfo(
-                    symbol=intent.from_token,
-                    address=yt_address,
-                    decimals=yt_decimals,
-                    is_native=False,
-                )
-
+        from_token = _resolve_pendle_from_token(compiler, intent)
         if from_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown from_token: {intent.from_token}",
-                intent_id=intent.intent_id,
-            )
+            return _failed(intent.intent_id, f"Unknown from_token: {intent.from_token}")
 
-        # Calculate input amount
-        if intent.amount_usd is not None:
-            amount_in = compiler._usd_to_token_amount(intent.amount_usd, from_token)
-        elif intent.amount is not None:
-            if intent.amount == "all":
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="amount='all' must be resolved before compilation. Use Intent.set_resolved_amount() to resolve chained amounts.",
-                    intent_id=intent.intent_id,
-                )
-            amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
-            amount_in = int(amount_decimal * Decimal(10**from_token.decimals))
-        else:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Either amount_usd or amount must be provided",
-                intent_id=intent.intent_id,
-            )
+        amount_in_or_err = _compute_pendle_amount_in(intent, compiler, from_token)
+        if isinstance(amount_in_or_err, CompilationResult):
+            return amount_in_or_err
+        amount_in = amount_in_or_err
 
-        # Pendle adapter accepts either a connected gateway_client (production
-        # path) or an RPC URL (local/backtest fallback). Normalize a
-        # disconnected gateway_client to None so we fall back cleanly.
-        gateway_client = compiler._gateway_client
-        if gateway_client is not None and not gateway_client.is_connected:
-            gateway_client = None
+        adapter_inputs = _resolve_pendle_adapter_inputs(compiler, intent.intent_id)
+        if isinstance(adapter_inputs, CompilationResult):
+            return adapter_inputs
+        gateway_client, rpc_url = adapter_inputs
 
-        rpc_url = None if gateway_client is not None else compiler._get_chain_rpc_url()
-        if gateway_client is None and not rpc_url:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    f"Pendle requires either a connected gateway_client or an RPC URL "
-                    f"for {compiler.chain}. Configure gateway client or provide rpc_url."
-                ),
-                intent_id=intent.intent_id,
-            )
-
-        # Create Pendle adapter
         adapter = PendleAdapter(
             rpc_url=rpc_url,
             chain=compiler.chain,
@@ -171,353 +575,53 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:  # n
             gateway_client=gateway_client,
         )
 
-        # Determine swap type based on token names
-        # PT-*/YT-* prefix means buying/selling PT or YT tokens
-        to_token_name = intent.to_token.upper()
-        from_token_name = intent.from_token.upper()
+        classified = _classify_pendle_swap_type(intent)
+        if isinstance(classified, CompilationResult):
+            return classified
+        swap_type, side = classified
 
-        is_buying_pt = to_token_name.startswith("PT-")
-        is_selling_pt = from_token_name.startswith("PT-")
-        is_buying_yt = to_token_name.startswith("YT-")
-        is_selling_yt = from_token_name.startswith("YT-")
-
-        # Guard against invalid PT/YT->PT/YT swaps
-        pendle_token_count = sum([is_buying_pt, is_selling_pt, is_buying_yt, is_selling_yt])
-        if pendle_token_count > 1:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Pendle swaps do not support direct PT/YT to PT/YT transfers",
-                intent_id=intent.intent_id,
-            )
-
-        if is_buying_pt:
-            swap_type = "token_to_pt"
-            pt_markets = MARKET_BY_PT_TOKEN.get(compiler.chain, {})
-            market = pt_markets.get(to_token_name) or pt_markets.get(to_token_name.upper())
-            if not market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Pendle market found for {to_token_name} on {compiler.chain}. "
-                    f"Available PT tokens: {', '.join(sorted(pt_markets.keys()))}",
-                    intent_id=intent.intent_id,
-                )
-        elif is_selling_pt:
-            swap_type = "pt_to_token"
-            pt_markets = MARKET_BY_PT_TOKEN.get(compiler.chain, {})
-            market = pt_markets.get(from_token_name) or pt_markets.get(from_token_name.upper())
-            if not market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Pendle market found for {from_token_name} on {compiler.chain}. "
-                    f"Available PT tokens: {', '.join(sorted(pt_markets.keys()))}",
-                    intent_id=intent.intent_id,
-                )
-        elif is_buying_yt:
-            swap_type = "token_to_yt"
-            yt_markets = MARKET_BY_YT_TOKEN.get(compiler.chain, {})
-            market = yt_markets.get(to_token_name) or yt_markets.get(to_token_name.upper())
-            if not market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Pendle market found for {to_token_name} on {compiler.chain}. "
-                    f"Available YT tokens: {', '.join(sorted(yt_markets.keys()))}",
-                    intent_id=intent.intent_id,
-                )
-        elif is_selling_yt:
-            swap_type = "yt_to_token"
-            yt_markets = MARKET_BY_YT_TOKEN.get(compiler.chain, {})
-            market = yt_markets.get(from_token_name) or yt_markets.get(from_token_name.upper())
-            if not market:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"No Pendle market found for {from_token_name} on {compiler.chain}. "
-                    f"Available YT tokens: {', '.join(sorted(yt_markets.keys()))}",
-                    intent_id=intent.intent_id,
-                )
-        else:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Pendle swaps require either from_token or to_token to be a PT or YT token "
-                "(e.g., PT-wstETH, YT-wstETH)",
-                intent_id=intent.intent_id,
-            )
+        market_or_err = _resolve_pendle_market(intent, compiler, side)
+        if isinstance(market_or_err, CompilationResult):
+            return market_or_err
+        market = market_or_err
 
         slippage_bps = int(intent.max_slippage * Decimal("10000"))
-
-        # The Pendle SDK methods apply slippage_bps internally on top of min_amount_out.
-        # Previously this line also reduced by slippage, causing double-count (VIB-576).
-        #
-        # For BUY directions (token_to_pt, token_to_yt): PT/YT is cheaper than the
-        # underlying, so output >= input. A 1:1 estimate is a safe conservative minimum.
-        #
-        # For SELL directions (pt_to_token, yt_to_token): PT/YT trades at a DISCOUNT
-        # to the underlying (depends on implied yield + time to maturity). Output < input.
-        # A 1:1 estimate causes INSUFFICIENT_TOKEN_OUT reverts (VIB-1366).
-        #
-        # PT holds most of the underlying's value (typically 90-99%), so a 50% haircut
-        # is a safe floor even for long-dated maturities.
-        # YT represents only the remaining yield and can approach zero near expiry,
-        # so we use a 1% floor to avoid reverts on near-maturity YT sells.
-        if swap_type == "yt_to_token":
-            # YT value decays toward zero near expiry. A fixed 1% floor caused
-            # INSUFFICIENT_TOKEN_OUT reverts that TeardownManager slippage
-            # escalation could not overcome (VIB-2174).
-            #
-            # Scale the floor by slippage: at default 200bps use 1% floor,
-            # at >=500bps use a minimal floor (1 wei) so the SDK's own
-            # slippage_bps reduction is the only protection. This lets
-            # TeardownManager escalation actually widen the tolerance.
-            if slippage_bps >= 500:
-                min_amount_out = 1  # Accept any output; SDK applies slippage_bps on top
-                estimation_method = f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry)"
-            else:
-                min_amount_out = amount_in // 100
-                estimation_method = f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps)"
-        elif swap_type == "pt_to_token":
-            min_amount_out = amount_in // 2
-            estimation_method = "50% floor (PT discount safe)"
-        else:
-            min_amount_out = amount_in
-            estimation_method = "1:1 estimate (BUY direction)"
-
+        min_amount_out, estimation_method = _compute_pendle_min_out(swap_type, amount_in, slippage_bps)
         logger.info(
             f"Pendle slippage params: swap_type={swap_type}, amount_in={amount_in}, "
-            f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, "
-            f"estimation={estimation_method}"
+            f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, estimation={estimation_method}"
         )
 
-        # Look up the token that mints SY for this market
-        # For yield-bearing token markets (like fUSDT0), this is the yield-bearing token
-        chain_mint_sy_map = MARKET_TOKEN_MINT_SY.get(compiler.chain, {})
-        token_mint_sy = chain_mint_sy_map.get(market.lower())
+        # Look up the token that mints SY for this market. For yield-bearing token markets
+        # (like fUSDT0), this is the yield-bearing token.
+        token_mint_sy = MARKET_TOKEN_MINT_SY.get(compiler.chain, {}).get(market.lower())
 
         # Track original input for pre-flight balance checks (VIB-2533)
-        original_from_token = None
-        original_amount_in = None
+        original_from_token: TokenInfo | None = None
+        original_amount_in: int | None = None
 
-        # ================================================================
-        # Pre-swap routing: when tokenIn != tokenMintSy
-        # ================================================================
-        # When the input token differs from the token that mints SY
-        # (e.g., WETH as input but wstETH mints SY), the Pendle router
-        # cannot route internally. We insert a Uniswap V3 pre-swap step
-        # to convert tokenIn -> tokenMintSy before calling Pendle.
-        if token_mint_sy and (is_buying_pt or is_buying_yt) and from_token.address.lower() != token_mint_sy.lower():
-            # Resolve tokenMintSy to get its symbol and decimals
-            mint_sy_token = compiler._resolve_token(token_mint_sy)
-            if mint_sy_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Cannot resolve tokenMintSy address {token_mint_sy} for pre-swap routing on {compiler.chain}. "
-                    f"Use the SY-minting token directly as from_token instead.",
-                    intent_id=intent.intent_id,
-                )
-
-            # Check if a V3-compatible DEX is available on this chain for the pre-swap.
-            # Prefer the chain's default protocol (may be a V3 fork like Agni Finance).
-            from almanak.framework.connectors.protocol_aliases import display_protocol, is_uniswap_v3_fork
-
-            chain_routers = compiler_constants.PROTOCOL_ROUTERS.get(compiler.chain, {})
-            v3_pre_swap_protocol = None
-            v3_pre_swap_router = None
-            # Prefer compiler.default_protocol if it's a V3 fork on this chain
-            if compiler.default_protocol in chain_routers and is_uniswap_v3_fork(compiler.default_protocol):
-                v3_pre_swap_protocol = compiler.default_protocol
-                v3_pre_swap_router = chain_routers[compiler.default_protocol]
-            else:
-                for proto_key, router_addr in chain_routers.items():
-                    if is_uniswap_v3_fork(proto_key):
-                        v3_pre_swap_protocol = proto_key
-                        v3_pre_swap_router = router_addr
-                        break
-            if not v3_pre_swap_router or not v3_pre_swap_protocol:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Pre-swap routing from {from_token.symbol} to {mint_sy_token.symbol} requires "
-                    f"a V3-compatible DEX, but none is configured for {compiler.chain}. "
-                    f"Use {mint_sy_token.symbol} directly as from_token instead.",
-                    intent_id=intent.intent_id,
-                )
-
-            # Estimate the pre-swap output using price oracle
-            try:
-                estimated_mint_sy_output = compiler._calculate_expected_output(amount_in, from_token, mint_sy_token)
-            except (ValueError, KeyError, ZeroDivisionError):
-                # Fallback: decimal-adjusted 1:1 estimate when price data unavailable.
-                # Many Pendle SY mint tokens (aEthPYUSD, sUSDai, USDG) are yield-bearing
-                # stablecoin wrappers where 1:1 is a safe conservative estimate.
-                # The 2% buffer applied below and Pendle's own slippage protection
-                # guard against estimation inaccuracy (VIB-2561).
-                from_decimals = from_token.decimals or 6
-                to_decimals = mint_sy_token.decimals or 18
-                estimated_mint_sy_output = int(
-                    Decimal(str(amount_in)) * Decimal(10**to_decimals) / Decimal(10**from_decimals)
-                )
-                logger.info(
-                    f"Pre-swap price fallback: {from_token.symbol} -> {mint_sy_token.symbol}, "
-                    f"using 1:1 decimal-adjusted estimate ({amount_in} -> {estimated_mint_sy_output})"
-                )
-
-            # Apply 2% safety buffer on the estimated output for the Pendle step.
-            # This ensures the Pendle transaction doesn't try to spend more
-            # tokenMintSy than the pre-swap actually produces.
-            pre_swap_buffer = Decimal("0.98")
-            buffered_mint_sy_amount = int(Decimal(str(estimated_mint_sy_output)) * pre_swap_buffer)
-
-            # Handle native ETH: the SwapRouter02 accepts msg.value for native swaps
-            actual_from_address = from_token.address
-            pre_swap_value = 0
-            if from_token.is_native:
-                pre_swap_value = amount_in
-                weth_address = compiler._get_wrapped_native_address()
-                if not weth_address:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=f"Cannot resolve wrapped native token address for {compiler.chain}. "
-                        f"Native ETH pre-swap routing requires a configured wrapped native address.",
-                        intent_id=intent.intent_id,
-                    )
-                actual_from_address = weth_address
-
-            # Build approval for V3 DEX router (skip for native token)
-            if not from_token.is_native:
-                approve_txs = compiler._build_approve_tx(
-                    from_token.address,
-                    v3_pre_swap_router,
-                    amount_in,
-                )
-                transactions.extend(approve_txs)
-
-            # Build pre-swap calldata via V3-compatible DEX
-            from .compiler_adapters import DefaultSwapAdapter
-
-            pre_swap_adapter = DefaultSwapAdapter(
-                chain=compiler.chain,
-                protocol=v3_pre_swap_protocol,
-                pool_selection_mode=compiler._config.swap_pool_selection_mode,
-                fixed_fee_tier=compiler._config.fixed_swap_fee_tier,
-                rpc_url=compiler._get_chain_rpc_url(),
-                rpc_timeout=compiler.rpc_timeout,
-                gateway_client=compiler._gateway_client,
-            )
-
-            pre_swap_min_out = int(Decimal(str(estimated_mint_sy_output)) * (Decimal("1") - intent.max_slippage))
-            # Cap Pendle input to the guaranteed pre-swap minimum.
-            # When max_slippage > 2%, the V3 DEX swap may legally return
-            # less than the 2%-buffered estimate, so the Pendle step must
-            # not try to spend more than the swap guarantees.
-            buffered_mint_sy_amount = min(buffered_mint_sy_amount, pre_swap_min_out)
-
-            if buffered_mint_sy_amount <= 0:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Pre-swap routing failed: computed Pendle input amount is {buffered_mint_sy_amount} "
-                    f"(max_slippage={intent.max_slippage} too high for pre-swap path). "
-                    f"Use {mint_sy_token.symbol} directly as from_token or reduce max_slippage.",
-                    intent_id=intent.intent_id,
-                )
-
-            deadline = int(datetime.now(UTC).timestamp()) + compiler.default_deadline_seconds
-
-            pre_swap_calldata = pre_swap_adapter.get_swap_calldata(
-                from_token=actual_from_address,
-                to_token=token_mint_sy,
-                amount_in=amount_in,
-                min_amount_out=pre_swap_min_out,
-                recipient=compiler.wallet_address,
-                deadline=deadline,
-            )
-
-            pre_swap_tx = TransactionData(
-                to=v3_pre_swap_router,
-                value=pre_swap_value,
-                data="0x" + pre_swap_calldata.hex(),
-                gas_estimate=200_000,
-                description=f"Pre-swap: {from_token.symbol} -> {mint_sy_token.symbol} via {display_protocol(compiler.chain, v3_pre_swap_protocol)}",
-                tx_type="swap",
-            )
-            transactions.append(pre_swap_tx)
-
-            logger.info(
-                f"Pendle pre-swap routing: {from_token.symbol} -> {mint_sy_token.symbol} -> {intent.to_token}, "
-                f"estimated output={estimated_mint_sy_output}, using {buffered_mint_sy_amount} "
-                f"(capped to min of 2% buffer and {intent.max_slippage:.1%} slippage floor)"
-            )
-
-            # Save original input token/amount for pre-flight balance checks (VIB-2533).
-            # The orchestrator must verify the wallet holds the *original* input token
-            # (e.g., USDC), not the intermediate token produced by the pre-swap (e.g., sUSDe).
-            original_from_token = from_token
-            original_amount_in = amount_in
-
-            # Override from_token and amount for the Pendle step
-            from_token = mint_sy_token
-            amount_in = buffered_mint_sy_amount
+        # Pre-swap routing: when tokenIn != tokenMintSy, insert a Uniswap V3 hop.
+        is_buy_side = side in ("buying_pt", "buying_yt")
+        if token_mint_sy and is_buy_side and from_token.address.lower() != token_mint_sy.lower():
+            applied = _apply_pendle_pre_swap_routing(compiler, intent, from_token, amount_in, token_mint_sy)
+            if isinstance(applied, CompilationResult):
+                return applied
+            pre_swap_txs, from_token, amount_in, original_from_token, original_amount_in = applied
+            transactions.extend(pre_swap_txs)
             token_mint_sy = None  # tokenIn now equals tokenMintSy
-            # Don't apply slippage here -- the SDK applies it internally (VIB-576).
-            # For sell directions, use discounted estimate (VIB-1366).
-            if swap_type == "yt_to_token":
-                if slippage_bps >= 500:
-                    min_amount_out = 1
-                    estimation_method = (
-                        f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry, post-pre-swap)"
-                    )
-                else:
-                    min_amount_out = amount_in // 100
-                    estimation_method = f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps, post-pre-swap)"
-            elif swap_type == "pt_to_token":
-                min_amount_out = amount_in // 2
-                estimation_method = "50% floor (PT discount safe, post-pre-swap)"
-            else:
-                min_amount_out = amount_in
-                estimation_method = "1:1 estimate (BUY direction, post-pre-swap)"
-
+            min_amount_out, estimation_method = _compute_pendle_min_out(
+                swap_type, amount_in, slippage_bps, post_preswap=True
+            )
             logger.info(
                 f"Pendle slippage params (post-pre-swap): swap_type={swap_type}, amount_in={amount_in}, "
-                f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, "
-                f"estimation={estimation_method}"
+                f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, estimation={estimation_method}"
             )
 
-        # Resolve token_out to an address
-        # For buying PT/YT, token_out is the PT/YT (use PT_TOKEN_INFO/YT_TOKEN_INFO)
-        # For selling PT/YT, token_out is the underlying token (use _resolve_token)
-        to_token_name_upper = intent.to_token.upper()
-        if to_token_name_upper.startswith("PT-"):
-            # Buying PT - resolve PT address
-            pt_info = PT_TOKEN_INFO.get(compiler.chain, {})
-            pt_data = pt_info.get(to_token_name_upper) or pt_info.get(intent.to_token)
-            if pt_data:
-                token_out_address = pt_data[0]
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Cannot resolve PT token '{intent.to_token}' - not found in PT_TOKEN_INFO for chain {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-        elif to_token_name_upper.startswith("YT-"):
-            # Buying YT - resolve YT address
-            yt_info = YT_TOKEN_INFO.get(compiler.chain, {})
-            yt_data = yt_info.get(to_token_name_upper) or yt_info.get(intent.to_token)
-            if yt_data:
-                token_out_address = yt_data[0]
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Cannot resolve YT token '{intent.to_token}' - not found in YT_TOKEN_INFO for chain {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-        else:
-            # Selling PT/YT - resolve underlying token address
-            to_token = compiler._resolve_token(intent.to_token)
-            if to_token is None:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Cannot resolve output token '{intent.to_token}' - token not found in registry for chain {compiler.chain}",
-                    intent_id=intent.intent_id,
-                )
-            token_out_address = to_token.address
+        token_out = _resolve_pendle_token_out(intent, compiler)
+        if isinstance(token_out, CompilationResult):
+            return token_out
+        token_out_address, to_token_decimals = token_out
 
-        # Build swap parameters
         params = PendleSwapParams(
             market=market,
             token_in=from_token.address,
@@ -529,61 +633,30 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:  # n
             slippage_bps=slippage_bps,
             token_mint_sy=token_mint_sy,
         )
-
         logger.info(
             f"Compiling Pendle SWAP: {from_token.symbol} -> {intent.to_token}, "
             f"amount={amount_in}, market={market[:10]}..."
         )
 
-        # Build approval transaction if needed
         router_address = adapter.get_router_address()
         if not from_token.is_native:
-            approve_txs = compiler._build_approve_tx(
-                from_token.address,
-                router_address,
-                amount_in,
-            )
-            transactions.extend(approve_txs)
+            transactions.extend(compiler._build_approve_tx(from_token.address, router_address, amount_in))
 
-        # Build swap transaction using adapter
         tx_data = adapter.build_swap(params)
-
-        swap_tx = TransactionData(
-            to=tx_data.to,
-            value=tx_data.value,
-            data=tx_data.data,
-            gas_estimate=tx_data.gas_estimate,
-            description=tx_data.description,
-            tx_type="swap",
+        transactions.append(
+            TransactionData(
+                to=tx_data.to,
+                value=tx_data.value,
+                data=tx_data.data,
+                gas_estimate=tx_data.gas_estimate,
+                description=tx_data.description,
+                tx_type="swap",
+            )
         )
-        transactions.append(swap_tx)
 
         total_gas = sum(tx.gas_estimate for tx in transactions)
 
-        # Resolve out-token decimals (PT/YT info already looked up above; for
-        # PT/YT-out swaps both come from the static info dicts). For sells the
-        # out token is the underlying which was already resolved via
-        # _resolve_token. We capture out-token address+decimals so the
-        # receipt parser can reconstruct user-facing amounts for YT swaps
-        # from Transfer events (VIB-3751).
-        to_token_decimals: int | None = None
-        if to_token_name_upper.startswith("PT-"):
-            pt_info = PT_TOKEN_INFO.get(compiler.chain, {})
-            pt_data = pt_info.get(to_token_name_upper) or pt_info.get(intent.to_token)
-            if pt_data:
-                to_token_decimals = pt_data[1]
-        elif to_token_name_upper.startswith("YT-"):
-            yt_info = YT_TOKEN_INFO.get(compiler.chain, {})
-            yt_data = yt_info.get(to_token_name_upper) or yt_info.get(intent.to_token)
-            if yt_data:
-                to_token_decimals = yt_data[1]
-        else:
-            # Selling PT/YT — out token is the underlying we already resolved
-            resolved_out = compiler._resolve_token(intent.to_token)
-            if resolved_out is not None:
-                to_token_decimals = resolved_out.decimals
-
-        metadata = {
+        metadata: dict[str, Any] = {
             "from_token": from_token.to_dict(),
             "to_token": intent.to_token,
             "to_token_address": token_out_address,
@@ -594,28 +667,23 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:  # n
             "protocol": "pendle",
             "market": market,
             "swap_type": swap_type,
-            # VIB-3751: receipt parser needs the wallet address to reconstruct
-            # user-facing YT swap amounts from Transfer events (the Pendle
-            # Market Swap event reflects an internal flash-mint and is NOT
-            # a faithful representation of the user-facing trade).
+            # VIB-3751: receipt parser needs the wallet address to reconstruct user-facing
+            # YT swap amounts from Transfer events (the Pendle Market Swap event reflects
+            # an internal flash-mint and is NOT a faithful representation of the user trade).
             "wallet_address": compiler.wallet_address,
         }
-
-        # When a pre-swap was inserted, expose the original input token/amount
-        # so the orchestrator's pre-flight balance check validates the token the
-        # wallet actually holds (e.g., USDC), not the intermediate token produced
-        # by the pre-swap (e.g., sUSDe). See VIB-2533.
+        # When a pre-swap was inserted, expose the original input token/amount so the
+        # orchestrator's pre-flight balance check validates the token the wallet actually
+        # holds (e.g., USDC), not the intermediate token (e.g., sUSDe). See VIB-2533.
         if original_from_token is not None:
             metadata["original_from_token"] = original_from_token.to_dict()
             metadata["original_amount_in"] = str(original_amount_in)
 
-        action_bundle = ActionBundle(
+        result.action_bundle = ActionBundle(
             intent_type=IntentType.SWAP.value,
             transactions=[tx.to_dict() for tx in transactions],
             metadata=metadata,
         )
-
-        result.action_bundle = action_bundle
         result.transactions = transactions
         result.total_gas_estimate = total_gas
 
@@ -646,7 +714,6 @@ def compile_pendle_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
         CompilationResult with Pendle LP open ActionBundle
     """
     from almanak.framework.connectors.pendle import PendleAdapter
-    from almanak.framework.connectors.pendle.sdk import MARKET_BY_PT_TOKEN
 
     result = CompilationResult(
         status=CompilationStatus.SUCCESS,
@@ -655,77 +722,23 @@ def compile_pendle_lp_open(compiler, intent: LPOpenIntent) -> CompilationResult:
     transactions: list[TransactionData] = []
 
     try:
-        if compiler.chain not in ("arbitrum", "ethereum", "plasma"):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Pendle LP not available on {compiler.chain}",
-                intent_id=intent.intent_id,
-            )
+        chain_err = _check_pendle_chain_supported(compiler, intent.intent_id, "Pendle LP not available")
+        if chain_err is not None:
+            return chain_err
 
-        # Pool format for Pendle: "TOKEN/0xmarket_address" or "TOKEN/PT-name"
-        # Parse token symbol and market from pool field
-        pool_str = intent.pool or ""
-        if "/" in pool_str:
-            parts = pool_str.split("/", 1)
-            token_symbol = parts[0].strip()
-            market_part = parts[1].strip()
-        elif pool_str.startswith("0x"):
-            # Bare market address -- no token specified
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Pendle LP pool must be 'TOKEN/0xmarket_address' format. Got: {pool_str}",
-                intent_id=intent.intent_id,
-            )
-        else:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Invalid Pendle pool format: {pool_str}. Expected: TOKEN/0xmarket_address",
-                intent_id=intent.intent_id,
-            )
-
-        token = compiler._resolve_token(token_symbol)
-        if token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown token: {token_symbol}",
-                intent_id=intent.intent_id,
-            )
-
-        # Resolve market address
-        market = market_part
-        if not market.startswith("0x"):
-            pt_markets = MARKET_BY_PT_TOKEN.get(compiler.chain, {})
-            found_market = pt_markets.get(market, None)
-            if found_market:
-                market = found_market
-            else:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Invalid Pendle market: {market}. Must be a 0x address or known PT token name.",
-                    intent_id=intent.intent_id,
-                )
-
-        # Use amount0 as deposit amount (single-sided LP)
-        amount_decimal: Decimal = intent.amount0
-        if amount_decimal <= 0:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="amount0 must be positive for Pendle LP",
-                intent_id=intent.intent_id,
-            )
-        amount_in = int(amount_decimal * Decimal(10**token.decimals))
+        inputs = _resolve_pendle_lp_open_inputs(compiler, intent)
+        if isinstance(inputs, CompilationResult):
+            return inputs
+        token, market, amount_in = inputs
 
         # Default slippage (LPOpenIntent has no max_slippage field)
         slippage_bps = 50
         min_lp_out = 0  # Pendle LP minting: use adapter to estimate proper min
 
-        rpc_url = compiler._get_chain_rpc_url()
-        if not rpc_url:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"RPC URL not available for {compiler.chain}",
-                intent_id=intent.intent_id,
-            )
+        rpc_url_or_err = _resolve_pendle_rpc_url(compiler, intent.intent_id)
+        if isinstance(rpc_url_or_err, CompilationResult):
+            return rpc_url_or_err
+        rpc_url = rpc_url_or_err
 
         adapter = PendleAdapter(
             rpc_url=rpc_url,
@@ -813,66 +826,33 @@ def compile_pendle_lp_close(compiler, intent: LPCloseIntent) -> CompilationResul
     transactions: list[TransactionData] = []
 
     try:
-        if compiler.chain not in ("arbitrum", "ethereum", "plasma"):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Pendle LP not available on {compiler.chain}",
-                intent_id=intent.intent_id,
-            )
+        chain_err = _check_pendle_chain_supported(compiler, intent.intent_id, "Pendle LP not available")
+        if chain_err is not None:
+            return chain_err
 
-        # Resolve output token from protocol_params (the canonical path) or legacy
-        # getattr fallback for any subclass that carries the field directly.
-        params = getattr(intent, "protocol_params", None) or {}
-        out_token_name: str = (
-            params.get("token")
-            or params.get("token_out")
-            or getattr(intent, "token_a", None)
-            or getattr(intent, "token", None)
-            or ""
-        )
-        if not out_token_name:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="Pendle LP close requires an output token. Specify via intent metadata.",
-                intent_id=intent.intent_id,
-            )
-        out_token = compiler._resolve_token(out_token_name)
-        if out_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown output token: {out_token_name}",
-                intent_id=intent.intent_id,
-            )
+        out_token_or_err = _resolve_pendle_lp_close_out_token(compiler, intent)
+        if isinstance(out_token_or_err, CompilationResult):
+            return out_token_or_err
+        out_token = out_token_or_err
 
         market = intent.pool
         if not market or not market.startswith("0x"):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Invalid Pendle market address: {intent.pool}",
-                intent_id=intent.intent_id,
-            )
+            return _failed(intent.intent_id, f"Invalid Pendle market address: {intent.pool}")
 
         # LP amount comes from position_id (the LP token amount in wei)
-        try:
-            lp_amount = int(intent.position_id)
-        except (ValueError, TypeError):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Invalid LP amount (position_id): {intent.position_id}. Must be LP token amount in wei.",
-                intent_id=intent.intent_id,
-            )
+        lp_amount_or_err = _parse_pendle_lp_close_amount(intent)
+        if isinstance(lp_amount_or_err, CompilationResult):
+            return lp_amount_or_err
+        lp_amount = lp_amount_or_err
 
         # Default slippage (LPCloseIntent has no max_slippage field)
         slippage_bps = 50
         min_token_out = 0  # Pendle LP removal: use adapter to estimate proper min
 
-        rpc_url = compiler._get_chain_rpc_url()
-        if not rpc_url:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"RPC URL not available for {compiler.chain}",
-                intent_id=intent.intent_id,
-            )
+        rpc_url_or_err = _resolve_pendle_rpc_url(compiler, intent.intent_id)
+        if isinstance(rpc_url_or_err, CompilationResult):
+            return rpc_url_or_err
+        rpc_url = rpc_url_or_err
 
         adapter = PendleAdapter(
             rpc_url=rpc_url,
@@ -956,38 +936,26 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
     transactions: list[TransactionData] = []
 
     try:
-        if compiler.chain not in ("arbitrum", "ethereum", "plasma"):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Pendle redeem not available on {compiler.chain}",
-                intent_id=intent.intent_id,
-            )
+        chain_err = _check_pendle_chain_supported(compiler, intent.intent_id, "Pendle redeem not available")
+        if chain_err is not None:
+            return chain_err
 
         # Resolve output token
         out_token = compiler._resolve_token(intent.token)
         if out_token is None:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Unknown token: {intent.token}",
-                intent_id=intent.intent_id,
-            )
+            return _failed(intent.intent_id, f"Unknown token: {intent.token}")
 
         # YT address comes from market_id field
         yt_address = intent.market_id
         if not yt_address:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="market_id (YT address) is required for Pendle redeem. Set intent.market_id to the YT contract address.",
-                intent_id=intent.intent_id,
+            return _failed(
+                intent.intent_id,
+                "market_id (YT address) is required for Pendle redeem. Set intent.market_id to the YT contract address.",
             )
 
         # Calculate amount
         if intent.amount == "all":
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error="amount='all' must be resolved before compilation for Pendle redeem",
-                intent_id=intent.intent_id,
-            )
+            return _failed(intent.intent_id, "amount='all' must be resolved before compilation for Pendle redeem")
         amount_decimal: Decimal = intent.amount  # type: ignore[assignment]
         # PT/YT tokens are always 18 decimals on Pendle
         py_decimals = 18
@@ -996,13 +964,10 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
         slippage_bps = 50
         min_token_out = 0  # Pendle redeem: use adapter to estimate proper min
 
-        rpc_url = compiler._get_chain_rpc_url()
-        if not rpc_url:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"RPC URL not available for {compiler.chain}",
-                intent_id=intent.intent_id,
-            )
+        rpc_url_or_err = _resolve_pendle_rpc_url(compiler, intent.intent_id)
+        if isinstance(rpc_url_or_err, CompilationResult):
+            return rpc_url_or_err
+        rpc_url = rpc_url_or_err
 
         adapter = PendleAdapter(
             rpc_url=rpc_url,
@@ -1014,48 +979,10 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
         # Approve PT tokens for the Pendle router (required before redeemPyToToken).
         # Primary: static YT_TOKEN_INFO reverse-lookup (fast, reliable);
         # fallback: on-chain YT.PT() call for markets not in config.
-        from almanak.framework.connectors.pendle.sdk import PT_TOKEN_INFO as _PT_TOKEN_INFO
-        from almanak.framework.connectors.pendle.sdk import YT_TOKEN_INFO as _YT_TOKEN_INFO
-
-        from .compiler_constants import MAX_UINT256
-
-        pt_address: str | None = None
-        yt_addr_lower = yt_address.lower()
-        for _pt_name, (_pt_addr, _) in _PT_TOKEN_INFO.get(compiler.chain, {}).items():
-            _yt_name = _pt_name.replace("PT-", "YT-", 1)
-            _yt_entry = _YT_TOKEN_INFO.get(compiler.chain, {}).get(_yt_name)
-            if _yt_entry and _yt_entry[0].lower() == yt_addr_lower:
-                pt_address = _pt_addr
-                logger.debug(
-                    "compile_pendle_redeem: resolved PT %s via static config for YT %s", pt_address, yt_address
-                )
-                break
-        if not pt_address:
-            pt_address = _resolve_pt_from_yt(adapter, yt_address)
+        pt_address = _resolve_pendle_redeem_pt_address(compiler, adapter, yt_address)
         if pt_address:
             router_address = adapter.get_router_address()
-            # Unconditional infinite approve — _build_approve_tx skips txs when the
-            # simulated allowance already seems sufficient, but Anvil simulates each
-            # tx in isolation (without prior txs' state changes), which can cause it
-            # to see allowance=0 for the redeem and flag it as broken.  Building the
-            # approve calldata directly avoids this ordering sensitivity.
-            from web3 import Web3
-
-            approve_data = (
-                "0x095ea7b3"
-                + Web3.to_checksum_address(router_address)[2:].lower().zfill(64)
-                + hex(MAX_UINT256)[2:].zfill(64)
-            )
-            transactions.append(
-                TransactionData(
-                    to=pt_address,
-                    value=0,
-                    data=approve_data,
-                    gas_estimate=60_000,
-                    description=f"Approve PT ({pt_address[:10]}…) for Pendle Router",
-                    tx_type="approve",
-                )
-            )
+            transactions.append(_build_pendle_redeem_pt_approval(pt_address, router_address))
 
         # Build redeem TX
         redeem_params = PendleRedeemParams(
