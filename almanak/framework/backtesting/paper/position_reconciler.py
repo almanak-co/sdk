@@ -807,143 +807,198 @@ class PositionReconciler:
         """Reconcile lending positions against on-chain Aave V3 state."""
         discrepancies: list[PositionDiscrepancy] = []
 
-        # Import position querying
-        from almanak.framework.backtesting.paper.position_queries import (
-            query_aave_positions,
-        )
-
-        # Get on-chain lending positions
-        try:
-            on_chain_positions = await query_aave_positions(
-                wallet=wallet_address,
-                web3=web3,
-                chain=self.chain,
-            )
-        except Exception as e:
-            logger.error("Failed to query on-chain lending positions: %s", e)
+        on_chain_positions = await self._query_aave_positions_safe(web3, wallet_address)
+        if on_chain_positions is None:
             return discrepancies
 
         # Build lookup by asset address for supply and borrow
         on_chain_supply = {pos.asset_address.lower(): pos for pos in on_chain_positions if pos.has_supply}
         on_chain_borrow = {pos.asset_address.lower(): pos for pos in on_chain_positions if pos.has_debt}
 
-        # Check tracked supply positions
-        tracked_supply = {
-            pid: pos
-            for pid, pos in self.positions.items()
-            if pos.position_type == PositionType.SUPPLY and pos.protocol == "aave_v3"
-        }
+        tracked_supply = self._tracked_lending_by_type(PositionType.SUPPLY)
+        tracked_borrow = self._tracked_lending_by_type(PositionType.BORROW)
 
         for position_id, tracked in tracked_supply.items():
             asset_addr = tracked.asset_address.lower() if tracked.asset_address else ""
-            on_chain = on_chain_supply.get(asset_addr)
-
-            if on_chain is None:
-                discrepancies.append(
-                    PositionDiscrepancy(
-                        discrepancy_type=DiscrepancyType.MISSING_ON_CHAIN,
-                        position_type=PositionType.SUPPLY,
-                        position_id=position_id,
-                        expected=tracked.atoken_balance,
-                        actual=None,
-                        message=f"Supply position {tracked.asset} not found on-chain",
-                    )
-                )
-                continue
-
-            if not self._values_within_tolerance(
-                tracked.atoken_balance, on_chain.current_atoken_balance, tolerance_percent
-            ):
-                discrepancies.append(
-                    PositionDiscrepancy(
-                        discrepancy_type=DiscrepancyType.AMOUNT_MISMATCH,
-                        position_type=PositionType.SUPPLY,
-                        position_id=position_id,
-                        expected=tracked.atoken_balance,
-                        actual=on_chain.current_atoken_balance,
-                        message=(
-                            f"Supply {tracked.asset} amount mismatch: "
-                            f"tracked={tracked.atoken_balance}, "
-                            f"on-chain={on_chain.current_atoken_balance}"
-                        ),
-                    )
-                )
-
-        # Check tracked borrow positions
-        tracked_borrow = {
-            pid: pos
-            for pid, pos in self.positions.items()
-            if pos.position_type == PositionType.BORROW and pos.protocol == "aave_v3"
-        }
+            discrepancy = self._check_supply_drift(
+                position_id, tracked, on_chain_supply.get(asset_addr), tolerance_percent
+            )
+            if discrepancy is not None:
+                discrepancies.append(discrepancy)
 
         for position_id, tracked in tracked_borrow.items():
             asset_addr = tracked.asset_address.lower() if tracked.asset_address else ""
-            on_chain = on_chain_borrow.get(asset_addr)
+            discrepancy = self._check_borrow_drift(
+                position_id, tracked, on_chain_borrow.get(asset_addr), tolerance_percent
+            )
+            if discrepancy is not None:
+                discrepancies.append(discrepancy)
 
-            if on_chain is None:
-                discrepancies.append(
-                    PositionDiscrepancy(
-                        discrepancy_type=DiscrepancyType.MISSING_ON_CHAIN,
-                        position_type=PositionType.BORROW,
-                        position_id=position_id,
-                        expected=tracked.debt_balance,
-                        actual=None,
-                        message=f"Borrow position {tracked.asset} not found on-chain",
-                    )
-                )
-                continue
-
-            if not self._values_within_tolerance(tracked.debt_balance, on_chain.total_debt, tolerance_percent):
-                discrepancies.append(
-                    PositionDiscrepancy(
-                        discrepancy_type=DiscrepancyType.AMOUNT_MISMATCH,
-                        position_type=PositionType.BORROW,
-                        position_id=position_id,
-                        expected=tracked.debt_balance,
-                        actual=on_chain.total_debt,
-                        message=(
-                            f"Borrow {tracked.asset} amount mismatch: "
-                            f"tracked={tracked.debt_balance}, "
-                            f"on-chain={on_chain.total_debt}"
-                        ),
-                    )
-                )
-
-        # Check for on-chain positions not tracked
-        for asset_addr, on_chain in on_chain_supply.items():
-            position_id = f"aave_v3_{asset_addr}_supply"
-            if position_id not in tracked_supply:
-                discrepancies.append(
-                    PositionDiscrepancy(
-                        discrepancy_type=DiscrepancyType.MISSING_IN_TRACKER,
-                        position_type=PositionType.SUPPLY,
-                        position_id=position_id,
-                        expected=None,
-                        actual=on_chain.current_atoken_balance,
-                        message=(
-                            f"Supply {on_chain.asset} found on-chain but not tracked "
-                            f"(balance={on_chain.current_atoken_balance})"
-                        ),
-                    )
-                )
-
-        for asset_addr, on_chain in on_chain_borrow.items():
-            position_id = f"aave_v3_{asset_addr}_borrow"
-            if position_id not in tracked_borrow:
-                discrepancies.append(
-                    PositionDiscrepancy(
-                        discrepancy_type=DiscrepancyType.MISSING_IN_TRACKER,
-                        position_type=PositionType.BORROW,
-                        position_id=position_id,
-                        expected=None,
-                        actual=on_chain.total_debt,
-                        message=(
-                            f"Borrow {on_chain.asset} found on-chain but not tracked (debt={on_chain.total_debt})"
-                        ),
-                    )
-                )
+        discrepancies.extend(self._collect_untracked_supply(on_chain_supply, tracked_supply))
+        discrepancies.extend(self._collect_untracked_borrow(on_chain_borrow, tracked_borrow))
 
         return discrepancies
+
+    async def _query_aave_positions_safe(
+        self,
+        web3: Any,
+        wallet_address: str,
+    ) -> list[Any] | None:
+        """Query Aave V3 positions, logging and swallowing query failures."""
+        from almanak.framework.backtesting.paper.position_queries import (
+            query_aave_positions,
+        )
+
+        try:
+            return await query_aave_positions(
+                wallet=wallet_address,
+                web3=web3,
+                chain=self.chain,
+            )
+        except Exception as e:
+            logger.error("Failed to query on-chain lending positions: %s", e)
+            return None
+
+    def _tracked_lending_by_type(self, position_type: PositionType) -> dict[str, "TrackedPosition"]:
+        """Return tracked Aave V3 positions filtered by supply/borrow type."""
+        return {
+            pid: pos
+            for pid, pos in self.positions.items()
+            if pos.position_type == position_type and pos.protocol == "aave_v3"
+        }
+
+    def _check_supply_drift(
+        self,
+        position_id: str,
+        tracked: "TrackedPosition",
+        on_chain: Any | None,
+        tolerance_percent: Decimal,
+    ) -> PositionDiscrepancy | None:
+        """Compare a single tracked supply against its on-chain row."""
+        if on_chain is None:
+            return PositionDiscrepancy(
+                discrepancy_type=DiscrepancyType.MISSING_ON_CHAIN,
+                position_type=PositionType.SUPPLY,
+                position_id=position_id,
+                expected=tracked.atoken_balance,
+                actual=None,
+                message=f"Supply position {tracked.asset} not found on-chain",
+            )
+
+        if self._values_within_tolerance(tracked.atoken_balance, on_chain.current_atoken_balance, tolerance_percent):
+            return None
+
+        return PositionDiscrepancy(
+            discrepancy_type=DiscrepancyType.AMOUNT_MISMATCH,
+            position_type=PositionType.SUPPLY,
+            position_id=position_id,
+            expected=tracked.atoken_balance,
+            actual=on_chain.current_atoken_balance,
+            message=(
+                f"Supply {tracked.asset} amount mismatch: "
+                f"tracked={tracked.atoken_balance}, "
+                f"on-chain={on_chain.current_atoken_balance}"
+            ),
+        )
+
+    def _check_borrow_drift(
+        self,
+        position_id: str,
+        tracked: "TrackedPosition",
+        on_chain: Any | None,
+        tolerance_percent: Decimal,
+    ) -> PositionDiscrepancy | None:
+        """Compare a single tracked borrow against its on-chain row."""
+        if on_chain is None:
+            return PositionDiscrepancy(
+                discrepancy_type=DiscrepancyType.MISSING_ON_CHAIN,
+                position_type=PositionType.BORROW,
+                position_id=position_id,
+                expected=tracked.debt_balance,
+                actual=None,
+                message=f"Borrow position {tracked.asset} not found on-chain",
+            )
+
+        if self._values_within_tolerance(tracked.debt_balance, on_chain.total_debt, tolerance_percent):
+            return None
+
+        return PositionDiscrepancy(
+            discrepancy_type=DiscrepancyType.AMOUNT_MISMATCH,
+            position_type=PositionType.BORROW,
+            position_id=position_id,
+            expected=tracked.debt_balance,
+            actual=on_chain.total_debt,
+            message=(
+                f"Borrow {tracked.asset} amount mismatch: "
+                f"tracked={tracked.debt_balance}, "
+                f"on-chain={on_chain.total_debt}"
+            ),
+        )
+
+    @staticmethod
+    def _tracked_asset_addresses(tracked: dict[str, "TrackedPosition"]) -> set[str]:
+        """Return the set of normalized (lowercase) tracked asset addresses."""
+        return {pos.asset_address.lower() for pos in tracked.values() if pos.asset_address}
+
+    @staticmethod
+    def _collect_untracked_supply(
+        on_chain_supply: dict[str, Any],
+        tracked_supply: dict[str, "TrackedPosition"],
+    ) -> list[PositionDiscrepancy]:
+        """Emit a discrepancy for every on-chain supply absent from the tracker.
+
+        Match by normalized asset address rather than synthesised position id —
+        a tracker entry keyed off a checksum address would otherwise look
+        ``MISSING_IN_TRACKER`` against the lowercase on-chain key.
+        """
+        tracked_addrs = PositionReconciler._tracked_asset_addresses(tracked_supply)
+        out: list[PositionDiscrepancy] = []
+        for asset_addr, on_chain in on_chain_supply.items():
+            if asset_addr.lower() in tracked_addrs:
+                continue
+            position_id = f"aave_v3_{asset_addr}_supply"
+            out.append(
+                PositionDiscrepancy(
+                    discrepancy_type=DiscrepancyType.MISSING_IN_TRACKER,
+                    position_type=PositionType.SUPPLY,
+                    position_id=position_id,
+                    expected=None,
+                    actual=on_chain.current_atoken_balance,
+                    message=(
+                        f"Supply {on_chain.asset} found on-chain but not tracked "
+                        f"(balance={on_chain.current_atoken_balance})"
+                    ),
+                )
+            )
+        return out
+
+    @staticmethod
+    def _collect_untracked_borrow(
+        on_chain_borrow: dict[str, Any],
+        tracked_borrow: dict[str, "TrackedPosition"],
+    ) -> list[PositionDiscrepancy]:
+        """Emit a discrepancy for every on-chain borrow absent from the tracker.
+
+        See ``_collect_untracked_supply`` for the address-normalisation
+        rationale — same shape, applied to borrow positions.
+        """
+        tracked_addrs = PositionReconciler._tracked_asset_addresses(tracked_borrow)
+        out: list[PositionDiscrepancy] = []
+        for asset_addr, on_chain in on_chain_borrow.items():
+            if asset_addr.lower() in tracked_addrs:
+                continue
+            position_id = f"aave_v3_{asset_addr}_borrow"
+            out.append(
+                PositionDiscrepancy(
+                    discrepancy_type=DiscrepancyType.MISSING_IN_TRACKER,
+                    position_type=PositionType.BORROW,
+                    position_id=position_id,
+                    expected=None,
+                    actual=on_chain.total_debt,
+                    message=(f"Borrow {on_chain.asset} found on-chain but not tracked (debt={on_chain.total_debt})"),
+                )
+            )
+        return out
 
     # =========================================================================
     # Helper Methods

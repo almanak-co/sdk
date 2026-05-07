@@ -88,6 +88,12 @@ class UnifiedLiquidationModel(StrEnum):
     AGGREGATE = "aggregate"
 
 
+# Saturation cap for unified risk scores. The score is defined on [0, 1]; the
+# AGGREGATE branch returns this when total_debt > 0 with zero collateral
+# (a debt-only portfolio is at maximum liquidation risk, not zero risk).
+UNIFIED_RISK_SCORE_MAX: Decimal = Decimal("1")
+
+
 class ExecutionPriority(StrEnum):
     """Priority levels for coordinated execution order.
 
@@ -721,7 +727,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
 
         return False
 
-    def calculate_unified_risk(  # noqa: C901
+    def calculate_unified_risk(
         self,
         portfolio: "SimulatedPortfolio",
         market_state: "MarketState",
@@ -738,25 +744,8 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         Returns:
             AggregatedRiskResult with unified risk metrics
         """
-        from almanak.framework.backtesting.pnl.portfolio import PositionType
+        protocol_positions = self._group_positions_by_protocol(portfolio)
 
-        # Group positions by protocol type
-        protocol_positions: dict[str, list[Any]] = {}
-        for position in portfolio.positions:
-            position_type_map = {
-                PositionType.LP: "lp",
-                PositionType.PERP_LONG: "perp",
-                PositionType.PERP_SHORT: "perp",
-                PositionType.SUPPLY: "lending",
-                PositionType.BORROW: "lending",
-                PositionType.SPOT: "spot",
-            }
-            protocol_type = position_type_map.get(position.position_type, "other")
-            if protocol_type not in protocol_positions:
-                protocol_positions[protocol_type] = []
-            protocol_positions[protocol_type].append(position)
-
-        # Calculate exposure for each protocol
         protocol_exposures: list[ProtocolExposure] = []
         total_collateral = Decimal("0")
         total_debt = Decimal("0")
@@ -766,103 +755,33 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         any_liquidation_risk = False
 
         for protocol_type, positions in protocol_positions.items():
-            protocol_value = Decimal("0")
-            protocol_collateral = Decimal("0")
-            protocol_debt = Decimal("0")
-            protocol_risk = Decimal("0")
-            liquidation_risk = False
-
-            for position in positions:
-                value = self.value_position(position, market_state)
-                protocol_value += value
-
-                # Track collateral vs debt
-                if position.position_type == PositionType.BORROW:
-                    protocol_debt += value
-                    total_debt += value
-                else:
-                    protocol_collateral += value
-                    total_collateral += value
-
-                # Check for liquidation risk
-                health_factor = getattr(position, "health_factor", None)
-                if health_factor is not None:
-                    if health_factor < Decimal("1.1"):
-                        liquidation_risk = True
-                        any_liquidation_risk = True
-                        protocol_risk = max(
-                            protocol_risk,
-                            Decimal("1") - (health_factor / Decimal("2")),
-                        )
-
-                # Check perp liquidation
-                if hasattr(position, "liquidation_price") and position.liquidation_price:
-                    try:
-                        current_price = market_state.get_price(position.primary_token)
-                        if current_price:
-                            distance = abs(current_price - position.liquidation_price) / current_price
-                            if distance < Decimal("0.1"):  # Within 10%
-                                liquidation_risk = True
-                                any_liquidation_risk = True
-                                protocol_risk = max(protocol_risk, Decimal("1") - distance)
-                    except KeyError:
-                        pass
-
-            net_exposure = protocol_collateral - protocol_debt
-            total_value += protocol_value
-
-            exposure = ProtocolExposure(
-                protocol_type=protocol_type,
-                position_count=len(positions),
-                total_value_usd=protocol_value,
-                net_exposure_usd=net_exposure,
-                risk_score=protocol_risk,
-                liquidation_risk=liquidation_risk,
-            )
+            exposure, totals = self._evaluate_protocol_exposure(protocol_type, positions, market_state)
             protocol_exposures.append(exposure)
 
-            # Track for unified risk calculation
-            max_risk_score = max(max_risk_score, protocol_risk)
-            if protocol_value > 0:
-                weighted_risk_sum += protocol_risk * protocol_value
+            total_collateral += totals["collateral"]
+            total_debt += totals["debt"]
+            total_value += exposure.total_value_usd
+            max_risk_score = max(max_risk_score, exposure.risk_score)
+            if exposure.total_value_usd > 0:
+                weighted_risk_sum += exposure.risk_score * exposure.total_value_usd
+            if exposure.liquidation_risk:
+                any_liquidation_risk = True
 
-        # Calculate unified metrics based on model
         model = UnifiedLiquidationModel(self._config.unified_liquidation_model)
+        unified_risk_score = self._compute_unified_risk_score(
+            model,
+            max_risk_score=max_risk_score,
+            weighted_risk_sum=weighted_risk_sum,
+            total_value=total_value,
+            total_collateral=total_collateral,
+            total_debt=total_debt,
+        )
 
-        if model == UnifiedLiquidationModel.CONSERVATIVE:
-            unified_risk_score = max_risk_score
-        elif model == UnifiedLiquidationModel.WEIGHTED:
-            if total_value > 0:
-                unified_risk_score = weighted_risk_sum / total_value
-            else:
-                unified_risk_score = Decimal("0")
-        else:  # AGGREGATE
-            if total_collateral > 0 and total_debt > 0:
-                unified_risk_score = total_debt / total_collateral
-            else:
-                unified_risk_score = Decimal("0")
+        # No debt = very healthy
+        unified_health_factor = total_collateral / total_debt if total_debt > 0 else Decimal("999")
 
-        # Calculate unified health factor
-        if total_debt > 0:
-            unified_health_factor = total_collateral / total_debt
-        else:
-            unified_health_factor = Decimal("999")  # No debt = very healthy
-
-        # Check against thresholds
         at_liquidation_risk = unified_health_factor < Decimal("1.0") or any_liquidation_risk
-
-        if unified_health_factor < self._config.liquidation_critical_threshold:
-            logger.warning(
-                "CRITICAL: Unified health factor %.2f is below critical threshold %.2f",
-                float(unified_health_factor),
-                float(self._config.liquidation_critical_threshold),
-            )
-        elif unified_health_factor < self._config.liquidation_warning_threshold:
-            logger.warning(
-                "WARNING: Unified health factor %.2f is below warning threshold %.2f",
-                float(unified_health_factor),
-                float(self._config.liquidation_warning_threshold),
-            )
+        self._log_health_factor_warnings(unified_health_factor)
 
         result = AggregatedRiskResult(
             unified_risk_score=unified_risk_score,
@@ -875,7 +794,6 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
             risk_model=model,
         )
 
-        # Store in history
         self._risk_history.append(result)
 
         logger.debug(
@@ -888,6 +806,135 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         )
 
         return result
+
+    @staticmethod
+    def _group_positions_by_protocol(portfolio: "SimulatedPortfolio") -> dict[str, list[Any]]:
+        """Group portfolio positions by their protocol type."""
+        from almanak.framework.backtesting.pnl.portfolio import PositionType
+
+        position_type_map = {
+            PositionType.LP: "lp",
+            PositionType.PERP_LONG: "perp",
+            PositionType.PERP_SHORT: "perp",
+            PositionType.SUPPLY: "lending",
+            PositionType.BORROW: "lending",
+            PositionType.SPOT: "spot",
+        }
+        protocol_positions: dict[str, list[Any]] = {}
+        for position in portfolio.positions:
+            protocol_type = position_type_map.get(position.position_type, "other")
+            protocol_positions.setdefault(protocol_type, []).append(position)
+        return protocol_positions
+
+    def _evaluate_protocol_exposure(
+        self,
+        protocol_type: str,
+        positions: list[Any],
+        market_state: "MarketState",
+    ) -> tuple[ProtocolExposure, dict[str, Decimal]]:
+        """Aggregate per-position risk into a single ProtocolExposure plus collateral/debt totals."""
+        from almanak.framework.backtesting.pnl.portfolio import PositionType
+
+        protocol_value = Decimal("0")
+        protocol_collateral = Decimal("0")
+        protocol_debt = Decimal("0")
+        protocol_risk = Decimal("0")
+        liquidation_risk = False
+
+        for position in positions:
+            value = self.value_position(position, market_state)
+            protocol_value += value
+
+            # Track collateral vs debt
+            if position.position_type == PositionType.BORROW:
+                protocol_debt += value
+            else:
+                protocol_collateral += value
+
+            position_risk, position_at_risk = self._evaluate_position_risk(position, market_state)
+            if position_at_risk:
+                liquidation_risk = True
+            if position_risk > protocol_risk:
+                protocol_risk = position_risk
+
+        exposure = ProtocolExposure(
+            protocol_type=protocol_type,
+            position_count=len(positions),
+            total_value_usd=protocol_value,
+            net_exposure_usd=protocol_collateral - protocol_debt,
+            risk_score=protocol_risk,
+            liquidation_risk=liquidation_risk,
+        )
+        return exposure, {"collateral": protocol_collateral, "debt": protocol_debt}
+
+    @staticmethod
+    def _evaluate_position_risk(
+        position: Any,
+        market_state: "MarketState",
+    ) -> tuple[Decimal, bool]:
+        """Return the worst-case (risk_score, at_risk_flag) for a single position."""
+        risk_score = Decimal("0")
+        at_risk = False
+
+        # Lending health-factor branch
+        health_factor = getattr(position, "health_factor", None)
+        if health_factor is not None and health_factor < Decimal("1.1"):
+            at_risk = True
+            risk_score = max(risk_score, Decimal("1") - (health_factor / Decimal("2")))
+
+        # Perp liquidation-price branch
+        liquidation_price = getattr(position, "liquidation_price", None)
+        if liquidation_price:
+            try:
+                current_price = market_state.get_price(position.primary_token)
+            except KeyError:
+                current_price = None
+            if current_price:
+                distance = abs(current_price - liquidation_price) / current_price
+                if distance < Decimal("0.1"):  # Within 10%
+                    at_risk = True
+                    risk_score = max(risk_score, Decimal("1") - distance)
+
+        return risk_score, at_risk
+
+    @staticmethod
+    def _compute_unified_risk_score(
+        model: UnifiedLiquidationModel,
+        *,
+        max_risk_score: Decimal,
+        weighted_risk_sum: Decimal,
+        total_value: Decimal,
+        total_collateral: Decimal,
+        total_debt: Decimal,
+    ) -> Decimal:
+        """Apply the configured liquidation model to derive the unified risk score."""
+        if model == UnifiedLiquidationModel.CONSERVATIVE:
+            return max_risk_score
+        if model == UnifiedLiquidationModel.WEIGHTED:
+            return weighted_risk_sum / total_value if total_value > 0 else Decimal("0")
+        # AGGREGATE
+        if total_collateral > 0 and total_debt > 0:
+            return total_debt / total_collateral
+        # Debt-only portfolio (no collateral) is at max liquidation risk;
+        # returning 0 here would silently understate it.
+        if total_debt > 0:
+            return UNIFIED_RISK_SCORE_MAX
+        return Decimal("0")
+
+    def _log_health_factor_warnings(self, unified_health_factor: Decimal) -> None:
+        """Emit critical/warning logs when the unified HF crosses configured thresholds."""
+        if unified_health_factor < self._config.liquidation_critical_threshold:
+            logger.warning(
+                "CRITICAL: Unified health factor %.2f is below critical threshold %.2f",
+                float(unified_health_factor),
+                float(self._config.liquidation_critical_threshold),
+            )
+        elif unified_health_factor < self._config.liquidation_warning_threshold:
+            logger.warning(
+                "WARNING: Unified health factor %.2f is below warning threshold %.2f",
+                float(unified_health_factor),
+                float(self._config.liquidation_warning_threshold),
+            )
 
     def aggregate_positions(
         self,
@@ -1559,6 +1606,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
 
 
 __all__ = [
+    "UNIFIED_RISK_SCORE_MAX",
     "AggregatedRiskResult",
     "CoordinatedExecution",
     "ExecutionPriority",

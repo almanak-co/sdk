@@ -43,7 +43,11 @@ from almanak.framework.backtesting.paper.config import (
     ForkLifecycle,
     PaperTraderConfig,
 )
-from almanak.framework.backtesting.paper.models import PaperTrade
+from almanak.framework.backtesting.paper.models import (
+    PaperTrade,
+    PaperTradeError,
+    PaperTradeErrorType,
+)
 from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorConfig,
     BacktestErrorHandler,
@@ -54,6 +58,8 @@ if TYPE_CHECKING:
         PaperTradeableStrategy,
         PaperTrader,
     )
+    from almanak.framework.execution.orchestrator import ExecutionResult
+    from almanak.framework.models.reproduction_bundle import TransactionReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -381,3 +387,437 @@ def assemble_backtest_result(
         institutional_compliance=institutional_compliance,
         compliance_violations=compliance_violations,
     )
+
+
+# ---------------------------------------------------------------------------
+# run_loop helpers (CC reduction for PaperTrader.run_loop)
+# ---------------------------------------------------------------------------
+
+
+def init_run_loop_state(trader: PaperTrader, strategy: PaperTradeableStrategy) -> datetime:
+    """Reset trader state for a ``run_loop`` session and return ``session_start``."""
+    session_start = datetime.now(UTC)
+    trader._session_start = session_start
+    trader._running = True
+    trader._current_strategy = strategy
+    trader._trades = []
+    trader._errors = []
+    trader._equity_curve = []
+    trader._reconciler_discrepancies = []
+    trader._tick_count = 0
+    trader._last_execution_result = None
+    trader._ticks_with_fork = 0
+    trader._ticks_with_indicators = 0
+    trader._ticks_with_action = 0
+    trader._last_successful_decision_at = None
+    trader._last_trade_at = None
+    trader._backtest_id = str(uuid.uuid4())
+    trader._error_handler = BacktestErrorHandler(BacktestErrorConfig())
+    return session_start
+
+
+async def run_loop_setup(trader: PaperTrader) -> None:
+    """Run the pre-loop setup phase: fork, orchestrator, valuer, snapshot, equity."""
+    await trader._initialize_fork()
+    await trader._initialize_orchestrator()
+    trader._init_portfolio_valuer()
+    await trader._seed_initial_market_snapshot()
+    await trader._record_equity_point()
+
+
+async def run_loop_iterate(trader: PaperTrader, effective_max_ticks: int | None) -> None:
+    """Execute the main tick loop until ``_running`` is cleared or limit hit.
+
+    ``trader.tick()`` is the canonical owner of ``_tick_count`` — it increments
+    once per call. Do not increment here as well; doing so would budget
+    ``max_ticks`` against 2x the actual tick count.
+    """
+    while trader._running:
+        if effective_max_ticks is not None and trader._tick_count >= effective_max_ticks:
+            logger.info(f"[{trader._backtest_id}] Max ticks ({effective_max_ticks}) reached, stopping")
+            break
+        await trader.tick()
+        if trader._running and (effective_max_ticks is None or trader._tick_count < effective_max_ticks):
+            await asyncio.sleep(trader.config.tick_interval_seconds)
+
+
+def handle_run_loop_exception(trader: PaperTrader, exc: BaseException) -> None:
+    """Log and record a loop-phase exception. ``CancelledError`` logs only."""
+    if isinstance(exc, asyncio.CancelledError):
+        logger.info(f"[{trader._backtest_id}] Paper trading loop cancelled")
+        return
+
+    assert isinstance(exc, Exception)
+    if trader._error_handler is not None:
+        handler_result = trader._error_handler.handle_error(exc, context="paper_trading_loop")
+        if handler_result.should_stop:
+            logger.error(f"[{trader._backtest_id}] Fatal error in paper trading loop: {exc}")
+        else:
+            logger.warning(f"[{trader._backtest_id}] Non-critical error in paper trading loop: {exc}")
+    else:
+        logger.exception(f"[{trader._backtest_id}] Paper trading loop failed: {exc}")
+
+    fork_manager = getattr(trader, "fork_manager", None)
+    block_number = (
+        fork_manager.current_block if fork_manager is not None and getattr(fork_manager, "is_running", False) else None
+    )
+    trader._errors.append(
+        PaperTradeError(
+            timestamp=datetime.now(UTC),
+            intent={},
+            error_type=PaperTradeErrorType.INTERNAL_ERROR,
+            error_message=f"Loop error: {exc}",
+            block_number=block_number,
+            metadata={"exception_type": type(exc).__name__},
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CachedTeardownValuation:
+    """Snapshot of final portfolio value/PnL captured before cleanup wipes state."""
+
+    final_value_usd: Decimal
+    valuation_source: str
+    pnl_usd: Decimal | None
+
+
+async def cache_run_loop_teardown_valuation(trader: PaperTrader) -> CachedTeardownValuation:
+    """Refresh prices and snapshot final value/PnL before ``_cleanup`` clears state.
+
+    Fallback chain: ``_value_portfolio_rich`` -> last equity point -> simple value.
+    Mirrors the ``finally`` block of ``run_loop`` byte-for-byte.
+    """
+    try:
+        await trader._get_portfolio_prices()
+    except Exception:
+        logger.debug(
+            "[%s] Failed to refresh portfolio prices before PnL calc",
+            trader._backtest_id,
+            exc_info=True,
+        )
+
+    rich = trader._value_portfolio_rich()
+    if rich is not None:
+        final_value = rich[0]
+        valuation_source = "portfolio_valuer"
+    elif trader._equity_curve:
+        final_value = trader._equity_curve[-1].value_usd
+        valuation_source = trader._equity_curve[-1].valuation_source
+    else:
+        final_value = trader._calculate_portfolio_value()
+        valuation_source = "simple"
+
+    pnl: Decimal | None = None
+    try:
+        pnl = final_value - trader._calculate_initial_capital()
+    except Exception:
+        logger.debug(
+            "[%s] Failed to compute cached PnL in run_loop teardown",
+            trader._backtest_id,
+            exc_info=True,
+        )
+
+    return CachedTeardownValuation(
+        final_value_usd=final_value,
+        valuation_source=valuation_source,
+        pnl_usd=pnl,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Oracle divergence helpers (CC reduction for PaperTrader._check_oracle_divergence)
+# ---------------------------------------------------------------------------
+
+
+# Chains for which on-fork Chainlink oracle divergence is checked. A chain
+# absent from this map skips the divergence check entirely.
+_CHAINLINK_DIVERGENCE_CHAINS: dict[str, str] = {
+    "ethereum": "ethereum",
+    "arbitrum": "arbitrum",
+    "base": "base",
+    "optimism": "optimism",
+    "polygon": "polygon",
+    "avalanche": "avalanche",
+}
+
+# Per-token info logging threshold: any individual divergence above this gets
+# a per-token info line (separate from the hard threshold gate which raises).
+_DIVERGENCE_INFO_LOG_THRESHOLD = Decimal("0.02")
+
+
+def resolve_chainlink_divergence_chain(chain: str) -> str | None:
+    """Return the Chainlink chain key for ``chain``, or ``None`` if unsupported."""
+    return _CHAINLINK_DIVERGENCE_CHAINS.get(chain)
+
+
+async def compute_max_oracle_divergence(
+    chainlink_provider: Any,
+    cached_prices: dict[str, Decimal],
+    backtest_id: str | None,
+) -> tuple[Decimal, str]:
+    """Walk cached live prices, compare to fork-bound Chainlink, return ``(max, token)``.
+
+    Per-token failures are logged at debug and skipped; the loop never raises.
+    """
+    max_divergence = Decimal("0")
+    worst_token = ""
+    for token, live_price in cached_prices.items():
+        if live_price <= 0:
+            continue
+        try:
+            fork_price = await chainlink_provider.get_price(token, timestamp=None)
+        except Exception as e:
+            logger.debug(f"[{backtest_id}] Failed to get on-fork price for {token} from Chainlink: {e}")
+            continue
+        if not fork_price or fork_price <= 0:
+            continue
+        divergence = abs(live_price - fork_price) / live_price
+        if divergence > max_divergence:
+            max_divergence = divergence
+            worst_token = token
+        if divergence > _DIVERGENCE_INFO_LOG_THRESHOLD:
+            logger.info(
+                f"[{backtest_id}] Oracle divergence for {token}: "
+                f"live=${live_price:.2f} vs fork=${fork_price:.2f} "
+                f"({divergence * 100:.1f}%)"
+            )
+    return max_divergence, worst_token
+
+
+def build_divergence_error_message(
+    worst_token: str,
+    max_divergence: Decimal,
+    threshold: Decimal,
+) -> str:
+    """Build the ``RuntimeError`` message raised when divergence exceeds threshold."""
+    return (
+        f"Oracle divergence exceeds threshold for {worst_token}: "
+        f"{max_divergence * 100:.1f}% > {threshold * 100:.0f}%. "
+        f"The persistent fork's on-chain prices have drifted too far from reality. "
+        f"Paper trading results would be unreliable. "
+        f"Increase oracle_divergence_threshold or reduce session duration."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Token flow helpers (CC reduction for PaperTrader._extract_token_flows)
+# ---------------------------------------------------------------------------
+
+
+def intent_flows_for_swap(
+    intent: Any,
+    expected_amount_out: Decimal | None,
+    track_fallback: Any,
+    backtest_id: str | None,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Estimate token flows for a SWAP intent without a receipt."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+    from_token = getattr(intent, "from_token", None)
+    to_token = getattr(intent, "to_token", None)
+    intent_amount = getattr(intent, "amount", None) or getattr(intent, "amount_in", None)
+
+    if from_token and intent_amount:
+        tokens_out[str(from_token).upper()] = Decimal(str(intent_amount))
+    if to_token:
+        if expected_amount_out is not None:
+            tokens_in[str(to_token).upper()] = expected_amount_out
+        else:
+            logger.warning(
+                f"[{backtest_id}] Cannot determine swap output amount for {to_token} "
+                "without receipt. Using zero placeholder - this may affect PnL accuracy."
+            )
+            track_fallback("zero_output_placeholder")
+            tokens_in[str(to_token).upper()] = Decimal("0")
+    return tokens_in, tokens_out
+
+
+def intent_flows_for_lending(
+    intent: Any,
+    direction: str,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Estimate token flows for SUPPLY/REPAY (``direction='out'``) or WITHDRAW/BORROW (``'in'``)."""
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+    token = getattr(intent, "token", None) or getattr(intent, "asset", None)
+    intent_amount = getattr(intent, "amount", None)
+    if token and intent_amount:
+        bucket = tokens_out if direction == "out" else tokens_in
+        bucket[str(token).upper()] = Decimal(str(intent_amount))
+    return tokens_in, tokens_out
+
+
+def intent_flows_for_lp_open(intent: Any) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Estimate token outflows for an LP_OPEN intent without a receipt."""
+    tokens_out: dict[str, Decimal] = {}
+    token0 = getattr(intent, "token0", None) or getattr(intent, "token_a", None)
+    token1 = getattr(intent, "token1", None) or getattr(intent, "token_b", None)
+    amount0 = getattr(intent, "amount0", None)
+    amount1 = getattr(intent, "amount1", None)
+    if token0 and amount0:
+        tokens_out[str(token0).upper()] = Decimal(str(amount0))
+    if token1 and amount1:
+        tokens_out[str(token1).upper()] = Decimal(str(amount1))
+    return {}, tokens_out
+
+
+def intent_flows_for_lp_close(
+    intent: Any,
+    track_fallback: Any,
+    backtest_id: str | None,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Build placeholder token inflows for an LP_CLOSE intent without a receipt."""
+    tokens_in: dict[str, Decimal] = {}
+    token0 = getattr(intent, "token0", None) or getattr(intent, "token_a", None)
+    token1 = getattr(intent, "token1", None) or getattr(intent, "token_b", None)
+    if token0 or token1:
+        logger.warning(
+            f"[{backtest_id}] Cannot determine LP close output amounts "
+            "without receipt. Using zero placeholder - this may affect PnL accuracy."
+        )
+        track_fallback("zero_output_placeholder")
+    if token0:
+        tokens_in[str(token0).upper()] = Decimal("0")
+    if token1:
+        tokens_in[str(token1).upper()] = Decimal("0")
+    return tokens_in, {}
+
+
+def intent_fallback_token_flows(
+    intent_type: IntentType,
+    intent: Any,
+    expected_amount_out: Decimal | None,
+    track_fallback: Any,
+    backtest_id: str | None,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Dispatch to the per-intent-type intent-only fallback estimator."""
+    if intent_type == IntentType.SWAP:
+        return intent_flows_for_swap(intent, expected_amount_out, track_fallback, backtest_id)
+    if intent_type in (IntentType.SUPPLY, IntentType.REPAY):
+        return intent_flows_for_lending(intent, direction="out")
+    if intent_type in (IntentType.WITHDRAW, IntentType.BORROW):
+        return intent_flows_for_lending(intent, direction="in")
+    if intent_type == IntentType.LP_OPEN:
+        return intent_flows_for_lp_open(intent)
+    if intent_type == IntentType.LP_CLOSE:
+        return intent_flows_for_lp_close(intent, track_fallback, backtest_id)
+    return {}, {}
+
+
+# ---------------------------------------------------------------------------
+# Intent execution helpers (CC reduction for PaperTrader._execute_intent)
+# ---------------------------------------------------------------------------
+
+
+def make_compile_failure_error(
+    *,
+    timestamp: datetime,
+    intent_dict: dict[str, Any],
+    block_number: int | None,
+    intent_type_value: str,
+) -> PaperTradeError:
+    """Build the PaperTradeError raised when intent compilation returns no bundle."""
+    return PaperTradeError(
+        timestamp=timestamp,
+        intent=intent_dict,
+        error_type=PaperTradeErrorType.INTENT_INVALID,
+        error_message="Failed to compile intent to ActionBundle",
+        block_number=block_number,
+        metadata={"intent_type": intent_type_value},
+    )
+
+
+def classify_execution_error_type(result: ExecutionResult) -> PaperTradeErrorType:
+    """Map an ``ExecutionResult.error_phase`` to a ``PaperTradeErrorType``."""
+    if not result.error_phase:
+        return PaperTradeErrorType.INTERNAL_ERROR
+    phase_name = result.error_phase.value.upper()
+    if "SIMULATION" in phase_name:
+        return PaperTradeErrorType.SIMULATION_FAILED
+    if "SUBMIT" in phase_name:
+        return PaperTradeErrorType.RPC_ERROR
+    return PaperTradeErrorType.INTERNAL_ERROR
+
+
+def make_execution_failure_error(
+    *,
+    timestamp: datetime,
+    intent_dict: dict[str, Any],
+    result: ExecutionResult,
+    block_number: int | None,
+    intent_type_value: str,
+) -> PaperTradeError:
+    """Build the PaperTradeError for a non-success ExecutionResult."""
+    return PaperTradeError(
+        timestamp=timestamp,
+        intent=intent_dict,
+        error_type=classify_execution_error_type(result),
+        error_message=result.error or "Unknown error",
+        block_number=block_number,
+        metadata={
+            "phase": result.phase.value,
+            "intent_type": intent_type_value,
+        },
+    )
+
+
+def log_intent_execution_exception(
+    trader: PaperTrader,
+    exc: Exception,
+    intent_type_value: str,
+) -> None:
+    """Log an intent-execution exception via the registered error handler."""
+    if trader._error_handler:
+        handler_result = trader._error_handler.handle_error(exc, context=f"intent_execution:{intent_type_value}")
+        if handler_result.should_stop:
+            logger.error(f"[{trader._backtest_id}] Fatal error executing intent: {exc}")
+        elif handler_result.should_retry:
+            logger.warning(f"[{trader._backtest_id}] Recoverable error executing intent (retry possible): {exc}")
+        else:
+            logger.warning(f"[{trader._backtest_id}] Non-critical error executing intent: {exc}")
+    else:
+        logger.exception(f"[{trader._backtest_id}] Error executing intent: {exc}")
+
+
+def make_intent_exception_error(
+    *,
+    timestamp: datetime,
+    intent_dict: dict[str, Any],
+    exc: Exception,
+    block_number: int | None,
+    intent_type_value: str,
+) -> PaperTradeError:
+    """Build the PaperTradeError for an exception raised during intent execution."""
+    return PaperTradeError(
+        timestamp=timestamp,
+        intent=intent_dict,
+        error_type=PaperTradeErrorType.INTERNAL_ERROR,
+        error_message=str(exc),
+        block_number=block_number,
+        metadata={
+            "exception_type": type(exc).__name__,
+            "intent_type": intent_type_value,
+        },
+    )
+
+
+def extract_receipt_tx_details(
+    result: ExecutionResult,
+    fallback_block: int,
+) -> tuple[str, int, int, TransactionReceipt | None]:
+    """Pull ``(tx_hash, block_number, gas_used, receipt)`` from the first tx result."""
+    tx_hash = ""
+    block_number = fallback_block
+    gas_used = 0
+    receipt: TransactionReceipt | None = None
+    if result.transaction_results:
+        first_result = result.transaction_results[0]
+        tx_hash = first_result.tx_hash or ""
+        if first_result.receipt:
+            receipt = first_result.receipt  # type: ignore[assignment]
+            if receipt.block_number is not None:  # type: ignore[union-attr]
+                block_number = receipt.block_number  # type: ignore[union-attr]
+            if receipt.gas_used is not None:  # type: ignore[union-attr]
+                gas_used = receipt.gas_used  # type: ignore[union-attr]
+    return tx_hash, block_number, gas_used, receipt

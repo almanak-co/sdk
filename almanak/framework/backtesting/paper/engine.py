@@ -65,7 +65,6 @@ Examples:
 
 import asyncio
 import logging
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -96,7 +95,6 @@ from almanak.framework.backtesting.paper.token_registry import (
     get_token_symbol_with_fallback,
 )
 from almanak.framework.backtesting.pnl.error_handling import (
-    BacktestErrorConfig,
     BacktestErrorHandler,
 )
 from almanak.framework.backtesting.pnl.providers.chainlink import (
@@ -1173,31 +1171,8 @@ class PaperTrader:
         if self._running:
             raise RuntimeError("PaperTrader is already running")
 
-        # Determine effective max_ticks
         effective_max_ticks: int | None = max_ticks if max_ticks is not None else self.config.max_ticks
-
-        # Initialize session state
-        session_start = datetime.now(UTC)
-        self._session_start = session_start
-        self._running = True
-        self._current_strategy = strategy
-        self._trades = []
-        self._errors = []
-        self._equity_curve = []
-        self._tick_count = 0
-        self._last_execution_result: ExecutionResult | None = None  # For on_intent_executed callback (VIB-1951)
-        # Reset health telemetry counters (VIB-1957)
-        self._ticks_with_fork = 0
-        self._ticks_with_indicators = 0
-        self._ticks_with_action = 0
-        self._last_successful_decision_at = None
-        self._last_trade_at = None
-
-        # Generate unique backtest_id for correlation across all log messages
-        self._backtest_id = str(uuid.uuid4())
-
-        # Initialize error handler for consistent error handling
-        self._error_handler = BacktestErrorHandler(BacktestErrorConfig())
+        session_start = _engine_helpers.init_run_loop_state(self, strategy)
 
         logger.info(
             f"[{self._backtest_id}] Starting paper trading loop for {strategy.strategy_id} "
@@ -1214,96 +1189,21 @@ class PaperTrader:
         )
 
         try:
-            # Initialize fork
-            await self._initialize_fork()
-
-            # Initialize orchestrator with fork RPC
-            await self._initialize_orchestrator()
-
-            # Initialize portfolio valuer with fork RPC for LP/lending repricing
-            self._init_portfolio_valuer()
-
-            # Seed initial market snapshot for PortfolioValuer
-            await self._seed_initial_market_snapshot()
-
-            # Record initial equity point
-            await self._record_equity_point()
-
-            # Main tick loop
-            while self._running:
-                # Check tick limit
-                if effective_max_ticks is not None and self._tick_count >= effective_max_ticks:
-                    logger.info(f"[{self._backtest_id}] Max ticks ({effective_max_ticks}) reached, stopping")
-                    break
-
-                # Execute tick (includes fork refresh check)
-                await self.tick()
-                self._tick_count += 1
-
-                # Sleep until next tick (only if we'll continue)
-                if self._running and (effective_max_ticks is None or self._tick_count < effective_max_ticks):
-                    await asyncio.sleep(self.config.tick_interval_seconds)
-
-        except asyncio.CancelledError:
-            logger.info(f"[{self._backtest_id}] Paper trading loop cancelled")
-        except Exception as e:
-            # Use error handler for consistent classification
-            if self._error_handler:
-                handler_result = self._error_handler.handle_error(e, context="paper_trading_loop")
-                if handler_result.should_stop:
-                    logger.error(f"[{self._backtest_id}] Fatal error in paper trading loop: {e}")
-                else:
-                    logger.warning(f"[{self._backtest_id}] Non-critical error in paper trading loop: {e}")
-            else:
-                logger.exception(f"[{self._backtest_id}] Paper trading loop failed: {e}")
-            # Record the error
-            error = PaperTradeError(
-                timestamp=datetime.now(UTC),
-                intent={},
-                error_type=PaperTradeErrorType.INTERNAL_ERROR,
-                error_message=f"Loop error: {e}",
-                block_number=self.fork_manager.current_block if self.fork_manager.is_running else None,
-                metadata={"exception_type": type(e).__name__},
-            )
-            self._errors.append(error)
+            await _engine_helpers.run_loop_setup(self)
+            await _engine_helpers.run_loop_iterate(self, effective_max_ticks)
+        except (asyncio.CancelledError, Exception) as e:
+            _engine_helpers.handle_run_loop_exception(self, e)
         finally:
             # VIB-2550: Refresh price cache for all portfolio tokens before PnL calc.
             # Without this, _get_token_price_sync may miss tokens whose prices
             # were never fetched (e.g., ETH used only for gas, not for trades).
-            try:
-                await self._get_portfolio_prices()
-            except Exception:
-                logger.debug(
-                    "[%s] Failed to refresh portfolio prices before PnL calc",
-                    self._backtest_id,
-                    exc_info=True,
-                )
-
-            # Cache final value BEFORE cleanup clears valuer state.
-            # Fallback chain: rich valuation > last equity point > simple.
-            _cached_rich = self._value_portfolio_rich()
-            if _cached_rich is not None:
-                _cached_final = _cached_rich[0]
-                _cached_val_source = "portfolio_valuer"
-            elif self._equity_curve:
-                _cached_final = self._equity_curve[-1].value_usd
-                _cached_val_source = self._equity_curve[-1].valuation_source
-            else:
-                _cached_final = self._calculate_portfolio_value()
-                _cached_val_source = "simple"
-            _cached_pnl: Decimal | None = None
-            try:
-                _cached_pnl = _cached_final - self._calculate_initial_capital()
-            except Exception:
-                logger.debug(
-                    "[%s] Failed to compute cached PnL in run_loop teardown",
-                    self._backtest_id,
-                    exc_info=True,
-                )
-
-            # Signal stop and cleanup
+            cached = await _engine_helpers.cache_run_loop_teardown_valuation(self)
             await self.stop()
             await self._cleanup()
+
+        _cached_final = cached.final_value_usd
+        _cached_val_source = cached.valuation_source
+        _cached_pnl = cached.pnl_usd
 
         session_end = datetime.now(UTC)
         duration = session_end - session_start
@@ -1791,7 +1691,7 @@ class PaperTrader:
 
         return trade_result
 
-    async def _execute_intent(  # noqa: C901
+    async def _execute_intent(
         self,
         intent: Any,
         strategy: PaperTradeableStrategy,
@@ -1819,34 +1719,28 @@ class PaperTrader:
             {"intent_type": intent_type.value},
         )
 
-        # Serialize intent for storage
         intent_dict = self._serialize_intent(intent)
-
         # Reset so callback never sees stale data from a previous tick
         self._last_execution_result = None
 
         try:
-            # Compile intent to ActionBundle
             action_bundle = self._compile_intent(intent)
-
             if not action_bundle:
                 logger.warning(f"[{self._backtest_id}] Failed to compile intent: {intent}")
-                error = PaperTradeError(
-                    timestamp=execution_start,
-                    intent=intent_dict,
-                    error_type=PaperTradeErrorType.INTENT_INVALID,
-                    error_message="Failed to compile intent to ActionBundle",
-                    block_number=self.fork_manager.current_block,
-                    metadata={"intent_type": intent_type.value},
+                self._errors.append(
+                    _engine_helpers.make_compile_failure_error(
+                        timestamp=execution_start,
+                        intent_dict=intent_dict,
+                        block_number=self.fork_manager.current_block,
+                        intent_type_value=intent_type.value,
+                    )
                 )
-                self._errors.append(error)
                 return None
 
             # VIB-2550: Snapshot balances BEFORE execution for delta accounting
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
             balances_before = await self._snapshot_balances(wallet_address, intent=intent)
 
-            # Create execution context
             context = ExecutionContext(
                 strategy_id=strategy.strategy_id,
                 chain=self.config.chain,
@@ -1854,7 +1748,6 @@ class PaperTrader:
                 simulation_enabled=True,  # Always simulate on fork
             )
 
-            # Execute on fork
             result = await self._orchestrator.execute(action_bundle, context)
 
             # VIB-2918: Enrich result so on_intent_executed receives populated
@@ -1876,168 +1769,165 @@ class PaperTrader:
             # Store for on_intent_executed callback (VIB-1951)
             self._last_execution_result = result
 
-            # Calculate execution time
-            execution_end = datetime.now(UTC)
-            execution_time_ms = int((execution_end - execution_start).total_seconds() * 1000)
+            execution_time_ms = int((datetime.now(UTC) - execution_start).total_seconds() * 1000)
 
             if result.success:
-                # Calculate costs
-                gas_cost_usd = self._calculate_gas_cost_usd(result)
-
-                # Get transaction details and receipt
-                tx_hash = ""
-                block_number = self.fork_manager.current_block or 0
-                gas_used = 0
-                receipt: TransactionReceipt | None = None
-                if result.transaction_results:
-                    first_result = result.transaction_results[0]
-                    tx_hash = first_result.tx_hash or ""
-                    if first_result.receipt:
-                        receipt = first_result.receipt  # type: ignore[assignment]
-                        block_number = receipt.block_number or block_number  # type: ignore[union-attr]
-                        gas_used = receipt.gas_used or 0  # type: ignore[union-attr]
-
-                # VIB-2550: Use balance deltas as primary accounting (ground truth)
-                # Snapshot balances AFTER execution and diff against pre-execution
-                balances_after = await self._snapshot_balances(wallet_address, intent=intent)
-                tokens_in, tokens_out = await self._compute_balance_deltas(balances_before, balances_after, intent)
-
-                # If balance deltas returned nothing (e.g., all tokens unresolvable),
-                # fall back to receipt/intent-based extraction as last resort
-                if not tokens_in and not tokens_out:
-                    logger.warning(
-                        f"[{self._backtest_id}] Balance deltas returned empty flows, "
-                        "falling back to receipt/intent-based extraction."
-                    )
-                    tokens_in, tokens_out = await self._extract_token_flows(
-                        intent, receipt=receipt, wallet_address=wallet_address
-                    )
-
-                # Calculate slippage tracking values
-                expected_amount_out = self._get_expected_amount_out(intent)
-                actual_amount_out = self._get_actual_amount_out(tokens_in, intent)
-                actual_slippage_bps = self._calculate_slippage_bps(expected_amount_out, actual_amount_out)
-
-                # Collect token prices at execution time for PnL calculation
-                token_prices_usd: dict[str, Decimal] = {}
-                all_tokens = set(tokens_in.keys()) | set(tokens_out.keys())
-                for token in all_tokens:
-                    token_prices_usd[token.upper()] = self._get_token_price_sync(token)
-
-                # Create successful trade
-                trade = PaperTrade(
-                    timestamp=execution_start,
-                    block_number=block_number,
-                    intent=intent_dict,
-                    tx_hash=tx_hash,
-                    gas_used=gas_used,
-                    gas_cost_usd=gas_cost_usd,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    protocol=self._get_intent_protocol(intent),
-                    intent_type=intent_type.value,
+                return await self._build_successful_trade(
+                    intent=intent,
+                    intent_dict=intent_dict,
+                    intent_type=intent_type,
+                    execution_start=execution_start,
                     execution_time_ms=execution_time_ms,
-                    eth_price_usd=self._get_token_price_sync("ETH"),
-                    metadata={
-                        "correlation_id": result.correlation_id,
-                        "amount_usd": str(self._get_intent_amount_usd(intent)),
-                    },
-                    expected_amount_out=expected_amount_out,
-                    actual_amount_out=actual_amount_out,
-                    actual_slippage_bps=actual_slippage_bps,
-                    token_prices_usd=token_prices_usd,
+                    result=result,
+                    wallet_address=wallet_address,
+                    balances_before=balances_before,
                 )
 
-                self._trades.append(trade)
-
-                # Update portfolio tracker
-                self.portfolio_tracker.record_trade(trade)
-
-                self._emit_event(
-                    PaperTradeEventType.TRADE_COMPLETED,
-                    {
-                        "intent_type": intent_type.value,
-                        "tx_hash": trade.tx_hash,
-                        "gas_used": trade.gas_used,
-                    },
-                )
-
-                return trade
-
-            else:
-                # Determine error type from result
-                error_type = PaperTradeErrorType.INTERNAL_ERROR
-                if result.error_phase:
-                    phase_name = result.error_phase.value.upper()
-                    if "SIMULATION" in phase_name:
-                        error_type = PaperTradeErrorType.SIMULATION_FAILED
-                    elif "SIGN" in phase_name:
-                        error_type = PaperTradeErrorType.INTERNAL_ERROR
-                    elif "SUBMIT" in phase_name:
-                        error_type = PaperTradeErrorType.RPC_ERROR
-
-                error = PaperTradeError(
-                    timestamp=execution_start,
-                    intent=intent_dict,
-                    error_type=error_type,
-                    error_message=result.error or "Unknown error",
-                    block_number=self.fork_manager.current_block,
-                    metadata={
-                        "phase": result.phase.value,
-                        "intent_type": intent_type.value,
-                    },
-                )
-
-                self._errors.append(error)
-
-                self._emit_event(
-                    PaperTradeEventType.TRADE_FAILED,
-                    {
-                        "intent_type": intent_type.value,
-                        "error": result.error,
-                        "phase": result.phase.value,
-                    },
-                )
-
-                return None
+            self._record_intent_failure(
+                intent_dict=intent_dict,
+                intent_type=intent_type,
+                execution_start=execution_start,
+                result=result,
+            )
+            return None
 
         except Exception as e:
-            # Use error handler for consistent classification
-            if self._error_handler:
-                handler_result = self._error_handler.handle_error(e, context=f"intent_execution:{intent_type.value}")
-                if handler_result.should_stop:
-                    logger.error(f"[{self._backtest_id}] Fatal error executing intent: {e}")
-                elif handler_result.should_retry:
-                    logger.warning(f"[{self._backtest_id}] Recoverable error executing intent (retry possible): {e}")
-                else:
-                    logger.warning(f"[{self._backtest_id}] Non-critical error executing intent: {e}")
-            else:
-                logger.exception(f"[{self._backtest_id}] Error executing intent: {e}")
-
-            error = PaperTradeError(
-                timestamp=execution_start,
-                intent=intent_dict,
-                error_type=PaperTradeErrorType.INTERNAL_ERROR,
-                error_message=str(e),
-                block_number=self.fork_manager.current_block,
-                metadata={
-                    "exception_type": type(e).__name__,
-                    "intent_type": intent_type.value,
-                },
+            self._handle_intent_exception(
+                intent_dict=intent_dict,
+                intent_type=intent_type,
+                execution_start=execution_start,
+                exc=e,
             )
-
-            self._errors.append(error)
-
-            self._emit_event(
-                PaperTradeEventType.TRADE_FAILED,
-                {
-                    "intent_type": intent_type.value,
-                    "error": str(e),
-                    "phase": "EXCEPTION",
-                },
-            )
-
             return None
+
+    async def _build_successful_trade(
+        self,
+        *,
+        intent: Any,
+        intent_dict: dict[str, Any],
+        intent_type: IntentType,
+        execution_start: datetime,
+        execution_time_ms: int,
+        result: ExecutionResult,
+        wallet_address: str,
+        balances_before: dict[str, int],
+    ) -> PaperTrade:
+        """Construct, record, and emit a ``TRADE_COMPLETED`` ``PaperTrade``."""
+        gas_cost_usd = self._calculate_gas_cost_usd(result)
+        tx_hash, block_number, gas_used, receipt = _engine_helpers.extract_receipt_tx_details(
+            result, fallback_block=self.fork_manager.current_block or 0
+        )
+
+        # VIB-2550: Use balance deltas as primary accounting (ground truth).
+        balances_after = await self._snapshot_balances(wallet_address, intent=intent)
+        tokens_in, tokens_out = await self._compute_balance_deltas(balances_before, balances_after, intent)
+
+        if not tokens_in and not tokens_out:
+            logger.warning(
+                f"[{self._backtest_id}] Balance deltas returned empty flows, "
+                "falling back to receipt/intent-based extraction."
+            )
+            tokens_in, tokens_out = await self._extract_token_flows(
+                intent, receipt=receipt, wallet_address=wallet_address
+            )
+
+        expected_amount_out = self._get_expected_amount_out(intent)
+        actual_amount_out = self._get_actual_amount_out(tokens_in, intent)
+        actual_slippage_bps = self._calculate_slippage_bps(expected_amount_out, actual_amount_out)
+
+        token_prices_usd: dict[str, Decimal] = {
+            token.upper(): self._get_token_price_sync(token) for token in set(tokens_in.keys()) | set(tokens_out.keys())
+        }
+
+        trade = PaperTrade(
+            timestamp=execution_start,
+            block_number=block_number,
+            intent=intent_dict,
+            tx_hash=tx_hash,
+            gas_used=gas_used,
+            gas_cost_usd=gas_cost_usd,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            protocol=self._get_intent_protocol(intent),
+            intent_type=intent_type.value,
+            execution_time_ms=execution_time_ms,
+            eth_price_usd=self._get_token_price_sync("ETH"),
+            metadata={
+                "correlation_id": result.correlation_id,
+                "amount_usd": str(self._get_intent_amount_usd(intent)),
+            },
+            expected_amount_out=expected_amount_out,
+            actual_amount_out=actual_amount_out,
+            actual_slippage_bps=actual_slippage_bps,
+            token_prices_usd=token_prices_usd,
+        )
+
+        self._trades.append(trade)
+        self.portfolio_tracker.record_trade(trade)
+        self._emit_event(
+            PaperTradeEventType.TRADE_COMPLETED,
+            {
+                "intent_type": intent_type.value,
+                "tx_hash": trade.tx_hash,
+                "gas_used": trade.gas_used,
+            },
+        )
+        return trade
+
+    def _record_intent_failure(
+        self,
+        *,
+        intent_dict: dict[str, Any],
+        intent_type: IntentType,
+        execution_start: datetime,
+        result: ExecutionResult,
+    ) -> None:
+        """Record a non-success ``ExecutionResult`` and emit ``TRADE_FAILED``."""
+        self._errors.append(
+            _engine_helpers.make_execution_failure_error(
+                timestamp=execution_start,
+                intent_dict=intent_dict,
+                result=result,
+                block_number=self.fork_manager.current_block,
+                intent_type_value=intent_type.value,
+            )
+        )
+        self._emit_event(
+            PaperTradeEventType.TRADE_FAILED,
+            {
+                "intent_type": intent_type.value,
+                "error": result.error,
+                "phase": result.phase.value,
+            },
+        )
+
+    def _handle_intent_exception(
+        self,
+        *,
+        intent_dict: dict[str, Any],
+        intent_type: IntentType,
+        execution_start: datetime,
+        exc: Exception,
+    ) -> None:
+        """Log + record the exception path of ``_execute_intent``; emit ``TRADE_FAILED``."""
+        _engine_helpers.log_intent_execution_exception(self, exc, intent_type.value)
+        self._errors.append(
+            _engine_helpers.make_intent_exception_error(
+                timestamp=execution_start,
+                intent_dict=intent_dict,
+                exc=exc,
+                block_number=self.fork_manager.current_block,
+                intent_type_value=intent_type.value,
+            )
+        )
+        self._emit_event(
+            PaperTradeEventType.TRADE_FAILED,
+            {
+                "intent_type": intent_type.value,
+                "error": str(exc),
+                "phase": "EXCEPTION",
+            },
+        )
 
     async def _record_equity_point(self) -> None:
         """Record current portfolio value as equity point.
@@ -2248,20 +2138,11 @@ class PaperTrader:
         if not self._cached_prices:
             return
 
-        # Build a fork-bound Chainlink provider to read on-fork oracle prices
         fork_rpc = self.fork_manager.get_rpc_url() if self.fork_manager else None
         if not fork_rpc:
             return
 
-        chain_mapping = {
-            "ethereum": "ethereum",
-            "arbitrum": "arbitrum",
-            "base": "base",
-            "optimism": "optimism",
-            "polygon": "polygon",
-            "avalanche": "avalanche",
-        }
-        chainlink_chain = chain_mapping.get(self.config.chain)
+        chainlink_chain = _engine_helpers.resolve_chainlink_divergence_chain(self.config.chain)
         if not chainlink_chain:
             return
 
@@ -2275,40 +2156,16 @@ class PaperTrader:
             logger.debug(f"[{self._backtest_id}] Failed to create fork-bound Chainlink provider: {e}")
             return
 
-        threshold = self.config.oracle_divergence_threshold
-        max_divergence = Decimal("0")
-        worst_token = ""
-
         try:
-            for token, live_price in self._cached_prices.items():
-                if live_price <= 0:
-                    continue
-                try:
-                    fork_price = await fork_chainlink.get_price(token, timestamp=None)
-                    if fork_price and fork_price > 0:
-                        divergence = abs(live_price - fork_price) / live_price
-                        if divergence > max_divergence:
-                            max_divergence = divergence
-                            worst_token = token
-                        if divergence > Decimal("0.02"):
-                            logger.info(
-                                f"[{self._backtest_id}] Oracle divergence for {token}: "
-                                f"live=${live_price:.2f} vs fork=${fork_price:.2f} "
-                                f"({divergence * 100:.1f}%)"
-                            )
-                except Exception as e:
-                    logger.debug(f"[{self._backtest_id}] Failed to get on-fork price for {token} from Chainlink: {e}")
+            max_divergence, worst_token = await _engine_helpers.compute_max_oracle_divergence(
+                fork_chainlink, self._cached_prices, self._backtest_id
+            )
         finally:
             await fork_chainlink.close()
 
+        threshold = self.config.oracle_divergence_threshold
         if max_divergence > threshold:
-            error_msg = (
-                f"Oracle divergence exceeds threshold for {worst_token}: "
-                f"{max_divergence * 100:.1f}% > {threshold * 100:.0f}%. "
-                f"The persistent fork's on-chain prices have drifted too far from reality. "
-                f"Paper trading results would be unreliable. "
-                f"Increase oracle_divergence_threshold or reduce session duration."
-            )
+            error_msg = _engine_helpers.build_divergence_error_message(worst_token, max_divergence, threshold)
             logger.error(f"[{self._backtest_id}] {error_msg}")
             raise RuntimeError(error_msg)
 
@@ -2730,7 +2587,7 @@ class PaperTrader:
 
         return tokens_in, tokens_out
 
-    async def _extract_token_flows(  # noqa: C901
+    async def _extract_token_flows(
         self,
         intent: Any,
         receipt: TransactionReceipt | None = None,
@@ -2801,67 +2658,14 @@ class PaperTrader:
 
         # Fallback: Extract expected flows from intent attributes
         intent_type = self._get_intent_type(intent)
-
-        if intent_type == IntentType.SWAP:
-            # Extract from_token and to_token
-            from_token = getattr(intent, "from_token", None)
-            to_token = getattr(intent, "to_token", None)
-            intent_amount = getattr(intent, "amount", None) or getattr(intent, "amount_in", None)
-
-            if from_token and intent_amount:
-                tokens_out[str(from_token).upper()] = Decimal(str(intent_amount))
-            if to_token:
-                # Try to get expected amount from intent attributes
-                expected_out = self._get_expected_amount_out(intent)
-                if expected_out is not None:
-                    tokens_in[str(to_token).upper()] = expected_out
-                else:
-                    # No receipt and no expected amount - use zero with warning
-                    logger.warning(
-                        f"[{self._backtest_id}] Cannot determine swap output amount for {to_token} "
-                        "without receipt. Using zero placeholder - this may affect PnL accuracy."
-                    )
-                    self._track_fallback("zero_output_placeholder")
-                    tokens_in[str(to_token).upper()] = Decimal("0")
-
-        elif intent_type in (IntentType.SUPPLY, IntentType.REPAY):
-            token = getattr(intent, "token", None) or getattr(intent, "asset", None)
-            intent_amount = getattr(intent, "amount", None)
-            if token and intent_amount:
-                tokens_out[str(token).upper()] = Decimal(str(intent_amount))
-
-        elif intent_type in (IntentType.WITHDRAW, IntentType.BORROW):
-            token = getattr(intent, "token", None) or getattr(intent, "asset", None)
-            intent_amount = getattr(intent, "amount", None)
-            if token and intent_amount:
-                tokens_in[str(token).upper()] = Decimal(str(intent_amount))
-
-        elif intent_type == IntentType.LP_OPEN:
-            token0 = getattr(intent, "token0", None) or getattr(intent, "token_a", None)
-            token1 = getattr(intent, "token1", None) or getattr(intent, "token_b", None)
-            amount0 = getattr(intent, "amount0", None)
-            amount1 = getattr(intent, "amount1", None)
-            if token0 and amount0:
-                tokens_out[str(token0).upper()] = Decimal(str(amount0))
-            if token1 and amount1:
-                tokens_out[str(token1).upper()] = Decimal(str(amount1))
-
-        elif intent_type == IntentType.LP_CLOSE:
-            token0 = getattr(intent, "token0", None) or getattr(intent, "token_a", None)
-            token1 = getattr(intent, "token1", None) or getattr(intent, "token_b", None)
-            if token0 or token1:
-                # LP_CLOSE without receipt - we can't know actual output amounts
-                logger.warning(
-                    f"[{self._backtest_id}] Cannot determine LP close output amounts "
-                    "without receipt. Using zero placeholder - this may affect PnL accuracy."
-                )
-                self._track_fallback("zero_output_placeholder")
-            if token0:
-                tokens_in[str(token0).upper()] = Decimal("0")
-            if token1:
-                tokens_in[str(token1).upper()] = Decimal("0")
-
-        return tokens_in, tokens_out
+        expected_out = self._get_expected_amount_out(intent) if intent_type == IntentType.SWAP else None
+        return _engine_helpers.intent_fallback_token_flows(
+            intent_type,
+            intent,
+            expected_out,
+            self._track_fallback,
+            self._backtest_id,
+        )
 
     def _get_expected_amount_out(self, intent: Any) -> Decimal | None:
         """Extract expected output amount from an intent.
