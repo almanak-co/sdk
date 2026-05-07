@@ -52,14 +52,19 @@ class TestKrakenCredentials:
         assert creds.api_key.get_secret_value() == "env_key"
         assert creds.api_secret.get_secret_value() == "env_secret"
 
-    def test_credentials_from_env_custom_vars(self, monkeypatch):
-        """Should load from custom environment variable names."""
-        monkeypatch.setenv("MY_KRAKEN_KEY", "custom_key")
-        monkeypatch.setenv("MY_KRAKEN_SECRET", "custom_secret")
+    def test_credentials_construct_with_explicit_kwargs(self):
+        """Should accept api_key/api_secret kwargs (the supported override path).
 
-        creds = KrakenCredentials.from_env(
-            key_env="MY_KRAKEN_KEY",
-            secret_env="MY_KRAKEN_SECRET",
+        The legacy ``key_env`` / ``secret_env`` overrides on ``from_env``
+        were removed in Phase 5b of the config-service migration — the
+        typed config exposes a fixed ``KRAKEN_API_KEY`` / ``KRAKEN_API_SECRET``
+        contract. Callers that want a non-default env-var name should
+        construct ``KrakenCredentials`` directly, which is what this test
+        exercises.
+        """
+        creds = KrakenCredentials(
+            api_key=SecretStr("custom_key"),
+            api_secret=SecretStr("custom_secret"),
         )
         assert creds.api_key.get_secret_value() == "custom_key"
         assert creds.api_secret.get_secret_value() == "custom_secret"

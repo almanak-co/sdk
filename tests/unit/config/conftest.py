@@ -88,6 +88,88 @@ _GATEWAY_ENV_VARS: tuple[str, ...] = (
     "ALMANAK_POLYMARKET_PASSPHRASE",
     # Deployment-mode discriminator.
     "AGENT_ID",
+    # Backtest env vars (Phase 5c). The factory ``backtest_config_from_env``
+    # reads these eagerly via the LocalConfig / HostedConfig
+    # ``default_factory`` path; if a developer's ``.env`` carries any of
+    # these, the bare ``LocalConfig()`` construction in tests would
+    # silently pick them up.
+    "THEGRAPH_API_KEY",
+    "ARCHIVE_RPC_URL_ETHEREUM",
+    "ARCHIVE_RPC_URL_ARBITRUM",
+    "ARCHIVE_RPC_URL_BASE",
+    "ARCHIVE_RPC_URL_OPTIMISM",
+    "ARCHIVE_RPC_URL_POLYGON",
+    "ARCHIVE_RPC_URL_AVALANCHE",
+    "ETHERSCAN_API_KEY",
+    "ARBISCAN_API_KEY",
+    "OPTIMISTIC_ETHERSCAN_API_KEY",
+    "BASESCAN_API_KEY",
+    "POLYGONSCAN_API_KEY",
+    "BSCSCAN_API_KEY",
+    "SNOWTRACE_API_KEY",
+    # SSL cert hint — the typed config falls back to certifi when no
+    # explicit path is set, so test runs on hosts with a usable certifi
+    # bundle still get a populated ``ssl_cert_file`` field. That's the
+    # production-aligned behaviour and tests asserting ``ssl_cert_file
+    # is not None`` should accept it.
+    "SSL_CERT_FILE",
+    # CLI-runtime env vars (Phase 5e). The factory ``cli_runtime_config_from_env``
+    # reads these eagerly via the LocalConfig / HostedConfig
+    # ``default_factory`` path; if a developer's ``.env`` carries any of
+    # these, the bare ``LocalConfig()`` construction in tests would
+    # silently pick them up.
+    "GATEWAY_AUTH_TOKEN",
+    "ALMANAK_GATEWAY_WALLETS",
+    "ALMANAK_GATEWAY_SAFE_MODE",
+    "ALMANAK_GATEWAY_SAFE_ADDRESS",
+    "ALMANAK_EXECUTION_MODE",
+    "SOLANA_RPC_URL",
+    "SOLANA_VALIDATOR_PORT",
+    "ALMANAK_RECONCILIATION_ENFORCEMENT",
+    "ALMANAK_ALLOW_HARDCODED_PRICES",
+    "CI",
+    # ``ANVIL_<CHAIN>_PORT`` cluster — read for every chain in the default
+    # ``anvil_chains`` tuple of ``cli_runtime_config_from_env``. Listed
+    # explicitly so a stray ``ANVIL_ARBITRUM_PORT=8546`` in the developer's
+    # shell can't leak into the bare ``LocalConfig()`` construction.
+    "ANVIL_ETHEREUM_PORT",
+    "ANVIL_ARBITRUM_PORT",
+    "ANVIL_OPTIMISM_PORT",
+    "ANVIL_POLYGON_PORT",
+    "ANVIL_BASE_PORT",
+    "ANVIL_AVALANCHE_PORT",
+    "ANVIL_BSC_PORT",
+    "ANVIL_LINEA_PORT",
+    "ANVIL_BLAST_PORT",
+    "ANVIL_MANTLE_PORT",
+    "ANVIL_BERACHAIN_PORT",
+    "ANVIL_SONIC_PORT",
+    "ANVIL_MONAD_PORT",
+    "ANVIL_XLAYER_PORT",
+    "ANVIL_ZEROG_PORT",
+    "ANVIL_PLASMA_PORT",
+    # ``RuntimeConfig`` env reads (PR #2152 review). These are not on the
+    # default_factory path today (``LocalConfig.runtime`` defaults to
+    # ``None`` and is wired explicitly after strategy load), but tests that
+    # call ``runtime_config_from_env()`` directly need the same isolation
+    # so a stray developer ``.env`` cannot bleed into the parity tests.
+    "ALMANAK_CHAIN",
+    "ALMANAK_CHAINS",
+    "ALMANAK_RPC_URL",
+    "RPC_URL",
+    "ALMANAK_NETWORK",
+    "ALMANAK_TX_TIMEOUT_SECONDS",
+    "ALMANAK_MAX_GAS_PRICE_GWEI",
+    "ALMANAK_MAX_GAS_COST_NATIVE",
+    "ALMANAK_MAX_GAS_COST_USD",
+    "ALMANAK_MAX_SLIPPAGE_BPS",
+    "ALMANAK_MAX_TX_VALUE_ETH",
+    "ALMANAK_BASE_RETRY_DELAY",
+    "ALMANAK_MAX_RETRY_DELAY",
+    "ALMANAK_MAX_RETRIES",
+    "ALMANAK_SIMULATION_ENABLED",
+    "ALMANAK_DATA_FRESHNESS_POLICY",
+    "ALMANAK_STALE_DATA_THRESHOLD_SECONDS",
 )
 
 

@@ -6,8 +6,6 @@ and precision constants for Drift perpetual futures on Solana mainnet.
 Reference: https://github.com/drift-labs/protocol-v2
 """
 
-import os
-
 # =========================================================================
 # Program IDs
 # =========================================================================
@@ -293,4 +291,31 @@ SPOT_MARKET_ORACLE_OFFSET = 48
 # Data API
 # =========================================================================
 
-DRIFT_DATA_API_BASE_URL = os.environ.get("DRIFT_DATA_API_BASE_URL") or "https://data.api.drift.trade"
+
+def get_drift_data_api_base_url() -> str:
+    """Return the Drift data API base URL.
+
+    Phase 5b of the config-service migration: the legacy module-level
+    constant ``DRIFT_DATA_API_BASE_URL = os.environ.get(...)`` froze the
+    env value at import time, which was a real bug (a test that
+    monkeypatched the env var after the constants module was first loaded
+    saw no effect). This helper reads the typed config at call time
+    instead, so monkeypatching ``DRIFT_DATA_API_BASE_URL`` between calls
+    works as expected.
+    """
+    from almanak.config.connectors import connectors_config_from_env
+
+    return connectors_config_from_env().drift_data_api_base_url
+
+
+def __getattr__(name: str) -> str:
+    """Lazy module attribute resolver — preserves the legacy constant name.
+
+    ``from almanak.framework.connectors.drift.constants import DRIFT_DATA_API_BASE_URL``
+    still works (callers haven't been updated wholesale), but every read
+    goes through :func:`get_drift_data_api_base_url` so the env-var lookup
+    happens at call time instead of import time.
+    """
+    if name == "DRIFT_DATA_API_BASE_URL":
+        return get_drift_data_api_base_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

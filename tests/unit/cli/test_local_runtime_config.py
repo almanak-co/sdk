@@ -1,8 +1,9 @@
 """Tests for LocalRuntimeConfig.
 
 This module tests the configuration class for local execution environment,
-including field validation, environment variable loading, and security
-requirements.
+including field validation, environment variable loading (via
+``runtime_config_from_env``, the Phase 5a-2 entry point that replaced
+``LocalRuntimeConfig.from_env``), and security requirements.
 """
 
 import os
@@ -10,12 +11,26 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.config.runtime import runtime_config_from_env
 from almanak.framework.execution.config import (
     CHAIN_IDS,
     ConfigurationError,
     LocalRuntimeConfig,
     MissingEnvironmentVariableError,
 )
+
+
+def _local_from_env(**kwargs):
+    """Compatibility shim: ``runtime_config_from_env`` + ``from_runtime_config``.
+
+    Phase 5a-2 deleted ``LocalRuntimeConfig.from_env``. These tests assert on
+    the env-loading + dataclass-construction pipeline, so we route them
+    through the new factory and adapter; the test bodies stay
+    field-by-field identical.
+    """
+    rc = runtime_config_from_env(**kwargs)
+    return LocalRuntimeConfig.from_runtime_config(rc)
+
 
 # Test private key (Ganache default account #0 - DO NOT USE IN PRODUCTION)
 TEST_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -337,7 +352,7 @@ class TestFromEnv:
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
         with patch.dict(os.environ, env_vars, clear=False):
-            config = LocalRuntimeConfig.from_env()
+            config = _local_from_env()
 
         assert config.chain == "arbitrum"
         assert config.rpc_url == "https://arb1.arbitrum.io/rpc"
@@ -356,7 +371,7 @@ class TestFromEnv:
             "ALMANAK_MAX_RETRIES": "5",
         }
         with patch.dict(os.environ, env_vars, clear=False):
-            config = LocalRuntimeConfig.from_env()
+            config = _local_from_env()
 
         assert config.max_gas_price_gwei == 50
         assert config.tx_timeout_seconds == 60
@@ -379,7 +394,7 @@ class TestFromEnv:
         }
         with patch.dict(os.environ, env_vars, clear=True):
             with pytest.raises(MissingEnvironmentVariableError) as exc_info:
-                LocalRuntimeConfig.from_env()
+                _local_from_env()
             assert "ALMANAK_PRIVATE_KEY" in str(exc_info.value)
 
     def test_from_env_custom_prefix(self):
@@ -390,7 +405,7 @@ class TestFromEnv:
             "MY_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
         with patch.dict(os.environ, env_vars, clear=False):
-            config = LocalRuntimeConfig.from_env(prefix="MY_")
+            config = _local_from_env(prefix="MY_")
 
         assert config.chain == "polygon"
         assert config.rpc_url == "https://polygon-rpc.com"
@@ -418,7 +433,7 @@ class TestFromEnv:
                 "ALMANAK_SIMULATION_ENABLED": value,
             }
             with patch.dict(os.environ, env_vars, clear=False):
-                config = LocalRuntimeConfig.from_env()
+                config = _local_from_env()
                 assert config.simulation_enabled is expected, f"Failed for value: {value}"
 
     def test_from_env_invalid_integer_raises_error(self):
@@ -431,7 +446,7 @@ class TestFromEnv:
         }
         with patch.dict(os.environ, env_vars, clear=False):
             with pytest.raises(ConfigurationError) as exc_info:
-                LocalRuntimeConfig.from_env()
+                _local_from_env()
             assert "ALMANAK_MAX_GAS_PRICE_GWEI" in exc_info.value.field
 
     # VIB-303: Chain-specific gas price cap defaults
@@ -443,9 +458,9 @@ class TestFromEnv:
             "ALMANAK_RPC_URL": "https://polygon-rpc.com",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env()
+                config = _local_from_env()
         assert config.max_gas_price_gwei == 500
 
     def test_from_env_arbitrum_uses_10_gwei_default(self):
@@ -455,9 +470,9 @@ class TestFromEnv:
             "ALMANAK_RPC_URL": "https://arb1.arbitrum.io/rpc",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env()
+                config = _local_from_env()
         assert config.max_gas_price_gwei == 10
 
     def test_from_env_ethereum_uses_300_gwei_default(self):
@@ -467,9 +482,9 @@ class TestFromEnv:
             "ALMANAK_RPC_URL": "https://mainnet.infura.io",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env()
+                config = _local_from_env()
         assert config.max_gas_price_gwei == 300
 
     def test_from_env_berachain_uses_chain_specific_cap(self):
@@ -479,9 +494,9 @@ class TestFromEnv:
             "ALMANAK_RPC_URL": "https://rpc.berachain.com",
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env()
+                config = _local_from_env()
         assert config.max_gas_price_gwei == 50  # berachain entry in CHAIN_GAS_PRICE_CAPS_GWEI
 
     def test_from_env_explicit_override_respected_on_mainnet(self):
@@ -492,9 +507,9 @@ class TestFromEnv:
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
             "ALMANAK_MAX_GAS_PRICE_GWEI": "1000",
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env()
+                config = _local_from_env()
         assert config.max_gas_price_gwei == 1000
 
     # VIB-304: Anvil mode disables effective gas cap
@@ -503,9 +518,9 @@ class TestFromEnv:
         env_vars = {
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
+                config = _local_from_env(chain="arbitrum", network="anvil")
         assert config.max_gas_price_gwei == 9999
 
     def test_from_env_anvil_mode_ignores_low_override(self):
@@ -518,9 +533,9 @@ class TestFromEnv:
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
             "ALMANAK_MAX_GAS_PRICE_GWEI": "100",
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                config = LocalRuntimeConfig.from_env(chain="polygon", network="anvil")
+                config = _local_from_env(chain="polygon", network="anvil")
         assert config.max_gas_price_gwei == 9999
 
     def test_from_env_anvil_mode_warns_on_low_override(self):
@@ -529,10 +544,10 @@ class TestFromEnv:
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
             "ALMANAK_MAX_GAS_PRICE_GWEI": "100",
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                with patch("almanak.framework.execution.config.logger") as mock_logger:
-                    LocalRuntimeConfig.from_env(chain="polygon", network="anvil")
+                with patch("almanak.config.runtime.logger") as mock_logger:
+                    _local_from_env(chain="polygon", network="anvil")
                 mock_logger.warning.assert_called()
                 warning_messages = [str(call) for call in mock_logger.warning.call_args_list]
                 assert any("too low for Anvil" in msg for msg in warning_messages)
@@ -546,10 +561,10 @@ class TestFromEnv:
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
             "MAX_GAS_PRICE_GWEI": "500",  # missing ALMANAK_ prefix
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                with patch("almanak.framework.execution.config.logger") as mock_logger:
-                    LocalRuntimeConfig.from_env()
+                with patch("almanak.config.runtime.logger") as mock_logger:
+                    _local_from_env()
                 # Check that a warning was emitted mentioning MAX_GAS_PRICE_GWEI
                 warning_calls = mock_logger.warning.call_args_list
                 warning_messages = [str(call) for call in warning_calls]
@@ -563,10 +578,10 @@ class TestFromEnv:
             "ALMANAK_PRIVATE_KEY": TEST_PRIVATE_KEY,
             "ALMANAK_MAX_GAS_PRICE_GWEI": "50",  # correctly prefixed
         }
-        with patch("almanak.framework.execution.config.load_dotenv"):
+        with patch("almanak.config.env.load_dotenv"):
             with patch.dict(os.environ, env_vars, clear=True):
-                with patch("almanak.framework.execution.config.logger") as mock_logger:
-                    LocalRuntimeConfig.from_env()
+                with patch("almanak.config.runtime.logger") as mock_logger:
+                    _local_from_env()
                 # No warning about MAX_GAS_PRICE_GWEI should be emitted
                 warning_calls = mock_logger.warning.call_args_list
                 warning_messages = [str(call) for call in warning_calls]

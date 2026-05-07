@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import ClassVar
 
 import click
-from dotenv import load_dotenv
+
+from almanak.config.env import _load_dotenv_once
 
 
 class LazyBacktestGroup(click.Group):
@@ -119,9 +120,11 @@ def backtest() -> None:
       # List available strategies
       almanak backtest pnl --list-strategies
     """
-    # Load .env from current directory so backtest commands pick up
-    # API keys (COINGECKO_API_KEY, THEGRAPH_API_KEY, ALCHEMY_API_KEY, etc.)
-    # the same way 'almanak strat run' does from its working directory.
+    # Load .env from current directory through the config-service boundary
+    # so backtest commands pick up API keys (COINGECKO_API_KEY,
+    # THEGRAPH_API_KEY, ALCHEMY_API_KEY, etc.) the same way
+    # 'almanak strat run' does from its working directory.
     env_file = Path.cwd() / ".env"
-    if load_dotenv(dotenv_path=env_file):
+    if env_file.exists():
+        _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")

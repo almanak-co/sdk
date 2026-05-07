@@ -36,12 +36,12 @@ from .constants import (
     METADATA_PROGRAM_ID,
     OPEN_POSITION_V2_DISCRIMINATOR,
     POSITION_SEED,
-    RAYDIUM_API_BASE_URL,
     RENT_SYSVAR_ID,
     SYSTEM_PROGRAM_ID,
     TICK_ARRAY_SEED,
     TOKEN_2022_PROGRAM_ID,
     TOKEN_PROGRAM_ID,
+    get_raydium_api_base_url,
 )
 
 WSOL_MINT = WRAPPED_NATIVE["solana"]
@@ -82,14 +82,16 @@ class RaydiumCLMMSDK:
     def __init__(
         self,
         wallet_address: str,
-        base_url: str = RAYDIUM_API_BASE_URL,
+        base_url: str | None = None,
         timeout: int = 30,
     ) -> None:
         if not wallet_address:
             raise RaydiumConfigError("wallet_address is required", parameter="wallet_address")
 
         self.wallet_address = wallet_address
-        self.base_url = base_url
+        # Phase 5b: typed-config lookup at call time, not at function-definition
+        # time. See ``DriftDataClient.__init__`` for the same rationale.
+        self.base_url = base_url or get_raydium_api_base_url()
         self.timeout = timeout
         self._owner = Pubkey.from_string(wallet_address)
         self._program_id = Pubkey.from_string(CLMM_PROGRAM_ID)

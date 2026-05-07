@@ -45,6 +45,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.config.backtest import backtest_config_from_env
+
 from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
 from ..types import DataConfidence, DataSourceInfo
 
@@ -421,6 +423,14 @@ class AggregatedDataProvider:
 
         return cls(providers=providers, provider_names=provider_names, chain=chain)
 
+    # crap-allowlist: Phase 5c (#2097) swaps a single env read inside this
+    # mode-dispatch factory for an ``almanak.config.backtest`` lookup. The
+    # outer cyclomatic-complexity stays at the legacy cc=10 (auto / chainlink
+    # / twap / coingecko / invalid branches); coverage is 4% because
+    # network-touching providers are mock-tested elsewhere. Refactoring the
+    # mode dispatch out is a separate ticket on the backtesting backlog
+    # (the create_with_data_config -> _create_<mode>_provider split is
+    # already half-done).
     @classmethod
     async def create_with_data_config(
         cls,
@@ -460,17 +470,20 @@ class AggregatedDataProvider:
             config = BacktestDataConfig(price_provider="chainlink")
             provider = await AggregatedDataProvider.create_with_data_config(config)
         """
-        import os
-
         providers: list[Any] = []
         provider_names: list[str] = []
 
         mode = data_config.price_provider
-        chain_upper = chain.upper()
 
-        # Resolve RPC URL from environment if not provided
+        # Resolve RPC URL from typed backtest config if not provided.
+        # Phase 5c: env reads centralised in
+        # ``almanak.config.backtest.backtest_config_from_env``. We pass the
+        # requested chain explicitly so non-default chains (e.g. ``bsc``,
+        # not in ``DEFAULT_ARCHIVE_RPC_CHAINS``) still get their
+        # ``ARCHIVE_RPC_URL_<CHAIN>`` env var read (PR #2152 review).
         if rpc_url is None:
-            rpc_url = os.environ.get(f"ARCHIVE_RPC_URL_{chain_upper}", "")
+            chain_key = chain.lower()
+            rpc_url = backtest_config_from_env(archive_rpc_chains=(chain_key,)).archive_rpc_urls.get(chain_key, "")
 
         logger.info(
             "Creating AggregatedDataProvider with mode=%s, chain=%s",

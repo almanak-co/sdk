@@ -28,7 +28,6 @@ Model Type Usage:
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -199,23 +198,32 @@ class ApiCredentials(BaseModel):
         )
 
     @classmethod
-    def from_env(
-        cls,
-        api_key_env: str = "POLYMARKET_API_KEY",
-        secret_env: str = "POLYMARKET_SECRET",
-        passphrase_env: str = "POLYMARKET_PASSPHRASE",
-    ) -> "ApiCredentials":
-        """Load credentials from environment variables."""
-        api_key = os.environ.get(api_key_env)
-        secret = os.environ.get(secret_env)
-        passphrase = os.environ.get(passphrase_env)
+    def from_env(cls) -> "ApiCredentials":
+        """Load credentials from environment variables.
+
+        Phase 5b of the config-service migration: routes through the typed
+        :class:`almanak.config.connectors.ConnectorsConfig`. The legacy
+        ``api_key_env`` / ``secret_env`` / ``passphrase_env`` overrides are
+        gone — use ``ApiCredentials(...)`` directly to bypass env entirely.
+
+        The ladder mirrors the gateway-tier resolver exactly: bare
+        ``POLYMARKET_*`` env var first, then ``ALMANAK_POLYMARKET_*``
+        alias. Both rungs are handled inside
+        :func:`almanak.config.connectors.connectors_config_from_env`.
+        """
+        from almanak.config.connectors import connectors_config_from_env
+
+        cfg = connectors_config_from_env()
+        api_key = cfg.polymarket_api_key
+        secret = cfg.polymarket_secret
+        passphrase = cfg.polymarket_passphrase
 
         if not api_key:
-            raise ValueError(f"Environment variable {api_key_env} not set")
+            raise ValueError("Environment variable POLYMARKET_API_KEY not set")
         if not secret:
-            raise ValueError(f"Environment variable {secret_env} not set")
+            raise ValueError("Environment variable POLYMARKET_SECRET not set")
         if not passphrase:
-            raise ValueError(f"Environment variable {passphrase_env} not set")
+            raise ValueError("Environment variable POLYMARKET_PASSPHRASE not set")
 
         return cls(
             api_key=api_key,
@@ -409,14 +417,7 @@ class PolymarketConfig(BaseModel):
         return Web3.to_checksum_address(v)
 
     @classmethod
-    def from_env(
-        cls,
-        wallet_env: str = "POLYMARKET_WALLET_ADDRESS",
-        rpc_env: str = "POLYGON_RPC_URL",
-        clob_url_env: str = "POLYMARKET_CLOB_URL",
-        gamma_url_env: str = "POLYMARKET_GAMMA_URL",
-        data_api_url_env: str = "POLYMARKET_DATA_API_URL",
-    ) -> "PolymarketConfig":
+    def from_env(cls) -> "PolymarketConfig":
         """Load configuration from environment variables.
 
         Builds a credentials-free ``PolymarketConfig``. Pair with
@@ -441,15 +442,23 @@ class PolymarketConfig(BaseModel):
         by this method. Keeping the credential read out of the config builder
         is what stops a strategy that grabs the connector directly from
         having a path to signer material (issue #1961).
+
+        Phase 5b: routes through :func:`almanak.config.connectors.connectors_config_from_env`.
+        The legacy custom-env-name kwargs were removed — construct
+        ``PolymarketConfig(wallet_address=..., rpc_url=..., ...)`` directly
+        for non-default env-var names.
         """
-        wallet = os.environ.get(wallet_env)
-        rpc_url = os.environ.get(rpc_env)
-        clob_url = os.environ.get(clob_url_env)
-        gamma_url = os.environ.get(gamma_url_env)
-        data_api_url = os.environ.get(data_api_url_env)
+        from almanak.config.connectors import connectors_config_from_env
+
+        cfg = connectors_config_from_env()
+        wallet = cfg.polymarket_wallet_address
+        rpc_url = cfg.polygon_rpc_url
+        clob_url = cfg.polymarket_clob_url
+        gamma_url = cfg.polymarket_gamma_url
+        data_api_url = cfg.polymarket_data_api_url
 
         if not wallet:
-            raise ValueError(f"Environment variable {wallet_env} not set")
+            raise ValueError("Environment variable POLYMARKET_WALLET_ADDRESS not set")
 
         # Build config with optional URL overrides
         config_kwargs: dict[str, Any] = {

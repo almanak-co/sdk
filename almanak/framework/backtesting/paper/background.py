@@ -789,14 +789,17 @@ class BackgroundPaperTrader:
             existing_pid = pid_file.get_pid()
             raise RuntimeError(f"Paper Trader for {self.config.strategy_id} already running (PID: {existing_pid})")
 
-        # Fix SSL cert resolution for spawned subprocess (macOS multiprocessing)
-        import os
+        # Fix SSL cert resolution for spawned subprocess (macOS
+        # multiprocessing). The typed backtest config resolves a usable
+        # cert path (env override > certifi > legacy OS paths), and
+        # ``apply_ssl_cert_file`` writes it back to ``os.environ`` so
+        # the spawned child inherits a working trust store at fork
+        # time. Phase 5c: env mutation lives at the config-service
+        # boundary (``almanak.config.backtest``) on the permanent
+        # allowlist — the strategy container otherwise mutates no env.
+        from almanak.config.backtest import apply_ssl_cert_file, backtest_config_from_env
 
-        if "SSL_CERT_FILE" not in os.environ:
-            for cert_path in ["/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem"]:
-                if os.path.exists(cert_path):
-                    os.environ["SSL_CERT_FILE"] = cert_path
-                    break
+        apply_ssl_cert_file(backtest_config_from_env())
 
         # Create the background process
         # Pass raw rpc_url separately since to_dict() masks it for display
@@ -1081,6 +1084,13 @@ class BackgroundPaperTrader:
 # =============================================================================
 
 
+# crap-allowlist: Phase 5c (#2097) swaps the inline SSL-cert search
+# for an ``apply_ssl_cert_file`` call. Cyclomatic complexity stays at
+# the pre-migration cc=13 (this function is the spawned-subprocess
+# entry point: PID acquisition, signal handling, state restore,
+# paper-trade loop). Coverage is 0% because unit tests don't spawn
+# the full subprocess — see TestBackgroundPaperTrader for the parent-
+# side coverage of start() / stop() / resume() that wires this in.
 def _run_background_paper_trader(  # noqa: C901
     config_dict: dict[str, Any],
     strategy_module: str,
@@ -1112,14 +1122,17 @@ def _run_background_paper_trader(  # noqa: C901
         raw_rpc_url: Unmasked RPC URL (to_dict masks it for display).
     """
     import asyncio
-    import os
 
-    # Fix SSL cert resolution in spawned subprocess (macOS multiprocessing issue)
-    if "SSL_CERT_FILE" not in os.environ:
-        for cert_path in ["/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem"]:
-            if os.path.exists(cert_path):
-                os.environ["SSL_CERT_FILE"] = cert_path
-                break
+    # Fix SSL cert resolution in spawned subprocess (macOS
+    # multiprocessing issue). The parent process already called
+    # ``apply_ssl_cert_file`` before ``Process.start()`` so the env
+    # variable is normally inherited; calling the helper a second time
+    # here is idempotent and protects against forks that lose the env
+    # (some test harnesses replace the parent env between start and
+    # child boot).
+    from almanak.config.backtest import apply_ssl_cert_file, backtest_config_from_env
+
+    apply_ssl_cert_file(backtest_config_from_env())
 
     # Convert paths
     state_path = Path(state_dir)

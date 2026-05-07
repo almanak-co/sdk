@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -30,6 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import click
+
+from almanak.config import cli_runtime_config_from_env
 
 if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
@@ -120,14 +121,25 @@ def resolve_wallet_address(
     instantiation time, but managed-gateway boot can still succeed without
     a wallet, just without Anvil pre-funding).
 
-    ``env`` defaults to ``os.environ`` so callers can inject a fixture in
-    tests without monkeypatching the global environment.
+    ``env`` defaults to the live process env (read through the typed
+    gateway-config service) so callers can inject a fixture in tests
+    without monkeypatching the global environment.
     """
-    if env is None:
-        env = dict(os.environ)
     if wallet_address := config_dict.get("wallet_address"):
         return wallet_address
-    private_key = env.get("ALMANAK_PRIVATE_KEY", "")
+    private_key = (env or {}).get("ALMANAK_PRIVATE_KEY") if env is not None else None
+    if private_key is None:
+        # No explicit env dict supplied — read the typed boundary value.
+        # We narrow to ``gateway_config_from_env`` instead of ``load_config``
+        # so an unrelated submodel validation error (e.g. a malformed
+        # ``ANVIL_*_PORT``) cannot strand teardown — wallet derivation only
+        # needs the gateway's private key (PR #2152 review). The typed
+        # ``GatewayConfig.private_key`` is populated by the Phase 1
+        # ``_apply_gateway_env_fallbacks`` ladder which honours
+        # ``ALMANAK_PRIVATE_KEY``.
+        from almanak.config.env import gateway_config_from_env
+
+        private_key = gateway_config_from_env().private_key or ""
     if not private_key:
         return None
     from eth_account import Account
@@ -444,7 +456,8 @@ def setup_solana_fork(
     from ..anvil.solana_fork_manager import SolanaForkManager
     from ._solana_setup import get_orca_pool_accounts
 
-    solana_rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+    cli_cfg = cli_runtime_config_from_env()
+    solana_rpc_url = cli_cfg.solana_rpc_url
     extra_clone: list[str] = []
     for _key in ("pool_address", "pool_a_address", "pool_b_address"):
         _addr = config_dict.get(_key)
@@ -459,7 +472,7 @@ def setup_solana_fork(
 
     fork_mgr = SolanaForkManager(
         rpc_url=solana_rpc_url,
-        validator_port=int(os.environ.get("SOLANA_VALIDATOR_PORT", "8899")),
+        validator_port=cli_cfg.solana_validator_port,
         clone_accounts=extra_clone,
     )
     click.echo("  Starting local solana-test-validator...")

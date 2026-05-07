@@ -166,6 +166,89 @@ def set_strategy_folder(path: Path | str) -> None:
     os.environ["ALMANAK_STRATEGY_FOLDER"] = str(path)
 
 
+def strategy_folder_env() -> str | None:
+    """Return the raw ``ALMANAK_STRATEGY_FOLDER`` env value (or ``None``).
+
+    The CLI surface needs the *raw* env value in three places:
+
+    * The teardown CLI's resolution ladder, which falls through to a
+      cwd check when the env value points at a non-strategy folder
+      (validation already lives in :func:`_strategy_folder` — but the
+      caller wants the raw string so it can decide whether to fall
+      through silently or warn).
+    * The teardown CLI's interrupt-resume hint, which echoes the
+      configured folder verbatim back to the operator.
+    * The accountant-test CLI's ``--working-dir`` save / restore
+      pattern that pushes a folder onto the env, runs path
+      resolution, and pops the prior value back.
+
+    Returns:
+        The raw env value (whitespace preserved, no validation), or
+        ``None`` when the var is unset / empty.
+    """
+    raw = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    if not raw:
+        return None
+    return raw
+
+
+def state_db_env() -> str | None:
+    """Return the raw ``ALMANAK_STATE_DB`` env value (or ``None``).
+
+    Companion to :func:`strategy_folder_env`. The CLI's
+    ``almanak gateway`` startup path needs to know whether the operator
+    has explicitly pinned a state-DB path before deciding whether to
+    refuse to start, fall back to standalone mode, or auto-detect a
+    strategy folder. The full resolution lives in
+    :func:`local_db_path` / :func:`local_strategy_db_path`; this helper
+    just exposes the raw env-value test the boot-time refuse-to-start
+    branch needs.
+
+    Returns:
+        The raw env value (whitespace preserved, no validation), or
+        ``None`` when the var is unset / empty.
+    """
+    raw = os.environ.get("ALMANAK_STATE_DB")
+    if not raw:
+        return None
+    return raw
+
+
+def push_strategy_folder(path: Path | str) -> str | None:
+    """Pin ``ALMANAK_STRATEGY_FOLDER`` and return the *prior* value (or ``None``).
+
+    Companion to :func:`pop_strategy_folder`. Callers use the returned
+    value to restore the prior env state in a ``finally`` block, so the
+    CLI's transient ``--working-dir`` doesn't leak across to siblings.
+
+    Args:
+        path: A ``Path`` or path-like ``str``. Resolved via
+            :func:`set_strategy_folder`.
+
+    Returns:
+        The prior value of ``ALMANAK_STRATEGY_FOLDER`` (or ``None``).
+    """
+    prior = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    set_strategy_folder(path)
+    return prior
+
+
+def pop_strategy_folder(prior: str | None) -> None:
+    """Restore ``ALMANAK_STRATEGY_FOLDER`` to ``prior`` (or unset it).
+
+    Companion to :func:`push_strategy_folder`. Idempotent — calling
+    with the value that was already in the environment is a no-op.
+
+    Args:
+        prior: The value returned by :func:`push_strategy_folder`. Pass
+            ``None`` to unset the env var.
+    """
+    if prior is None:
+        os.environ.pop("ALMANAK_STRATEGY_FOLDER", None)
+    else:
+        os.environ["ALMANAK_STRATEGY_FOLDER"] = prior
+
+
 def _ensure_local() -> None:
     """Refuse to be used in hosted mode.
 

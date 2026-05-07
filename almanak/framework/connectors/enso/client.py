@@ -34,7 +34,6 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -146,9 +145,14 @@ class EnsoConfig:
     def __post_init__(self) -> None:
         """Validate configuration and resolve API key."""
         # API key lives in the gateway when gateway_client is provided. Only the
-        # direct HTTP fallback needs a local credential.
+        # direct HTTP fallback needs a local credential. The typed
+        # ``ConnectorsConfig.enso_api_key`` is the single env reader (Phase 5b
+        # of the config-service migration); the lazy import avoids a hard
+        # dependency on ``almanak.config`` at module load.
         if self.gateway_client is None and self.api_key is None:
-            self.api_key = os.environ.get("ENSO_API_KEY")
+            from almanak.config.connectors import connectors_config_from_env
+
+            self.api_key = connectors_config_from_env().enso_api_key
             if not self.api_key:
                 raise EnsoConfigError(
                     "API key is required. Set ENSO_API_KEY env var, pass api_key, "

@@ -4544,10 +4544,21 @@ def new_strategy(
         # and we're not in a CI environment, default output there so users don't
         # need to manually mv after scaffolding.
         # (VIB-2328: every portfolio experiment required a manual mv after strat new)
-        import os
+        from almanak.config import cli_runtime_config_from_env
 
         incubating_dir = Path.cwd() / "strategies" / "incubating"
-        if incubating_dir.is_dir() and not os.environ.get("CI"):
+        # Reading ``is_ci`` is purely an output-directory hint — a malformed
+        # unrelated env var (e.g. ``ANVIL_*_PORT=abc``) must not abort
+        # scaffolding before any file is written. When the typed config
+        # refuses to load we force the cwd default: the safer surprise is
+        # "scaffold landed in cwd, mv it" rather than "scaffold landed in
+        # ``strategies/incubating/`` while the user's env was broken"
+        # (PR #2152 review).
+        try:
+            use_incubating = incubating_dir.is_dir() and not cli_runtime_config_from_env().is_ci
+        except Exception:  # noqa: BLE001 — degrade gracefully for any config error
+            use_incubating = False
+        if use_incubating:
             strategy_dir = incubating_dir / snake_name
         else:
             # Fall back to current working directory / strategy name

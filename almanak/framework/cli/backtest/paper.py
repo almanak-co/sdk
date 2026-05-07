@@ -16,6 +16,8 @@ from typing import Any
 
 import click
 
+from almanak.config.cli_runtime import cli_runtime_config_from_env
+
 from ...anvil.fork_manager import CHAIN_IDS
 from ...backtesting import (
     PaperPortfolioTracker,
@@ -102,7 +104,11 @@ def paper() -> None:
     pass
 
 
-# crap-allowlist: VIB-4062 — pre-existing CC=55 in paper-start CLI; touched only by codemod (legacy MarketSnapshot import → canonical)
+# crap-allowlist: Phase 5e (#2097) replaces direct os.environ.get reads with the typed
+# cli_runtime_config_from_env() and chain_rpc_url_from_env() helpers — no new branches,
+# no new behaviour. VIB-4062 codemod (legacy MarketSnapshot import → canonical) also
+# touches this function. Pre-existing CC=55 in the paper-start CLI; click-command
+# refactor is tracked separately.
 @paper.command("start")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to paper trade")
 @click.option(
@@ -224,8 +230,9 @@ def paper_start(
 
     # Create config
     try:
-        # Env var for relaxed price mode (tokens without feeds, e.g. Pendle PT) (VIB-2562)
-        relaxed_prices = os.environ.get("ALMANAK_ALLOW_HARDCODED_PRICES", "").strip() == "1"
+        # Check typed config for relaxed price mode (useful for tokens
+        # without price feeds, e.g. Pendle PT tokens) (VIB-2562).
+        relaxed_prices = cli_runtime_config_from_env().allow_hardcoded_prices
 
         paper_config = PaperTraderConfig(
             chain=chain,

@@ -16,13 +16,19 @@ strategy folder per VIB-3835 / VIB-3761.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 from almanak.framework.accounting.accountant_test import run_against_sqlite
 
 
+# crap-allowlist: Phase 5e (#2097) swaps four direct ``os.environ.<get|pop|set>``
+# calls (the prior save / restore-or-pop pattern around ALMANAK_STRATEGY_FOLDER)
+# for the typed :func:`push_strategy_folder` / :func:`pop_strategy_folder` helpers
+# in ``almanak.framework.local_paths``. The function's CC (9) is structural to the
+# resolution / validation ladder (explicit-db branch + folder-scoped branch + four
+# distinct file-shape error paths); targeted unit coverage is owned by the
+# accountant-test smoke harness rather than an isolated test class.
 def _resolve_db_path(strategy_folder: str | None, explicit_db: str | None) -> Path:
     """Resolve the sqlite DB path with the same rules as VIB-3835.
 
@@ -44,15 +50,22 @@ def _resolve_db_path(strategy_folder: str | None, explicit_db: str | None) -> Pa
             raise SystemExit(f"DB file does not exist: {p}")
         return p
 
-    from almanak.framework.local_paths import LocalPathError, local_strategy_db_path
+    from almanak.framework.local_paths import (
+        LocalPathError,
+        local_strategy_db_path,
+        pop_strategy_folder,
+        push_strategy_folder,
+        strategy_folder_env,
+    )
 
     # ``local_strategy_db_path`` honours ALMANAK_STATE_DB / ALMANAK_STRATEGY_FOLDER
     # before falling back. When the caller passes -d, scope it via the env var
     # so the helper resolves to <folder>/almanak_state.db.
-    prior = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    if strategy_folder:
+        prior = push_strategy_folder(Path(strategy_folder).expanduser().resolve())
+    else:
+        prior = strategy_folder_env()
     try:
-        if strategy_folder:
-            os.environ["ALMANAK_STRATEGY_FOLDER"] = str(Path(strategy_folder).expanduser().resolve())
         try:
             p = local_strategy_db_path()
         except LocalPathError as e:
@@ -62,10 +75,7 @@ def _resolve_db_path(strategy_folder: str | None, explicit_db: str | None) -> Pa
             ) from None
     finally:
         if strategy_folder:
-            if prior is None:
-                os.environ.pop("ALMANAK_STRATEGY_FOLDER", None)
-            else:
-                os.environ["ALMANAK_STRATEGY_FOLDER"] = prior
+            pop_strategy_folder(prior)
 
     if not p.is_file():
         # ``exists()`` would also accept a directory and defer the failure

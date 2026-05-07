@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -87,8 +86,18 @@ class DriftAdapter:
         self.config = config
         self.wallet_address = config.wallet_address
 
-        # Resolve RPC URL: config > env > empty (only used when no gateway_client)
-        rpc_url = config.rpc_url or os.environ.get("SOLANA_RPC_URL", "")
+        # Resolve RPC URL: config > typed connectors config > empty (only
+        # used when no gateway_client). Phase 5b: typed-config lookup is the
+        # single env reader. Drift's legacy default was empty string when
+        # ``SOLANA_RPC_URL`` was unset — preserved verbatim (the SDK requires
+        # an explicit RPC URL on the direct path; gateway-routed callers
+        # never read this field).
+        if config.rpc_url:
+            rpc_url = config.rpc_url
+        else:
+            from almanak.config.connectors import connectors_config_from_env
+
+            rpc_url = connectors_config_from_env().solana_rpc_url or ""
         self.sdk = DriftSDK(
             wallet_address=config.wallet_address,
             rpc_url=rpc_url,

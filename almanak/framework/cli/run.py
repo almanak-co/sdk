@@ -613,15 +613,22 @@ def _validate_safe_mode_preflight(execution_address: str) -> str | None:
     """Validate Safe mode environment consistency between framework and gateway.
 
     Returns an error message string if validation fails, or None on success.
+
+    Reads through the typed CLI-runtime config so the env-boundary lint stays
+    clean (Phase 5e). The legacy callsite read four env vars directly; the
+    typed shape exposes the same values via :class:`CliRuntimeConfig`.
     """
-    gw_safe_mode = (os.environ.get("ALMANAK_GATEWAY_SAFE_MODE") or "").lower()
-    gw_safe_address = os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS") or os.environ.get("ALMANAK_SAFE_ADDRESS")
+    from almanak.config import cli_runtime_config_from_env
+
+    cli_cfg = cli_runtime_config_from_env()
+    gw_safe_mode = cli_cfg.gateway_safe_mode or ""
+    gw_safe_address = cli_cfg.gateway_safe_address or cli_cfg.safe_address
 
     # Guard 1: Gateway must also be in Safe mode
     if gw_safe_mode not in ("direct", "zodiac"):
         return (
             f"Strategy is in Safe mode (ALMANAK_EXECUTION_MODE="
-            f"{os.environ.get('ALMANAK_EXECUTION_MODE')}) but gateway Safe mode "
+            f"{cli_cfg.execution_mode}) but gateway Safe mode "
             "is not configured.\n"
             "Set ALMANAK_GATEWAY_SAFE_MODE=direct|zodiac and "
             "ALMANAK_GATEWAY_SAFE_ADDRESS to match."
@@ -632,7 +639,7 @@ def _validate_safe_mode_preflight(execution_address: str) -> str | None:
         return "ALMANAK_GATEWAY_SAFE_MODE is set but ALMANAK_GATEWAY_SAFE_ADDRESS is missing."
 
     # Guard 3: Safe mode type must match (direct vs zodiac)
-    framework_exec_mode = (os.environ.get("ALMANAK_EXECUTION_MODE") or "").lower()
+    framework_exec_mode = cli_cfg.execution_mode or ""
     expected_gw_mode = "zodiac" if framework_exec_mode == "safe_zodiac" else "direct"
     if gw_safe_mode != expected_gw_mode:
         return (
@@ -786,6 +793,62 @@ def create_balance_provider(
     )
 
 
+# crap-allowlist: Phase 5e (#2097) replaces the legacy 5x ``os.environ.get(...) or os.environ.get(legacy)``
+# presence-check ladder with a typed :func:`gas_risk_override_presence` call.
+# CC stays at 7 (one branch per typed override + the max_value_usd parse) and the
+# function is exercised end-to-end by ``almanak strat run`` smokes; targeted unit
+# coverage can land alongside a refactor that consolidates the four presence
+# checks into a small helper, but the cyclomatic shape is structural to the
+# legacy contract rather than something the migration introduced.
+def _apply_runtime_gas_risk_overrides(
+    tx_risk_config: Any,
+    config: LocalRuntimeConfig,
+) -> None:
+    """Apply explicit env-var gas/risk overrides on top of the chain default.
+
+    Mirrors the legacy presence-check ladder: when the operator has
+    explicitly set ``ALMANAK_MAX_GAS_PRICE_GWEI`` (or the legacy
+    unprefixed ``MAX_GAS_PRICE_GWEI``), the resolved
+    ``LocalRuntimeConfig`` value wins over the chain-specific default.
+    Otherwise the chain default selected by ``TransactionRiskConfig.for_chain``
+    is preserved verbatim.
+
+    The presence-check is sourced from the typed CLI-runtime config so
+    the boundary lint stays clean (Phase 5e).
+    """
+    from decimal import Decimal as _Decimal
+    from decimal import InvalidOperation as _InvalidOperation
+
+    from almanak.config.cli_runtime import gas_risk_override_presence, max_value_usd_override
+
+    presence = gas_risk_override_presence()
+    if presence["max_gas_price_gwei"]:
+        tx_risk_config.max_gas_price_gwei = config.max_gas_price_gwei
+    if presence["max_gas_cost_native"]:
+        tx_risk_config.max_gas_cost_native = config.max_gas_cost_native
+    if presence["max_gas_cost_usd"]:
+        tx_risk_config.max_gas_cost_usd = config.max_gas_cost_usd
+    if presence["max_slippage_bps"]:
+        tx_risk_config.max_slippage_bps = config.max_slippage_bps
+
+    # Per-tx USD cap. The CLI path hydrates native_token_price_usd via
+    # StrategyRunner before each execute(), so it's safe to enable a default
+    # cap here. Other orchestrator callers (gateway, paper trading) leave
+    # this off — see TransactionRiskConfig docstring.
+    max_value_usd_env = max_value_usd_override()
+    if max_value_usd_env:
+        try:
+            tx_risk_config.max_value_usd = _Decimal(max_value_usd_env)
+        except _InvalidOperation as exc:
+            raise ValueError(
+                "ALMANAK_MAX_VALUE_USD / MAX_VALUE_USD must be a plain decimal "
+                "number (no commas, no units). Got: "
+                f"{max_value_usd_env!r}"
+            ) from exc
+    else:
+        tx_risk_config.max_value_usd = _Decimal("50000")
+
+
 def create_execution_orchestrator(
     config: LocalRuntimeConfig,
     simulation_override: bool | None = None,
@@ -821,37 +884,9 @@ def create_execution_orchestrator(
 
     tx_risk_config = TransactionRiskConfig.for_chain(config.chain)
     # Override with explicit env var values (env vars take precedence over chain defaults).
-    # Check os.environ directly to distinguish "user set value" from "default used".
-    import os
-
-    if os.environ.get("ALMANAK_MAX_GAS_PRICE_GWEI") or os.environ.get("MAX_GAS_PRICE_GWEI"):
-        tx_risk_config.max_gas_price_gwei = config.max_gas_price_gwei
-    if os.environ.get("ALMANAK_MAX_GAS_COST_NATIVE") or os.environ.get("MAX_GAS_COST_NATIVE"):
-        tx_risk_config.max_gas_cost_native = config.max_gas_cost_native
-    if os.environ.get("ALMANAK_MAX_GAS_COST_USD") or os.environ.get("MAX_GAS_COST_USD"):
-        tx_risk_config.max_gas_cost_usd = config.max_gas_cost_usd
-    if os.environ.get("ALMANAK_MAX_SLIPPAGE_BPS") or os.environ.get("MAX_SLIPPAGE_BPS"):
-        tx_risk_config.max_slippage_bps = config.max_slippage_bps
-
-    # Per-tx USD cap. The CLI path hydrates native_token_price_usd via
-    # StrategyRunner before each execute(), so it's safe to enable a default
-    # cap here. Other orchestrator callers (gateway, paper trading) leave
-    # this off — see TransactionRiskConfig docstring.
-    from decimal import Decimal as _Decimal
-    from decimal import InvalidOperation as _InvalidOperation
-
-    max_value_usd_env = os.environ.get("ALMANAK_MAX_VALUE_USD") or os.environ.get("MAX_VALUE_USD")
-    if max_value_usd_env:
-        try:
-            tx_risk_config.max_value_usd = _Decimal(max_value_usd_env)
-        except _InvalidOperation as exc:
-            raise ValueError(
-                "ALMANAK_MAX_VALUE_USD / MAX_VALUE_USD must be a plain decimal "
-                "number (no commas, no units). Got: "
-                f"{max_value_usd_env!r}"
-            ) from exc
-    else:
-        tx_risk_config.max_value_usd = _Decimal("50000")
+    # Route through the typed gas-risk override resolver so the boundary
+    # check stays clean (Phase 5e).
+    _apply_runtime_gas_risk_overrides(tx_risk_config, config)
 
     return ExecutionOrchestrator(
         signer=signer,

@@ -36,12 +36,13 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import aiohttp
+
+from almanak.config.backtest import backtest_config_from_env
 
 from .rate_limiter import TokenBucketRateLimiter
 
@@ -157,9 +158,17 @@ class SubgraphClientConfig:
     gateway_url: str = THEGRAPH_GATEWAY_URL
 
     def __post_init__(self) -> None:
-        """Load API key from environment if not provided."""
+        """Load API key from typed backtest config if not provided.
+
+        Phase 5c: env reading is centralised in
+        :func:`almanak.config.backtest.backtest_config_from_env`. The
+        legacy ``os.environ.get("THEGRAPH_API_KEY")`` lookup is gone;
+        the config factory reads the same env var and exposes it as
+        ``BacktestConfig.thegraph_api_key`` (``None`` when unset, the
+        same shape this dataclass expects).
+        """
         if self.api_key is None:
-            self.api_key = os.environ.get("THEGRAPH_API_KEY")
+            self.api_key = backtest_config_from_env().thegraph_api_key
 
     def __repr__(self) -> str:
         """Return a safe representation without exposing the API key."""

@@ -35,7 +35,6 @@ from .constants import (
     DLMM_PROGRAM_ID,
     EVENT_AUTHORITY_SEED,
     INITIALIZE_POSITION_DISCRIMINATOR,
-    METEORA_API_BASE_URL,
     ORACLE_SEED,
     POSITION_SEED,
     REMOVE_LIQUIDITY_BY_RANGE_DISCRIMINATOR,
@@ -43,6 +42,7 @@ from .constants import (
     STRATEGY_TYPE_SPOT_BALANCED,
     SYSTEM_PROGRAM_ID,
     TOKEN_PROGRAM_ID,
+    get_meteora_api_base_url,
 )
 
 WSOL_MINT = WRAPPED_NATIVE["solana"]
@@ -73,14 +73,17 @@ class MeteoraSDK:
     def __init__(
         self,
         wallet_address: str,
-        base_url: str = METEORA_API_BASE_URL,
+        base_url: str | None = None,
         timeout: int = 30,
     ) -> None:
         if not wallet_address:
             raise ValueError("wallet_address is required")
 
         self.wallet_address = wallet_address
-        self.base_url = base_url
+        # Phase 5b: typed-config lookup at call time, not at function-definition
+        # time (the legacy default ``base_url: str = METEORA_API_BASE_URL``
+        # froze the env value at import).
+        self.base_url = base_url or get_meteora_api_base_url()
         self.timeout = timeout
         self._owner = Pubkey.from_string(wallet_address)
         self._program_id = Pubkey.from_string(DLMM_PROGRAM_ID)

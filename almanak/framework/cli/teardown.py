@@ -37,7 +37,6 @@ import asyncio
 import importlib.util
 import json
 import logging
-import os
 import sys
 import time
 from datetime import datetime
@@ -131,7 +130,9 @@ def _resolve_and_export_strategy_folder(working_dir: str | None) -> Path:
 
     # Step 2: respect a folder already exported by a parent process (e.g. a
     # `strat run` that shells out to `teardown` for some scripted flow).
-    env_folder = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    from almanak.framework.local_paths import strategy_folder_env
+
+    env_folder = strategy_folder_env()
     if env_folder and env_folder.strip():
         candidate = Path(env_folder.strip()).expanduser().resolve()
         if candidate.is_dir() and _looks_like_strategy_folder(candidate):
@@ -670,14 +671,13 @@ def execute_teardown(  # noqa: C901
     # of falling through to a noisier failure later in strategy loading.
     working_path = _resolve_and_export_strategy_folder(working_dir)
 
-    # Load environment from .env if present
-    from dotenv import load_dotenv
-
+    # Load environment from .env through the boundary helper.
+    from almanak.config.env import _load_dotenv_once
     from almanak.core.redaction import install_redaction
 
     env_file = working_path / ".env"
     if env_file.exists():
-        load_dotenv(env_file)
+        _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")
 
     # Install secret redaction after env is loaded so all secrets are registered.
@@ -1113,7 +1113,9 @@ def _wait_for_terminal_state(manager: Any, strategy_id: str, timeout: int) -> in
         # follow-up command from another cwd would otherwise hard-fail at the
         # resolver. Read the folder we exported earlier (always populated by
         # ``_resolve_and_export_strategy_folder``).
-        strategy_folder = os.environ.get("ALMANAK_STRATEGY_FOLDER", "<folder>")
+        from almanak.framework.local_paths import strategy_folder_env
+
+        strategy_folder = strategy_folder_env() or "<folder>"
         click.echo()
         click.echo(
             click.style(

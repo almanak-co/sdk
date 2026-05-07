@@ -16,17 +16,26 @@ Public surface:
   schemas (filled in during Phase 3).
 """
 
+from almanak.config.backtest import BacktestConfig, backtest_config_from_env
 from almanak.config.base import BaseConfig, GatewayConfig
+from almanak.config.cli_runtime import CliRuntimeConfig, cli_runtime_config_from_env
+from almanak.config.connectors import ConnectorsConfig, connectors_config_from_env
 from almanak.config.hosted import HostedConfig
 from almanak.config.local import LocalConfig
 from almanak.config.service import load_config
 from almanak.config.strategy import StrategyConfig
 
 __all__ = [
+    "BacktestConfig",
     "BaseConfig",
+    "CliRuntimeConfig",
+    "ConnectorsConfig",
     "GatewayConfig",
     "HostedConfig",
     "LocalConfig",
     "StrategyConfig",
+    "backtest_config_from_env",
+    "cli_runtime_config_from_env",
+    "connectors_config_from_env",
     "load_config",
 ]

@@ -29,7 +29,6 @@ Example:
 
 import asyncio
 import logging
-import os
 import random
 import sqlite3
 import time
@@ -42,6 +41,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.config.backtest import backtest_config_from_env
 from almanak.framework.backtesting.config import BacktestDataConfig
 
 from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
@@ -602,7 +602,12 @@ class CoinGeckoDataProvider:
                             survive across process restarts, eliminating redundant
                             API calls on repeated backtests.
         """
-        self._api_key = api_key or os.environ.get("COINGECKO_API_KEY", "")
+        # Phase 5c: env reads for backtest creds live in
+        # almanak.config.backtest. The factory is called only when no
+        # explicit api_key kwarg was passed, mirroring the legacy
+        # ``api_key or os.environ.get(...)`` precedence (kwarg wins; env
+        # is the fallback).
+        self._api_key = api_key or (backtest_config_from_env().coingecko_api_key or "")
         self._request_timeout = request_timeout
         self._min_request_interval = min_request_interval
         self._retry_config = retry_config or RetryConfig()

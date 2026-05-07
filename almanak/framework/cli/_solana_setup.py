@@ -8,9 +8,10 @@ providers — see VIB-522). Both call sites now share this lightweight module.
 from __future__ import annotations
 
 import logging
-import os
 
 import click
+
+from almanak.config import connectors_config_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def get_orca_pool_accounts(strategy_config: dict) -> list[str]:
         return []
 
     try:
-        orca_api = os.environ.get("ORCA_API_BASE_URL") or "https://api.orca.so/v2/solana"
+        orca_api = connectors_config_from_env().orca_api_base_url
         resp = _req.get(f"{orca_api}/pools/{pool_address}", timeout=10)
         if resp.status_code != 200:
             return []

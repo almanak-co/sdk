@@ -1,60 +1,65 @@
 """Local Runtime Configuration for Execution Environment.
 
-This module provides typed, validated configuration for local execution
-environments. It supports loading from environment variables and provides
-secure handling of sensitive data like private keys.
+This module hosts the runtime-config dataclass containers consumed by the
+runner / executor / multi-chain orchestrator. Phase 5a-2 of the
+config-service migration moved the env-reading entry points to
+:mod:`almanak.config.runtime`; this module no longer reads ``os.environ`` /
+``load_dotenv`` from its public API. The ``from_env`` classmethods are
+gone — consumers now call :func:`almanak.config.runtime.runtime_config_from_env`
+and convert via :meth:`LocalRuntimeConfig.from_runtime_config` /
+:meth:`MultiChainRuntimeConfig.from_runtime_config`.
 
-Key Features:
-    - Required fields: chain, rpc_url, private_key (validated at instantiation)
-    - Derived fields: wallet_address (from private_key)
-    - Optional fields with defaults: max_gas_price_gwei, tx_timeout_seconds, simulation_enabled
-    - Environment variable loading via python-dotenv
-    - Private key never exposed in __repr__ or string representations
+What stays here:
+    * The dataclass containers themselves (``LocalRuntimeConfig``,
+      ``MultiChainRuntimeConfig``, ``GatewayRuntimeConfig``).
+    * Direct-construction validation in ``__post_init__``.
+    * Direct-construction helpers: ``from_dict``, ``from_single_chain``,
+      ``create``, ``to_dict``, ``to_local_config``, properties, etc.
+
+What moved to :mod:`almanak.config.runtime`:
+    * ``runtime_config_from_env`` (the env-reading factory).
+    * ``_resolve_private_key_from_env``, ``_create_safe_signer_from_env``.
+    * ``CHAIN_IDS``, ``ConfigurationError``, ``MissingEnvironmentVariableError``,
+      ``DataFreshnessPolicy``, ``ExecutionMode`` are RE-EXPORTED here for
+      back-compat — they have a single canonical home in ``almanak.config.runtime``.
 
 Example:
-    # Load from environment variables
-    config = LocalRuntimeConfig.from_env()
+    # Build a runtime config from env (Phase 5a-2 entry point):
+    from almanak.config.runtime import runtime_config_from_env
+    rc = runtime_config_from_env(chain="arbitrum", network="anvil")
 
-    # Or create directly
+    # Convert to the dataclass shape consumed by the runner / executor:
+    config = LocalRuntimeConfig.from_runtime_config(rc)
+
+    # Or construct the dataclass directly for tests:
     config = LocalRuntimeConfig(
         chain="arbitrum",
         rpc_url="https://arb1.arbitrum.io/rpc",
         private_key="0x...",
     )
-
-    print(f"Wallet: {config.wallet_address}")
-    print(f"Chain: {config.chain}")
 """
 
 import logging
 import os
 import re
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import StrEnum
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from dotenv import load_dotenv
 from eth_account import Account
 
-# =============================================================================
-# Type Aliases
-# =============================================================================
-
-
-# Data freshness policy for multi-chain strategies
-# - fail_closed: If ANY chain's data is stale (>30s) or unavailable, decide() receives error
-# - fail_open: Stale/unavailable chains excluded from snapshot, decide() proceeds with available data
-DataFreshnessPolicy = Literal["fail_closed", "fail_open"]
-
-# Import Safe signer types for type hints (avoid circular imports)
-from typing import TYPE_CHECKING
-
-from almanak.framework.execution.gas.constants import (
-    ANVIL_GAS_PRICE_CAP_GWEI,
-    CHAIN_GAS_PRICE_CAPS_GWEI,
-    DEFAULT_GAS_PRICE_CAP_GWEI,
+# The Phase-5a-1 hack of importing the legacy dataclasses from
+# almanak.config.runtime is reversed: this module now imports the canonical
+# types FROM the config service. ``CHAIN_IDS`` / ``ConfigurationError`` /
+# ``MissingEnvironmentVariableError`` / ``DataFreshnessPolicy`` /
+# ``ExecutionMode`` live in almanak.config.runtime and are re-exported here.
+from almanak.config.runtime import (
+    CHAIN_IDS,
+    ConfigurationError,
+    DataFreshnessPolicy,
+    ExecutionMode,
+    MissingEnvironmentVariableError,
+    RuntimeConfig,
 )
 from almanak.framework.execution.interfaces import Chain
 
@@ -76,82 +81,6 @@ if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
 
 logger = logging.getLogger(__name__)
-
-# VIB-308: Env vars that are silently ignored when set without the ALMANAK_ prefix.
-_UNPREFIXED_WARN_VARS: list[str] = [
-    "MAX_GAS_PRICE_GWEI",
-    "TX_TIMEOUT_SECONDS",
-    "SIMULATION_ENABLED",
-    "MAX_SLIPPAGE_BPS",
-]
-
-
-def _warn_unprefixed_env_vars(prefix: str) -> None:
-    """Warn when env vars are set without the required prefix.
-
-    Silently-ignored env vars are dangerous when real money is at stake.
-    This helper emits a warning so operators notice the misconfiguration.
-    """
-    for var in _UNPREFIXED_WARN_VARS:
-        if os.environ.get(var) and not os.environ.get(f"{prefix}{var}"):
-            logger.warning(
-                f"Environment variable '{var}' is set but will be ignored -- "
-                f"use '{prefix}{var}' instead (the {prefix} prefix is required)"
-            )
-
-
-# =============================================================================
-# Exceptions
-# =============================================================================
-
-
-class ConfigurationError(Exception):
-    """Raised when configuration is invalid or missing.
-
-    Attributes:
-        field: The configuration field that caused the error
-        reason: Human-readable explanation of the error
-    """
-
-    def __init__(self, field: str, reason: str) -> None:
-        self.field = field
-        self.reason = reason
-        super().__init__(f"Configuration error for '{field}': {reason}")
-
-
-class MissingEnvironmentVariableError(ConfigurationError):
-    """Raised when a required environment variable is missing."""
-
-    def __init__(self, var_name: str) -> None:
-        self.var_name = var_name
-        super().__init__(field=var_name, reason="Required environment variable not set")
-
-
-# =============================================================================
-# Constants
-# =============================================================================
-
-
-# Chain ID mapping for supported chains
-CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "polygon": 137,
-    "base": 8453,
-    "avalanche": 43114,
-    "bsc": 56,
-    "linea": 59144,
-    "plasma": 9745,
-    "blast": 81457,
-    "mantle": 5000,
-    "berachain": 80094,
-    "solana": 0,  # Non-EVM chain, no EVM chain ID
-    "sonic": 146,
-    "monad": 143,
-    "xlayer": 196,
-    "zerog": 16661,
-}
 
 # Supported protocols and which chains they are available on
 SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
@@ -210,82 +139,9 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = {
 
 
 # =============================================================================
-# Execution Mode
+# Execution Mode (canonical home: ``almanak.config.runtime.ExecutionMode``;
+# re-exported above for back-compat).
 # =============================================================================
-
-
-class ExecutionMode(StrEnum):
-    """Execution mode for transaction signing.
-
-    This enum controls how transactions are signed and executed:
-
-    EOA:
-        Direct EOA (Externally Owned Account) signing. Transactions are signed
-        directly with the private key and sent to the network. Works on both
-        mainnet/testnet and local Anvil forks.
-
-        Required env vars:
-            - ALMANAK_PRIVATE_KEY
-
-    SAFE_DIRECT:
-        Safe wallet with direct local signing. Transactions are wrapped in
-        Safe.execTransaction() calls and signed locally. Used for testing
-        Safe flows on Anvil forks without needing the signer service.
-
-        Required env vars:
-            - ALMANAK_PRIVATE_KEY
-            - ALMANAK_SAFE_ADDRESS
-
-    SAFE_ZODIAC:
-        Safe wallet with Zodiac Roles module. Transactions are executed via
-        execTransactionWithRole() through a remote signer service. Used in
-        production where the private key is held by a secure signer service.
-
-        Required env vars:
-            - ALMANAK_PRIVATE_KEY (dummy value, key held by signer service)
-            - ALMANAK_EOA_ADDRESS (EOA address that has the Zodiac role)
-            - ALMANAK_SAFE_ADDRESS
-            - ALMANAK_ZODIAC_ADDRESS
-            - ALMANAK_SIGNER_SERVICE_URL
-            - ALMANAK_SIGNER_SERVICE_JWT
-
-    Example:
-        # Set via environment variable
-        export ALMANAK_EXECUTION_MODE=safe_direct
-
-        # Or use in code
-        config = MultiChainRuntimeConfig.from_env(
-            chains=["arbitrum"],
-            protocols={"arbitrum": ["enso"]},
-        )
-        # Mode is auto-detected from ALMANAK_EXECUTION_MODE
-    """
-
-    EOA = "eoa"
-    SAFE_DIRECT = "safe_direct"
-    SAFE_ZODIAC = "safe_zodiac"
-
-    @classmethod
-    def from_string(cls, value: str) -> "ExecutionMode":
-        """Parse execution mode from string.
-
-        Args:
-            value: Mode string (case-insensitive)
-
-        Returns:
-            ExecutionMode enum value
-
-        Raises:
-            ConfigurationError: If value is not a valid mode
-        """
-        try:
-            return cls(value.lower())
-        except ValueError as e:
-            valid_modes = ", ".join(m.value for m in cls)
-            raise ConfigurationError(
-                field="execution_mode",
-                reason=f"Invalid execution mode '{value}'. Valid modes: {valid_modes}",
-            ) from e
 
 
 # =============================================================================
@@ -326,8 +182,10 @@ class LocalRuntimeConfig:
         - Wallet address is derived once at initialization and cached
 
     Example:
-        # From environment variables
-        config = LocalRuntimeConfig.from_env()
+        # From environment variables (Phase 5a-2 entry point):
+        from almanak.config.runtime import runtime_config_from_env
+        rc = runtime_config_from_env(chain="arbitrum")
+        config = LocalRuntimeConfig.from_runtime_config(rc)
 
         # Direct instantiation
         config = LocalRuntimeConfig(
@@ -598,238 +456,57 @@ class LocalRuntimeConfig:
         return masked
 
     @classmethod
-    def from_env(  # noqa: C901
-        cls,
-        chain: str | None = None,
-        network: str = "mainnet",
-        dotenv_path: str | None = None,
-        prefix: str = "ALMANAK_",
-        private_key: str | None = None,
-    ) -> "LocalRuntimeConfig":
-        """Create configuration from environment variables.
+    def from_runtime_config(cls, rc: RuntimeConfig) -> "LocalRuntimeConfig":
+        """Build a :class:`LocalRuntimeConfig` from a typed :class:`RuntimeConfig`.
 
-        Loads configuration from environment variables, optionally loading
-        from a .env file first. Environment variable names are prefixed
-        with the given prefix (default: ALMANAK_).
+        Phase 5a-2: replaces the deleted :meth:`from_env` classmethod. The
+        env-reading factory :func:`almanak.config.runtime.runtime_config_from_env`
+        produces a :class:`RuntimeConfig`; this classmethod adapts it to the
+        dataclass shape consumed downstream.
 
-        This method supports two modes:
-        1. **Explicit RPC URL**: Set {prefix}RPC_URL directly
-        2. **Dynamic URL** (recommended): Set ALCHEMY_API_KEY and the URL is built automatically
-
-        Environment Variables:
-            {prefix}PRIVATE_KEY: Hex-encoded private key (required)
-            {prefix}CHAIN: Blockchain network (e.g., "arbitrum") - optional if chain param provided
-            {prefix}RPC_URL: RPC endpoint URL - optional if ALCHEMY_API_KEY is set
-            ALCHEMY_API_KEY: Alchemy API key for dynamic URL building (recommended)
-            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default: chain-specific; Anvil: always 9999)
-            {prefix}MAX_GAS_COST_NATIVE: Optional, max gas cost per tx in native token (default 0 = no limit)
-            {prefix}MAX_GAS_COST_USD: Optional, max gas cost per tx in USD (default 0 = no limit)
-            {prefix}MAX_SLIPPAGE_BPS: Optional, max acceptable swap slippage in basis points (default 0 = no limit)
-            {prefix}TX_TIMEOUT_SECONDS: Optional, timeout (default 120)
-            {prefix}SIMULATION_ENABLED: Optional, "true"/"false" (default true)
-            {prefix}MAX_TX_VALUE_ETH: Optional, max tx value (default 10.0)
-            {prefix}BASE_RETRY_DELAY: Optional, base delay (default 1.0)
-            {prefix}MAX_RETRY_DELAY: Optional, max delay (default 32.0)
-            {prefix}MAX_RETRIES: Optional, max retries (default 3)
+        For single-chain ``RuntimeConfig`` (``rc.single_chain == True``),
+        the singular view (``chain``, ``rpc_url``, ``chain_id``) is the
+        primary source. Multi-chain rows are not valid input here — call
+        :meth:`MultiChainRuntimeConfig.from_runtime_config` for those.
 
         Args:
-            chain: Optional chain name. If provided, overrides {prefix}CHAIN env var.
-                   Useful when chain comes from strategy config.
-            network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
-            dotenv_path: Optional path to .env file to load
-            prefix: Environment variable prefix (default "ALMANAK_")
-            private_key: Optional explicit private key. When non-None, used directly
-                as the wallet signing key, bypassing the {prefix}PRIVATE_KEY env
-                lookup for that field only. Other env reads (RPC URLs, gas caps,
-                Safe addresses, etc.) keep their existing precedence. Precedence:
-                kwarg > {prefix}PRIVATE_KEY > unprefixed PRIVATE_KEY. The kwarg
-                lets callers (CLI Anvil-fallback, --wallet isolated) plumb a
-                derived key without mutating os.environ mid-run (#2100).
+            rc: Typed runtime config from
+                :func:`almanak.config.runtime.runtime_config_from_env`.
 
         Returns:
-            LocalRuntimeConfig instance
+            ``LocalRuntimeConfig`` instance.
 
         Raises:
-            MissingEnvironmentVariableError: If required env var is missing
-            ConfigurationError: If env var value is invalid
-
-        Example:
-            # Minimal setup with ALCHEMY_API_KEY (recommended)
-            # .env: ALCHEMY_API_KEY=xxx, ALMANAK_PRIVATE_KEY=0x...
-            config = LocalRuntimeConfig.from_env(chain="arbitrum")
-
-            # Legacy mode with explicit RPC URL
-            # .env: ALMANAK_CHAIN=arbitrum, ALMANAK_RPC_URL=https://..., ALMANAK_PRIVATE_KEY=0x...
-            config = LocalRuntimeConfig.from_env()
-
-            # Local development with Anvil
-            config = LocalRuntimeConfig.from_env(chain="arbitrum", network="anvil")
+            ConfigurationError: If ``rc`` is multi-chain (use
+                :class:`MultiChainRuntimeConfig` instead).
         """
-        from almanak.gateway.utils.rpc_provider import get_rpc_url
-
-        # Load .env file if specified or found in default locations
-        if dotenv_path:
-            load_dotenv(dotenv_path)
-        else:
-            load_dotenv()
-
-        def get_required(name: str) -> str:
-            """Get required environment variable (empty string treated as missing)."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if not value:
-                raise MissingEnvironmentVariableError(full_name)
-            return value
-
-        def get_optional(name: str, default: str | None = None) -> str | None:
-            """Get optional environment variable."""
-            full_name = f"{prefix}{name}"
-            return os.environ.get(full_name, default)
-
-        def get_optional_int(name: str, default: int) -> int:
-            """Get optional integer environment variable."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if value is None:
-                return default
-            try:
-                return int(value)
-            except ValueError:
-                raise ConfigurationError(
-                    field=full_name,
-                    reason=f"Invalid integer value: {value}",
-                ) from None
-
-        def get_optional_float(name: str, default: float) -> float:
-            """Get optional float environment variable."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if value is None:
-                return default
-            try:
-                return float(value)
-            except ValueError:
-                raise ConfigurationError(
-                    field=full_name,
-                    reason=f"Invalid float value: {value}",
-                ) from None
-
-        def get_optional_bool(name: str, default: bool) -> bool:
-            """Get optional boolean environment variable."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if value is None:
-                return default
-            return value.lower() in ("true", "1", "yes", "y")
-
-        # VIB-308: Warn when unprefixed env vars are set -- silently ignored without prefix.
-        _warn_unprefixed_env_vars(prefix)
-
-        # Determine chain: parameter > env var (normalize to lowercase for lookups)
-        resolved_chain = (chain or get_optional("CHAIN") or "").lower() or None
-        if not resolved_chain:
+        if not rc.single_chain:
             raise ConfigurationError(
-                field="chain",
-                reason="Chain must be provided via 'chain' parameter or ALMANAK_CHAIN env var",
+                field="single_chain",
+                reason=(
+                    "LocalRuntimeConfig.from_runtime_config requires a "
+                    "single-chain RuntimeConfig — use "
+                    "MultiChainRuntimeConfig.from_runtime_config for multi-chain rows"
+                ),
             )
-
-        # Determine RPC URL based on network setting
-        # Priority when network="anvil": use local Anvil directly (skip env vars)
-        # Priority when network="mainnet": chain-specific env var > generic env var > dynamic build
-        rpc_url: str | None = None
-
-        if network.lower() == "anvil":
-            # Anvil mode: always use local fork URL, ignore env vars
-            rpc_url = get_rpc_url(resolved_chain, network="anvil")
-            logger.debug(f"Using Anvil RPC URL for {resolved_chain}: {rpc_url}")
-        else:
-            # Mainnet/testnet: check env vars first, then dynamic build
-            # First try chain-specific (e.g., ALMANAK_ARBITRUM_RPC_URL for arbitrum)
-            chain_specific_rpc_var = f"{prefix}{resolved_chain.upper()}_RPC_URL"
-            rpc_url = os.environ.get(chain_specific_rpc_var)
-            if rpc_url:
-                logger.debug(f"Using chain-specific RPC URL from {chain_specific_rpc_var}")
-            else:
-                # Fall back to generic RPC_URL
-                rpc_url = get_optional("RPC_URL")
-
-            if not rpc_url:
-                # Build dynamically via get_rpc_url (handles API keys, Tenderly, and free public RPCs)
-                try:
-                    rpc_url = get_rpc_url(resolved_chain, network=network)
-                    logger.debug(f"Built RPC URL dynamically for {resolved_chain}")
-                except ValueError as e:
-                    raise ConfigurationError(
-                        field="rpc_url",
-                        reason=f"Could not build RPC URL: {e}. Set {prefix}RPC_URL, {prefix}{resolved_chain.upper()}_RPC_URL, ALCHEMY_API_KEY, or TENDERLY_API_KEY_{resolved_chain.upper()}.",
-                    ) from None
-
-        # VIB-303 + VIB-304 + VIB-1719: Chain-aware gas price cap defaults.
-        # In Anvil mode, gas costs no real money -- always use ANVIL_GAS_PRICE_CAP_GWEI
-        # to prevent false-positive cap errors on high-gas chains like Polygon.
-        # If a user's .env has ALMANAK_MAX_GAS_PRICE_GWEI=100 (from .env.example),
-        # we override it in Anvil mode and warn, because 100 gwei breaks Polygon forks.
-        if network.lower() == "anvil":
-            default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
-            user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)
-            if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
-                logger.warning(
-                    "ALMANAK_MAX_GAS_PRICE_GWEI=%d is too low for Anvil mode "
-                    "(gas costs no real money). Overriding to %d gwei to prevent "
-                    "false-positive gas cap errors on high-gas chains (e.g. Polygon).",
-                    user_gas_cap,
-                    ANVIL_GAS_PRICE_CAP_GWEI,
-                )
-            # Always use Anvil cap in Anvil mode -- env var is ignored entirely
-            gas_cap_override = ANVIL_GAS_PRICE_CAP_GWEI
-        else:
-            default_gas_cap = CHAIN_GAS_PRICE_CAPS_GWEI.get(resolved_chain, DEFAULT_GAS_PRICE_CAP_GWEI)
-            gas_cap_override = None  # Let env var take effect normally
-
-        # Get execution mode and create Safe signer if needed
-        mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
-        execution_mode = ExecutionMode.from_string(mode_str)
-
-        # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry handles
-        # signer creation per chain. No local private key or SAFE_ADDRESS needed.
-        gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
-
-        # Resolve the signing key. Explicit kwarg wins over env (#2100): the CLI
-        # plumbs the Anvil-default and isolated-wallet derived keys this way
-        # instead of mutating os.environ mid-run.
-        resolved_private_key = _resolve_private_key_from_env(
-            private_key=private_key,
-            chain=resolved_chain,
-            execution_mode=execution_mode,
-            gateway_wallets_configured=gateway_wallets_configured,
-            get_required=get_required,
-            get_optional=get_optional,
-        )
-        safe_signer = None
-        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
-            safe_signer = _create_safe_signer_from_env(
-                execution_mode=execution_mode,
-                private_key=resolved_private_key,
-                prefix=prefix,
-            )
-
+        # ``rc.chain`` / ``rc.rpc_url`` are non-None on single-chain rows
+        # (validated by the model's ``_check_single_vs_multi_consistency``).
+        assert rc.chain is not None and rc.rpc_url is not None  # for type narrowing
         return cls(
-            chain=resolved_chain,
-            rpc_url=rpc_url,
-            private_key=resolved_private_key,
-            max_gas_price_gwei=gas_cap_override
-            if gas_cap_override is not None
-            else get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap),
-            max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
-            max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
-            max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
-            tx_timeout_seconds=get_optional_int("TX_TIMEOUT_SECONDS", _default_receipt_timeout(resolved_chain)),
-            simulation_enabled=get_optional_bool("SIMULATION_ENABLED", True),
-            max_tx_value_eth=get_optional_float("MAX_TX_VALUE_ETH", 10.0),
-            base_retry_delay=get_optional_float("BASE_RETRY_DELAY", 1.0),
-            max_retry_delay=get_optional_float("MAX_RETRY_DELAY", 32.0),
-            max_retries=get_optional_int("MAX_RETRIES", 3),
-            safe_signer=safe_signer,
+            chain=rc.chain,
+            rpc_url=rc.rpc_url,
+            private_key=rc.private_key,
+            max_gas_price_gwei=rc.max_gas_price_gwei,
+            max_gas_cost_native=rc.max_gas_cost_native,
+            max_gas_cost_usd=rc.max_gas_cost_usd,
+            max_slippage_bps=rc.max_slippage_bps,
+            tx_timeout_seconds=rc.tx_timeout_seconds,
+            simulation_enabled=rc.simulation_enabled,
+            max_tx_value_eth=rc.max_tx_value_eth,
+            base_retry_delay=rc.base_retry_delay,
+            max_retry_delay=rc.max_retry_delay,
+            max_retries=rc.max_retries,
+            safe_signer=rc.safe_signer,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1299,9 +976,10 @@ class MultiChainRuntimeConfig:
             logger.info("Gateway wallets mode — skipping local RPC URL loading (gateway handles RPC)")
             return
 
+        from almanak.config.env import _load_dotenv_once
         from almanak.gateway.utils.rpc_provider import get_rpc_url
 
-        load_dotenv()
+        _load_dotenv_once()
 
         is_anvil = network.lower() == "anvil"
 
@@ -1641,200 +1319,69 @@ class MultiChainRuntimeConfig:
         )
 
     @classmethod
-    def from_env(  # noqa: C901
-        cls,
-        chains: list[str],
-        protocols: dict[str, list[str]],
-        network: str = "mainnet",
-        dotenv_path: str | None = None,
-        prefix: str = "ALMANAK_",
-        private_key: str | None = None,
-    ) -> "MultiChainRuntimeConfig":
-        """Create configuration from environment variables.
+    def from_runtime_config(cls, rc: RuntimeConfig) -> "MultiChainRuntimeConfig":
+        """Build a :class:`MultiChainRuntimeConfig` from a typed :class:`RuntimeConfig`.
 
-        Loads private key, execution mode, and optional settings from environment
-        variables. RPC URLs are loaded per-chain from ALMANAK_{CHAIN}_RPC_URL format.
-
-        Environment Variables:
-            {prefix}PRIVATE_KEY: Hex-encoded private key (required)
-            {prefix}EXECUTION_MODE: Execution mode - "eoa", "safe_direct", "safe_zodiac"
-                                    (default: "eoa")
-            {prefix}SAFE_ADDRESS: Safe wallet address (required for safe_* modes)
-            {prefix}ZODIAC_ADDRESS: Zodiac Roles module address (required for safe_zodiac)
-            {prefix}SIGNER_SERVICE_URL: Remote signer URL (required for safe_zodiac)
-            {prefix}SIGNER_SERVICE_JWT: JWT for signer service (required for safe_zodiac)
-            {prefix}MAX_GAS_PRICE_GWEI: Optional, max gas price (default: 500 gwei global cap; Anvil: always 9999)
-            {prefix}MAX_GAS_COST_NATIVE: Optional, max gas cost per tx in native token (default 0 = no limit)
-            {prefix}MAX_GAS_COST_USD: Optional, max gas cost per tx in USD (default 0 = no limit)
-            {prefix}MAX_SLIPPAGE_BPS: Optional, max acceptable swap slippage in basis points (default 0 = no limit)
-            {prefix}TX_TIMEOUT_SECONDS: Optional, timeout (default 120)
-            {prefix}SIMULATION_ENABLED: Optional, "true"/"false" (default true)
-            {prefix}MAX_TX_VALUE_ETH: Optional, max tx value (default 10.0)
-            ALMANAK_{CHAIN}_RPC_URL: RPC URL for each chain (required per chain)
+        Phase 5a-2: replaces the deleted :meth:`from_env` classmethod. The
+        env-reading factory :func:`almanak.config.runtime.runtime_config_from_env`
+        produces a :class:`RuntimeConfig`; this classmethod adapts it to the
+        dataclass shape consumed by :class:`MultiChainOrchestrator`.
 
         Args:
-            chains: List of chain names to configure
-            protocols: Protocol mapping per chain
-            network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
-            dotenv_path: Optional path to .env file to load
-            prefix: Environment variable prefix (default "ALMANAK_")
-            private_key: Optional explicit private key. When non-None, used directly
-                as the wallet signing key, bypassing the {prefix}PRIVATE_KEY env
-                lookup for that field only. Other env reads keep their existing
-                precedence. Precedence: kwarg > {prefix}PRIVATE_KEY > unprefixed
-                PRIVATE_KEY. Plumbed by the CLI Anvil-fallback path so it does
-                not have to mutate os.environ mid-run (#2100).
+            rc: Multi-chain ``RuntimeConfig`` from
+                :func:`almanak.config.runtime.runtime_config_from_env`.
 
         Returns:
-            MultiChainRuntimeConfig instance
+            ``MultiChainRuntimeConfig`` instance with RPC URLs already
+            resolved (the dataclass's ``__post_init__`` re-loads them from
+            env, and we override with the canonical resolved view post-hoc).
 
-        Example:
-            # EOA mode (default)
-            export ALMANAK_EXECUTION_MODE=eoa
-            config = MultiChainRuntimeConfig.from_env(...)
-
-            # Safe direct mode (for Anvil testing)
-            export ALMANAK_EXECUTION_MODE=safe_direct
-            export ALMANAK_SAFE_ADDRESS=0x...
-            config = MultiChainRuntimeConfig.from_env(...)
-
-            # Safe Zodiac mode (production)
-            export ALMANAK_EXECUTION_MODE=safe_zodiac
-            export ALMANAK_SAFE_ADDRESS=0x...
-            export ALMANAK_ZODIAC_ADDRESS=0x...
-            export ALMANAK_SIGNER_SERVICE_URL=https://...
-            export ALMANAK_SIGNER_SERVICE_JWT=...
-            config = MultiChainRuntimeConfig.from_env(...)
+        Raises:
+            ConfigurationError: If ``rc`` is single-chain (use
+                :class:`LocalRuntimeConfig` instead).
         """
-        # Load .env file if specified or found in default locations
-        if dotenv_path:
-            load_dotenv(dotenv_path)
-        else:
-            load_dotenv()
-
-        def get_required(name: str) -> str:
-            """Get required environment variable (empty string treated as missing)."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if not value:
-                raise MissingEnvironmentVariableError(full_name)
-            return value
-
-        def get_optional(name: str, default: str | None = None) -> str | None:
-            """Get optional environment variable."""
-            full_name = f"{prefix}{name}"
-            return os.environ.get(full_name, default)
-
-        def get_optional_int(name: str, default: int) -> int:
-            """Get optional integer environment variable."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if value is None:
-                return default
-            try:
-                return int(value)
-            except ValueError:
-                raise ConfigurationError(
-                    field=full_name,
-                    reason=f"Invalid integer value: {value}",
-                ) from None
-
-        def get_optional_float(name: str, default: float) -> float:
-            """Get optional float environment variable."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if value is None:
-                return default
-            try:
-                return float(value)
-            except ValueError:
-                raise ConfigurationError(
-                    field=full_name,
-                    reason=f"Invalid float value: {value}",
-                ) from None
-
-        def get_optional_bool(name: str, default: bool) -> bool:
-            """Get optional boolean environment variable."""
-            full_name = f"{prefix}{name}"
-            value = os.environ.get(full_name)
-            if value is None:
-                return default
-            return value.lower() in ("true", "1", "yes", "y")
-
-        # VIB-308: Warn when unprefixed env vars are set -- silently ignored without prefix.
-        _warn_unprefixed_env_vars(prefix)
-
-        # Get execution mode (default: EOA)
-        mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
-        execution_mode = ExecutionMode.from_string(mode_str)
-
-        # When ALMANAK_GATEWAY_WALLETS is set, the gateway's WalletRegistry handles
-        # signer creation per chain. The framework does not need a local private key
-        # or SAFE_ADDRESS — those are resolved from the registry at RegisterChains time.
-        gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
-
-        # Resolve the signing key. Explicit kwarg wins over env (#2100): the CLI
-        # plumbs the Anvil-default key this way instead of mutating os.environ.
-        # ``chain=None`` because MultiChainRuntimeConfig is multi-chain by
-        # construction — the Solana-specific env-var fallback only fires for
-        # the single-chain LocalRuntimeConfig path.
-        resolved_private_key = _resolve_private_key_from_env(
-            private_key=private_key,
-            chain=None,
-            execution_mode=execution_mode,
-            gateway_wallets_configured=gateway_wallets_configured,
-            get_required=get_required,
-            get_optional=get_optional,
-        )
-
-        # Create Safe signer if needed — skip when gateway wallets are configured
-        # (the gateway creates signers per chain from the WalletRegistry)
-        safe_signer = None
-        if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
-            safe_signer = _create_safe_signer_from_env(
-                execution_mode=execution_mode,
-                private_key=resolved_private_key,
-                prefix=prefix,
+        if rc.single_chain:
+            raise ConfigurationError(
+                field="single_chain",
+                reason=(
+                    "MultiChainRuntimeConfig.from_runtime_config requires a "
+                    "multi-chain RuntimeConfig — use "
+                    "LocalRuntimeConfig.from_runtime_config for single-chain rows"
+                ),
             )
 
-        # VIB-303 + VIB-304 + VIB-1719: Chain-aware gas price cap defaults.
-        # In Anvil mode, gas costs no real money -- always use ANVIL_GAS_PRICE_CAP_GWEI
-        # to prevent false-positive cap errors on high-gas chains like Polygon.
-        if network.lower() == "anvil":
-            multi_default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
-            user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap)
-            if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
-                logger.warning(
-                    "ALMANAK_MAX_GAS_PRICE_GWEI=%d is too low for Anvil mode "
-                    "(gas costs no real money). Overriding to %d gwei to prevent "
-                    "false-positive gas cap errors on high-gas chains (e.g. Polygon).",
-                    user_gas_cap,
-                    ANVIL_GAS_PRICE_CAP_GWEI,
-                )
-            multi_gas_cap_override = ANVIL_GAS_PRICE_CAP_GWEI
-        else:
-            multi_default_gas_cap = DEFAULT_GAS_PRICE_CAP_GWEI
-            multi_gas_cap_override = None
+        chains = list(rc.chains)
+        protocols = {chain: list(plist) for chain, plist in rc.protocols.items()}
 
-        return cls(
+        # The dataclass __post_init__ re-runs validation and re-loads RPC
+        # URLs from env if ``rpc_urls`` is empty at construction. To preserve
+        # the resolved URLs from ``rc``, we set them on the instance after
+        # construction (the dataclass treats ``rpc_urls`` as init=False).
+        instance = cls(
             chains=chains,
             protocols=protocols,
-            private_key=resolved_private_key,
-            safe_signer=safe_signer,
-            network=network,
-            max_gas_price_gwei=multi_gas_cap_override
-            if multi_gas_cap_override is not None
-            else get_optional_int("MAX_GAS_PRICE_GWEI", multi_default_gas_cap),
-            max_gas_cost_native=get_optional_float("MAX_GAS_COST_NATIVE", 0.0),
-            max_gas_cost_usd=get_optional_float("MAX_GAS_COST_USD", 0.0),
-            max_slippage_bps=get_optional_int("MAX_SLIPPAGE_BPS", 0),
-            tx_timeout_seconds=get_optional_int("TX_TIMEOUT_SECONDS", 120),
-            simulation_enabled=get_optional_bool("SIMULATION_ENABLED", True),
-            max_tx_value_eth=get_optional_float("MAX_TX_VALUE_ETH", 10.0),
-            base_retry_delay=get_optional_float("BASE_RETRY_DELAY", 1.0),
-            max_retry_delay=get_optional_float("MAX_RETRY_DELAY", 32.0),
-            max_retries=get_optional_int("MAX_RETRIES", 3),
+            private_key=rc.private_key,
+            network=rc.network,
+            max_gas_price_gwei=rc.max_gas_price_gwei,
+            max_gas_cost_native=rc.max_gas_cost_native,
+            max_gas_cost_usd=rc.max_gas_cost_usd,
+            max_slippage_bps=rc.max_slippage_bps,
+            tx_timeout_seconds=rc.tx_timeout_seconds,
+            simulation_enabled=rc.simulation_enabled,
+            max_tx_value_eth=rc.max_tx_value_eth,
+            base_retry_delay=rc.base_retry_delay,
+            max_retry_delay=rc.max_retry_delay,
+            max_retries=rc.max_retries,
+            data_freshness_policy=rc.data_freshness_policy,
+            stale_data_threshold_seconds=rc.stale_data_threshold_seconds,
+            safe_signer=rc.safe_signer,
         )
+        # Override RPC URLs with the resolved values from ``rc`` (the
+        # dataclass loaded them from env in __post_init__; we replace with
+        # the canonical resolved view from the config service).
+        if rc.rpc_urls:
+            instance.rpc_urls = dict(rc.rpc_urls)
+        return instance
 
     def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary for serialization.
@@ -2082,156 +1629,19 @@ class MultiChainRuntimeConfig:
 
 
 # =============================================================================
-# Safe Signer Factory
+# Safe Signer Factory (canonical home: ``almanak.config.runtime``;
+# re-exported here for back-compat).
 # =============================================================================
 
 
-def _resolve_private_key_from_env(
-    *,
-    private_key: str | None,
-    chain: str | None,
-    execution_mode: ExecutionMode,
-    gateway_wallets_configured: bool,
-    get_required: Callable[[str], str],
-    get_optional: Callable[..., str | None],
-) -> str:
-    """Resolve the wallet signing key with kwarg-over-env precedence (#2100).
-
-    Shared between ``LocalRuntimeConfig.from_env`` and
-    ``MultiChainRuntimeConfig.from_env`` so the precedence order is encoded
-    once. Precedence: explicit ``private_key`` kwarg (incl. ``""``) >
-    ``{prefix}PRIVATE_KEY`` env (via ``get_required`` / ``get_optional``) >
-    unprefixed env (only the Solana branch reads ``SOLANA_PRIVATE_KEY``
-    directly because that name is the canonical bare env var).
-
-    ``private_key is not None`` honours an explicit empty-string override:
-    callers can pass ``private_key=""`` to force the no-local-key path even
-    when an ambient ``ALMANAK_PRIVATE_KEY`` is set in env (e.g. SAFE_ZODIAC
-    or gateway-wallets flows running on a developer box).
-    """
-    if private_key is not None:
-        return private_key
-    if chain == "solana":
-        # Solana uses base58 Ed25519 instead of hex secp256k1 — separate env var.
-        return os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
-    if execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Zodiac: private key held by the remote signer service, not needed locally.
-        return get_optional("PRIVATE_KEY", "") or ""
-    if gateway_wallets_configured:
-        # Gateway wallets mode: signing handled by the gateway, key optional locally.
-        return get_optional("PRIVATE_KEY", "") or ""
-    return get_required("PRIVATE_KEY")
-
-
-def _create_safe_signer_from_env(
-    execution_mode: ExecutionMode,
-    private_key: str,
-    prefix: str = "ALMANAK_",
-) -> "SafeSigner":
-    """Create a Safe signer from environment variables.
-
-    This is a helper function used by MultiChainRuntimeConfig.from_env() to
-    create the appropriate Safe signer based on the execution mode.
-
-    Args:
-        execution_mode: The execution mode (SAFE_DIRECT or SAFE_ZODIAC)
-        private_key: The private key for signing
-        prefix: Environment variable prefix
-
-    Returns:
-        SafeSigner instance
-
-    Raises:
-        MissingEnvironmentVariableError: If required env vars are missing
-        ConfigurationError: If configuration is invalid
-    """
-    from almanak.framework.execution.signer.safe import (
-        SafeSignerConfig,
-        SafeWalletConfig,
-        create_safe_signer,
-    )
-
-    def get_required(name: str) -> str:
-        """Get required environment variable (empty string treated as missing)."""
-        full_name = f"{prefix}{name}"
-        value = os.environ.get(full_name)
-        if not value:
-            raise MissingEnvironmentVariableError(full_name)
-        return value
-
-    def get_optional(name: str) -> str | None:
-        """Get optional environment variable."""
-        full_name = f"{prefix}{name}"
-        return os.environ.get(full_name)
-
-    # Get Safe address (required for all Safe modes)
-    safe_address = get_required("SAFE_ADDRESS")
-
-    if execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Zodiac mode: prefer explicit EOA_ADDRESS (platform deployments use
-        # remote signer with no local key). Fall back to deriving from private
-        # key only when EOA_ADDRESS is not set.
-        explicit_eoa = get_optional("EOA_ADDRESS")
-        if explicit_eoa:
-            eoa_address = explicit_eoa
-        elif private_key:
-            try:
-                account = Account.from_key(private_key)
-                eoa_address = account.address
-            except Exception:
-                raise ConfigurationError(
-                    field="private_key",
-                    reason="Invalid private key format for safe_zodiac mode",
-                ) from None
-        else:
-            raise MissingEnvironmentVariableError(f"{prefix}EOA_ADDRESS")
-    else:
-        # Direct mode: derive EOA from private key
-        account = Account.from_key(private_key)
-        eoa_address = account.address
-
-    if execution_mode == ExecutionMode.SAFE_DIRECT:
-        # Direct mode - local signing for Anvil testing
-        wallet_config = SafeWalletConfig(
-            safe_address=safe_address,
-            eoa_address=eoa_address,
-        )
-        signer_config = SafeSignerConfig(
-            mode="direct",
-            wallet_config=wallet_config,
-            private_key=private_key,
-        )
-        logger.info(f"Creating Safe signer (direct): safe={safe_address[:10]}..., eoa={eoa_address[:10]}...")
-        return create_safe_signer(signer_config)
-
-    elif execution_mode == ExecutionMode.SAFE_ZODIAC:
-        # Zodiac mode - signing via factory (local or plugin)
-        zodiac_address = get_required("ZODIAC_ADDRESS")
-        # Service URL/JWT are optional — zodiac mode also works with just a private_key
-        signer_service_url = get_optional("SIGNER_SERVICE_URL")
-        signer_service_jwt = get_optional("SIGNER_SERVICE_JWT")
-
-        wallet_config = SafeWalletConfig(
-            safe_address=safe_address,
-            eoa_address=eoa_address,
-            zodiac_roles_address=zodiac_address,
-        )
-        signer_config = SafeSignerConfig(
-            mode="zodiac",
-            wallet_config=wallet_config,
-            private_key=private_key,
-            signer_service_url=signer_service_url,
-            signer_service_jwt=signer_service_jwt,
-        )
-        logger.info(f"Creating Safe signer (zodiac): safe={safe_address[:10]}..., zodiac={zodiac_address[:10]}...")
-        return create_safe_signer(signer_config)
-
-    else:
-        raise ConfigurationError(
-            field="execution_mode",
-            reason=f"Cannot create Safe signer for mode: {execution_mode}",
-        )
-
+# ``_resolve_private_key_from_env`` and ``_create_safe_signer_from_env``
+# moved to ``almanak.config.runtime`` in Phase 5a-2. Importing them here
+# preserves the back-compat surface for code that still imports them via
+# ``from almanak.framework.execution.config import _resolve_private_key_from_env``.
+from almanak.config.runtime import (  # noqa: E402  (intentional: re-export at module bottom)
+    _create_safe_signer_from_env,
+    _resolve_private_key_from_env,
+)
 
 # =============================================================================
 # Exports
@@ -2248,4 +1658,7 @@ __all__ = [
     "CHAIN_IDS",
     "SUPPORTED_PROTOCOLS",
     "DataFreshnessPolicy",
+    "RuntimeConfig",
+    "_resolve_private_key_from_env",
+    "_create_safe_signer_from_env",
 ]

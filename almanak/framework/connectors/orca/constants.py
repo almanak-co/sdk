@@ -7,7 +7,6 @@ Reference: https://github.com/orca-so/whirlpools
 """
 
 import hashlib
-import os
 
 # =========================================================================
 # Program IDs
@@ -73,7 +72,24 @@ TICK_ARRAY_SIZE = 88
 # Orca API
 # =========================================================================
 
-ORCA_API_BASE_URL = os.environ.get("ORCA_API_BASE_URL") or "https://api.orca.so/v2/solana"
+
+def get_orca_api_base_url() -> str:
+    """Return the Orca Whirlpools API base URL.
+
+    Phase 5b of the config-service migration: same rationale as
+    :func:`almanak.framework.connectors.drift.constants.get_drift_data_api_base_url`.
+    """
+    from almanak.config.connectors import connectors_config_from_env
+
+    return connectors_config_from_env().orca_api_base_url
+
+
+def __getattr__(name: str) -> str:
+    """Lazy module attribute resolver — preserves the legacy constant name."""
+    if name == "ORCA_API_BASE_URL":
+        return get_orca_api_base_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Common Whirlpool tick spacings and their fee tiers
 TICK_SPACINGS = {

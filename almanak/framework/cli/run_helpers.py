@@ -41,7 +41,6 @@ import contextvars
 import inspect
 import json
 import logging
-import os
 import sys
 import time
 from collections.abc import Callable, Coroutine
@@ -318,10 +317,10 @@ def _anchor_strategy_folder_env(working_dir: str) -> None:
     lines that the CRAP gate cannot cover without a full refactor of
     ``run`` itself.
     """
-    from almanak.framework.local_paths import set_strategy_folder
+    from almanak.framework.local_paths import set_strategy_folder, strategy_folder_env
 
     resolved = Path(working_dir).expanduser().resolve()
-    if resolved.is_dir() and not os.environ.get("ALMANAK_STRATEGY_FOLDER"):
+    if resolved.is_dir() and not strategy_folder_env():
         set_strategy_folder(resolved)
 
 
@@ -878,8 +877,15 @@ def _attach_external_gateway(
     from ..gateway_client import GatewayClient, GatewayClientConfig
 
     click.echo(f"Connecting to existing gateway at {effective_host}:{gateway_port}...")
-    # Read ALMANAK_GATEWAY_AUTH_TOKEN with fallback to GATEWAY_AUTH_TOKEN for backward compatibility
-    auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN")
+    # Read the typed gateway auth token with fallback to the legacy unprefixed
+    # GATEWAY_AUTH_TOKEN. Both flow through the Phase 5 config service, but
+    # we narrow to the gateway + cli factories rather than ``load_config()``
+    # so an unrelated submodel validation error (e.g. malformed
+    # ``ANVIL_*_PORT``) cannot block ``--no-gateway`` startup (PR #2152 review).
+    from almanak.config import cli_runtime_config_from_env
+    from almanak.config.env import gateway_config_from_env
+
+    auth_token = gateway_config_from_env().auth_token or cli_runtime_config_from_env().legacy_gateway_auth_token
     gateway_config = GatewayClientConfig(host=effective_host, port=gateway_port, auth_token=auth_token)
     gateway_client = GatewayClient(gateway_config)
     gateway_client.connect()
@@ -1098,9 +1104,11 @@ def _derive_isolated_wallet_or_none(
     """Derive an isolated wallet+key for `--wallet isolated`; otherwise return (None, None).
 
     Resolution order for the master key: caller-plumbed ``runtime_private_key``
-    (or its contextvar fallback set by `almanak strat test`) >
-    ``ALMANAK_PRIVATE_KEY`` env var. Honours the kwarg-first, no-env signing-key
-    plumbing the rest of `_setup_gateway` documents (#2100).
+    (or its contextvar fallback set by `almanak strat test`) > the typed
+    ``GatewayConfig.private_key`` (Phase 5 — populated from
+    ``ALMANAK_PRIVATE_KEY`` via the ``_apply_gateway_env_fallbacks`` ladder).
+    Honours the kwarg-first, no-env signing-key plumbing the rest of
+    ``_setup_gateway`` documents (#2100).
     """
     if wallet != "isolated":
         return None, None
@@ -1113,7 +1121,13 @@ def _derive_isolated_wallet_or_none(
     if master_key is None:
         master_key = _runtime_private_key_override.get()
     if not master_key:
-        master_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+        # Phase 5: read through the typed gateway config rather than directly
+        # off ``os.environ`` so the config-boundary lint stays clean. The
+        # ``_apply_gateway_env_fallbacks`` ladder still honours
+        # ``ALMANAK_PRIVATE_KEY``.
+        from almanak.config.env import gateway_config_from_env
+
+        master_key = gateway_config_from_env().private_key or ""
     if not master_key:
         raise click.ClickException(
             "--wallet isolated requires a private key — pass `runtime_private_key=...` or set ALMANAK_PRIVATE_KEY"
@@ -1708,16 +1722,32 @@ def _resolve_effective_signing_key(
     Solana single-chain strategies use ``SOLANA_PRIVATE_KEY`` (base58 Ed25519)
     instead of ``ALMANAK_PRIVATE_KEY`` (hex secp256k1) as the canonical env
     var — mirroring the rule in
-    ``execution.config._resolve_private_key_from_env``. Without this branch,
-    a Solana strategy with ``--no-gateway`` and only ``SOLANA_PRIVATE_KEY``
-    set would falsely take the sidecar branch even though
-    ``LocalRuntimeConfig.from_env`` is fully able to load.
+    ``almanak.config.runtime._resolve_private_key_from_env``. Without this
+    branch, a Solana strategy with ``--no-gateway`` and only
+    ``SOLANA_PRIVATE_KEY`` set would falsely take the sidecar branch even
+    though ``runtime_config_from_env`` (Phase 5a-2 entry point) is fully
+    able to load.
     """
     if runtime_private_key is not None:
+        # Honour the explicit kwarg before touching the typed config — the
+        # kwarg-first contract documented above must hold even when an
+        # unrelated submodel would fail validation (PR #2152 review).
         return runtime_private_key
+
+    # Narrow to ``gateway_config_from_env`` rather than ``load_config()`` so
+    # a malformed unrelated submodel (backtest, cli, connectors) cannot block
+    # signing-key resolution. ``GatewayConfig`` already carries the
+    # ``ALMANAK_PRIVATE_KEY`` / ``SOLANA_PRIVATE_KEY`` Phase 1 fallback ladder.
+    from almanak.config.env import gateway_config_from_env
+
+    _gw = gateway_config_from_env()
     if (config_chain or "").strip().lower() == "solana":
-        return os.environ.get("SOLANA_PRIVATE_KEY") or os.environ.get("ALMANAK_PRIVATE_KEY")
-    return os.environ.get("ALMANAK_PRIVATE_KEY")
+        # The typed ``GatewayConfig.solana_private_key`` carries
+        # SOLANA_PRIVATE_KEY via the Phase 1 env-fallback ladder; falling
+        # back to ``private_key`` (ALMANAK_PRIVATE_KEY) preserves the legacy
+        # "Solana strategy with hex key" path.
+        return _gw.solana_private_key or _gw.private_key or None
+    return _gw.private_key or None
 
 
 def _resolve_runtime_private_key_kwarg(runtime_private_key: str | None) -> str | None:
@@ -1751,9 +1781,12 @@ def _build_sidecar_runtime_config(*, config_chain: str | None) -> Any:
         raise click.ClickException(
             "Chain must be specified in config.json or strategy decorator for sidecar deployment mode."
         )
-    safe_address = os.environ.get("ALMANAK_SAFE_ADDRESS")
-    wallet_address = safe_address or os.environ.get("ALMANAK_EOA_ADDRESS")
-    if not wallet_address and not os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+    from almanak.config import cli_runtime_config_from_env as _cli_cfg
+
+    _cli = _cli_cfg()
+    safe_address = _cli.safe_address
+    wallet_address = safe_address or _cli.eoa_address
+    if not wallet_address and not _cli.gateway_wallets_configured:
         raise click.ClickException(
             "Sidecar mode (--no-gateway without ALMANAK_PRIVATE_KEY) requires "
             "ALMANAK_SAFE_ADDRESS, ALMANAK_EOA_ADDRESS, or ALMANAK_GATEWAY_WALLETS to be set."
@@ -1819,30 +1852,38 @@ def _load_local_runtime_config(
 ) -> Any:
     """Build a ``LocalRuntimeConfig`` with Anvil-default fallback and verbose errors.
 
-    Mirrors the original single-chain branch of ``_build_runtime_config``: a
-    primary ``LocalRuntimeConfig.from_env`` call, and on
-    ``MissingEnvironmentVariableError`` for ``PRIVATE_KEY`` while on Anvil, a
-    second attempt that plumbs ``ANVIL_DEFAULT_PRIVATE_KEY`` via the typed
-    kwarg (#2100). Anything else exits with the canonical help text.
+    Phase 5a-2: routes env reads through
+    :func:`almanak.config.runtime.runtime_config_from_env` and converts to
+    the dataclass shape via :meth:`LocalRuntimeConfig.from_runtime_config`.
+    On ``MissingEnvironmentVariableError`` for ``PRIVATE_KEY`` while on
+    Anvil, a second attempt plumbs ``ANVIL_DEFAULT_PRIVATE_KEY`` via the
+    typed kwarg (#2100). Anything else exits with the canonical help text.
     """
-    from ..execution.config import LocalRuntimeConfig, MissingEnvironmentVariableError
+    from almanak.config.runtime import (
+        MissingEnvironmentVariableError,
+        runtime_config_from_env,
+    )
+
+    from ..execution.config import LocalRuntimeConfig
     from .run import ANVIL_DEFAULT_PRIVATE_KEY
 
     try:
-        return LocalRuntimeConfig.from_env(
+        rc = runtime_config_from_env(
             chain=config_chain,
             network=resolved_network,
             private_key=runtime_private_key,
         )
+        return LocalRuntimeConfig.from_runtime_config(rc)
     except MissingEnvironmentVariableError as e:
         if resolved_network == "anvil" and e.var_name.endswith("PRIVATE_KEY"):
             _accept_anvil_default_wallet_or_exit()
             try:
-                return LocalRuntimeConfig.from_env(
+                rc = runtime_config_from_env(
                     chain=config_chain,
                     network=resolved_network,
                     private_key=ANVIL_DEFAULT_PRIVATE_KEY,
                 )
+                return LocalRuntimeConfig.from_runtime_config(rc)
             except Exception as retry_err:
                 click.echo(f"Error loading configuration after setting default key: {retry_err}", err=True)
                 sys.exit(1)
@@ -1871,34 +1912,42 @@ def _load_multichain_runtime_config(
 ) -> Any:
     """Build a ``MultiChainRuntimeConfig`` with Anvil-default fallback and verbose errors.
 
-    Mirrors the original multi-chain branch of ``_build_runtime_config``,
-    including the multi-chain-sidecar guard that points users at
-    ``ALMANAK_GATEWAY_WALLETS`` when ``--no-gateway`` is set without a
-    primary key. The Anvil-default retry plumbs ``ANVIL_DEFAULT_PRIVATE_KEY``
-    via the typed kwarg (#2100).
+    Phase 5a-2: routes env reads through
+    :func:`almanak.config.runtime.runtime_config_from_env` and converts to
+    the dataclass shape via
+    :meth:`MultiChainRuntimeConfig.from_runtime_config`. The Anvil-default
+    retry and the multi-chain-sidecar guard match the legacy semantics
+    (#2100).
     """
-    from ..execution.config import MissingEnvironmentVariableError, MultiChainRuntimeConfig
+    from almanak.config.runtime import (
+        MissingEnvironmentVariableError,
+        runtime_config_from_env,
+    )
+
+    from ..execution.config import MultiChainRuntimeConfig
     from .run import ANVIL_DEFAULT_PRIVATE_KEY
 
     try:
-        runtime_config = MultiChainRuntimeConfig.from_env(
+        rc = runtime_config_from_env(
             chains=strategy_chains,
             protocols=strategy_protocols,
             network=resolved_network,
             private_key=runtime_private_key,
         )
+        runtime_config = MultiChainRuntimeConfig.from_runtime_config(rc)
         click.echo(f"Multi-chain config loaded for: {', '.join(strategy_chains)}")
         return runtime_config
     except MissingEnvironmentVariableError as e:
         if resolved_network == "anvil" and e.var_name.endswith("PRIVATE_KEY"):
             _accept_anvil_default_wallet_or_exit()
             try:
-                runtime_config = MultiChainRuntimeConfig.from_env(
+                rc = runtime_config_from_env(
                     chains=strategy_chains,
                     protocols=strategy_protocols,
                     network=resolved_network,
                     private_key=ANVIL_DEFAULT_PRIVATE_KEY,
                 )
+                runtime_config = MultiChainRuntimeConfig.from_runtime_config(rc)
             except Exception as retry_err:
                 click.echo(f"Error loading configuration after setting default key: {retry_err}", err=True)
                 sys.exit(1)
@@ -1944,7 +1993,9 @@ def _register_chain_wallets(
     primary wallet so the runtime signs through the same identity the gateway
     uses for accounting.
     """
-    if not os.environ.get("ALMANAK_GATEWAY_WALLETS"):
+    from almanak.config import cli_runtime_config_from_env as _cli_cfg
+
+    if not _cli_cfg().gateway_wallets_configured:
         return {}
     try:
         register_chain_list = strategy_chains if multi_chain else [str(config_chain)]
@@ -1995,7 +2046,15 @@ def _apply_strategy_config_chain(
         return
     if multi_chain:
         return
-    env_chain = (os.environ.get("ALMANAK_CHAIN") or "").strip().lower() or None
+    # ``ALMANAK_CHAIN`` is the canonical single-chain override; the
+    # runtime-config layer reads it via ``runtime_config_from_env`` already.
+    # Here we only need the raw value to compare against the strategy
+    # config's own ``chain`` field; reading ``os.environ`` would re-introduce
+    # the boundary lint hit. Source the value through the runtime-config
+    # factory's same lookup path by going through the canonical helper.
+    from almanak.config.cli_runtime import _almanak_chain_env
+
+    env_chain = _almanak_chain_env()
     if not env_chain:
         return
     existing = strategy_config.get("chain")
@@ -2089,7 +2148,9 @@ def _build_runtime_config(
     # Safe-mode preflight only when the CLI manages the gateway (env vars
     # are local). Skip when ALMANAK_GATEWAY_WALLETS is set — the gateway's
     # WalletRegistry handles signer configuration per chain.
-    gateway_wallets_configured = bool(os.environ.get("ALMANAK_GATEWAY_WALLETS"))
+    from almanak.config import cli_runtime_config_from_env as _cli_cfg_for_wallets
+
+    gateway_wallets_configured = _cli_cfg_for_wallets().gateway_wallets_configured
     if runtime_config.is_safe_mode and not no_gateway and not gateway_wallets_configured:
         error = _validate_safe_mode_preflight(runtime_config.execution_address)
         if error:
@@ -2142,6 +2203,10 @@ def _get_data_requirements(strategy_instance: Any) -> StrategyDataRequirements:
     return dr
 
 
+# crap-allowlist: Phase 5e (#2097) replaces direct os.environ.get reads with the typed
+# cli_runtime_config_from_env() — no new branches, no new behaviour. Function refactor
+# is tracked separately; allowlist matches the documented escape hatch for boundary
+# cutovers (#2097, plan §"Phase 5e").
 def _build_orchestrator_and_providers(  # noqa: C901
     *,
     multi_chain: bool,
@@ -2313,9 +2378,12 @@ def _build_orchestrator_and_providers(  # noqa: C901
 
         # For Solana + --network anvil, start local solana-test-validator
         if runtime_config.chain.lower() == "solana" and resolved_network == "anvil":
+            from almanak.config import cli_runtime_config_from_env as _solana_cli_cfg
+
             from ..anvil.solana_fork_manager import SolanaForkManager
 
-            solana_rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+            _solana_cli = _solana_cli_cfg()
+            solana_rpc_url = _solana_cli.solana_rpc_url
             # Clone any pool/account addresses declared in the strategy config
             _extra_clone = []
             if strategy_config and isinstance(strategy_config, dict):
@@ -2332,7 +2400,7 @@ def _build_orchestrator_and_providers(  # noqa: C901
                 click.echo(f"  Cloning {len(_extra_clone)} account(s) from mainnet")
             solana_fork_mgr = SolanaForkManager(
                 rpc_url=solana_rpc_url,
-                validator_port=int(os.environ.get("SOLANA_VALIDATOR_PORT", "8899")),
+                validator_port=_solana_cli.solana_validator_port,
                 clone_accounts=_extra_clone,
             )
             click.echo("  Starting local solana-test-validator...")
@@ -2734,13 +2802,12 @@ def _reconciliation_enforcement_from_env() -> bool:
     Default is observation mode (False) until VIB-3348 block-anchored balance
     reads close the false-positive race. Truthy values: ``1``, ``true``, ``yes``
     (case-insensitive, surrounding whitespace tolerated). Anything else — unset,
-    empty, ``0``, ``false``, arbitrary strings — returns False.
+    empty, ``0``, ``false``, arbitrary strings — returns False. Read via the
+    typed CLI-runtime config (Phase 5e).
     """
-    return os.environ.get("ALMANAK_RECONCILIATION_ENFORCEMENT", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    from almanak.config import cli_runtime_config_from_env as _cli_cfg
+
+    return _cli_cfg().reconciliation_enforcement
 
 
 def _build_runner(
@@ -3013,18 +3080,25 @@ def _start_dashboard_background(
     project_root = Path(__file__).parent.parent.parent.parent
     dashboard_path = project_root / "almanak" / "framework" / "dashboard" / "app.py"
 
-    # Pass gateway connection info to the dashboard subprocess. The managed
-    # gateway rolls a fresh session token on mainnet (run_helpers
-    # session_auth_token = uuid.uuid4().hex, VIB-520) — we MUST forward it
-    # so the dashboard's GatewayClient picks up the same token rather than
-    # whatever a stale .env entry happens to hold (an inherited
-    # GATEWAY_AUTH_TOKEN can otherwise shadow the session token and every
-    # gRPC call returns UNAUTHENTICATED).
-    env = os.environ.copy()
-    env["GATEWAY_HOST"] = gateway_host
-    env["GATEWAY_PORT"] = str(gateway_port)
+    # Pass gateway connection info to the dashboard subprocess via the typed
+    # subprocess-env helper. The managed gateway rolls a fresh session token
+    # on mainnet (run_helpers session_auth_token = uuid.uuid4().hex, VIB-520) —
+    # we MUST forward it so the dashboard's GatewayClient picks up the same
+    # token rather than whatever a stale .env entry happens to hold (an
+    # inherited GATEWAY_AUTH_TOKEN can otherwise shadow the session token
+    # and every gRPC call returns UNAUTHENTICATED).
+    from almanak.config.cli_runtime import subprocess_env_with_overrides
+
+    overrides: dict[str, str] = {
+        "GATEWAY_HOST": gateway_host,
+        "GATEWAY_PORT": str(gateway_port),
+    }
     if auth_token:
-        env["ALMANAK_GATEWAY_AUTH_TOKEN"] = auth_token
+        overrides["ALMANAK_GATEWAY_AUTH_TOKEN"] = auth_token
+    env = subprocess_env_with_overrides(overrides)
+    if auth_token:
+        # Drop the legacy unprefixed shape so a stale .env value can't shadow
+        # the session token in the spawned child.
         env.pop("GATEWAY_AUTH_TOKEN", None)
 
     try:

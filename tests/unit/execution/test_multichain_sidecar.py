@@ -4,9 +4,17 @@ Covers the fix that allows multi-chain strategies to run in sidecar mode
 (--no-gateway without ALMANAK_PRIVATE_KEY) when ALMANAK_GATEWAY_WALLETS is set.
 
 Three aspects tested:
-1. MultiChainRuntimeConfig.from_env() accepts ALMANAK_GATEWAY_WALLETS without private key
-2. _load_rpc_urls() skips RPC loading in gateway wallets mode
-3. _load_rpc_urls() still loads RPCs when private key is present
+1. ``runtime_config_from_env`` (multi-chain lane) accepts
+   ALMANAK_GATEWAY_WALLETS without private key.
+2. ``MultiChainRuntimeConfig._load_rpc_urls`` skips RPC loading in gateway
+   wallets mode.
+3. ``MultiChainRuntimeConfig._load_rpc_urls`` still loads RPCs when private
+   key is present.
+
+Phase 5a-2: ``MultiChainRuntimeConfig.from_env`` was deleted. The tests now
+route through :func:`almanak.config.runtime.runtime_config_from_env` and
+:meth:`MultiChainRuntimeConfig.from_runtime_config` — the test bodies stay
+field-by-field identical.
 """
 
 import os
@@ -14,10 +22,18 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.config.runtime import runtime_config_from_env
 from almanak.framework.execution.config import (
     MissingEnvironmentVariableError,
     MultiChainRuntimeConfig,
 )
+
+
+def _multi_from_env(**kwargs):
+    """Compatibility shim: ``runtime_config_from_env`` + ``from_runtime_config``."""
+    rc = runtime_config_from_env(**kwargs)
+    return MultiChainRuntimeConfig.from_runtime_config(rc)
+
 
 # Deterministic test key (Anvil default #0)
 TEST_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -33,7 +49,7 @@ GATEWAY_WALLETS_JSON = (
 @pytest.fixture(autouse=True)
 def _no_dotenv():
     """Prevent load_dotenv from loading .env file during tests."""
-    with patch("almanak.framework.execution.config.load_dotenv"):
+    with patch("almanak.config.env.load_dotenv"):
         yield
 
 
@@ -47,7 +63,7 @@ class TestMultiChainSidecarConfig:
         }
 
         with patch.dict(os.environ, env, clear=True):
-            config = MultiChainRuntimeConfig.from_env(
+            config = _multi_from_env(
                 chains=["base", "arbitrum"],
                 protocols={"base": ["uniswap_v3"], "arbitrum": ["uniswap_v3"]},
                 network="mainnet",
@@ -65,7 +81,7 @@ class TestMultiChainSidecarConfig:
         """No ALMANAK_GATEWAY_WALLETS and no ALMANAK_PRIVATE_KEY should raise."""
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(MissingEnvironmentVariableError):
-                MultiChainRuntimeConfig.from_env(
+                _multi_from_env(
                     chains=["base", "arbitrum"],
                     protocols={"base": ["uniswap_v3"], "arbitrum": ["uniswap_v3"]},
                     network="mainnet",
@@ -78,7 +94,7 @@ class TestMultiChainSidecarConfig:
         }
 
         with patch.dict(os.environ, env, clear=True):
-            config = MultiChainRuntimeConfig.from_env(
+            config = _multi_from_env(
                 chains=["arbitrum"],
                 protocols={"arbitrum": ["uniswap_v3"]},
                 network="mainnet",
@@ -99,7 +115,7 @@ class TestLoadRpcUrlsGatewayWallets:
         }
 
         with patch.dict(os.environ, env, clear=True):
-            config = MultiChainRuntimeConfig.from_env(
+            config = _multi_from_env(
                 chains=["base", "arbitrum"],
                 protocols={"base": ["uniswap_v3"], "arbitrum": ["uniswap_v3"]},
                 network="mainnet",
@@ -114,7 +130,7 @@ class TestLoadRpcUrlsGatewayWallets:
         }
 
         with patch.dict(os.environ, env, clear=True):
-            config = MultiChainRuntimeConfig.from_env(
+            config = _multi_from_env(
                 chains=["arbitrum"],
                 protocols={"arbitrum": ["uniswap_v3"]},
                 network="mainnet",
@@ -130,7 +146,7 @@ class TestLoadRpcUrlsGatewayWallets:
         }
 
         with patch.dict(os.environ, env, clear=True):
-            config = MultiChainRuntimeConfig.from_env(
+            config = _multi_from_env(
                 chains=["base", "arbitrum"],
                 protocols={"base": ["uniswap_v3"], "arbitrum": ["uniswap_v3"]},
                 network="mainnet",

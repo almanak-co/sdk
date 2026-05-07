@@ -288,23 +288,76 @@ def _patch_runtime_config_imports(
     multi_factory: Any = None,
     missing_env_cls: type = _FakeMissingEnvErr,
 ) -> None:
-    """Patch `from_env` classmethods on the real config classes so the helper
-    uses fakes while keeping `isinstance(rt, LocalRuntimeConfig)` true."""
+    """Patch ``runtime_config_from_env`` so the production loaders use fakes.
+
+    Phase 5a-2: ``LocalRuntimeConfig.from_env`` / ``MultiChainRuntimeConfig.from_env``
+    were deleted; consumers now go through
+    :func:`almanak.config.runtime.runtime_config_from_env` and
+    ``LocalRuntimeConfig.from_runtime_config(rc)`` /
+    ``MultiChainRuntimeConfig.from_runtime_config(rc)``. To preserve the
+    test contract — fake factories that take ``(chain, network, private_key)``
+    / ``(chains, protocols, network, private_key)`` and return a dataclass
+    instance — we patch ``runtime_config_from_env`` in
+    :mod:`almanak.config.runtime`. The fake's dataclass output is wrapped
+    as a ``_RuntimeConfigStub`` (carrying ``single_chain`` / ``chains`` so
+    ``from_runtime_config`` doesn't reject it), and the dataclass's
+    ``from_runtime_config`` classmethod is patched to extract the embedded
+    fake. The production retry / error logic in ``_load_local_runtime_config``
+    runs unmodified.
+    """
+    from almanak.config import runtime as cfg_runtime
     from almanak.framework.execution import config as execution_config
 
     default_local = lambda chain, network, private_key=None: _make_fake_local_config(chain or "arbitrum")
     default_multi = lambda chains, protocols, network, private_key=None: _make_fake_multichain_config(chains)
 
+    local_fn = local_factory or default_local
+    multi_fn = multi_factory or default_multi
+
+    class _RuntimeConfigStub:
+        """Minimal stub that carries the test fake under ``_test_dataclass``."""
+
+        def __init__(self, *, single_chain: bool, chains: list[str], dataclass: Any) -> None:
+            self.single_chain = single_chain
+            self.chains = chains
+            self._test_dataclass = dataclass
+
+    def _fake_runtime_config_from_env(
+        *,
+        chain: str | None = None,
+        chains: list[str] | None = None,
+        protocols: dict[str, list[str]] | None = None,
+        network: str = "mainnet",
+        dotenv_path: str | None = None,
+        prefix: str = "ALMANAK_",
+        private_key: str | None = None,
+    ) -> Any:
+        if chains is not None:
+            dc = multi_fn(chains, protocols, network, private_key)
+            return _RuntimeConfigStub(single_chain=False, chains=list(chains), dataclass=dc)
+        dc = local_fn(chain, network, private_key)
+        return _RuntimeConfigStub(
+            single_chain=True, chains=[chain] if chain else ["arbitrum"], dataclass=dc
+        )
+
+    def _fake_local_from_runtime_config(rc: Any) -> Any:
+        return rc._test_dataclass
+
+    def _fake_multi_from_runtime_config(rc: Any) -> Any:
+        return rc._test_dataclass
+
+    monkeypatch.setattr(cfg_runtime, "runtime_config_from_env", _fake_runtime_config_from_env)
     monkeypatch.setattr(
         execution_config.LocalRuntimeConfig,
-        "from_env",
-        staticmethod(local_factory or default_local),
+        "from_runtime_config",
+        classmethod(lambda cls, rc: _fake_local_from_runtime_config(rc)),
     )
     monkeypatch.setattr(
         execution_config.MultiChainRuntimeConfig,
-        "from_env",
-        staticmethod(multi_factory or default_multi),
+        "from_runtime_config",
+        classmethod(lambda cls, rc: _fake_multi_from_runtime_config(rc)),
     )
+    monkeypatch.setattr(cfg_runtime, "MissingEnvironmentVariableError", missing_env_cls)
     monkeypatch.setattr(execution_config, "MissingEnvironmentVariableError", missing_env_cls)
 
 

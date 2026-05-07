@@ -23,7 +23,6 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -92,8 +91,12 @@ class LiFiConfig:
     def __post_init__(self) -> None:
         """Resolve API key from env if not provided."""
         if self.api_key is None:
-            self.api_key = os.environ.get("LIFI_API_KEY")
-            # API key is optional for LiFi (just gives higher rate limits)
+            # Phase 5b: typed-config lookup is the single env reader.
+            # API key is optional for LiFi (just gives higher rate limits) —
+            # ``None`` is the legitimate "no key configured" state.
+            from almanak.config.connectors import connectors_config_from_env
+
+            self.api_key = connectors_config_from_env().lifi_api_key
 
         if not self.wallet_address:
             raise LiFiConfigError(

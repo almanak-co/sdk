@@ -36,12 +36,12 @@ Example:
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.config.backtest import backtest_config_from_env
 from almanak.framework.backtesting.models import BacktestResult, CrisisMetrics
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import BacktestableStrategy, PnLBacktester
@@ -283,7 +283,11 @@ def _validate_scenario_date_range(scenario: CrisisScenario, backtester: PnLBackt
     if not _is_coingecko_provider(backtester):
         return
 
-    has_api_key = bool(os.environ.get("COINGECKO_API_KEY", ""))
+    # Phase 5c: env reads centralised in
+    # ``almanak.config.backtest.backtest_config_from_env``. The factory
+    # mirrors the legacy ``os.environ.get("COINGECKO_API_KEY", "")``
+    # bit-for-bit (None when unset, the same shape this guard expects).
+    has_api_key = bool(backtest_config_from_env().coingecko_api_key)
     if has_api_key:
         return
 

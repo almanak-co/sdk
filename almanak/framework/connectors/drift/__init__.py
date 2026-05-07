@@ -14,12 +14,12 @@ Key classes:
 from .adapter import DriftAdapter
 from .client import DriftDataClient
 from .constants import (
-    DRIFT_DATA_API_BASE_URL,
     DRIFT_PROGRAM_ID,
     PERP_MARKET_SYMBOL_TO_INDEX,
     PERP_MARKETS,
     SPOT_MARKET_SYMBOL_TO_INDEX,
     SPOT_MARKETS,
+    get_drift_data_api_base_url,
 )
 from .exceptions import (
     DriftAccountNotFoundError,
@@ -64,12 +64,13 @@ __all__ = [
     "FundingRate",
     "OrderParams",
     # Constants
-    "DRIFT_PROGRAM_ID",
     "DRIFT_DATA_API_BASE_URL",
+    "DRIFT_PROGRAM_ID",
     "PERP_MARKETS",
     "PERP_MARKET_SYMBOL_TO_INDEX",
     "SPOT_MARKETS",
     "SPOT_MARKET_SYMBOL_TO_INDEX",
+    "get_drift_data_api_base_url",
     # Market rules
     "ALLOWED_COLLATERAL_MINTS",
     "is_supported_collateral",
@@ -82,3 +83,16 @@ __all__ = [
     "DriftAccountNotFoundError",
     "DriftMarketError",
 ]
+
+
+def __getattr__(name: str) -> str:
+    """Package-level shim for the legacy ``DRIFT_DATA_API_BASE_URL`` import.
+
+    Internal code now reads via :func:`get_drift_data_api_base_url`, but
+    external consumers still use ``from almanak.framework.connectors.drift
+    import DRIFT_DATA_API_BASE_URL``. Mirrors the same shim in
+    ``constants.py`` so package-level imports keep working.
+    """
+    if name == "DRIFT_DATA_API_BASE_URL":
+        return get_drift_data_api_base_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

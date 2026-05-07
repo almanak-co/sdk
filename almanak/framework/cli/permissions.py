@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
 import click
+
+from almanak.config import load_config
 
 from .intent_debug import load_strategy_from_file
 
@@ -37,31 +38,31 @@ _CHAIN_RPC_TEMPLATES: dict[str, str] = {
 
 
 def _load_dotenv(working_path: Path) -> None:
-    """Load .env from the working directory into os.environ (without overwriting)."""
+    """Load .env from the working directory through the config-service boundary.
+
+    Routes through :func:`almanak.config.env._load_dotenv_once` — the single
+    process-wide dotenv ingest. ``_load_dotenv_once`` honours the typical
+    "no overwrite" semantic via dotenv's default ``override=False`` (so existing
+    env values win), matching the legacy hand-rolled parser this helper replaced.
+    """
+    from almanak.config.env import _load_dotenv_once
+
     env_file = working_path / ".env"
     if not env_file.exists():
         return
-    try:
-        for line in env_file.read_text().splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            eq = stripped.find("=")
-            if eq < 0:
-                continue
-            key = stripped[:eq].strip()
-            val = stripped[eq + 1 :].strip().strip("'\"")
-            if key not in os.environ:
-                os.environ[key] = val
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.debug("Failed to load .env from %s: %s", env_file, exc)
+    _load_dotenv_once(str(env_file))
 
 
 def _resolve_rpc_url(explicit_url: str | None, chain: str) -> str | None:
-    """Resolve RPC URL from explicit flag or ALCHEMY_API_KEY environment variable."""
+    """Resolve RPC URL from explicit flag or typed gateway config.
+
+    The Alchemy key is the canonical home of the gateway-tier env read
+    (:attr:`GatewayConfig.alchemy_api_key`); this helper consumes the
+    typed value rather than re-reading ``ALCHEMY_API_KEY`` directly.
+    """
     if explicit_url:
         return explicit_url
-    alchemy_key = os.environ.get("ALCHEMY_API_KEY")
+    alchemy_key = load_config().gateway.alchemy_api_key
     if not alchemy_key:
         return None
     template = _CHAIN_RPC_TEMPLATES.get(chain.lower())

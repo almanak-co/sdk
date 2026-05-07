@@ -17,7 +17,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .constants import DRIFT_DATA_API_BASE_URL, PERP_MARKETS, PRICE_PRECISION
+from .constants import PERP_MARKETS, PRICE_PRECISION, get_drift_data_api_base_url
 from .exceptions import DriftAPIError
 from .models import DriftMarket, FundingRate
 
@@ -38,10 +38,14 @@ class DriftDataClient:
 
     def __init__(
         self,
-        base_url: str = DRIFT_DATA_API_BASE_URL,
+        base_url: str | None = None,
         timeout: int = 30,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        # Resolve at call time, not at function-definition time. The legacy
+        # default ``base_url: str = DRIFT_DATA_API_BASE_URL`` froze the env
+        # value at module import; the typed-config lookup honours runtime
+        # changes (Phase 5b of the config-service migration).
+        self.base_url = (base_url or get_drift_data_api_base_url()).rstrip("/")
         self.timeout = timeout
         self._setup_session()
 

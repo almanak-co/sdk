@@ -6,8 +6,6 @@ constants for the Raydium CLMM program on Solana mainnet.
 Reference: https://github.com/raydium-io/raydium-clmm
 """
 
-import os
-
 # =========================================================================
 # Program IDs
 # =========================================================================
@@ -77,7 +75,24 @@ MAX_SQRT_PRICE_X64 = 79226673521066979257578248091
 # Raydium API
 # =========================================================================
 
-RAYDIUM_API_BASE_URL = os.environ.get("RAYDIUM_API_BASE_URL") or "https://api-v3.raydium.io"
+
+def get_raydium_api_base_url() -> str:
+    """Return the Raydium CLMM API base URL.
+
+    Phase 5b of the config-service migration: same rationale as
+    :func:`almanak.framework.connectors.drift.constants.get_drift_data_api_base_url`.
+    """
+    from almanak.config.connectors import connectors_config_from_env
+
+    return connectors_config_from_env().raydium_api_base_url
+
+
+def __getattr__(name: str) -> str:
+    """Lazy module attribute resolver — preserves the legacy constant name."""
+    if name == "RAYDIUM_API_BASE_URL":
+        return get_raydium_api_base_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Common CLMM tick spacings and their fee tiers
 TICK_SPACINGS = {

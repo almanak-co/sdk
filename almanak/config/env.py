@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -20,35 +21,65 @@ from almanak.config.base import GatewayConfig
 # is emitted on this logger (legacy "almanak.gateway.core.settings" channel).
 logger = logging.getLogger("almanak.gateway.core.settings")
 
-# Process-wide guard. ``True`` once any caller has triggered dotenv ingest.
-# A ``functools.cache`` keyed on ``dotenv_path`` would *not* enforce
-# "load once": a call sequence ``_load_dotenv_once("custom.env")`` followed
-# by ``_load_dotenv_once()`` (no path, from ``gateway_config_from_env``)
-# generates two distinct cache keys and ``load_dotenv`` runs twice — once
-# with the explicit file, then again against the cwd's default ``.env``,
-# silently merging values from the latter under pydotenv's ``override=False``
-# default. The flag below makes the function truly load-once-per-process
-# regardless of argument shape.
-_DOTENV_LOADED = False
+# Path-aware load tracking. The SDK genuinely has more than one dotenv
+# source per process: the Click main group loads the cwd default, and a
+# per-strategy command (``strat run``, ``strat test``, ``ax``, teardown,
+# permissions, paper) layers a strategy-folder ``.env`` on top. The earlier
+# process-wide boolean made the second load a silent no-op (PR #2152
+# review — Codex P1 + CodeRabbit). The set below keys on the resolved
+# absolute path so each distinct file is loaded exactly once, while
+# different paths layer additively.
+_LOADED_DOTENVS: set[str] = set()
+# The no-arg cwd ladder is also load-once, AND is suppressed once any
+# explicit path has been loaded — an explicit path is always strictly
+# more authoritative than the cwd default, so re-reading the cwd would
+# only merge in unintended values from the dev's working directory.
+_DEFAULT_LOADED: bool = False
 
 
 def _load_dotenv_once(dotenv_path: str | None = None) -> None:
-    """Single ``load_dotenv()`` entry point for the SDK.
+    """Load a dotenv source at most once per resolved path per process.
 
-    Loads at most once per process. Subsequent calls — with any argument —
-    are no-ops; if a non-default path is needed, it must be supplied on the
-    *first* call in the process lifetime. This is the deliberate semantic:
-    the SDK has one dotenv source per process, and switching mid-stream
-    would silently merge values from a second file.
+    Two distinct invariants are pinned here — don't conflate them:
+
+    * **Once-per-source**: each distinct absolute ``dotenv_path`` is loaded
+      exactly once, and the no-arg cwd ladder is also load-once. Different
+      explicit paths layer additively (the SDK's strategy-folder model
+      genuinely has more than one ``.env`` per process: the Click main
+      group loads the cwd default, then ``strat run`` / ``strat test`` /
+      ``ax`` / teardown / permissions / paper layer a strategy-folder
+      ``.env`` on top).
+
+    * **No-arg suppression after explicit**: a no-arg call (``dotenv_path
+      is None``) becomes a no-op once any explicit path has loaded. This
+      is the *invocation* contract from Gemini's PR #2107 finding —
+      ``load_config(dotenv_path="custom.env")`` triggers an inner
+      ``gateway_config_from_env`` that calls ``_load_dotenv_once()`` no-arg;
+      without this guard that inner call would silently merge in the
+      dev's cwd ``.env``. It is NOT a per-key value-precedence claim.
+
+    **Per-key value precedence** is whatever ``python-dotenv`` gives you:
+    the default ``override=False`` means values already in ``os.environ``
+    (incl. shell exports and earlier dotenv loads) win. So when multiple
+    explicit paths layer additively, the *first-loaded* file's values
+    stick where keys overlap; later loads only fill in the gaps. Concrete
+    example: cwd ``.env`` loads first at the Click main group, then a
+    strategy ``.env`` loads in ``strat run`` — for keys present in both,
+    cwd wins. Shell exports beat both. Reorder loads (or load the most
+    specific source first) if a different precedence is required.
     """
-    global _DOTENV_LOADED
-    if _DOTENV_LOADED:
-        return
+    global _DEFAULT_LOADED
     if dotenv_path:
+        key = str(Path(dotenv_path).resolve())
+        if key in _LOADED_DOTENVS:
+            return
         load_dotenv(dotenv_path)
-    else:
-        load_dotenv()
-    _DOTENV_LOADED = True
+        _LOADED_DOTENVS.add(key)
+        return
+    if _DEFAULT_LOADED or _LOADED_DOTENVS:
+        return
+    load_dotenv()
+    _DEFAULT_LOADED = True
 
 
 def _apply_gateway_env_fallbacks(gateway: GatewayConfig) -> None:  # noqa: C901

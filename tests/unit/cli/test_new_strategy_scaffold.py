@@ -30,9 +30,7 @@ def _get_strategy_class_def(tree: ast.AST) -> ast.ClassDef:
     class_defs = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
     assert class_defs, "No class definition found in generated code"
     strategy_classes = [c for c in class_defs if c.name.endswith("Strategy")]
-    assert strategy_classes, (
-        f"No class ending in 'Strategy' found (got: {[c.name for c in class_defs]})"
-    )
+    assert strategy_classes, f"No class ending in 'Strategy' found (got: {[c.name for c in class_defs]})"
     return strategy_classes[0]
 
 
@@ -94,9 +92,7 @@ def test_generate_dashboard_ui_passes_ruff() -> None:
             text=True,
             timeout=60,
         )
-        assert result.returncode == 0, (
-            f"ruff check failed for scaffolded ui.py:\n{result.stdout}\n{result.stderr}"
-        )
+        assert result.returncode == 0, f"ruff check failed for scaffolded ui.py:\n{result.stdout}\n{result.stderr}"
 
 
 def test_generate_dashboard_ui_includes_three_section_helpers() -> None:
@@ -214,9 +210,7 @@ def test_strategy_file_has_decide_method(template: StrategyTemplate) -> None:
         )
         tree = ast.parse(code)
         strategy_class = _get_strategy_class_def(tree)
-        method_names = [
-            n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
-        ]
+        method_names = [n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)]
         assert "decide" in method_names, f"decide() not found in {strategy_class.name}"
 
 
@@ -232,9 +226,7 @@ def test_strategy_file_has_teardown_methods(template: StrategyTemplate) -> None:
         )
         tree = ast.parse(code)
         strategy_class = _get_strategy_class_def(tree)
-        method_names = [
-            n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
-        ]
+        method_names = [n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)]
         for required in ("get_open_positions", "generate_teardown_intents"):
             assert required in method_names, f"{required}() missing from {strategy_class.name}"
 
@@ -395,12 +387,8 @@ def test_stateful_templates_have_callbacks(template: StrategyTemplate) -> None:
         )
         tree = ast.parse(code)
         strategy_class = _get_strategy_class_def(tree)
-        method_names = [
-            n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)
-        ]
-        assert "on_intent_executed" in method_names, (
-            f"on_intent_executed() missing from {template.value} template"
-        )
+        method_names = [n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)]
+        assert "on_intent_executed" in method_names, f"on_intent_executed() missing from {template.value} template"
 
 
 # ---------------------------------------------------------------------------
@@ -449,11 +437,7 @@ def _scaffold_lending_loop(preserve_decide: bool = False):
     # that is not IntentStrategy itself (which also appears in ns after import).
     from almanak.framework.strategies import IntentStrategy as _Base
 
-    base_cls = next(
-        v
-        for v in ns.values()
-        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
-    )
+    base_cls = next(v for v in ns.values() if isinstance(v, type) and issubclass(v, _Base) and v is not _Base)
 
     if preserve_decide:
 
@@ -605,9 +589,7 @@ def test_lending_loop_repay_full_resets_leverage() -> None:
     strat._loop_count = 3
     strat._current_leverage = Decimal("2.5")
 
-    strat.on_intent_executed(
-        _make_mock_intent("REPAY", repay_full=True), success=True, result=None
-    )
+    strat.on_intent_executed(_make_mock_intent("REPAY", repay_full=True), success=True, result=None)
     assert strat._current_leverage == Decimal("1.0")
     assert strat._loop_state == "monitoring"
 
@@ -621,17 +603,13 @@ def test_lending_loop_partial_repay_shrinks_leverage() -> None:
     strat._current_leverage = Decimal("2.0")
     strat.partial_repay_pct = Decimal("0.25")
 
-    strat.on_intent_executed(
-        _make_mock_intent("REPAY", repay_full=False), success=True, result=None
-    )
+    strat.on_intent_executed(_make_mock_intent("REPAY", repay_full=False), success=True, result=None)
     # 2.0 * (1 - 0.25) = 1.5
     assert strat._current_leverage == Decimal("1.5")
 
     # Idempotent floor at 1.0.
     strat._current_leverage = Decimal("1.0")
-    strat.on_intent_executed(
-        _make_mock_intent("REPAY", repay_full=False), success=True, result=None
-    )
+    strat.on_intent_executed(_make_mock_intent("REPAY", repay_full=False), success=True, result=None)
     assert strat._current_leverage == Decimal("1.0")
 
 
@@ -1060,11 +1038,7 @@ def _scaffold_basis_trade():
     exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
     from almanak.framework.strategies import IntentStrategy as _Base
 
-    base_cls = next(
-        v
-        for v in ns.values()
-        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
-    )
+    base_cls = next(v for v in ns.values() if isinstance(v, type) and issubclass(v, _Base) and v is not _Base)
 
     class _Concrete(base_cls):
         def decide(self, market):
@@ -1215,11 +1189,7 @@ def _scaffold_perps_class():
     exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
     from almanak.framework.strategies import IntentStrategy as _Base
 
-    base_cls = next(
-        v
-        for v in ns.values()
-        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
-    )
+    base_cls = next(v for v in ns.values() if isinstance(v, type) and issubclass(v, _Base) and v is not _Base)
 
     class _Concrete(base_cls):
         def decide(self, market):
@@ -1285,9 +1255,7 @@ def _make_perps_strategy(direction: str | None = "LONG"):
         _direction_raw = "LONG"
     strat.direction = str(_direction_raw).upper()
     if strat.direction not in ("LONG", "SHORT"):
-        raise ValueError(
-            f"Invalid direction {_direction_raw!r}: must be 'LONG' or 'SHORT'"
-        )
+        raise ValueError(f"Invalid direction {_direction_raw!r}: must be 'LONG' or 'SHORT'")
     strat._is_long = strat.direction == "LONG"
 
     # Match emitted init exactly: PerpsState is defined at module level in the
@@ -1315,9 +1283,7 @@ def test_perps_scaffold_config_default_is_long() -> None:
 
     config_str = generate_config_json("Test Perps", StrategyTemplate.PERPS, SupportedChain.ARBITRUM)
     config = json.loads(config_str)
-    assert config.get("direction") == "LONG", (
-        "PERPS config.json must include direction='LONG' by default"
-    )
+    assert config.get("direction") == "LONG", "PERPS config.json must include direction='LONG' by default"
 
 
 def test_perps_scaffold_reads_direction_from_config() -> None:
@@ -1328,9 +1294,7 @@ def test_perps_scaffold_reads_direction_from_config() -> None:
     # Must NOT contain hardcoded is_long=True anywhere in the emitted file
     assert "is_long=True" not in code, "PERPS scaffold must not hardcode is_long=True"
     # Must thread is_long=self._is_long instead
-    assert "is_long=self._is_long" in code, (
-        "PERPS scaffold must wire is_long from self._is_long"
-    )
+    assert "is_long=self._is_long" in code, "PERPS scaffold must wire is_long from self._is_long"
 
 
 def test_perps_scaffold_long_config_sets_is_long_true() -> None:
@@ -1378,9 +1342,7 @@ def test_perps_scaffold_emits_warning_when_direction_omitted() -> None:
         _get_template_init_params,
     )
 
-    init_code = _get_template_init_params(
-        StrategyTemplate.PERPS, TEMPLATE_CONFIGS[StrategyTemplate.PERPS]
-    )
+    init_code = _get_template_init_params(StrategyTemplate.PERPS, TEMPLATE_CONFIGS[StrategyTemplate.PERPS])
     # The emitted init must contain a warning path for missing direction
     assert "logger.warning" in init_code
     assert "direction" in init_code
@@ -1393,9 +1355,7 @@ def test_perps_scaffold_teardown_uses_direction() -> None:
     # perp_close in teardown must be direction-driven
     assert "is_long=self._is_long" in code
     # position_id must be direction-aware (not hardcoded _perp_long)
-    assert "_perp_long\"" not in code, (
-        "Teardown position_id must not hardcode '_perp_long' suffix"
-    )
+    assert '_perp_long"' not in code, "Teardown position_id must not hardcode '_perp_long' suffix"
 
 
 def test_perps_scaffold_callbacks_persist_direction() -> None:
@@ -1417,16 +1377,12 @@ def test_perps_scaffold_callbacks_persist_direction() -> None:
         "PERPS on_intent_executed must pin self._position_direction on PERP_OPEN"
     )
     # get_persistent_state must include the persisted direction
-    assert '"position_is_long": self._position_is_long' in cb, (
-        "get_persistent_state must persist position_is_long"
-    )
+    assert '"position_is_long": self._position_is_long' in cb, "get_persistent_state must persist position_is_long"
     assert '"position_direction": self._position_direction' in cb, (
         "get_persistent_state must persist position_direction"
     )
     # load_persistent_state must restore persisted direction for open positions
-    assert 'state.get("position_is_long")' in cb, (
-        "load_persistent_state must read persisted position_is_long"
-    )
+    assert 'state.get("position_is_long")' in cb, "load_persistent_state must read persisted position_is_long"
     # Persisted direction must override self._is_long when a position is open
     assert "self._is_long = persisted_is_long" in cb, (
         "load_persistent_state must override config direction with persisted one"
@@ -1445,12 +1401,8 @@ def test_perps_scaffold_init_initializes_position_direction_attrs() -> None:
         _get_template_init_params,
     )
 
-    init_code = _get_template_init_params(
-        StrategyTemplate.PERPS, TEMPLATE_CONFIGS[StrategyTemplate.PERPS]
-    )
-    assert "self._position_is_long = None" in init_code, (
-        "PERPS __init__ must initialize self._position_is_long = None"
-    )
+    init_code = _get_template_init_params(StrategyTemplate.PERPS, TEMPLATE_CONFIGS[StrategyTemplate.PERPS])
+    assert "self._position_is_long = None" in init_code, "PERPS __init__ must initialize self._position_is_long = None"
     assert "self._position_direction = None" in init_code, (
         "PERPS __init__ must initialize self._position_direction = None"
     )
@@ -1501,16 +1453,10 @@ def test_perps_persisted_direction_overrides_config_mismatch() -> None:
 
     # After load, persisted direction must win
     assert strat._position_state == perps_state.OPEN
-    assert strat._position_is_long is True, (
-        "Persisted position_is_long must override config-derived value"
-    )
+    assert strat._position_is_long is True, "Persisted position_is_long must override config-derived value"
     assert strat._position_direction == "LONG"
-    assert strat._is_long is True, (
-        "self._is_long must be overridden to match the live position"
-    )
-    assert strat.direction == "LONG", (
-        "self.direction must be overridden to match the live position"
-    )
+    assert strat._is_long is True, "self._is_long must be overridden to match the live position"
+    assert strat.direction == "LONG", "self.direction must be overridden to match the live position"
 
 
 def test_perps_idle_state_uses_config_direction() -> None:
@@ -1588,7 +1534,10 @@ def test_dynamic_lp_strategy_provides_both_lp_amounts() -> None:
     """dynamic_lp decide() must fetch both balances and pass both to lp_open."""
     with tempfile.TemporaryDirectory() as tmpdir:
         code = generate_strategy_file(
-            "Test LP", StrategyTemplate.DYNAMIC_LP, SupportedChain.ARBITRUM, output_dir=Path(tmpdir),
+            "Test LP",
+            StrategyTemplate.DYNAMIC_LP,
+            SupportedChain.ARBITRUM,
+            output_dir=Path(tmpdir),
         )
     # Must NOT hardcode amount1=0 (single-sided)
     assert 'amount1=Decimal("0")' not in code, "LP_OPEN must not hardcode amount1=0"
@@ -1667,6 +1616,76 @@ def test_new_strategy_falls_back_to_cwd_when_no_incubating(tmp_path: Path) -> No
     assert not (tmp_path / "strategies" / "incubating" / "my_fallback_strat").exists()
 
 
+def test_new_strategy_falls_back_to_cwd_when_ci_set(tmp_path: Path) -> None:
+    """incubating/ exists + CI=1 → cwd/<name>, NOT strategies/incubating/<name>.
+
+    Auto-detection of the SDK-root layout is suppressed in CI so a
+    scaffold inside an SDK checkout (where ``strategies/incubating/``
+    happens to exist) doesn't drop the new strategy into a directory the
+    operator wasn't expecting (PR #2152 review)."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    incubating_dir = tmp_path / "strategies" / "incubating"
+    incubating_dir.mkdir(parents=True)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        os.chdir(tmp_path)
+        result = runner.invoke(
+            new_strategy,
+            ["--name", "my_ci_strat", "--chain", "arbitrum"],
+            env={"CI": "1"},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "my_ci_strat").exists(), (
+        "Expected strategy in cwd when CI=1 even though strategies/incubating/ exists"
+    )
+    assert not (incubating_dir / "my_ci_strat").exists(), "Strategy must NOT land in strategies/incubating/ when CI=1"
+
+
+def test_new_strategy_degrades_when_runtime_config_invalid(tmp_path: Path) -> None:
+    """Malformed unrelated env (e.g. ``ANVIL_*_PORT=abc``) must not abort scaffolding.
+
+    ``cli_runtime_config_from_env()`` is consulted only to read ``is_ci``
+    for the output-directory hint. A malformed runtime knob would
+    otherwise raise ``ValueError`` and strand the scaffold before any
+    file is written. On config-load failure we conservatively pick the
+    cwd default — landing in cwd and asking the operator to ``mv`` is a
+    smaller surprise than landing in ``strategies/incubating/`` while
+    the user's env was broken (PR #2152 review)."""
+    import os
+
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    incubating_dir = tmp_path / "strategies" / "incubating"
+    incubating_dir.mkdir(parents=True)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        os.chdir(tmp_path)
+        result = runner.invoke(
+            new_strategy,
+            ["--name", "my_resilient_strat", "--chain", "arbitrum"],
+            env={"CI": "", "ANVIL_ARBITRUM_PORT": "not-a-port"},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "my_resilient_strat").exists(), (
+        "Scaffolding should survive malformed unrelated env vars and "
+        "fall back to cwd rather than auto-routing into strategies/incubating/"
+    )
+    assert not (incubating_dir / "my_resilient_strat").exists(), (
+        "Strategy must NOT land in strategies/incubating/ when typed config refuses to load"
+    )
+
+
 def test_new_strategy_output_dir_flag_overrides_auto_detection(tmp_path: Path) -> None:
     """Explicit --output-dir always wins over auto-detection."""
     import os
@@ -1686,7 +1705,14 @@ def test_new_strategy_output_dir_flag_overrides_auto_detection(tmp_path: Path) -
         os.chdir(tmp_path)
         result = runner.invoke(
             new_strategy,
-            ["--name", "my_explicit_strat", "--chain", "arbitrum", "--output-dir", str(explicit_dir / "my_explicit_strat")],
+            [
+                "--name",
+                "my_explicit_strat",
+                "--chain",
+                "arbitrum",
+                "--output-dir",
+                str(explicit_dir / "my_explicit_strat"),
+            ],
             env={"CI": ""},
         )
 
@@ -1902,7 +1928,8 @@ def test_stateful_templates_do_not_use_bare_state_strings(template: StrategyTemp
         # Recover the enum value from the ``MEMBER = "value"`` line in the
         # emitted code. We can just lowercase the MEMBER name because that's
         # the scheme the generator uses.
-        m.lower() for m in members
+        m.lower()
+        for m in members
     }
     # Find bare string state literals that should be EnumClass.MEMBER references.
     # Covers three usage patterns:
@@ -1960,18 +1987,14 @@ def test_lending_loop_state_json_round_trips_through_raw_strings() -> None:
     # something other than IDLE.
     strat.on_intent_executed(_make_mock_intent("SUPPLY"), success=True, result=None)
     # Now _loop_state should be the StrEnum member LendingLoopState.SUPPLIED.
-    assert isinstance(strat._loop_state, StrEnum), (
-        f"Expected StrEnum instance, got {type(strat._loop_state)}"
-    )
+    assert isinstance(strat._loop_state, StrEnum), f"Expected StrEnum instance, got {type(strat._loop_state)}"
     assert strat._loop_state == "supplied"  # StrEnum compares equal to its value
 
     # Serialize through JSON (the real persistence path).
     saved_json = json.dumps(strat.get_persistent_state())
     # Round-trip through JSON -> dict -> load_persistent_state.
     loaded = json.loads(saved_json)
-    assert loaded["loop_state"] == "supplied", (
-        "Raw JSON must contain the plain string value, not a repr of the enum"
-    )
+    assert loaded["loop_state"] == "supplied", "Raw JSON must contain the plain string value, not a repr of the enum"
     assert isinstance(loaded["loop_state"], str), "JSON load must yield a plain str"
 
     # Load into a fresh strategy instance.
@@ -2101,11 +2124,7 @@ def _scaffold_and_get_class(template: StrategyTemplate, chain: SupportedChain = 
     exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
     from almanak.framework.strategies import IntentStrategy as _Base
 
-    base_cls = next(
-        v
-        for v in ns.values()
-        if isinstance(v, type) and issubclass(v, _Base) and v is not _Base
-    )
+    base_cls = next(v for v in ns.values() if isinstance(v, type) and issubclass(v, _Base) and v is not _Base)
 
     class _Concrete(base_cls):
         def decide(self, market):
@@ -2381,7 +2400,8 @@ def test_get_status_staking_exposes_staked_amount_and_rewards() -> None:
     # unbonding_end_ts (the pre-audit version pre-stringified it, which never
     # hit the isoformat path and would have silently broken any strategy that
     # passed a real datetime).
-    from datetime import UTC as _UTC, datetime as _dt
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
 
     inst._last_position_snapshot = {
         "rewards_usd": Decimal("3.21"),
@@ -2410,7 +2430,8 @@ def test_get_status_ta_swap_exposes_signal_state() -> None:
     # Exercise the _safe helper's Enum branch for last_signal: pass a real
     # Enum member so the generated get_status() has to normalise it via
     # ``getattr(v, 'value', str(v))``.
-    from datetime import UTC as _UTC, datetime as _dt
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
     from enum import Enum as _Enum
 
     class _Signal(_Enum):
@@ -2536,9 +2557,7 @@ def test_get_status_copy_trader_exposes_open_trades_count() -> None:
 _ALL_TEMPLATES_FOR_STATUS = list(StrategyTemplate)
 
 
-@pytest.mark.parametrize(
-    "template", _ALL_TEMPLATES_FOR_STATUS, ids=lambda t: t.value
-)
+@pytest.mark.parametrize("template", _ALL_TEMPLATES_FOR_STATUS, ids=lambda t: t.value)
 def test_get_status_always_returns_canonical_trio(template: StrategyTemplate) -> None:
     """Every template must keep the canonical ``{strategy, chain, wallet}`` trio."""
     # Staking template only supports Ethereum; every other template works on Arbitrum.
@@ -2557,9 +2576,7 @@ def test_get_status_always_returns_canonical_trio(template: StrategyTemplate) ->
     assert status["wallet"] is not None
 
 
-@pytest.mark.parametrize(
-    "template", _ALL_TEMPLATES_FOR_STATUS, ids=lambda t: t.value
-)
+@pytest.mark.parametrize("template", _ALL_TEMPLATES_FOR_STATUS, ids=lambda t: t.value)
 def test_get_status_is_json_serializable(template: StrategyTemplate) -> None:
     """Every template's get_status() output must round-trip through json.dumps."""
     import json

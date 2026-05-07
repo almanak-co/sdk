@@ -30,7 +30,6 @@ either path into ``ClobClient`` without leaking signing credentials onto
 from __future__ import annotations
 
 import logging
-import os
 from typing import Protocol
 
 import httpx
@@ -328,12 +327,7 @@ def make_remote_signer(
     return _sign
 
 
-def signer_from_env(
-    private_key_env: str = "POLYMARKET_PRIVATE_KEY",
-    signer_service_url_env: str = "ALMANAK_SIGNER_SERVICE_URL",
-    signer_service_jwt_env: str = "ALMANAK_SIGNER_SERVICE_JWT",
-    eoa_address_env: str = "POLYMARKET_WALLET_ADDRESS",
-) -> Signer | None:
+def signer_from_env() -> Signer | None:
     """Build a :class:`Signer` from environment variables, or return ``None``.
 
     Sibling of :meth:`PolymarketConfig.from_env` — kept here so the credentials
@@ -351,14 +345,22 @@ def signer_from_env(
        ``POLYMARKET_WALLET_ADDRESS`` set → :func:`make_remote_signer`.
     3. Neither path fully configured → ``None`` (read-only mode; signing-required
        calls raise :class:`PolymarketSignatureError`).
+
+    Phase 5b: routes through :class:`almanak.config.connectors.ConnectorsConfig`.
+    The legacy custom-env-name kwargs were removed — to wire a non-default
+    signer in a test or harness, use :func:`make_local_signer` /
+    :func:`make_remote_signer` directly.
     """
-    private_key = os.environ.get(private_key_env)
+    from almanak.config.connectors import connectors_config_from_env
+
+    cfg = connectors_config_from_env()
+    private_key = cfg.polymarket_private_key
     if private_key:
         return make_local_signer(private_key)
 
-    signer_url = os.environ.get(signer_service_url_env)
-    signer_jwt = os.environ.get(signer_service_jwt_env)
-    eoa_address = os.environ.get(eoa_address_env)
+    signer_url = cfg.polymarket_signer_service_url
+    signer_jwt = cfg.polymarket_signer_service_jwt
+    eoa_address = cfg.polymarket_wallet_address
     if signer_url and signer_jwt and eoa_address:
         return make_remote_signer(
             eoa_address=eoa_address,

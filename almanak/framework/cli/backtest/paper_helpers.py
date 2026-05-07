@@ -8,7 +8,6 @@ mirroring the cli/run.py Phase 4 refactor pattern.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -95,21 +94,20 @@ def abort_if_session_running(strategy: str) -> None:
 
 
 def resolve_rpc_url(rpc_url: str | None, chain: str) -> str:
-    """Resolve an RPC URL from CLI arg or chain-specific env vars; abort if missing."""
+    """Resolve an RPC URL from CLI arg or chain-specific env vars; abort if missing.
+
+    Walks the typed CLI-runtime ladder via :func:`chain_rpc_url_from_env`
+    so the env-read happens through the Phase 5 boundary helper rather than
+    a raw ``os.environ.get`` (PR #2152).
+    """
+    from almanak.config.cli_runtime import chain_rpc_url_from_env
+
     if rpc_url:
         return rpc_url
 
-    chain_upper = chain.upper()
-    env_var_names = [
-        f"ALMANAK_{chain_upper}_RPC_URL",
-        f"{chain_upper}_RPC_URL",
-        "ALMANAK_RPC_URL",
-        "RPC_URL",
-    ]
-    for env_var in env_var_names:
-        value = os.environ.get(env_var)
-        if value:
-            return value
+    resolved, env_var_names = chain_rpc_url_from_env(chain)
+    if resolved:
+        return resolved
 
     click.echo(f"Error: No RPC URL provided for chain '{chain}'", err=True)
     click.echo(f"Set one of: {', '.join(env_var_names[:2])}", err=True)
@@ -386,19 +384,24 @@ def reset_dead_or_abort(
 
 
 def resolve_resume_rpc_url(saved_rpc_url: Any, chain: str) -> str:
-    """Pick an RPC URL for resume — falls back to env vars when masked or missing."""
+    """Pick an RPC URL for resume — falls back to env vars when masked or missing.
+
+    Walks the typed CLI-runtime ladder via :func:`chain_rpc_url_from_env`
+    so the remediation hint reflects the helper's actual env-var aliases
+    instead of a hard-coded name that can drift (PR #2152 review)."""
+    from almanak.config.cli_runtime import chain_rpc_url_from_env
+
     rpc_url = saved_rpc_url
     if rpc_url and "***" not in str(rpc_url):
         return str(rpc_url)
 
-    chain_upper = chain.upper()
-    for env_var in [f"ALMANAK_{chain_upper}_RPC_URL", f"{chain_upper}_RPC_URL", "ALMANAK_RPC_URL", "RPC_URL"]:
-        value = os.environ.get(env_var)
-        if value:
-            return value
+    resolved, env_var_names = chain_rpc_url_from_env(chain)
+    if resolved:
+        return resolved
 
     click.echo(f"Error: Saved RPC URL is masked and no env var found for '{chain}'.", err=True)
-    click.echo(f"Set ALMANAK_{chain_upper}_RPC_URL or use 'paper start' instead.", err=True)
+    click.echo(f"Set one of: {', '.join(env_var_names[:2])}", err=True)
+    click.echo("Or use 'paper start' instead.", err=True)
     raise click.Abort()
 
 

@@ -7,7 +7,6 @@ This module provides Pydantic models for:
 - CEX-specific idempotency keys
 """
 
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -76,30 +75,34 @@ class KrakenCredentials(BaseModel):
     api_secret: SecretStr = Field(description="Kraken API secret")
 
     @classmethod
-    def from_env(
-        cls,
-        key_env: str = "KRAKEN_API_KEY",
-        secret_env: str = "KRAKEN_API_SECRET",
-    ) -> "KrakenCredentials":
+    def from_env(cls) -> "KrakenCredentials":
         """Load credentials from environment variables.
 
-        Args:
-            key_env: Environment variable name for API key
-            secret_env: Environment variable name for API secret
+        Phase 5b of the config-service migration: the typed
+        :class:`almanak.config.connectors.ConnectorsConfig` is the single
+        env reader. The legacy ``key_env`` / ``secret_env`` overrides are
+        gone — pass ``KrakenCredentials(api_key=..., api_secret=...)``
+        directly to use a non-default env-var name (the test that
+        exercised the custom-name path was the only caller). The fixed
+        env-var contract is now ``KRAKEN_API_KEY`` and
+        ``KRAKEN_API_SECRET``.
 
         Returns:
             KrakenCredentials instance
 
         Raises:
-            ValueError: If environment variables are not set
+            ValueError: If KRAKEN_API_KEY or KRAKEN_API_SECRET is not set
         """
-        api_key = os.environ.get(key_env)
-        api_secret = os.environ.get(secret_env)
+        from almanak.config.connectors import connectors_config_from_env
+
+        cfg = connectors_config_from_env()
+        api_key = cfg.kraken_api_key
+        api_secret = cfg.kraken_api_secret
 
         if not api_key:
-            raise ValueError(f"Environment variable {key_env} not set")
+            raise ValueError("Environment variable KRAKEN_API_KEY not set")
         if not api_secret:
-            raise ValueError(f"Environment variable {secret_env} not set")
+            raise ValueError("Environment variable KRAKEN_API_SECRET not set")
 
         return cls(api_key=SecretStr(api_key), api_secret=SecretStr(api_secret))
 

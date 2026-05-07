@@ -15,6 +15,7 @@ real gateway or RPC connection.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,6 @@ from click.testing import CliRunner
 from almanak.framework.cli import run_helpers
 from almanak.framework.cli._run_context import IdentityInfo, ResumeInfo
 
-
 # ---------------------------------------------------------------------------
 # Fakes for gateway tests
 # ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ class _FakeChannel:
 
 
 class _FakeGatewayClient:
-    last: "_FakeGatewayClient | None" = None
+    last: _FakeGatewayClient | None = None
 
     def __init__(self, config: Any) -> None:
         self.config = config
@@ -58,7 +58,7 @@ class _FakeGatewayClient:
 
 
 class _FakeManagedGateway:
-    last: "_FakeManagedGateway | None" = None
+    last: _FakeManagedGateway | None = None
     start_should_fail = False
     # Match the real ManagedGateway class attribute (managed.py:196) — the
     # _anvil_timeout helper sources the slow-chain set from this attribute,
@@ -107,13 +107,38 @@ def _install_gateway_fakes(monkeypatch: pytest.MonkeyPatch, *, port: int = 50051
     helper rather than the pydantic class.
     """
     from almanak.config import env as cfg_env
-    from almanak.gateway import managed as gw_managed
-
     from almanak.framework import gateway_client as gw_client_pkg
+    from almanak.gateway import managed as gw_managed
 
     class _FakeSettings:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
+            # Mirror pydantic-settings + ``_apply_gateway_env_fallbacks`` for the
+            # fields the production helpers read off ``GatewayConfig``. Each
+            # attribute is presence-checked first (so an explicit empty-string
+            # kwarg is preserved verbatim, matching the documented force-empty
+            # override pattern), otherwise sourced from the corresponding env var.
+            if "private_key" in kwargs and kwargs["private_key"] is not None:
+                self.private_key = kwargs["private_key"]
+            else:
+                self.private_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+            # ``auth_token`` is read by ``_attach_external_gateway`` (PR
+            # #2152 narrowed it to ``gateway_config_from_env`` so a malformed
+            # unrelated submodel doesn't block ``--no-gateway`` startup).
+            # The pydantic prefix is ``ALMANAK_GATEWAY_AUTH_TOKEN``.
+            if "auth_token" in kwargs and kwargs["auth_token"] is not None:
+                self.auth_token = kwargs["auth_token"]
+            else:
+                self.auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN")
+            # ``solana_private_key`` is read by ``_resolve_effective_signing_key``
+            # for Solana strategies. Pydantic prefix gives
+            # ``ALMANAK_GATEWAY_SOLANA_PRIVATE_KEY``; the unprefixed
+            # ``SOLANA_PRIVATE_KEY`` fallback is applied by
+            # ``_apply_gateway_env_fallbacks``.
+            if "solana_private_key" in kwargs and kwargs["solana_private_key"] is not None:
+                self.solana_private_key = kwargs["solana_private_key"]
+            else:
+                self.solana_private_key = os.environ.get("SOLANA_PRIVATE_KEY", "")
 
     monkeypatch.setattr(gw_managed, "ManagedGateway", _FakeManagedGateway)
     monkeypatch.setattr(gw_managed, "find_available_gateway_port", lambda host, port: port)
@@ -176,9 +201,7 @@ class TestSetupGatewayExternal:
         assert run_helpers._runtime_private_key_override.get() is None
         assert early_cls is None
 
-    def test_external_reads_auth_token_from_env(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_external_reads_auth_token_from_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _install_gateway_fakes(monkeypatch)
         monkeypatch.setenv("ALMANAK_GATEWAY_AUTH_TOKEN", "primary-token")
         monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "fallback-token")
@@ -201,9 +224,7 @@ class TestSetupGatewayExternal:
         # Primary env var wins over fallback.
         assert _FakeGatewayClient.last.config.auth_token == "primary-token"
 
-    def test_external_falls_back_to_gateway_auth_token(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_external_falls_back_to_gateway_auth_token(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _install_gateway_fakes(monkeypatch)
         monkeypatch.delenv("ALMANAK_GATEWAY_AUTH_TOKEN", raising=False)
         monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "legacy-token")
@@ -257,9 +278,7 @@ class TestSetupGatewayExternal:
         finally:
             monkeypatch.setattr(_FakeGatewayClient, "wait_for_ready", original_wait)
 
-    def test_external_rejects_anvil_port(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_external_rejects_anvil_port(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _install_gateway_fakes(monkeypatch)
         with pytest.raises(click.ClickException, match="--anvil-port requires a managed gateway"):
             run_helpers._setup_gateway(
@@ -276,9 +295,7 @@ class TestSetupGatewayExternal:
                 once=False,
             )
 
-    def test_external_rejects_keep_anvil(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_external_rejects_keep_anvil(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _install_gateway_fakes(monkeypatch)
         with pytest.raises(click.ClickException, match="--keep-anvil requires a managed gateway"):
             run_helpers._setup_gateway(
@@ -295,9 +312,7 @@ class TestSetupGatewayExternal:
                 once=False,
             )
 
-    def test_external_rejects_isolated_wallet(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_external_rejects_isolated_wallet(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _install_gateway_fakes(monkeypatch)
         with pytest.raises(click.ClickException, match="--wallet isolated requires a managed gateway"):
             run_helpers._setup_gateway(
@@ -331,9 +346,7 @@ class TestSetupGatewayManaged:
 
         import atexit as real_atexit
 
-        monkeypatch.setattr(
-            real_atexit, "register", lambda fn, *a, **kw: atexit_calls.append((fn, a, kw))
-        )
+        monkeypatch.setattr(real_atexit, "register", lambda fn, *a, **kw: atexit_calls.append((fn, a, kw)))
         runner = CliRunner()
         with runner.isolation():
             (
@@ -499,9 +512,7 @@ class TestSetupGatewayManaged:
         _install_gateway_fakes(monkeypatch)
         monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "0x" + "11" * 32)
         runner = CliRunner()
-        with runner.isolation(), pytest.raises(
-            click.ClickException, match="only supported with --network anvil"
-        ):
+        with runner.isolation(), pytest.raises(click.ClickException, match="only supported with --network anvil"):
             run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
@@ -591,9 +602,7 @@ class TestSetupGatewayManaged:
         _install_gateway_fakes(monkeypatch)
         monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
         runner = CliRunner()
-        with runner.isolation(), pytest.raises(
-            click.ClickException, match="--wallet isolated requires a private key"
-        ):
+        with runner.isolation(), pytest.raises(click.ClickException, match="--wallet isolated requires a private key"):
             run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
@@ -1073,9 +1082,7 @@ def _install_identity_fakes(
 
 
 class TestResolveIdentity:
-    def test_single_chain_uses_config_chain(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_single_chain_uses_config_chain(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
         captured = _install_identity_fakes(monkeypatch, deployment_id="name:hash")
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
@@ -1095,9 +1102,7 @@ class TestResolveIdentity:
         assert captured[0]["chain"] == "arbitrum"
         assert captured[0]["wallet_address"] == "0xabc"
 
-    def test_multi_chain_hashes_all_chains(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_multi_chain_hashes_all_chains(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
         captured = _install_identity_fakes(monkeypatch, deployment_id="name:multi")
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
@@ -1113,9 +1118,7 @@ class TestResolveIdentity:
         # Chains are lowercased and sorted before joining.
         assert captured[0]["chain"] == "arbitrum,base,optimism"
 
-    def test_cli_override_takes_precedence(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_cli_override_takes_precedence(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
         captured = _install_identity_fakes(monkeypatch, deployment_id="cli-override")
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
@@ -1138,15 +1141,9 @@ class TestResolveIdentity:
         # Create a state DB with one row for the target strategy and one for another.
         db_path = tmp_path / "almanak_state.db"
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                "CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
-            )
-            conn.execute(
-                "INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}")
-            )
-            conn.execute(
-                "INSERT INTO strategy_state VALUES (?, ?, ?)", ("other-strat", 1, "{}")
-            )
+            conn.execute("CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)")
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}"))
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("other-strat", 1, "{}"))
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         runner = CliRunner()
@@ -1164,22 +1161,14 @@ class TestResolveIdentity:
             rows = conn.execute("SELECT strategy_id FROM strategy_state").fetchall()
         assert [r[0] for r in rows] == ["other-strat"]
 
-    def test_fresh_anvil_deletes_all_rows(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_fresh_anvil_deletes_all_rows(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
         _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
         db_path = tmp_path / "almanak_state.db"
         with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                "CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)"
-            )
-            conn.execute(
-                "INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}")
-            )
-            conn.execute(
-                "INSERT INTO strategy_state VALUES (?, ?, ?)", ("other-strat", 1, "{}")
-            )
+            conn.execute("CREATE TABLE strategy_state (strategy_id TEXT PRIMARY KEY, version INTEGER, state_data TEXT)")
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("strat-1:hash", 1, "{}"))
+            conn.execute("INSERT INTO strategy_state VALUES (?, ?, ?)", ("other-strat", 1, "{}"))
         monkeypatch.setenv("ALMANAK_STATE_DB", str(db_path))
         strategy_config: dict[str, Any] = {"chain": "arbitrum", "wallet_address": "0xabc"}
         runner = CliRunner()
@@ -1197,9 +1186,7 @@ class TestResolveIdentity:
             rows = conn.execute("SELECT strategy_id FROM strategy_state").fetchall()
         assert rows == []
 
-    def test_fresh_without_state_db_emits_message(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_fresh_without_state_db_emits_message(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
         _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
         monkeypatch.setenv("ALMANAK_STATE_DB", str(tmp_path / "missing.db"))
@@ -1266,9 +1253,7 @@ class TestResolveIdentity:
         assert info.migrated is True
         assert "Migrated 4 rows from 'strat-1' to 'strat-1:hash'" in output
 
-    def test_backfill_exception_is_swallowed(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_backfill_exception_is_swallowed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.chdir(tmp_path)
         _install_identity_fakes(monkeypatch, deployment_id="strat-1:hash")
 
@@ -1301,9 +1286,7 @@ class TestResolveIdentity:
         assert info.migrated is False
         assert info.deployment_id == "strat-1:hash"
 
-    def test_backfill_skipped_when_names_match(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_backfill_skipped_when_names_match(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """If deployment_id already equals display name, no backfill runs."""
         monkeypatch.chdir(tmp_path)
         # deployment_id equals config_display_name to skip backfill.
@@ -1329,9 +1312,7 @@ class TestResolveIdentity:
         )
         assert info.migrated is False
 
-    def test_hosted_mode_skips_sqlite_backfill(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_hosted_mode_skips_sqlite_backfill(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Hosted mode (AGENT_ID set) keeps state in Postgres — the
         bare-name → deployment_id SQLite backfill must not even attempt to
         resolve a local DB path. Calling local_db_path in hosted mode raises
@@ -1348,9 +1329,7 @@ class TestResolveIdentity:
 
         class _Tripwire:
             def __init__(self, config: Any) -> None:
-                raise AssertionError(
-                    "hosted mode must not construct SQLiteStore for backfill"
-                )
+                raise AssertionError("hosted mode must not construct SQLiteStore for backfill")
 
         monkeypatch.setattr(sqlite_backend, "SQLiteStore", _Tripwire)
 
@@ -1368,9 +1347,7 @@ class TestResolveIdentity:
         assert info.deployment_id == "strat-1:hash"
         assert info.migrated is False
 
-    def test_hosted_mode_rejects_fresh_flag(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_hosted_mode_rejects_fresh_flag(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """--fresh is a SQLite-only operation. In hosted mode there is no
         local DB to clear; the platform recreates the agent if a clean state
         is required. Surface this as a clear ClickException rather than
@@ -1400,9 +1377,7 @@ class TestResolveIdentity:
 
 class TestIdentityInfoShape:
     def test_identity_info_is_frozen(self) -> None:
-        info = IdentityInfo(
-            deployment_id="d", run_id="r", strategy_name="s", migrated=False
-        )
+        info = IdentityInfo(deployment_id="d", run_id="r", strategy_name="s", migrated=False)
         with pytest.raises(Exception):
             info.deployment_id = "changed"  # type: ignore[misc]
 
@@ -1459,55 +1434,39 @@ class TestArchiveChainStartupTimeout:
         assert _FakeManagedGateway.last is not None
         return _FakeManagedGateway.last.start_timeout
 
-    def test_archive_single_chain_avalanche_gets_120s(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_archive_single_chain_avalanche_gets_120s(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Single archive chain: 90s Anvil + 30s warmup = 120s."""
         timeout = self._run_setup(monkeypatch, tmp_path, chain="avalanche")
         assert timeout == 120.0
 
-    def test_archive_single_chain_ethereum_gets_120s(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_archive_single_chain_ethereum_gets_120s(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         timeout = self._run_setup(monkeypatch, tmp_path, chain="ethereum")
         assert timeout == 120.0
 
-    def test_archive_single_chain_polygon_gets_120s(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_archive_single_chain_polygon_gets_120s(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         timeout = self._run_setup(monkeypatch, tmp_path, chain="polygon")
         assert timeout == 120.0
 
-    def test_non_archive_chain_arbitrum_gets_60s(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_non_archive_chain_arbitrum_gets_60s(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Non-archive chain: 30s Anvil + 30s warmup = 60s."""
         timeout = self._run_setup(monkeypatch, tmp_path, chain="arbitrum")
         assert timeout == 60.0
 
-    def test_non_archive_chain_base_gets_60s(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_non_archive_chain_base_gets_60s(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         timeout = self._run_setup(monkeypatch, tmp_path, chain="base")
         assert timeout == 60.0
 
-    def test_alias_avax_resolves_to_archive_budget(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_alias_avax_resolves_to_archive_budget(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Chain alias 'avax' must canonicalize to 'avalanche' and get 90s budget."""
         timeout = self._run_setup(monkeypatch, tmp_path, chain="avax")
         assert timeout == 120.0
 
-    def test_alias_eth_resolves_to_archive_budget(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_alias_eth_resolves_to_archive_budget(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Chain alias 'eth' must canonicalize to 'ethereum' and get 90s budget."""
         timeout = self._run_setup(monkeypatch, tmp_path, chain="eth")
         assert timeout == 120.0
 
-    def test_no_chains_mainnet_gets_10s(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_no_chains_mainnet_gets_10s(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No anvil_chains (mainnet mode): short 10s health-check timeout."""
         # No network=anvil → anvil_chains stays empty → 10s timeout.
         timeout = self._run_setup(monkeypatch, tmp_path, chain=None, network=None)

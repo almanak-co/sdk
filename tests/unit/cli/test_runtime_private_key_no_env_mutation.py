@@ -3,9 +3,10 @@
 The four ``os.environ["ALMANAK_PRIVATE_KEY"] = ...`` mutation sites in
 ``almanak/cli/cli.py`` and ``almanak/framework/cli/run_helpers.py`` were
 replaced with a typed ``private_key`` kwarg threaded through
-``LocalRuntimeConfig.from_env`` / ``MultiChainRuntimeConfig.from_env``. These
-tests pin the contract: same observable behaviour, but ``os.environ`` is
-never mutated mid-run.
+``runtime_config_from_env`` (Phase 5a-2 — formerly
+``LocalRuntimeConfig.from_env`` / ``MultiChainRuntimeConfig.from_env``).
+These tests pin the contract: same observable behaviour, but ``os.environ``
+is never mutated mid-run.
 
 Each test exercises one of the original mutation sites:
 
@@ -36,15 +37,51 @@ class _FakeMissingEnvErr(Exception):
 
 
 def _patch_local_factory(monkeypatch: pytest.MonkeyPatch, factory: Any) -> None:
-    """Patch ``LocalRuntimeConfig.from_env`` in execution.config (where the
-    helper imports it) so the helper exercises our fake."""
+    """Patch ``runtime_config_from_env`` in :mod:`almanak.config.runtime` so
+    the helper exercises our fake.
+
+    Phase 5a-2: the legacy ``LocalRuntimeConfig.from_env`` classmethod is
+    gone. Tests inject behaviour by faking the env-reading factory; the
+    production helper's MissingEnv → Anvil-default retry loop runs
+    unmodified, then ``LocalRuntimeConfig.from_runtime_config(rc)`` runs on
+    the fake's output (we monkeypatch ``from_runtime_config`` to be a
+    pass-through identity that pulls the dataclass fake out of a stub
+    runtime-config wrapper).
+    """
+    from almanak.config import runtime as cfg_runtime
     from almanak.framework.execution import config as execution_config
 
+    class _RuntimeConfigStub:
+        def __init__(self, dataclass: Any) -> None:
+            self._test_dataclass = dataclass
+            self.single_chain = True
+            # ``chains`` populated so the stub satisfies any incidental
+            # access — the production helper only reaches into it via
+            # ``from_runtime_config``, which is patched below.
+            self.chains = [getattr(dataclass, "chain", "arbitrum")]
+
+    def _fake_runtime_config_from_env(
+        *,
+        chain: str | None = None,
+        chains: list[str] | None = None,
+        protocols: dict[str, list[str]] | None = None,
+        network: str = "mainnet",
+        dotenv_path: str | None = None,
+        prefix: str = "ALMANAK_",
+        private_key: str | None = None,
+    ) -> Any:
+        # Tests only need the local lane here; the legacy fakes have a
+        # ``(chain, network, private_key)`` signature so we forward those.
+        dc = factory(chain, network, private_key)
+        return _RuntimeConfigStub(dc)
+
+    monkeypatch.setattr(cfg_runtime, "runtime_config_from_env", _fake_runtime_config_from_env)
     monkeypatch.setattr(
         execution_config.LocalRuntimeConfig,
-        "from_env",
-        staticmethod(factory),
+        "from_runtime_config",
+        classmethod(lambda cls, rc: rc._test_dataclass),
     )
+    monkeypatch.setattr(cfg_runtime, "MissingEnvironmentVariableError", _FakeMissingEnvErr)
     monkeypatch.setattr(execution_config, "MissingEnvironmentVariableError", _FakeMissingEnvErr)
 
 

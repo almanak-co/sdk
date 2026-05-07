@@ -33,7 +33,6 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -41,6 +40,8 @@ from enum import StrEnum
 from typing import Any
 
 import aiohttp
+
+from almanak.config.backtest import backtest_config_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -295,8 +296,12 @@ async def _get_single_token_prices(
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
 
-    # Use Pro API if API key is available (matches CoinGeckoDataProvider pattern)
-    api_key = os.environ.get("COINGECKO_API_KEY", "")
+    # Use Pro API if API key is available (matches CoinGeckoDataProvider pattern).
+    # Phase 5c: env reads centralised in almanak.config.backtest; the
+    # factory mirrors the legacy ``os.environ.get("COINGECKO_API_KEY", "")``
+    # bit-for-bit (None when unset) and the Pro/Free branch logic below
+    # is unchanged.
+    api_key = backtest_config_from_env().coingecko_api_key or ""
     api_base = _PRO_API_BASE if api_key else _FREE_API_BASE
 
     url = f"{api_base}/coins/{token_id}/market_chart/range"

@@ -29,7 +29,6 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -73,9 +72,13 @@ class JupiterConfig:
                 "wallet_address is required",
                 parameter="wallet_address",
             )
-        # Fall back to env var for API key
+        # Fall back to typed config for API key (Phase 5b of the
+        # config-service migration). The lazy import avoids pulling
+        # ``almanak.config`` into ``framework.connectors`` at module load.
         if not self.api_key:
-            self.api_key = os.environ.get("JUPITER_API_KEY")
+            from almanak.config.connectors import connectors_config_from_env
+
+            self.api_key = connectors_config_from_env().jupiter_api_key
         # Auto-select base URL based on API key availability
         if not self.base_url:
             self.base_url = self._DEFAULT_PAID_URL if self.api_key else self._DEFAULT_FREE_URL

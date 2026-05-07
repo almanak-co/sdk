@@ -20,11 +20,10 @@ Example:
     from almanak.framework.backtesting.pnl.providers.chainlink import ChainlinkDataProvider
     from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
     from datetime import datetime
-    import os
 
-    # Set archive RPC URL environment variable (or pass directly)
-    os.environ["ARCHIVE_RPC_URL_ETHEREUM"] = "https://eth-mainnet.g.alchemy.com/v2/..."
-
+    # Pass the archive RPC URL directly, or set ARCHIVE_RPC_URL_ETHEREUM in
+    # the environment (the typed BacktestConfig in almanak.config.backtest
+    # is the single env reader).
     provider = ChainlinkDataProvider(chain="ethereum")
     config = HistoricalDataConfig(
         start_time=datetime(2024, 1, 1),
@@ -40,13 +39,14 @@ Example:
 
 import json
 import logging
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+from almanak.config.backtest import backtest_config_from_env
 
 from ..data_provider import OHLCV, HistoricalDataCapability, HistoricalDataConfig, MarketState
 from ..types import DataConfidence, DataSourceInfo
@@ -503,14 +503,23 @@ class ChainlinkDataProvider:
         )
 
     def _get_archive_rpc_url_from_env(self) -> str:
-        """Get archive RPC URL from environment variable.
+        """Get archive RPC URL from the typed backtest config.
+
+        Phase 5c: env reads centralised in
+        :func:`almanak.config.backtest.backtest_config_from_env`. The
+        method preserves the legacy ``ARCHIVE_RPC_URL_<CHAIN>`` shape —
+        the factory walks every chain it knows about and only stores
+        a value when the env var is set. ``""`` here means "no archive
+        access for this chain", matching the legacy
+        ``os.environ.get(env_var_name, "")`` semantics.
 
         Returns:
             Archive RPC URL or empty string if not configured.
         """
-        env_var_name = ARCHIVE_RPC_URL_ENV_PATTERN.format(chain=self._chain.upper())
-        url = os.environ.get(env_var_name, "")
+        cfg = backtest_config_from_env()
+        url = cfg.archive_rpc_urls.get(self._chain.lower(), "")
         if url:
+            env_var_name = ARCHIVE_RPC_URL_ENV_PATTERN.format(chain=self._chain.upper())
             logger.debug(f"Using archive RPC URL from {env_var_name}")
         return url
 

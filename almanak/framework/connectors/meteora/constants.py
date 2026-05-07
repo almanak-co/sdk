@@ -7,7 +7,6 @@ Reference: https://github.com/nicholasgasior/meteora-dlmm-db (Anchor IDL)
 """
 
 import hashlib
-import os
 
 # =========================================================================
 # Program IDs
@@ -76,7 +75,27 @@ STRATEGY_TYPE_BID_ASK_BALANCED = 8
 # API
 # =========================================================================
 
-METEORA_API_BASE_URL = os.environ.get("METEORA_API_BASE_URL") or "https://dlmm.datapi.meteora.ag"
+
+def get_meteora_api_base_url() -> str:
+    """Return the Meteora DLMM API base URL.
+
+    Phase 5b of the config-service migration: same rationale as
+    :func:`almanak.framework.connectors.drift.constants.get_drift_data_api_base_url`.
+    Reads ``ConnectorsConfig.meteora_api_base_url`` at call time so a
+    test that monkeypatches ``METEORA_API_BASE_URL`` between SDK
+    instantiations is honoured.
+    """
+    from almanak.config.connectors import connectors_config_from_env
+
+    return connectors_config_from_env().meteora_api_base_url
+
+
+def __getattr__(name: str) -> str:
+    """Lazy module attribute resolver — preserves the legacy constant name."""
+    if name == "METEORA_API_BASE_URL":
+        return get_meteora_api_base_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # =========================================================================
 # Common bin_step values and their approximate fee tiers (bps)

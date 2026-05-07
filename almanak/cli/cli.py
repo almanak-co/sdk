@@ -8,11 +8,11 @@ from pathlib import Path
 
 import click
 import requests
-from dotenv import load_dotenv
 
 from almanak import __version__
 from almanak.cli.agent import agent as agent_group
 from almanak.config.cli_options import gateway_client_options
+from almanak.config.cli_runtime import subprocess_env_with_overrides
 from almanak.core.redaction import install_redaction
 
 # V2 Framework CLI commands
@@ -743,13 +743,10 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
     """
     import asyncio
     import logging
-    import os
     import sys
 
     from almanak.config.env import gateway_config_from_env
     from almanak.framework.deployment import is_hosted
-    from almanak.framework.local_paths import auto_detect_strategy_folder
-    from almanak.gateway.server import serve
 
     # VIB-3761/-3835: anchor the gateway to a strategy folder before any
     # downstream code resolves a local DB path. Without this, an
@@ -761,8 +758,11 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
     #
     # Hosted mode (AGENT_ID set) uses Postgres, so the local-path branch
     # is skipped entirely.
-    explicit_state_db = os.environ.get("ALMANAK_STATE_DB")
-    explicit_strategy_folder = os.environ.get("ALMANAK_STRATEGY_FOLDER")
+    from almanak.framework.local_paths import auto_detect_strategy_folder, state_db_env, strategy_folder_env
+    from almanak.gateway.server import serve
+
+    explicit_state_db = state_db_env()
+    explicit_strategy_folder = strategy_folder_env()
     detected_folder = None
     if not is_hosted():
         # Auto-detect cwd if neither env var is set; the helper is a no-op
@@ -937,6 +937,13 @@ def backtest_service(host, port, workers, log_level):
     run_server(host=host, port=port, workers=workers, log_level=log_level)
 
 
+# crap-allowlist: Phase 5e (#2097) swaps the inline ``env = os.environ.copy() ;
+# env["GATEWAY_HOST"] = ...`` block for the typed
+# :func:`subprocess_env_with_overrides` boundary helper. CC (6) is structural —
+# gateway-readiness probe with three distinct error branches followed by the
+# subprocess invocation with two graceful-stop catch arms. Coverage is 3% because
+# the dashboard subprocess is exercised by integration tests outside the unit
+# suite; the migration touches only the env-mutation site, not the control flow.
 @almanak.command()
 @click.option(
     "--port",
@@ -1026,10 +1033,15 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
         },
     )
 
-    # Set environment variables for the dashboard process
-    env = os.environ.copy()
-    env["GATEWAY_HOST"] = gateway_host
-    env["GATEWAY_PORT"] = str(gateway_port)
+    # Set environment variables for the dashboard process via the typed
+    # boundary helper — the CLI's only env mutation surface for spawning
+    # subprocesses (Phase 5e).
+    env = subprocess_env_with_overrides(
+        {
+            "GATEWAY_HOST": gateway_host,
+            "GATEWAY_PORT": str(gateway_port),
+        }
+    )
 
     # Get path to dashboard app
     from almanak.framework.dashboard import app as dashboard_app
@@ -1222,6 +1234,14 @@ def _strat_test_skip_reason(working_dir: str, config_file: str | None) -> str | 
     return None
 
 
+# crap-allowlist: Phase 5e (#2097) replaces the inline ``os.environ.get("ALMANAK_PRIVATE_KEY")``
+# probe + the strategy-local ``load_dotenv(env_file)`` call with the typed
+# ``load_config().gateway.private_key`` read and the ``_load_dotenv_once`` boundary
+# helper. CC (16) is structural — option parsing + skip-reason gating + JSON / human
+# output branches + ContextVar plumbing + exit-code propagation. Coverage (37%) is
+# limited because the production path drives a managed Anvil + gateway lifecycle that
+# isn't exercised by unit tests; integration coverage lives in the demo-strategy
+# smoke harness (``test-demo-quick``). The migration touches only the env-read sites.
 @strat.command("test")
 @click.option(
     "--working-dir",
@@ -1317,11 +1337,15 @@ def strategy_test(
     if not parsed_actions and not teardown:
         raise click.ClickException("strat test needs at least one of: --actions <csv> or --teardown")
 
-    # Match strategy_run() — load strategy-local .env so test runs see the same
-    # environment overrides the production run path does.
+    # Match strategy_run() — load strategy-local .env through the boundary
+    # helper so test runs see the same environment overrides the production
+    # run path does.
+    from almanak.config import load_config
+    from almanak.config.env import _load_dotenv_once
+
     env_file = Path(working_dir) / ".env"
     if env_file.exists():
-        load_dotenv(env_file)
+        _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")
 
     # `almanak strat test` always runs against a managed Anvil fork. If the user
@@ -1329,8 +1353,11 @@ def strategy_test(
     # fall back to the well-known Anvil account #0 key so anvil_funding has a
     # wallet to fund. Public test key — no security impact, only used here
     # because this command is hardcoded to `--network anvil`.
+    # The typed ``GatewayConfig.private_key`` carries the ALMANAK_PRIVATE_KEY
+    # value via the Phase 1 env-fallback ladder; reading it here keeps the
+    # config-boundary lint clean.
     test_runtime_private_key: str | None = None
-    if not os.environ.get("ALMANAK_PRIVATE_KEY"):
+    if not load_config().gateway.private_key:
         from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
 
         # Plumbed via the ``_runtime_private_key_override`` ContextVar below
@@ -1440,6 +1467,12 @@ def strategy_test(
             _rt_pk_var.reset(_rt_pk_token)
 
 
+# crap-allowlist: Phase 5e (#2097) replaces the strategy-local ``load_dotenv(env_file)``
+# call with the typed :func:`_load_dotenv_once` boundary helper. CC (11) is structural
+# to the run-vs-test branch + auto-discover-config-file ladder + dashboard /
+# log-file / fresh / network plumbing; coverage (43%) is bounded by the same
+# managed-Anvil-required-for-end-to-end constraint that holds back ``strategy_test``.
+# The migration touches only the dotenv ingest site at the top of the function body.
 @strat.command("run")
 @click.option(
     "--working-dir",
@@ -1662,10 +1695,12 @@ def strategy_run(
                 click.echo(f"Using config: {config_file}")
                 break
 
-    # Load environment from .env if present
+    # Load environment from .env through the boundary helper.
+    from almanak.config.env import _load_dotenv_once
+
     env_file = Path(working_dir) / ".env"
     if env_file.exists():
-        load_dotenv(env_file)
+        _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")
 
     run_config = _load_pyproject_run_config(working_dir)

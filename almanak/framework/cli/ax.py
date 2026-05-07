@@ -150,15 +150,19 @@ def ax(ctx, gateway_host, gateway_port, chain, wallet, max_trade_usd, dry_run, j
     """
     # Load .env from current directory (same as strat run) so env vars like
     # ALCHEMY_API_KEY, ALMANAK_PRIVATE_KEY, etc. are available to the gateway.
-    # Also check .power-env (extended config). Neither overrides existing vars.
+    # Also check .power-env (extended config). Both files are loaded — the
+    # boundary helper is path-aware so each distinct file loads exactly once.
+    # ``.env`` is checked first, and python-dotenv's ``override=False`` makes
+    # values from the first-loaded file win where keys overlap, so
+    # ``.env`` wins over ``.power-env``.
     from pathlib import Path
 
-    from dotenv import load_dotenv
+    from almanak.config.env import _load_dotenv_once
 
     for env_name in (".env", ".power-env"):
         env_file = Path.cwd() / env_name
         if env_file.exists():
-            load_dotenv(env_file)
+            _load_dotenv_once(str(env_file))
 
     ctx.ensure_object(dict)
     ctx.obj["gateway_host"] = gateway_host
@@ -287,20 +291,22 @@ def _get_executor(ctx: click.Context):
     if "executor" in ctx.obj:
         return ctx.obj["executor"], ctx.obj["client"]
 
-    import os
-
+    from almanak.config import load_config
     from almanak.framework.agent_tools.cli_executor import create_cli_executor
 
     host = ctx.obj["gateway_host"]
     port = ctx.obj["gateway_port"]
     network = ctx.obj.get("network")
 
-    # Read the auth token from env so the CLI can reach a gateway that was
-    # started by another process (e.g. a long-running strategy) and therefore
-    # has auth enabled. ALMANAK_GATEWAY_AUTH_TOKEN is the canonical name;
-    # GATEWAY_AUTH_TOKEN is accepted for parity with other clients. Bug 5 of
-    # the 0G DogFooding report (2026-04-16).
-    env_auth_token = os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN") or os.environ.get("GATEWAY_AUTH_TOKEN") or None
+    # Read the auth token via the typed config service so the CLI can reach
+    # a gateway that was started by another process (e.g. a long-running
+    # strategy) and therefore has auth enabled. ``GatewayConfig.auth_token``
+    # carries the typed ALMANAK_GATEWAY_AUTH_TOKEN value;
+    # ``CliRuntimeConfig.legacy_gateway_auth_token`` carries the unprefixed
+    # GATEWAY_AUTH_TOKEN fallback. Bug 5 of the 0G DogFooding report
+    # (2026-04-16).
+    _cfg = load_config()
+    env_auth_token = _cfg.gateway.auth_token or _cfg.cli.legacy_gateway_auth_token or None
 
     # Try connecting to an existing gateway first.
     # Suppress gateway_client logger during the quick probe so users don't
@@ -366,9 +372,9 @@ def _start_managed_gateway(
     including auth token generation and private key forwarding.
     """
     import atexit
-    import os
     import uuid
 
+    from almanak.config import load_config
     from almanak.config.env import gateway_config_from_env
     from almanak.gateway.managed import ManagedGateway, find_available_gateway_port, is_port_in_use
 
@@ -398,8 +404,11 @@ def _start_managed_gateway(
     if session_auth_token:
         gateway_kwargs["auth_token"] = session_auth_token
 
-    # Forward private key so the gateway can sign transactions
-    private_key = os.environ.get("ALMANAK_PRIVATE_KEY", "")
+    # Forward private key so the gateway can sign transactions. The typed
+    # ``GatewayConfig.private_key`` carries the same ALMANAK_PRIVATE_KEY
+    # value that the legacy direct-env-read used (populated by the Phase 1
+    # ``_apply_gateway_env_fallbacks`` ladder).
+    private_key = load_config().gateway.private_key or ""
     if private_key:
         gateway_kwargs["private_key"] = private_key
 
@@ -772,7 +781,7 @@ def _open_channel_if_reachable(ctx: click.Context):
     the user already has one running, but must not impose gateway startup
     latency on the common static-hit case.
     """
-    import os
+    from almanak.config import load_config
 
     host = ctx.obj.get("gateway_host", "localhost")
     port = ctx.obj.get("gateway_port", 50051)
@@ -783,10 +792,9 @@ def _open_channel_if_reachable(ctx: click.Context):
     try:
         import grpc
 
+        _cfg = load_config()
         gateway_auth_token = (
-            ctx.obj.get("gateway_auth_token")
-            or os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN")
-            or os.environ.get("GATEWAY_AUTH_TOKEN")
+            ctx.obj.get("gateway_auth_token") or _cfg.gateway.auth_token or _cfg.cli.legacy_gateway_auth_token
         )
         channel = grpc.insecure_channel(f"{host}:{port}")
         if gateway_auth_token:
@@ -838,21 +846,22 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
     if not use_gateway:
         return resolver, None, None
 
-    import os
+    from almanak.config import load_config
 
     host = ctx.obj.get("gateway_host", "localhost")
     port = ctx.obj.get("gateway_port", 50051)
     network = ctx.obj.get("network")
-    # Match ``_get_executor``: fall back to the ALMANAK_GATEWAY_AUTH_TOKEN /
-    # GATEWAY_AUTH_TOKEN env vars when no CLI-provided token is on the
-    # context.  ``ax resolve`` frequently attaches to a gateway that was
-    # started by another process (a long-running strategy, or the shared
-    # sidecar in CI), and that process is the one that sets the env var —
-    # without this fallback, auth-enabled gateways reject the probe.
+    # Match ``_get_executor``: fall back to the typed gateway auth values
+    # (ALMANAK_GATEWAY_AUTH_TOKEN via ``GatewayConfig.auth_token``,
+    # legacy unprefixed ``GATEWAY_AUTH_TOKEN`` via
+    # ``CliRuntimeConfig.legacy_gateway_auth_token``) when no CLI-provided
+    # token is on the context. ``ax resolve`` frequently attaches to a
+    # gateway started by another process (a long-running strategy, or the
+    # shared sidecar in CI), and that process is the one that exported the
+    # env var — without this fallback, auth-enabled gateways reject the probe.
+    _cfg = load_config()
     gateway_auth_token = (
-        ctx.obj.get("gateway_auth_token")
-        or os.environ.get("ALMANAK_GATEWAY_AUTH_TOKEN")
-        or os.environ.get("GATEWAY_AUTH_TOKEN")
+        ctx.obj.get("gateway_auth_token") or _cfg.gateway.auth_token or _cfg.cli.legacy_gateway_auth_token
     )
 
     try:

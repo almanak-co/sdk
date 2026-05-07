@@ -27,7 +27,6 @@ Example:
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -129,7 +128,21 @@ class JupiterAdapter:
         self.config = config
         self.client = JupiterClient(config)
         self.wallet_address = config.wallet_address
-        self._rpc_url = rpc_url or os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+        # Phase 5b: typed-config lookup is the single env reader. Jupiter's
+        # legacy default was the public mainnet endpoint when ``SOLANA_RPC_URL``
+        # was unset — preserved verbatim by ``DEFAULT_SOLANA_RPC_URL_JUPITER``.
+        # Treat empty strings the same as ``None``: an explicit ``rpc_url=""``
+        # would otherwise bypass the fallback and fail in the ``amount='all'``
+        # path with an invalid endpoint (PR #2152 review).
+        if not rpc_url:
+            from almanak.config.connectors import (
+                DEFAULT_SOLANA_RPC_URL_JUPITER,
+                connectors_config_from_env,
+            )
+
+            self._rpc_url = connectors_config_from_env().solana_rpc_url or DEFAULT_SOLANA_RPC_URL_JUPITER
+        else:
+            self._rpc_url = rpc_url
 
         # Initialize token resolver
         if token_resolver is not None:

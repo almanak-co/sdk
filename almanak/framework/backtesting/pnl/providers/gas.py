@@ -32,7 +32,6 @@ Example:
 """
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -40,6 +39,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import aiohttp
+
+from almanak.config.backtest import backtest_config_from_env
 
 from ..types import DataConfidence
 
@@ -977,6 +978,12 @@ class EtherscanGasPriceProvider:
 
     _SUPPORTED_CHAINS = list(ETHERSCAN_API_URLS.keys())
 
+    # crap-allowlist: Phase 5c (#2097) swaps two ``os.environ.get()`` calls
+    # inside this constructor for an ``almanak.config.backtest`` lookup.
+    # Cyclomatic complexity stays at the legacy cc=9 (the
+    # ``ETHERSCAN_API_KEY_ENV_VARS`` walk and ``ARCHIVE_RPC_CHAINS`` walk
+    # are unchanged in shape). Coverage is 4% because the gas provider
+    # is mock-tested at the API-call layer in tests/unit/backtesting/pnl/.
     def __init__(
         self,
         api_keys: dict[str, str] | None = None,
@@ -1020,18 +1027,29 @@ class EtherscanGasPriceProvider:
         self._data_config = data_config
         self._archive_rpc_urls: dict[str, str] = archive_rpc_urls or {}
 
-        # Load API keys from environment if not provided
-        for chain, env_var in ETHERSCAN_API_KEY_ENV_VARS.items():
-            if chain not in self._api_keys:
-                key = os.environ.get(env_var, "")
+        # Load API keys + archive RPC URLs from the typed backtest config
+        # if not provided. Phase 5c: env reads centralised in
+        # ``almanak.config.backtest.backtest_config_from_env``. The factory
+        # is only called when at least one slot needs filling — explicit
+        # constructor inputs that already cover every chain skip the env
+        # read entirely so an unrelated config-validation error in
+        # ``BacktestConfig`` cannot break gas-provider construction (PR
+        # #2152 review).
+        needs_cfg = any(c not in self._api_keys for c in ETHERSCAN_API_KEY_ENV_VARS) or any(
+            c not in self._archive_rpc_urls for c in ARCHIVE_RPC_CHAINS
+        )
+        cfg = backtest_config_from_env() if needs_cfg else None
+
+        for chain in ETHERSCAN_API_KEY_ENV_VARS:
+            if chain not in self._api_keys and cfg is not None:
+                key = cfg.gas_api.api_keys.get(chain, "")
                 if key:
                     self._api_keys[chain] = key
 
         # Load archive RPC URLs from environment if not provided
         for chain in ARCHIVE_RPC_CHAINS:
-            if chain not in self._archive_rpc_urls:
-                env_var = ARCHIVE_RPC_URL_ENV_PATTERN.format(chain=chain.upper())
-                url = os.environ.get(env_var, "")
+            if chain not in self._archive_rpc_urls and cfg is not None:
+                url = cfg.archive_rpc_urls.get(chain.lower(), "")
                 if url:
                     self._archive_rpc_urls[chain] = url
 
