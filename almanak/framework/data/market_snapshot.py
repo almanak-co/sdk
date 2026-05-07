@@ -1,42 +1,25 @@
-"""MarketSnapshot - Unified market data interface for strategies.
+"""Legacy ``almanak.framework.data.market_snapshot`` module.
 
-This module provides a clean interface for strategies to access market data
-without knowing about underlying data providers, caching, or aggregation logic.
+The ``MarketSnapshot`` class moved to ``almanak.framework.market.snapshot``
+in VIB-4062 and is no longer importable from this module — see
+``docs/migration/vib-4062-marketsnapshot.md`` for the migration table.
 
-The MarketSnapshot wraps PriceOracle, BalanceProvider, and RSI calculators
-to provide simple, type-safe methods for strategy decision-making.
+What still lives here:
 
-Key Features:
-    - Simplified synchronous interface (async handled internally)
-    - Clear exceptions on failure (not silent defaults)
-    - Type-safe Decimal returns for monetary values
-    - Integration with existing IntentStrategy.decide() signature
+* ``StablecoinConfig`` / ``StablecoinMode`` / ``DEFAULT_STABLECOINS`` —
+  stablecoin pricing-mode configuration consumed by ``MarketSnapshot``.
+* ``FreshnessConfig`` — data-staleness thresholds (warn / error).
+* ``PROTOCOL_TOKEN_VARIANTS`` — per-protocol token-variant registry
+  (e.g. Polymarket's pUSD on Polygon).
+* ``RSICalculator`` Protocol.
+* Re-exports of every typed error from ``almanak.framework.market.errors``
+  so legacy ``from almanak.framework.data.market_snapshot import <Error>``
+  imports keep working and ``isinstance`` checks against the canonical
+  class continue to succeed.
 
-Example:
-    from almanak.framework.data.market_snapshot import MarketSnapshot
-    from almanak.framework.data.price import PriceAggregator, CoinGeckoPriceSource
+For the canonical strategy-facing API, import from the canonical home::
 
-    # Create providers
-    price_oracle = PriceAggregator(sources=[CoinGeckoPriceSource()])
-    balance_provider = Web3BalanceProvider(web3, wallet_address)
-
-    # Create snapshot
-    snapshot = MarketSnapshot(
-        chain="arbitrum",
-        wallet_address="0x...",
-        price_oracle=price_oracle,
-        balance_provider=balance_provider,
-    )
-
-    # Use in strategy
-    def decide(self, market: MarketSnapshot) -> Intent:
-        eth_price = market.price("WETH")  # Returns Decimal
-        usdc_balance = market.balance("USDC")  # Returns Decimal
-        rsi = market.rsi("WETH", period=14)  # Returns float 0-100
-
-        if rsi < 30 and usdc_balance > Decimal("100"):
-            return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
-        return Intent.hold()
+    from almanak.framework.market import MarketSnapshot
 """
 
 import inspect

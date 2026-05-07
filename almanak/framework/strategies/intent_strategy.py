@@ -10,7 +10,8 @@ a decide() method that returns an Intent, and the framework handles:
 4. Providing market data through MarketSnapshot helper
 
 Example:
-    from almanak.framework.strategies.intent_strategy import IntentStrategy, MarketSnapshot
+    from almanak.framework.market import MarketSnapshot
+    from almanak.framework.strategies import IntentStrategy, almanak_strategy
     from almanak.framework.intents import Intent
     from decimal import Decimal
 

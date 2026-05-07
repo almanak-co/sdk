@@ -79,7 +79,8 @@ Strategies implement the `decide()` method, which receives a `MarketSnapshot` an
 ```python
 from decimal import Decimal
 from almanak.framework.intents import Intent
-from almanak.framework.strategies import IntentStrategy, MarketSnapshot
+from almanak.framework.market import MarketSnapshot
+from almanak.framework.strategies import IntentStrategy
 
 class MyStrategy(IntentStrategy):
     """A simple mean-reversion strategy."""

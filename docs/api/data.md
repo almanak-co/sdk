@@ -1,15 +1,6 @@
 # Data Layer
 
-Market data providers, price oracles, balance providers, and the unified `MarketSnapshot` interface.
-
-## MarketSnapshot
-
-The primary data interface passed to `decide()`. Provides lazy access to prices, balances, indicators, and more.
-
-::: almanak.framework.data.MarketSnapshot
-    options:
-      show_root_heading: true
-      members_order: source
+Price oracles, balance providers, OHLCV sources, and the indicator/analytics primitives consumed by `MarketSnapshot`.
 
 ## Price Data
 

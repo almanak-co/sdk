@@ -315,17 +315,6 @@ Lower-level base class for strategies that need direct action control.
       show_root_heading: true
       members_order: source
 
-## MarketSnapshot
-
-Unified interface for accessing market data within `decide()`.
-Canonical class lives under `almanak.framework.market` (VIB-4062);
-see also [`api/market.md`](market.md).
-
-::: almanak.framework.market.MarketSnapshot
-    options:
-      show_root_heading: true
-      members_order: source
-
 ## RiskGuard
 
 Non-bypassable risk validation that runs before every execution.
