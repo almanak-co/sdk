@@ -1566,6 +1566,15 @@ class SQLiteStore:
                     # only overwrites the columns this method actually
                     # provides, preserving phase-4 metadata on conflict
                     # (CodeRabbit review).
+                    # VIB-4096 (3.5) — Phase 4 identity columns are now read
+                    # off the snapshot itself (real fields after VIB-4092 /
+                    # 3.1). The runner stamps them at capture time
+                    # (VIB-4099 / 3.8); this writer carries them onto the
+                    # row. ON CONFLICT preserves any existing non-empty
+                    # identity (asymmetric: writing "" over a real id MUST
+                    # keep the real id; writing a real id over "" MUST take
+                    # the real id) so a late re-save by a less-stamped
+                    # caller cannot blank out a previously-stamped row.
                     cursor = conn.execute(
                         """
                         INSERT INTO portfolio_snapshots (
@@ -1573,8 +1582,9 @@ class SQLiteStore:
                             available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                             value_confidence, positions_json,
                             token_prices_json, wallet_balances_json,
-                            chain, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            chain, created_at,
+                            deployment_id, cycle_id, execution_mode
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(strategy_id, timestamp) DO UPDATE SET
                             iteration_number = excluded.iteration_number,
                             total_value_usd = excluded.total_value_usd,
@@ -1586,7 +1596,22 @@ class SQLiteStore:
                             token_prices_json = excluded.token_prices_json,
                             wallet_balances_json = excluded.wallet_balances_json,
                             chain = excluded.chain,
-                            created_at = excluded.created_at
+                            created_at = excluded.created_at,
+                            deployment_id = CASE
+                                WHEN portfolio_snapshots.deployment_id = ''
+                                THEN excluded.deployment_id
+                                ELSE portfolio_snapshots.deployment_id
+                            END,
+                            cycle_id = CASE
+                                WHEN portfolio_snapshots.cycle_id = ''
+                                THEN excluded.cycle_id
+                                ELSE portfolio_snapshots.cycle_id
+                            END,
+                            execution_mode = CASE
+                                WHEN portfolio_snapshots.execution_mode = ''
+                                THEN excluded.execution_mode
+                                ELSE portfolio_snapshots.execution_mode
+                            END
                         RETURNING id
                         """,
                         (
@@ -1616,6 +1641,9 @@ class SQLiteStore:
                             else "[]",
                             snapshot.chain,
                             now,
+                            snapshot.deployment_id or "",
+                            snapshot.cycle_id or "",
+                            snapshot.execution_mode or "",
                         ),
                     )
                     # `RETURNING id` makes the row id unambiguous on both
@@ -1670,15 +1698,35 @@ class SQLiteStore:
             with self._db_lock:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    # Extract Phase 4 fields from metrics (single source of truth)
-                    deployment_id = getattr(metrics, "deployment_id", "") or ""
-                    cycle_id = getattr(metrics, "cycle_id", "") or ""
-                    execution_mode = getattr(metrics, "execution_mode", "") or ""
+                    # Phase 4 identity (VIB-4092/VIB-4099): snapshot is the
+                    # authoritative source — the runner stamps it via
+                    # _stamp_snapshot_identity before either writer is called.
+                    # Fall back to metrics for legacy callers that pre-date
+                    # the snapshot stamp.
+                    deployment_id = (
+                        getattr(snapshot, "deployment_id", "") or getattr(metrics, "deployment_id", "") or ""
+                    )
+                    cycle_id = getattr(snapshot, "cycle_id", "") or getattr(metrics, "cycle_id", "") or ""
+                    execution_mode = (
+                        getattr(snapshot, "execution_mode", "") or getattr(metrics, "execution_mode", "") or ""
+                    )
 
-                    # 1. Save snapshot
+                    # 1. Save snapshot via INSERT ... ON CONFLICT DO UPDATE
+                    # mirroring save_portfolio_snapshot (CodeRabbit). The
+                    # legacy INSERT OR REPLACE deleted-and-reinserted on
+                    # conflict, which (a) blanked any previously-stamped
+                    # identity to TEXT '' on a less-stamped retry and
+                    # (b) cascade-deleted any position_state_snapshots
+                    # tied to the original snapshot id. The asymmetric
+                    # CASE preserves an existing non-empty identity:
+                    # writing "" over a real id MUST keep the real id;
+                    # writing a real id over "" MUST take the real id.
+                    # RETURNING id makes the row id unambiguous on both
+                    # the INSERT and the DO UPDATE branch (lastrowid is
+                    # not updated when ON CONFLICT takes the UPDATE path).
                     cursor = conn.execute(
                         """
-                        INSERT OR REPLACE INTO portfolio_snapshots (
+                        INSERT INTO portfolio_snapshots (
                             strategy_id, deployment_id, cycle_id, execution_mode,
                             timestamp, iteration_number, total_value_usd,
                             available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
@@ -1686,6 +1734,34 @@ class SQLiteStore:
                             token_prices_json, wallet_balances_json,
                             chain, created_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(strategy_id, timestamp) DO UPDATE SET
+                            iteration_number = excluded.iteration_number,
+                            total_value_usd = excluded.total_value_usd,
+                            available_cash_usd = excluded.available_cash_usd,
+                            deployed_capital_usd = excluded.deployed_capital_usd,
+                            wallet_total_value_usd = excluded.wallet_total_value_usd,
+                            value_confidence = excluded.value_confidence,
+                            positions_json = excluded.positions_json,
+                            token_prices_json = excluded.token_prices_json,
+                            wallet_balances_json = excluded.wallet_balances_json,
+                            chain = excluded.chain,
+                            created_at = excluded.created_at,
+                            deployment_id = CASE
+                                WHEN portfolio_snapshots.deployment_id = ''
+                                THEN excluded.deployment_id
+                                ELSE portfolio_snapshots.deployment_id
+                            END,
+                            cycle_id = CASE
+                                WHEN portfolio_snapshots.cycle_id = ''
+                                THEN excluded.cycle_id
+                                ELSE portfolio_snapshots.cycle_id
+                            END,
+                            execution_mode = CASE
+                                WHEN portfolio_snapshots.execution_mode = ''
+                                THEN excluded.execution_mode
+                                ELSE portfolio_snapshots.execution_mode
+                            END
+                        RETURNING id
                         """,
                         (
                             snapshot.strategy_id,
@@ -1719,7 +1795,8 @@ class SQLiteStore:
                             now,
                         ),
                     )
-                    snapshot_id = cursor.lastrowid or 0
+                    returned = cursor.fetchone()
+                    snapshot_id = returned[0] if returned else (cursor.lastrowid or 0)
 
                     # 2. Save metrics in the same transaction
                     conn.execute(
@@ -1776,7 +1853,8 @@ class SQLiteStore:
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json,
-                       token_prices_json, wallet_balances_json, chain
+                       token_prices_json, wallet_balances_json, chain,
+                       deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
                 WHERE strategy_id = ?
                 ORDER BY timestamp DESC
@@ -1820,7 +1898,8 @@ class SQLiteStore:
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json,
-                       token_prices_json, wallet_balances_json, chain
+                       token_prices_json, wallet_balances_json, chain,
+                       deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp >= ?
                 ORDER BY timestamp ASC
@@ -1860,7 +1939,8 @@ class SQLiteStore:
                 SELECT strategy_id, timestamp, iteration_number, total_value_usd,
                        available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
                        value_confidence, positions_json,
-                       token_prices_json, wallet_balances_json, chain
+                       token_prices_json, wallet_balances_json, chain,
+                       deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
                 WHERE strategy_id = ? AND timestamp <= ?
                 ORDER BY timestamp DESC
@@ -1876,6 +1956,46 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
+    @staticmethod
+    def _safe_row_str(row: sqlite3.Row, column: str, default: str = "") -> str:
+        """Read a string column defensively — returns ``default`` if the column
+        is missing (older DB schema) or stored as ``NULL``."""
+        try:
+            return str(row[column] or default)
+        except (KeyError, IndexError):
+            return default
+
+    @staticmethod
+    def _safe_row_json(row: sqlite3.Row, column: str, default: Any) -> Any:
+        """Decode a JSON-text column defensively.
+
+        Three failure modes, two signal levels:
+
+        * Missing column (legacy DB schema) → silent. Expected for older
+          DBs that pre-date the column being added; the pattern across
+          this file is migrate-then-validate, so an absent column self-
+          heals on next bootstrap.
+        * NULL / empty value → silent. No data is a valid state.
+        * Invalid JSON → ``logger.warning`` with the column name. Corrupt
+          payload is *not* expected and indicates either a writer bug
+          or row-level data corruption; an operator should see it.
+        """
+        try:
+            raw = row[column]
+        except (KeyError, IndexError):
+            return default
+        if raw and isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "Corrupt JSON in portfolio_snapshots.%s — returning default; error: %s",
+                    column,
+                    exc,
+                )
+                return default
+        return default
+
     def _row_to_portfolio_snapshot(self, row: sqlite3.Row) -> "PortfolioSnapshot":
         """Convert a SQLite row to PortfolioSnapshot.
 
@@ -1887,7 +2007,6 @@ class SQLiteStore:
         """
         from almanak.framework.portfolio.models import PortfolioSnapshot
 
-        # Parse timestamp
         timestamp = row["timestamp"]
         if isinstance(timestamp, str):
             timestamp = datetime.fromisoformat(timestamp)
@@ -1896,51 +2015,27 @@ class SQLiteStore:
             positions_payload = json.loads(positions_payload)
         positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
 
-        # Deserialize token_prices_json (new column, may not exist in old DBs)
-        token_prices: dict[str, dict] = {}
-        try:
-            tp_raw = row["token_prices_json"]
-            if tp_raw and isinstance(tp_raw, str):
-                token_prices = json.loads(tp_raw)
-        except (KeyError, json.JSONDecodeError):
-            pass
-
-        # Deserialize wallet_balances_json (new column, may not exist in old DBs)
-        wallet_balances_raw: list[dict] = []
-        try:
-            wb_raw = row["wallet_balances_json"]
-            if wb_raw and isinstance(wb_raw, str):
-                wallet_balances_raw = json.loads(wb_raw)
-        except (KeyError, json.JSONDecodeError):
-            pass
-
-        # Read VIB-3614 columns defensively (may not exist in older DBs)
-        deployed_capital_usd = "0"
-        wallet_total_value_usd = "0"
-        try:
-            deployed_capital_usd = str(row["deployed_capital_usd"] or "0")
-        except (KeyError, IndexError):
-            pass
-        try:
-            wallet_total_value_usd = str(row["wallet_total_value_usd"] or "0")
-        except (KeyError, IndexError):
-            pass
-
+        # VIB-4097 identity columns and VIB-3614 cash split columns are read
+        # defensively because legacy DBs pre-date them. The model's
+        # ``from_dict`` accepts the ``""`` / ``"0"`` defaults emitted here.
         return PortfolioSnapshot.from_dict(
             {
                 "timestamp": timestamp.isoformat(),
                 "strategy_id": row["strategy_id"],
                 "total_value_usd": str(row["total_value_usd"]),
                 "available_cash_usd": str(row["available_cash_usd"]),
-                "deployed_capital_usd": deployed_capital_usd,
-                "wallet_total_value_usd": wallet_total_value_usd,
+                "deployed_capital_usd": self._safe_row_str(row, "deployed_capital_usd", "0"),
+                "wallet_total_value_usd": self._safe_row_str(row, "wallet_total_value_usd", "0"),
                 "value_confidence": row["value_confidence"],
                 "positions": positions,
-                "wallet_balances": wallet_balances_raw,
-                "token_prices": token_prices,
+                "wallet_balances": self._safe_row_json(row, "wallet_balances_json", []),
+                "token_prices": self._safe_row_json(row, "token_prices_json", {}),
                 "chain": row["chain"] or "",
                 "iteration_number": row["iteration_number"] or 0,
                 "snapshot_metadata": snapshot_metadata,
+                "deployment_id": self._safe_row_str(row, "deployment_id", ""),
+                "cycle_id": self._safe_row_str(row, "cycle_id", ""),
+                "execution_mode": self._safe_row_str(row, "execution_mode", ""),
             }
         )
 

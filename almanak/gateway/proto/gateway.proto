@@ -269,6 +269,12 @@ message SaveSnapshotRequest {
   string value_confidence = 6;  // "HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"
   bytes positions_json = 7;  // JSON-serialized positions array
   string chain = 8;
+  // Phase 4 accounting identity (VIB-2835/2837/2839 / VIB-4091) — mirrors
+  // SaveMetricsRequest. Required for cycle_id correlation across
+  // transaction_ledger / portfolio_metrics / portfolio_snapshots.
+  string deployment_id = 9;
+  string cycle_id = 10;
+  string execution_mode = 11;
 }
 
 message SaveSnapshotResponse {
@@ -297,6 +303,10 @@ message SnapshotData {
   bytes positions_json = 7;
   string chain = 8;
   bool found = 9;  // False if no snapshot exists
+  // Phase 4 accounting identity (VIB-2835/2837/2839 / VIB-4091).
+  string deployment_id = 10;
+  string cycle_id = 11;
+  string execution_mode = 12;
 }
 
 message SnapshotList {

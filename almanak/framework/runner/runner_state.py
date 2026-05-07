@@ -36,6 +36,77 @@ logger = structlog.get_logger("almanak.framework.runner.strategy_runner")
 # -------------------------------------------------------------------------
 
 
+def _stamp_snapshot_identity(runner: Any, snapshot: PortfolioSnapshot) -> None:
+    """Copy runner-owned Phase 4 identity onto the snapshot before save.
+
+    VIB-4099 (PRD-Snapshot.md §3.8). The runner is the only component that
+    knows the current ``(deployment_id, cycle_id, execution_mode)`` triple;
+    stamp once, before any writer sees the object, so SQLite, Postgres,
+    the proto wire, and any subsequent round-trip read all agree.
+
+    This must be called at every snapshot persistence call site —
+    ``capture_portfolio_snapshot`` (success path) and
+    ``_persist_unavailable_on_failure`` (the most diagnostically valuable
+    row in the table; blanking its identity is the worst possible outcome).
+
+    Critical: ``StrategyRunner`` does NOT expose ``execution_mode`` as an
+    attribute. The production source of truth is
+    ``derive_execution_mode_from_config(runner.config)`` returning an
+    ``ExecutionMode`` enum (already used at strategy_runner.py:2172 for
+    ledger entries and on the metrics path below). Never read
+    ``getattr(runner, "execution_mode", "")`` — that path silently
+    returns ``""`` in production while passing on any test fake that
+    sets the attribute.
+    """
+    from almanak.framework.runner.strategy_runner import (
+        derive_execution_mode_from_config,
+    )
+
+    # cycle_id: prefer runner._last_cycle_id (survives clear_cycle_id in
+    # finally block); fall back to observability context for non-runner
+    # callers; finally fall back to whatever was already on the snapshot
+    # (e.g. the teardown lane stamps ``cycle_id = f"teardown-{tid}"`` onto
+    # the snapshot before save — never blank it). Mirrors
+    # ``_build_metrics_for_snapshot``.
+    existing_cycle_id = getattr(snapshot, "cycle_id", "") or ""
+    cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+    if not cycle_id:
+        try:
+            from almanak.framework.observability.context import get_cycle_id
+
+            cycle_id = get_cycle_id() or ""
+        except Exception:  # noqa: BLE001
+            cycle_id = ""
+    snapshot.cycle_id = cycle_id or existing_cycle_id
+
+    # deployment_id: prefer runner.deployment_id; then any value already
+    # on the snapshot (callers may have pre-stamped it); finally
+    # snapshot.strategy_id. The runner may not have its deployment_id set
+    # yet on the very first capture (May 7 Anvil verification:
+    # portfolio_metrics correctly used this fallback at
+    # _build_metrics_for_snapshot but the snapshot path did not, so
+    # portfolio_snapshots.deployment_id came out empty while
+    # portfolio_metrics.deployment_id was populated). Mirroring the
+    # metrics path keeps the two tables joinable on deployment_id.
+    snapshot.deployment_id = (
+        getattr(runner, "deployment_id", "") or getattr(snapshot, "deployment_id", "") or snapshot.strategy_id or ""
+    )
+
+    existing_mode = getattr(snapshot, "execution_mode", "") or ""
+    try:
+        mode = derive_execution_mode_from_config(runner.config)
+        snapshot.execution_mode = mode.value if hasattr(mode, "value") else str(mode)
+    except Exception:  # noqa: BLE001
+        # Defensive: never crash a snapshot save on a missing config —
+        # but log so the gap is visible in regression checks. Preserve any
+        # value the caller already stamped rather than blanking it.
+        logger.warning(
+            "_stamp_snapshot_identity: could not derive execution_mode for %s; preserving existing value",
+            getattr(snapshot, "strategy_id", "?"),
+        )
+        snapshot.execution_mode = existing_mode
+
+
 async def update_state(
     runner: Any,
     strategy_id: str,
@@ -544,6 +615,12 @@ async def _persist_unavailable_on_failure(
             now=now,
             error=str(error),
         )
+        # VIB-4099 (3.8) — UNAVAILABLE rows are the most diagnostically
+        # valuable rows in the table; blanking their identity is the worst
+        # possible outcome. Stamp before save so a forensic auditor can
+        # always answer "which cycle of which deployment failed at which
+        # mode" without joining against a possibly-empty metrics row.
+        _stamp_snapshot_identity(runner, unavailable_snapshot)
         await runner.state_manager.save_portfolio_snapshot(unavailable_snapshot)
         runner._last_snapshot_time = now
     except AccountingPersistenceError:
@@ -595,6 +672,14 @@ async def capture_portfolio_snapshot(
                 now=now,
                 error="No valuation path produced a portfolio snapshot",
             )
+
+        # VIB-4099 (3.8) — stamp Phase 4 identity onto the snapshot
+        # BEFORE any writer sees it, so SQLite + Postgres + proto + any
+        # subsequent round-trip read all agree on (deployment_id, cycle_id,
+        # execution_mode). The metrics builder below already derives the
+        # same values for PortfolioMetrics; the snapshot stamp closes the
+        # other half of the loop.
+        _stamp_snapshot_identity(runner, snapshot)
 
         # Build metrics for atomic co-write (VIB-2765).
         # VIB-3882: pass the strategy so its declared ``allocation_usd``

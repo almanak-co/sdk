@@ -339,6 +339,14 @@ def _snapshot_stub():
     snap.token_prices = None
     snap.wallet_balances = None
     snap.to_positions_payload = MagicMock(return_value={"positions": [], "metadata": {}})
+    # VIB-4091 (PR #2162): proto3 string fields require real strings, not
+    # MagicMock auto-attributes — without these explicit assignments the
+    # gateway client raises TypeError("bad argument type for built-in
+    # operation") inside ``SaveSnapshotRequest(deployment_id=...)``,
+    # masking the RPC-failure path the tests below intend to exercise.
+    snap.deployment_id = "s1"
+    snap.cycle_id = "c1"
+    snap.execution_mode = "live"
     return snap
 
 

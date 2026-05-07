@@ -590,6 +590,9 @@ class SaveSnapshotRequest(_message.Message):
     VALUE_CONFIDENCE_FIELD_NUMBER: _builtins.int
     POSITIONS_JSON_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     timestamp: _builtins.int
     """Unix epoch seconds"""
@@ -601,6 +604,13 @@ class SaveSnapshotRequest(_message.Message):
     positions_json: _builtins.bytes
     """JSON-serialized positions array"""
     chain: _builtins.str
+    deployment_id: _builtins.str
+    """Phase 4 accounting identity (VIB-2835/2837/2839 / VIB-4091) — mirrors
+    SaveMetricsRequest. Required for cycle_id correlation across
+    transaction_ledger / portfolio_metrics / portfolio_snapshots.
+    """
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
     def __init__(
         self,
         *,
@@ -612,8 +622,11 @@ class SaveSnapshotRequest(_message.Message):
         value_confidence: _builtins.str = ...,
         positions_json: _builtins.bytes = ...,
         chain: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveSnapshotRequest: _TypeAlias = SaveSnapshotRequest  # noqa: Y015
@@ -693,6 +706,9 @@ class SnapshotData(_message.Message):
     POSITIONS_JSON_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
     FOUND_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     strategy_id: _builtins.str
     timestamp: _builtins.int
     iteration_number: _builtins.int
@@ -703,6 +719,10 @@ class SnapshotData(_message.Message):
     chain: _builtins.str
     found: _builtins.bool
     """False if no snapshot exists"""
+    deployment_id: _builtins.str
+    """Phase 4 accounting identity (VIB-2835/2837/2839 / VIB-4091)."""
+    cycle_id: _builtins.str
+    execution_mode: _builtins.str
     def __init__(
         self,
         *,
@@ -715,8 +735,11 @@ class SnapshotData(_message.Message):
         positions_json: _builtins.bytes = ...,
         chain: _builtins.str = ...,
         found: _builtins.bool = ...,
+        deployment_id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "found", b"found", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "found", b"found", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SnapshotData: _TypeAlias = SnapshotData  # noqa: Y015
@@ -4300,7 +4323,20 @@ class TimelineEventInfo(_message.Message):
     cycle_id: _builtins.str
     phase: _builtins.str
     related_ledger_entry_id: _builtins.str
-    """Typed pointer to transaction_ledger.id (VIB-4041). Empty string when the event is not transaction-derived."""
+    """Typed pointer to transaction_ledger.id (VIB-4041) — the only permitted
+    timeline → ledger link (PRD-TimelineEvents §6.3). Non-empty: reliably
+    means a transaction-derived UX event whose money trail is on the
+    referenced ledger row (gas_used, amount_in/out, slippage_bps,
+    pnl_usd, …). Empty: ambiguous on its own. It can mean either (a) the
+    event is genuinely not transaction-derived (lifecycle / risk /
+    operator action) or (b) the row was written on a deployed gateway
+    whose Postgres host predates the metrics-database migration that
+    adds the `related_ledger_entry_id` column (the staged-rollout
+    capability gate at `_pg_supports_related_ledger` omits writes on
+    such hosts). Clients that need to disambiguate should consult
+    `event_type` / look for a same-cycle ledger row, not treat empty as
+    a definitive "UX-only" marker.
+    """
     def __init__(
         self,
         *,

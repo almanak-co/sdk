@@ -36,7 +36,20 @@ from __future__ import annotations
 # not yet read or write) are intentionally NOT listed here so a new SDK
 # build can be deployed before its companion metrics-database migration
 # without bricking startup.
-ACCOUNTING_SCHEMA_CONTRACT: dict[str, frozenset[str]] = {
+#
+# Identity column convention (CodeRabbit + Codex on PR #2162):
+#   - Local SQLite tables key on ``strategy_id`` (the SDK's wire-side
+#     name; this is what every writer in ``backends/sqlite.py`` writes).
+#   - Hosted Postgres tables key on ``agent_id`` (the deployed
+#     metrics-database name; the gateway maps wire-side ``strategy_id``
+#     → ``agent_id`` via ``resolve_agent_id`` before each PG INSERT /
+#     SELECT — see ``state_service.py:610`` and the read sites in
+#     ``state_manager.py:721/752/782``).
+# We therefore expose two contract dicts and two name maps so the
+# validator can introspect the right column names per backend. The
+# legacy ``ACCOUNTING_SCHEMA_CONTRACT`` alias points at the SQLite
+# variant for backwards compatibility with existing imports.
+ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
     "portfolio_snapshots": frozenset(
         {
             "id",
@@ -142,6 +155,27 @@ ACCOUNTING_SCHEMA_CONTRACT: dict[str, frozenset[str]] = {
         }
     ),
 }
+
+
+# Postgres variant: same table set, ``strategy_id`` → ``agent_id`` per
+# the deployed metrics-database schema. The transformation is
+# table-by-table because some accounting tables (``accounting_events``,
+# ``accounting_outbox``) historically carry both ``deployment_id`` AND
+# the strategy/agent key.
+def _swap_strategy_for_agent(cols: frozenset[str]) -> frozenset[str]:
+    return frozenset({"agent_id" if c == "strategy_id" else c for c in cols})
+
+
+ACCOUNTING_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
+    table: _swap_strategy_for_agent(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
+}
+
+
+# Backwards-compatibility alias. Existing call sites that import
+# ``ACCOUNTING_SCHEMA_CONTRACT`` get the SQLite-shaped contract — the
+# pre-split behaviour. The Postgres validator now imports the explicit
+# ``_POSTGRES`` variant.
+ACCOUNTING_SCHEMA_CONTRACT = ACCOUNTING_SCHEMA_CONTRACT_SQLITE
 
 
 class SchemaContractViolation(RuntimeError):

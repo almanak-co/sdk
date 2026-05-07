@@ -32,6 +32,57 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _apply_synth_position_guard(snapshot: "PortfolioSnapshot") -> None:
+    """Degrade a HIGH-confidence snapshot to ESTIMATED if it carries a
+    measured-zero-cost-basis position with non-zero value (VIB-3917 / 4098).
+
+    Pre-3.7 the predicate also fired when ``cost_basis_usd is None`` — a
+    legal "unmeasured" state for a freshly-discovered position. That
+    overreach silently re-degraded every snapshot back to ESTIMATED on
+    every iteration, producing the May 3 production class where the
+    dashboard's confidence pill never went green even with a healthy
+    accounting pipeline.
+
+    Truth table after 3.7:
+
+        cb              v               action
+        --------------  --------------  ------
+        None            *               leave HIGH (unmeasured ≠ zero)
+        Decimal("0")    None            leave HIGH (oracle silent)
+        Decimal("0")    Decimal("0")    leave HIGH (genuine zero position)
+        Decimal("0")    > 0             degrade   (true basis violation)
+        > 0             *               leave HIGH
+
+    Per-position degradation (instead of snapshot-wide) is a follow-up;
+    requires adding ``value_confidence`` to ``PositionValue``. This PRD
+    ships the ``None`` / ``Decimal(0)`` distinction first.
+    """
+    from almanak.framework.portfolio.models import ValueConfidence
+
+    if getattr(snapshot, "value_confidence", None) is None:
+        return
+    if snapshot.value_confidence != ValueConfidence.HIGH:
+        return
+
+    for pos in snapshot.positions or []:
+        cb = getattr(pos, "cost_basis_usd", None)
+        v = getattr(pos, "value_usd", None)
+        # True basis violation: handler measured zero cost (Decimal('0'))
+        # while oracle reports non-zero value. ``cb is None`` means
+        # "unmeasured" — legal for a freshly-discovered position; do
+        # NOT degrade.
+        if isinstance(cb, Decimal) and cb == Decimal("0") and v is not None and v > Decimal("0"):
+            logger.warning(
+                "VIB-3917: snapshot for %s carries HIGH+measured-zero-basis "
+                "position (value_usd=%s, cost_basis_usd=%s) — degrading to ESTIMATED",
+                snapshot.strategy_id,
+                v,
+                cb,
+            )
+            snapshot.value_confidence = ValueConfidence.ESTIMATED
+            return
+
+
 class GatewayStateManager:
     """StateManager that persists state through the gateway.
 
@@ -215,35 +266,11 @@ class GatewayStateManager:
             Snapshot ID from the database
         """
         try:
-            # VIB-3917 — writer-side raise: refuse to ship a snapshot that
-            # claims HIGH confidence while carrying a synthesised position
-            # whose cost_basis_usd is null. The May 3 production trace
-            # showed exactly this combination — a HIGH-confidence snapshot
-            # with a fabricated $0-cost-basis LP position because the
-            # accounting pipeline hadn't finished. CONF (VIB-3886) covers
-            # accounting_events; this covers snapshot_writes.
-            if getattr(snapshot, "value_confidence", None) and snapshot.value_confidence.value == "HIGH":
-                for pos in snapshot.positions or []:
-                    cb = getattr(pos, "cost_basis_usd", None)
-                    if cb is None or (isinstance(cb, Decimal) and cb == Decimal("0")):
-                        # cost_basis=0 by itself is legal (e.g. a freshly
-                        # tracked position whose handler hasn't priced yet).
-                        # But if value_usd is non-zero AND cost_basis is
-                        # zero/null while we claim HIGH confidence, the
-                        # books are lying. Degrade in-place.
-                        v = getattr(pos, "value_usd", None)
-                        if v is not None and v > Decimal("0"):
-                            from almanak.framework.portfolio.models import ValueConfidence
-
-                            logger.warning(
-                                "VIB-3917: snapshot for %s carries HIGH+synth position "
-                                "(value_usd=%s, cost_basis_usd=%s) — degrading to ESTIMATED",
-                                snapshot.strategy_id,
-                                v,
-                                cb,
-                            )
-                            snapshot.value_confidence = ValueConfidence.ESTIMATED
-                            break
+            # VIB-3917 / VIB-4098 (3.7) — guard extracted into module-level
+            # helper for testability and narrowed predicate (None ≠
+            # Decimal("0")). See ``_apply_synth_position_guard`` docstring
+            # for the full truth table.
+            _apply_synth_position_guard(snapshot)
 
             # VIB-3923 — to_positions_payload() now ALWAYS emits envelope shape.
             # The state_service on the receiving end unpacks it and persists
@@ -288,6 +315,12 @@ class GatewayStateManager:
                 value_confidence=snapshot.value_confidence.value,
                 positions_json=positions_bytes,
                 chain=snapshot.chain or "",
+                # VIB-4091/4094 — Phase 4 identity. Source of truth: the runner
+                # stamps these onto the snapshot before calling save (VIB-4099),
+                # mirroring how it stamps PortfolioMetrics today.
+                deployment_id=snapshot.deployment_id or "",
+                cycle_id=snapshot.cycle_id or "",
+                execution_mode=snapshot.execution_mode or "",
             )
             response = self._client.state.SavePortfolioSnapshot(request, timeout=self._timeout)
 
@@ -533,6 +566,12 @@ class GatewayStateManager:
             "chain": data.chain or "",
             "iteration_number": data.iteration_number,
             "snapshot_metadata": snapshot_metadata,
+            # VIB-4097 (3.6) — Phase 4 identity. Older gateways that
+            # pre-date VIB-4093 / 3.2 send default ``""`` for these
+            # fields; the model accepts that.
+            "deployment_id": getattr(data, "deployment_id", "") or "",
+            "cycle_id": getattr(data, "cycle_id", "") or "",
+            "execution_mode": getattr(data, "execution_mode", "") or "",
         }
 
         return PortfolioSnapshot.from_dict(snapshot_dict)

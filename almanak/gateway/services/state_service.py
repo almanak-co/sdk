@@ -551,7 +551,167 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 )
             return await conn.fetch(query, *args)
 
-    async def SavePortfolioSnapshot(  # noqa: C901
+    @staticmethod
+    def _validate_save_snapshot_payload(request: gateway_pb2.SaveSnapshotRequest) -> str | None:
+        """Return an error string if the request payload is invalid, else None.
+
+        Validates timestamp positivity, positions_json well-formedness, and
+        envelope shape (legacy list OR ``{positions: list, metadata: dict}``).
+        """
+        if request.timestamp <= 0:
+            return "timestamp must be positive"
+        if not request.positions_json:
+            return None
+        try:
+            positions_payload = json.loads(request.positions_json)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return "positions_json must be valid JSON"
+        is_legacy = isinstance(positions_payload, list)
+        is_envelope = (
+            isinstance(positions_payload, dict)
+            and isinstance(positions_payload.get("positions", []), list)
+            and isinstance(positions_payload.get("metadata", {}), dict)
+        )
+        if not (is_legacy or is_envelope):
+            return "positions_json must be a list or {positions: list, metadata: object}"
+        return None
+
+    # VIB-4095 (3.4) — Phase 4 identity columns
+    # (deployment_id/cycle_id/execution_mode) are persisted in hosted
+    # Postgres, mirroring the metrics-database schema for portfolio_metrics.
+    # ON CONFLICT preserves any existing non-empty identity (asymmetric
+    # write — once stamped, never blanked by a subsequent unstamped write).
+    _SAVE_SNAPSHOT_PG_SQL = """
+        INSERT INTO portfolio_snapshots (
+            agent_id, timestamp, iteration_number, total_value_usd,
+            available_cash_usd, value_confidence, positions_json, chain, created_at,
+            deployment_id, cycle_id, execution_mode
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
+        ON CONFLICT (agent_id, timestamp) DO UPDATE SET
+            iteration_number = EXCLUDED.iteration_number,
+            total_value_usd = EXCLUDED.total_value_usd,
+            available_cash_usd = EXCLUDED.available_cash_usd,
+            value_confidence = EXCLUDED.value_confidence,
+            positions_json = EXCLUDED.positions_json,
+            chain = EXCLUDED.chain,
+            deployment_id = CASE
+                WHEN portfolio_snapshots.deployment_id IS NULL
+                  OR portfolio_snapshots.deployment_id = ''
+                THEN EXCLUDED.deployment_id
+                ELSE portfolio_snapshots.deployment_id
+            END,
+            cycle_id = CASE
+                WHEN portfolio_snapshots.cycle_id IS NULL
+                  OR portfolio_snapshots.cycle_id = ''
+                THEN EXCLUDED.cycle_id
+                ELSE portfolio_snapshots.cycle_id
+            END,
+            execution_mode = CASE
+                WHEN portfolio_snapshots.execution_mode IS NULL
+                  OR portfolio_snapshots.execution_mode = ''
+                THEN EXCLUDED.execution_mode
+                ELSE portfolio_snapshots.execution_mode
+            END
+        RETURNING id
+        """
+
+    async def _save_snapshot_postgres(
+        self,
+        strategy_id: str,
+        ts: datetime,
+        now: datetime,
+        request: gateway_pb2.SaveSnapshotRequest,
+    ) -> int:
+        """Run the snapshot upsert against Postgres and return the row id."""
+        row = await self._snapshot_fetchrow(
+            self._SAVE_SNAPSHOT_PG_SQL,
+            strategy_id,
+            ts,
+            request.iteration_number,
+            request.total_value_usd,
+            request.available_cash_usd,
+            request.value_confidence or "HIGH",
+            request.positions_json.decode("utf-8") if request.positions_json else "[]",
+            request.chain,
+            now,
+            request.deployment_id or "",
+            request.cycle_id or "",
+            request.execution_mode or "",
+        )
+        return row["id"] if row else 0
+
+    @staticmethod
+    def _build_sqlite_snapshot(
+        strategy_id: str,
+        ts: datetime,
+        request: gateway_pb2.SaveSnapshotRequest,
+    ):
+        """Rebuild a PortfolioSnapshot from the wire request for the SQLite
+        writer. Pulls smuggled cash-split fields out of envelope metadata
+        (VIB-3894) and lifts token_prices / wallet_balances off the
+        envelope (Phase 1c)."""
+        from decimal import Decimal
+
+        from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+
+        snapshot = PortfolioSnapshot(
+            timestamp=ts,
+            strategy_id=strategy_id,
+            total_value_usd=Decimal(request.total_value_usd or "0"),
+            available_cash_usd=Decimal(request.available_cash_usd or "0"),
+            value_confidence=ValueConfidence(request.value_confidence or "HIGH"),
+            chain=request.chain,
+            iteration_number=request.iteration_number,
+            # VIB-4095 (3.4) — Phase 4 identity reaches the SQLite writer
+            # (VIB-4096 / 3.5) on the rebuilt object. Source: framework
+            # client (3.3) populated the proto from runner-stamped snapshot
+            # fields (3.8).
+            deployment_id=request.deployment_id or "",
+            cycle_id=request.cycle_id or "",
+            execution_mode=request.execution_mode or "",
+        )
+        if not request.positions_json:
+            return snapshot
+
+        positions_payload = json.loads(request.positions_json.decode("utf-8"))
+        positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
+        snapshot_dict = snapshot.to_dict()
+        snapshot_dict["positions"] = positions
+        snapshot_dict["snapshot_metadata"] = snapshot_metadata
+        # VIB-3894 — SaveSnapshotRequest is missing ``deployed_capital_usd``
+        # and ``wallet_total_value_usd`` on the proto wire. The runner's
+        # GatewayStateManager smuggles them through the envelope's metadata;
+        # lift them onto the rebuilt snapshot so the SQLite writer persists
+        # the actual values rather than the ``Decimal("0")`` default.
+        if isinstance(snapshot_metadata, dict):
+            dep_str = snapshot_metadata.pop("__deployed_capital_usd__", None)
+            wtv_str = snapshot_metadata.pop("__wallet_total_value_usd__", None)
+            if dep_str is not None:
+                snapshot_dict["deployed_capital_usd"] = str(dep_str)
+            if wtv_str is not None:
+                snapshot_dict["wallet_total_value_usd"] = str(wtv_str)
+        if isinstance(positions_payload, dict):
+            if "token_prices" in positions_payload:
+                snapshot_dict["token_prices"] = positions_payload["token_prices"]
+            if "wallet_balances" in positions_payload:
+                snapshot_dict["wallet_balances"] = positions_payload["wallet_balances"]
+        return PortfolioSnapshot.from_dict(snapshot_dict)
+
+    async def _save_snapshot_sqlite(
+        self,
+        strategy_id: str,
+        ts: datetime,
+        request: gateway_pb2.SaveSnapshotRequest,
+    ) -> int:
+        """Persist the snapshot via StateManager's warm SQLiteStore backend."""
+        await self._ensure_initialized()
+        assert self._state_manager is not None
+        warm = self._state_manager.warm_backend
+        assert warm is not None
+        snapshot = self._build_sqlite_snapshot(strategy_id, ts, request)
+        return await warm.save_portfolio_snapshot(snapshot)  # type: ignore[attr-defined]
+
+    async def SavePortfolioSnapshot(
         self,
         request: gateway_pb2.SaveSnapshotRequest,
         context: grpc.aio.ServicerContext,
@@ -564,131 +724,28 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.SaveSnapshotResponse(success=False, error=str(e))
 
-        # Validate payload before backend split
-        if request.timestamp <= 0:
+        payload_error = self._validate_save_snapshot_payload(request)
+        if payload_error:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("timestamp must be positive")
-            return gateway_pb2.SaveSnapshotResponse(success=False, error="timestamp must be positive")
-        if request.positions_json:
-            try:
-                positions_payload = json.loads(request.positions_json)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("positions_json must be valid JSON")
-                return gateway_pb2.SaveSnapshotResponse(success=False, error="positions_json must be valid JSON")
-
-            # Validate envelope shape: must be a list (legacy) or {positions: list, metadata: dict}
-            is_legacy = isinstance(positions_payload, list)
-            is_envelope = (
-                isinstance(positions_payload, dict)
-                and isinstance(positions_payload.get("positions", []), list)
-                and isinstance(positions_payload.get("metadata", {}), dict)
-            )
-            if not (is_legacy or is_envelope):
-                error = "positions_json must be a list or {positions: list, metadata: object}"
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(error)
-                return gateway_pb2.SaveSnapshotResponse(success=False, error=error)
+            context.set_details(payload_error)
+            return gateway_pb2.SaveSnapshotResponse(success=False, error=payload_error)
 
         strategy_id = resolve_agent_id(strategy_id)
         await self._ensure_snapshot_pool()
-
         ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
-        now = datetime.now(UTC)
 
-        if self._snapshot_pool is not None:
-            # PostgreSQL mode (deployed)
-            try:
-                row = await self._snapshot_fetchrow(
-                    """
-                    INSERT INTO portfolio_snapshots (
-                        agent_id, timestamp, iteration_number, total_value_usd,
-                        available_cash_usd, value_confidence, positions_json, chain, created_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
-                    ON CONFLICT (agent_id, timestamp) DO UPDATE SET
-                        iteration_number = EXCLUDED.iteration_number,
-                        total_value_usd = EXCLUDED.total_value_usd,
-                        available_cash_usd = EXCLUDED.available_cash_usd,
-                        value_confidence = EXCLUDED.value_confidence,
-                        positions_json = EXCLUDED.positions_json,
-                        chain = EXCLUDED.chain
-                    RETURNING id
-                    """,
-                    strategy_id,
-                    ts,
-                    request.iteration_number,
-                    request.total_value_usd,
-                    request.available_cash_usd,
-                    request.value_confidence or "HIGH",
-                    request.positions_json.decode("utf-8") if request.positions_json else "[]",
-                    request.chain,
-                    now,
-                )
-                snapshot_id = row["id"] if row else 0
-                return gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=snapshot_id)
-            except Exception as e:
-                logger.error(f"SavePortfolioSnapshot failed for {strategy_id}: {e}")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.SaveSnapshotResponse(success=False, error="internal server error")
-        else:
-            # SQLite mode (local dev) — delegate to StateManager's SQLiteStore
-            try:
-                await self._ensure_initialized()
-                assert self._state_manager is not None
-                warm = self._state_manager.warm_backend
-                assert warm is not None
-                from decimal import Decimal
-
-                from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
-
-                snapshot = PortfolioSnapshot(
-                    timestamp=ts,
-                    strategy_id=strategy_id,
-                    total_value_usd=Decimal(request.total_value_usd or "0"),
-                    available_cash_usd=Decimal(request.available_cash_usd or "0"),
-                    value_confidence=ValueConfidence(request.value_confidence or "HIGH"),
-                    chain=request.chain,
-                    iteration_number=request.iteration_number,
-                )
-                # Deserialize positions from JSON bytes
-                if request.positions_json:
-                    snapshot_dict = snapshot.to_dict()
-                    positions_payload = json.loads(request.positions_json.decode("utf-8"))
-                    positions, snapshot_metadata = PortfolioSnapshot.unpack_positions_payload(positions_payload)
-                    snapshot_dict["positions"] = positions
-                    snapshot_dict["snapshot_metadata"] = snapshot_metadata
-                    # VIB-3894 — SaveSnapshotRequest is missing
-                    # ``deployed_capital_usd`` and ``wallet_total_value_usd``
-                    # on the proto wire. The runner's GatewayStateManager
-                    # smuggles them through the envelope's metadata under
-                    # ``__deployed_capital_usd__`` / ``__wallet_total_value_usd__``
-                    # keys; lift them onto the rebuilt snapshot here so the
-                    # SQLite writer persists the actual values rather than
-                    # the ``Decimal("0")`` default. Backwards-compatible:
-                    # legacy snapshots without the keys default to "0".
-                    if isinstance(snapshot_metadata, dict):
-                        dep_str = snapshot_metadata.pop("__deployed_capital_usd__", None)
-                        wtv_str = snapshot_metadata.pop("__wallet_total_value_usd__", None)
-                        if dep_str is not None:
-                            snapshot_dict["deployed_capital_usd"] = str(dep_str)
-                        if wtv_str is not None:
-                            snapshot_dict["wallet_total_value_usd"] = str(wtv_str)
-                    # Extract accounting data from envelope (Phase 1c)
-                    if isinstance(positions_payload, dict):
-                        if "token_prices" in positions_payload:
-                            snapshot_dict["token_prices"] = positions_payload["token_prices"]
-                        if "wallet_balances" in positions_payload:
-                            snapshot_dict["wallet_balances"] = positions_payload["wallet_balances"]
-                    snapshot = PortfolioSnapshot.from_dict(snapshot_dict)
-
-                snapshot_id = await warm.save_portfolio_snapshot(snapshot)  # type: ignore[attr-defined]
-                return gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=snapshot_id)
-            except Exception as e:
-                logger.error(f"SavePortfolioSnapshot (SQLite) failed for {strategy_id}: {e}")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.SaveSnapshotResponse(success=False, error="internal server error")
+        backend_label = "Postgres" if self._snapshot_pool is not None else "SQLite"
+        try:
+            if self._snapshot_pool is not None:
+                snapshot_id = await self._save_snapshot_postgres(strategy_id, ts, datetime.now(UTC), request)
+            else:
+                snapshot_id = await self._save_snapshot_sqlite(strategy_id, ts, request)
+            return gateway_pb2.SaveSnapshotResponse(success=True, snapshot_id=snapshot_id)
+        except Exception as e:
+            logger.error(f"SavePortfolioSnapshot ({backend_label}) failed for {strategy_id}: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SaveSnapshotResponse(success=False, error="internal server error")
 
     async def GetLatestSnapshot(
         self,
@@ -775,6 +832,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             positions_json=positions_bytes,
             chain=snapshot.chain or "",
             found=True,
+            # VIB-4097 (3.6) — Phase 4 identity on the read response.
+            deployment_id=getattr(snapshot, "deployment_id", "") or "",
+            cycle_id=getattr(snapshot, "cycle_id", "") or "",
+            execution_mode=getattr(snapshot, "execution_mode", "") or "",
         )
 
     # =========================================================================

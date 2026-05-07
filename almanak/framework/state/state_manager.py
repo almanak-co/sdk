@@ -723,7 +723,8 @@ class PostgresStore:
                        value_confidence, positions_json::text AS positions_text,
                        token_prices_json::text AS token_prices_text,
                        wallet_balances_json::text AS wallet_balances_text,
-                       chain
+                       chain,
+                       deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
                 WHERE agent_id = $1
                 ORDER BY timestamp DESC
@@ -753,7 +754,8 @@ class PostgresStore:
                        value_confidence, positions_json::text AS positions_text,
                        token_prices_json::text AS token_prices_text,
                        wallet_balances_json::text AS wallet_balances_text,
-                       chain
+                       chain,
+                       deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
                 WHERE agent_id = $1 AND timestamp >= $2
                 ORDER BY timestamp ASC
@@ -782,7 +784,8 @@ class PostgresStore:
                        value_confidence, positions_json::text AS positions_text,
                        token_prices_json::text AS token_prices_text,
                        wallet_balances_json::text AS wallet_balances_text,
-                       chain
+                       chain,
+                       deployment_id, cycle_id, execution_mode
                 FROM portfolio_snapshots
                 WHERE agent_id = $1 AND timestamp <= $2
                 ORDER BY timestamp DESC
@@ -1082,6 +1085,12 @@ def _pg_row_to_portfolio_snapshot(row: Any) -> "PortfolioSnapshot":
             "chain": row["chain"] or "",
             "iteration_number": row["iteration_number"] or 0,
             "snapshot_metadata": snapshot_metadata,
+            # VIB-4097 (3.6) — Phase 4 identity, defensive read for legacy
+            # rows. Older Postgres rows that pre-date VIB-4095 / 3.4 return
+            # ``""`` rather than raising.
+            "deployment_id": row.get("deployment_id") or "",
+            "cycle_id": row.get("cycle_id") or "",
+            "execution_mode": row.get("execution_mode") or "",
         }
     )
 

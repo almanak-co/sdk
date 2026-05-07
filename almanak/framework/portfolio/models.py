@@ -180,6 +180,13 @@ class PortfolioSnapshot:
     iteration_number: int = 0
     snapshot_metadata: dict[str, Any] = field(default_factory=dict)
 
+    # Phase 4 accounting identity (VIB-2835/2837/2839) — mirrors PortfolioMetrics.
+    # Stamped by the runner before persistence (VIB-4099). Required for cycle_id
+    # correlation across transaction_ledger / portfolio_metrics / portfolio_snapshots.
+    deployment_id: str = ""
+    cycle_id: str = ""
+    execution_mode: str = ""  # "live" | "paper" | "dry_run" | "backtest"
+
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
         if isinstance(self.total_value_usd, int | float | str):
@@ -226,6 +233,10 @@ class PortfolioSnapshot:
             "token_prices": self.token_prices,
             "chain": self.chain,
             "iteration_number": self.iteration_number,
+            # Phase 4 identity (VIB-4091)
+            "deployment_id": self.deployment_id,
+            "cycle_id": self.cycle_id,
+            "execution_mode": self.execution_mode,
         }
         if self.snapshot_metadata:
             data["snapshot_metadata"] = self.snapshot_metadata
@@ -321,6 +332,10 @@ class PortfolioSnapshot:
             chain=data.get("chain", ""),
             iteration_number=data.get("iteration_number", 0),
             snapshot_metadata=data.get("snapshot_metadata", {}),
+            # Phase 4 identity (VIB-4091) — defensive `""` defaults for legacy rows.
+            deployment_id=data.get("deployment_id", ""),
+            cycle_id=data.get("cycle_id", ""),
+            execution_mode=data.get("execution_mode", ""),
         )
 
     @staticmethod

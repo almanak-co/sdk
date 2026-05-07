@@ -21,6 +21,7 @@ import pytest
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.schema_contract import (
     ACCOUNTING_SCHEMA_CONTRACT,
+    ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
     SchemaContractViolation,
     format_violations,
 )
@@ -68,6 +69,36 @@ def test_t_3763_2_contract_columns_are_non_empty() -> None:
     for table, cols in ACCOUNTING_SCHEMA_CONTRACT.items():
         assert cols, f"contract for {table} is empty"
         assert all(isinstance(c, str) and c for c in cols), table
+
+
+def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
+    """T-3763-2b (PR #2162 / Codex): the PG contract uses ``agent_id``
+    everywhere the SQLite contract uses ``strategy_id`` — and ONLY there.
+
+    Locks the rename invariant: a future drift between deployed
+    metrics-database column names and ``ACCOUNTING_SCHEMA_CONTRACT_POSTGRES``
+    will fail this test loudly rather than silently bricking the hosted
+    validator.
+    """
+    sqlite = ACCOUNTING_SCHEMA_CONTRACT  # alias to SQLite variant
+    assert set(sqlite) == set(ACCOUNTING_SCHEMA_CONTRACT_POSTGRES), "PG and SQLite contracts must cover the same tables"
+    for table in sqlite:
+        sqlite_cols = sqlite[table]
+        pg_cols = ACCOUNTING_SCHEMA_CONTRACT_POSTGRES[table]
+        # ``strategy_id`` must NOT appear in any PG-shaped contract.
+        assert "strategy_id" not in pg_cols, f"{table}: PG contract still lists 'strategy_id' — should be 'agent_id'"
+        # If ``strategy_id`` was in the SQLite contract, ``agent_id``
+        # must be in the PG contract for the same table.
+        if "strategy_id" in sqlite_cols:
+            assert "agent_id" in pg_cols, f"{table}: SQLite has strategy_id but PG is missing agent_id"
+        # Every other column must be identical.
+        sqlite_other = sqlite_cols - {"strategy_id"}
+        pg_other = pg_cols - {"agent_id"}
+        assert sqlite_other == pg_other, (
+            f"{table}: PG contract diverges from SQLite outside the "
+            f"strategy_id↔agent_id rename: "
+            f"{(sqlite_other - pg_other) | (pg_other - sqlite_other)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -185,10 +216,13 @@ def _make_pg_mock(
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_t_3763_7_postgres_clean_passes() -> None:
-    """T-3763-7: PG with all required columns passes."""
-    full_columns = {
-        table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT.items()
-    }
+    """T-3763-7: PG with all required columns passes.
+
+    Uses ``ACCOUNTING_SCHEMA_CONTRACT_POSTGRES`` (``agent_id`` instead of
+    ``strategy_id``) — the deployed metrics-database shape, not the SDK
+    SQLite shape (per Codex review on PR #2162).
+    """
+    full_columns = {table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items()}
     connect, _ = _make_pg_mock(full_columns)
     with patch("asyncpg.connect", connect):
         await validate_postgres_schema_or_raise("postgres://user:pass@host/db")
@@ -200,9 +234,7 @@ async def test_t_3763_7_postgres_clean_passes() -> None:
 @pytest.mark.asyncio
 async def test_t_3763_8_postgres_missing_column_raises() -> None:
     """T-3763-8: PG missing a single column raises with that column named."""
-    full_columns = {
-        table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT.items()
-    }
+    full_columns = {table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items()}
     full_columns["transaction_ledger"].remove("post_state_json")
     connect, _ = _make_pg_mock(full_columns)
     with patch("asyncpg.connect", connect):
@@ -229,11 +261,10 @@ async def test_t_3763_9_postgres_validator_never_issues_ddl() -> None:
 
     async def _fetch(query: str, *args):
         issued_queries.append(query)
-        # Return everything required so we don't raise.
+        # Return everything required so we don't raise. Use the PG-shaped
+        # contract since this exercises the hosted validator.
         table = args[-1]
-        return [
-            {"column_name": c} for c in ACCOUNTING_SCHEMA_CONTRACT.get(table, set())
-        ]
+        return [{"column_name": c} for c in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.get(table, set())]
 
     fake_conn = MagicMock()
     fake_conn.fetch = _fetch
@@ -246,9 +277,7 @@ async def test_t_3763_9_postgres_validator_never_issues_ddl() -> None:
     assert issued_queries, "validator did not issue any query"
     for q in issued_queries:
         normalized = q.strip().upper()
-        assert normalized.startswith("SELECT "), (
-            f"validator issued non-SELECT query (potential DDL): {q!r}"
-        )
+        assert normalized.startswith("SELECT "), f"validator issued non-SELECT query (potential DDL): {q!r}"
         for forbidden in ("ALTER", "CREATE", "DROP", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
             assert forbidden not in normalized.split(), (
                 f"validator query contains forbidden DDL/DML token {forbidden!r}: {q!r}"
@@ -261,9 +290,7 @@ async def test_t_3763_9_postgres_validator_never_issues_ddl() -> None:
 @pytest.mark.asyncio
 async def test_t_3763_10_postgres_missing_table_reports_all_columns() -> None:
     """T-3763-10: a missing table is treated as 'every column missing'."""
-    full_columns = {
-        table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT.items()
-    }
+    full_columns = {table: list(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES.items()}
     full_columns["accounting_events"] = []  # table missing entirely
     connect, _ = _make_pg_mock(full_columns)
     with patch("asyncpg.connect", connect):
@@ -333,9 +360,7 @@ async def test_validate_state_schema_at_boot_hosted_without_database_url_fails(
 
 
 @pytest.mark.asyncio
-async def test_validate_state_schema_at_boot_routes_to_sqlite(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+async def test_validate_state_schema_at_boot_routes_to_sqlite(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """Boot helper must call SQLite migrations + validator in local mode."""
     from almanak.gateway._server_start_helpers import validate_state_schema_at_boot
 
@@ -355,6 +380,9 @@ async def test_validate_state_schema_at_boot_routes_to_sqlite(
 
     sq_validate.assert_called_once_with(db_path)
     # Migrations actually ran — file exists, tables present.
-    assert sqlite3.connect(db_path).execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio_snapshots'"
-    ).fetchone() is not None
+    assert (
+        sqlite3.connect(db_path)
+        .execute("SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio_snapshots'")
+        .fetchone()
+        is not None
+    )
