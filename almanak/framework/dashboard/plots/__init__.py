@@ -41,15 +41,20 @@ from almanak.framework.dashboard.plots.base import (
 
 # Lending protocol plots
 from almanak.framework.dashboard.plots.lending_plots import (
+    LendingPosition,
     plot_borrow_utilization,
     plot_collateral_breakdown,
     plot_health_factor_gauge,
+    plot_health_factor_history,
+    plot_lending_position_summary,
     plot_lending_rates_comparison,
     plot_ltv_ratio,
 )
 
 # LP/DEX plots
 from almanak.framework.dashboard.plots.lp_plots import (
+    PositionData,
+    TickData,
     plot_fee_accumulation,
     plot_impermanent_loss,
     plot_liquidity_distribution,
@@ -59,15 +64,19 @@ from almanak.framework.dashboard.plots.lp_plots import (
 
 # Perpetuals plots
 from almanak.framework.dashboard.plots.perp_plots import (
+    PerpPosition,
     plot_funding_rate_history,
     plot_leverage_gauge,
     plot_liquidation_levels,
     plot_perp_position_dashboard,
+    plot_pnl_by_market,
 )
 
 # Portfolio plots
 from almanak.framework.dashboard.plots.portfolio_plots import (
+    TradeRecord,
     plot_asset_allocation,
+    plot_daily_pnl_heatmap,
     plot_pnl_waterfall,
     plot_portfolio_value_over_time,
     plot_trade_history,
@@ -75,6 +84,7 @@ from almanak.framework.dashboard.plots.portfolio_plots import (
 
 # Prediction market plots
 from almanak.framework.dashboard.plots.prediction_plots import (
+    PredictionPosition,
     plot_arbitrage_opportunity,
     plot_market_outcomes,
     plot_prediction_pnl_breakdown,
@@ -84,6 +94,7 @@ from almanak.framework.dashboard.plots.prediction_plots import (
 
 # Technical analysis plots
 from almanak.framework.dashboard.plots.ta_plots import (
+    TAMetrics,
     calculate_ta_metrics,
     plot_atr_indicator,
     plot_bollinger_bands,
@@ -104,10 +115,20 @@ __all__ = [
     "PlotResult",
     "get_default_config",
     "hex_to_rgba",
+    # Public dataclasses (constructed by callers to pass data into plots)
+    "LendingPosition",
+    "PerpPosition",
+    "PositionData",
+    "PredictionPosition",
+    "TAMetrics",
+    "TickData",
+    "TradeRecord",
     # Lending plots
     "plot_borrow_utilization",
     "plot_collateral_breakdown",
     "plot_health_factor_gauge",
+    "plot_health_factor_history",
+    "plot_lending_position_summary",
     "plot_lending_rates_comparison",
     "plot_ltv_ratio",
     # LP plots
@@ -121,8 +142,10 @@ __all__ = [
     "plot_leverage_gauge",
     "plot_liquidation_levels",
     "plot_perp_position_dashboard",
+    "plot_pnl_by_market",
     # Portfolio plots
     "plot_asset_allocation",
+    "plot_daily_pnl_heatmap",
     "plot_pnl_waterfall",
     "plot_portfolio_value_over_time",
     "plot_trade_history",
