@@ -4,6 +4,20 @@ Lending Protocol Dashboard Template.
 Reusable template for creating dashboards for lending strategies on protocols
 like Aave V3, Morpho Blue, Compound V3, and Spark.
 
+Scope (single-signal / single-position): the template renders **one**
+collateral / borrow pair with **one** scalar health factor and LTV — the
+shape of a single supply-borrow loop. Multi-collateral is partially
+supported through ``collateral_assets`` (a dict feeding the breakdown
+plot), but the headline metrics remain singular. The 3 accounting
+sections (PnL, Cost Stack, Trade Tape) are baked in so every lending
+dashboard ships with full accounting. For multi-signal layouts (e.g.
+"supply on Aave + supply on Morpho" as separate motivations), do not
+parameterize this template — write a custom dashboard composed from the
+section helpers (``render_pnl_section``, ``render_cost_stack_section``,
+``render_trade_tape_section``) plus primitive plot helpers from
+``almanak.framework.dashboard.plots`` directly. See the dashboard
+blueprints for the recommended composition.
+
 Usage:
     from almanak.framework.dashboard.templates import LendingDashboardConfig, render_lending_dashboard
 
@@ -29,6 +43,11 @@ from almanak.framework.dashboard.plots import (
     plot_health_factor_gauge,
     plot_lending_rates_comparison,
     plot_ltv_ratio,
+)
+from almanak.framework.dashboard.sections import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
 )
 
 
@@ -73,6 +92,12 @@ def render_lending_dashboard(
 ) -> None:
     """Render a lending strategy dashboard using the provided configuration.
 
+    Single-signal / single-position template — one collateral/borrow pair
+    with scalar health factor and LTV. Bakes in the 3 accounting sections
+    (PnL → primitive content → Cost Stack → Trade Tape). For multi-
+    position or multi-signal layouts, compose a custom dashboard from
+    the section helpers directly rather than parameterizing this template.
+
     Args:
         strategy_id: The strategy identifier
         strategy_config: Strategy configuration dictionary
@@ -91,7 +116,8 @@ def render_lending_dashboard(
     st.markdown(f"**Collateral:** {collateral_token} | **Borrow:** {borrow_token}")
     st.markdown(f"**Chain:** {chain.title()}")
 
-    st.divider()
+    # Eyeball — am I making or losing money?
+    render_pnl_section(strategy_id)
 
     # Health Factor and LTV Section
     col1, col2 = st.columns(2)
@@ -181,6 +207,10 @@ def render_lending_dashboard(
     # Performance Summary
     st.subheader("Performance Summary")
     _render_performance_summary(session_state)
+
+    # Audit — life-to-date costs + per-intent trade tape
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position_details(

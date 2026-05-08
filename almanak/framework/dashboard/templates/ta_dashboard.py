@@ -4,6 +4,17 @@ Technical Analysis (TA) Dashboard Template.
 Reusable template for creating dashboards for indicator-based strategies.
 Supports any TA indicator with configurable signal logic and visualization.
 
+Scope (single-signal / single-position): the template is designed for one
+signal driving one position on one ``base_token``/``quote_token`` pair.
+The 3 accounting sections (PnL, Cost Stack, Trade Tape) are baked in so
+every TA dashboard ships with full accounting by default. For multi-
+position or multi-signal layouts, do **not** stretch this template — write
+a custom dashboard composed from the section helpers
+(``render_pnl_section``, ``render_cost_stack_section``,
+``render_trade_tape_section``) plus primitive plot helpers from
+``almanak.framework.dashboard.plots``. See the dashboard blueprints for
+the recommended composition.
+
 Usage:
     from almanak.framework.dashboard.templates import TADashboardConfig, render_ta_dashboard
 
@@ -31,6 +42,11 @@ from plotly.subplots import make_subplots
 
 from almanak.framework.dashboard.plots import plot_price_with_signals
 from almanak.framework.dashboard.plots.base import get_default_config
+from almanak.framework.dashboard.sections import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
+)
 
 
 @dataclass
@@ -80,6 +96,12 @@ def render_ta_dashboard(
 ) -> None:
     """Render a technical analysis dashboard using the provided configuration.
 
+    Single-signal / single-position template — one indicator driving one
+    position on one configured pair. Bakes in the 3 accounting sections
+    (PnL → primitive content → Cost Stack → Trade Tape). For multi-
+    position or multi-signal layouts, compose a custom dashboard from
+    the section helpers directly rather than parameterizing this template.
+
     Args:
         strategy_id: The strategy identifier
         strategy_config: Strategy configuration dictionary
@@ -99,7 +121,8 @@ def render_ta_dashboard(
     st.markdown(f"**Pair:** {base_token}/{quote_token}")
     st.markdown(f"**Chain:** {chain} | **Protocol:** {protocol}")
 
-    st.divider()
+    # Eyeball — am I making or losing money?
+    render_pnl_section(strategy_id)
 
     # Indicator section
     _render_indicator_section(session_state, strategy_config, config, period)
@@ -125,6 +148,10 @@ def render_ta_dashboard(
     # Performance section
     st.subheader("Performance")
     _render_performance(session_state)
+
+    # Audit — life-to-date costs + per-intent trade tape
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_indicator_section(

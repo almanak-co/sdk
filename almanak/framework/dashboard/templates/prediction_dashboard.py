@@ -4,6 +4,20 @@ Prediction Market Dashboard Template.
 Reusable template for creating dashboards for prediction market strategies
 on platforms like Polymarket.
 
+Scope (single-signal / single-position): the template renders **one**
+active market with **one** YES/NO position. ``market_id`` /
+``yes_shares`` / ``no_shares`` / ``cost_basis`` are scalars; an account
+holding positions across multiple markets simultaneously is not modelled
+in the headline panels (the optional ``tracked_markets`` plot is
+informational only). The 3 accounting sections (PnL, Cost Stack, Trade
+Tape) are baked in so every prediction dashboard ships with full
+accounting. For multi-market or multi-signal layouts (e.g. an arbitrage
+basket spanning N markets), do not parameterize this template — write a
+custom dashboard composed from the section helpers (``render_pnl_section``,
+``render_cost_stack_section``, ``render_trade_tape_section``) plus
+primitive plot helpers from ``almanak.framework.dashboard.plots``
+directly. See the dashboard blueprints for the recommended composition.
+
 Usage:
     from almanak.framework.dashboard.templates import PredictionDashboardConfig, render_prediction_dashboard
 
@@ -29,6 +43,11 @@ from almanak.framework.dashboard.plots import (
 from almanak.framework.dashboard.plots.prediction_plots import (
     plot_arbitrage_opportunity,
     plot_prediction_pnl_breakdown,
+)
+from almanak.framework.dashboard.sections import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
 )
 
 
@@ -63,6 +82,12 @@ def render_prediction_dashboard(
 ) -> None:
     """Render a prediction market strategy dashboard using the provided configuration.
 
+    Single-signal / single-position template — one active market with
+    one YES/NO position. Bakes in the 3 accounting sections (PnL →
+    primitive content → Cost Stack → Trade Tape). For multi-position or
+    multi-signal layouts, compose a custom dashboard from the section
+    helpers directly rather than parameterizing this template.
+
     Args:
         strategy_id: The strategy identifier
         strategy_config: Strategy configuration dictionary
@@ -78,7 +103,8 @@ def render_prediction_dashboard(
     st.markdown(f"**Strategy ID:** `{strategy_id}`")
     st.markdown(f"**Chain:** {chain.title()}")
 
-    st.divider()
+    # Eyeball — am I making or losing money?
+    render_pnl_section(strategy_id)
 
     # Active Market Info
     market_question = session_state.get("market_question", "")
@@ -192,6 +218,10 @@ def render_prediction_dashboard(
     # Performance Summary
     st.subheader("Performance Summary")
     _render_performance_summary(session_state)
+
+    # Audit — life-to-date costs + per-intent trade tape
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position_details(session_state: dict[str, Any]) -> None:

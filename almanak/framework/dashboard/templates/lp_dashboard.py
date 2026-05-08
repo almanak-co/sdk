@@ -4,6 +4,19 @@ Liquidity Provider (LP) Dashboard Template.
 Reusable template for creating dashboards for LP strategies on concentrated
 liquidity protocols like Uniswap V3, PancakeSwap V3, TraderJoe V2, and Aerodrome.
 
+Scope (single-signal / single-position): the template renders **one**
+active LP position on **one** ``token0``/``token1`` pair. ``LPSessionState``
+is intentionally scalar (``position_id``, ``range_lower``, ``range_upper``);
+strategies that hold multiple LP NFTs simultaneously are not modelled here
+even though the gateway data model (``PositionSummary.lp_positions``) is
+multi-aware. The 3 accounting sections (PnL, Cost Stack, Trade Tape) are
+baked in so every LP dashboard ships with full accounting. For multi-
+position or multi-signal layouts, compose a custom dashboard from the
+section helpers (``render_pnl_section``, ``render_cost_stack_section``,
+``render_trade_tape_section``) plus primitive plot helpers from
+``almanak.framework.dashboard.plots`` directly. See the dashboard
+blueprints for the recommended composition.
+
 Usage:
     from almanak.framework.dashboard.templates import (
         LPDashboardConfig,
@@ -34,6 +47,11 @@ from almanak.framework.dashboard.plots import (
     plot_liquidity_distribution,
     plot_position_range_status,
     plot_positions_over_time,
+)
+from almanak.framework.dashboard.sections import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
 )
 
 
@@ -241,6 +259,12 @@ def render_lp_dashboard(
 ) -> None:
     """Render an LP strategy dashboard using the provided configuration.
 
+    Single-signal / single-position template — renders one active LP
+    position on one configured pair. Bakes in the 3 accounting sections
+    (PnL → primitive content → Cost Stack → Trade Tape). For multi-
+    position or multi-signal layouts, compose a custom dashboard from
+    the section helpers directly rather than parameterizing this template.
+
     Args:
         strategy_id: The strategy identifier
         strategy_config: Strategy configuration dictionary
@@ -271,7 +295,8 @@ def render_lp_dashboard(
     st.markdown(f"**Pool:** {token0}/{token1} ({fee_tier})")
     st.markdown(f"**Chain:** {chain.title()}")
 
-    st.divider()
+    # Eyeball — am I making or losing money?
+    render_pnl_section(strategy_id)
 
     # Position Status Section
     st.subheader("Position Status")
@@ -379,6 +404,10 @@ def render_lp_dashboard(
     # Performance Summary
     st.subheader("Performance Summary")
     _render_performance_summary(session_state)
+
+    # Audit — life-to-date costs + per-intent trade tape
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position_status(

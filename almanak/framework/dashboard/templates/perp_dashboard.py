@@ -4,6 +4,19 @@ Perpetual Futures Dashboard Template.
 Reusable template for creating dashboards for perpetual trading strategies
 on protocols like GMX V2 and Hyperliquid.
 
+Scope (single-signal / single-position): the template renders **one**
+perp position on **one** market. ``has_position`` is a boolean and
+``entry_price`` / ``is_long`` / ``liquidation_price`` are scalars; an
+account holding multiple perps simultaneously is not modelled here. The
+3 accounting sections (PnL, Cost Stack, Trade Tape) are baked in so every
+perp dashboard ships with full accounting. For multi-position or
+multi-signal layouts (e.g. a basket of perp legs hedging spot exposure),
+do not parameterize this template — write a custom dashboard composed
+from the section helpers (``render_pnl_section``,
+``render_cost_stack_section``, ``render_trade_tape_section``) plus
+primitive plot helpers from ``almanak.framework.dashboard.plots``
+directly. See the dashboard blueprints for the recommended composition.
+
 Usage:
     from almanak.framework.dashboard.templates import PerpDashboardConfig, render_perp_dashboard
 
@@ -28,6 +41,11 @@ from almanak.framework.dashboard.plots import (
     plot_leverage_gauge,
     plot_liquidation_levels,
     plot_perp_position_dashboard,
+)
+from almanak.framework.dashboard.sections import (
+    render_cost_stack_section,
+    render_pnl_section,
+    render_trade_tape_section,
 )
 
 
@@ -68,6 +86,12 @@ def render_perp_dashboard(
 ) -> None:
     """Render a perpetual futures strategy dashboard using the provided configuration.
 
+    Single-signal / single-position template — one perp position on one
+    market. Bakes in the 3 accounting sections (PnL → primitive content
+    → Cost Stack → Trade Tape). For multi-position or multi-signal
+    layouts, compose a custom dashboard from the section helpers
+    directly rather than parameterizing this template.
+
     Args:
         strategy_id: The strategy identifier
         strategy_config: Strategy configuration dictionary
@@ -87,7 +111,8 @@ def render_perp_dashboard(
     st.markdown(f"**Market:** {market}")
     st.markdown(f"**Collateral:** {collateral_token} | **Chain:** {chain.title()}")
 
-    st.divider()
+    # Eyeball — am I making or losing money?
+    render_pnl_section(strategy_id)
 
     # Position Overview
     if config.show_position_dashboard and session_state.get("has_position"):
@@ -179,6 +204,10 @@ def render_perp_dashboard(
     # Performance Summary
     st.subheader("Performance Summary")
     _render_performance_summary(session_state)
+
+    # Audit — life-to-date costs + per-intent trade tape
+    render_cost_stack_section(strategy_id)
+    render_trade_tape_section(strategy_id)
 
 
 def _render_position_metrics(
