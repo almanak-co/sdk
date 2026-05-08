@@ -1,20 +1,17 @@
-"""AccountingProcessor intent classifier — maps (intent_type, protocol, token_out) to AccountingCategory."""
+"""AccountingProcessor intent classifier — maps (intent_type, protocol, token_out) to AccountingCategory.
+
+VIB-4161 (T1): :class:`AccountingCategory` now lives in
+``almanak.framework.primitives.types`` and is re-exported here for
+back-compat. The :func:`classify` function is kept as the local routing
+authority for one release; T2 (VIB-4163 et al.) re-points consumers at
+``primitives.taxonomy.classify`` and deletes this local copy.
+"""
 
 from __future__ import annotations
 
-from enum import StrEnum
+from almanak.framework.primitives.types import AccountingCategory
 
-
-class AccountingCategory(StrEnum):
-    LENDING = "lending"
-    PENDLE_LP = "pendle_lp"
-    PENDLE_PT = "pendle_pt"
-    LP = "lp"
-    PERP = "perp"
-    VAULT = "vault"
-    SWAP = "swap"
-    PREDICTION = "prediction"
-    NO_ACCOUNTING = "no_accounting"
+__all__ = ["AccountingCategory", "classify"]
 
 
 _LENDING_TYPES: frozenset[str] = frozenset({"SUPPLY", "BORROW", "REPAY", "DELEVERAGE", "WITHDRAW"})

@@ -1,0 +1,426 @@
+"""Declarative primitives taxonomy table and lookup API.
+
+The :data:`TAXONOMY` table is the single canonical mapping from canonical
+intent string to :class:`~almanak.framework.primitives.types.PrimitiveRecord`.
+It covers every value of ``IntentType`` declared in
+``almanak/framework/intents/vocabulary.py`` (see VIB-4159 ratified design).
+
+Design rules:
+    - Keyed by **string** intent type (not the ``IntentType`` enum) to avoid
+      re-introducing the import cycle the taxonomy is meant to break.
+    - :data:`ALIASES` maps legacy / ghost intent strings (e.g. the never-declared
+      ``"VAULT_WITHDRAW"``) to their canonical equivalents. Lookups go through
+      :func:`_resolve_alias` so callers can pass either.
+    - Lookups are case-sensitive on the canonical form (uppercase). Inputs
+      are normalised by upper-casing, matching the existing classifier.
+    - Five placeholder rows (``LIQUIDATE``, ``OPEN_CDP``, ``MINT_STABLE``,
+      ``REPAY_STABLE``, ``CLOSE_CDP``) are added in T5 (VIB-4165) — they live
+      in the same shred-tree.
+"""
+
+from __future__ import annotations
+
+from almanak.framework.primitives.types import (
+    AccountingCategory,
+    EventKind,
+    LifecyclePhase,
+    PositionKind,
+    Primitive,
+    PrimitiveRecord,
+)
+
+ALIASES: dict[str, str] = {
+    # Ghost name from accounting/classifier.py:24 (pre-VIB-4161). The intent
+    # was never declared in IntentType but the classifier still accepted it.
+    # Resolving here keeps any caller that still passes the legacy spelling
+    # working until T2 deletes the classifier-side acceptance.
+    "VAULT_WITHDRAW": "VAULT_REDEEM",
+}
+
+
+def _resolve_alias(intent_type: str) -> str:
+    """Return the canonical (upper-cased, alias-resolved) intent string."""
+    canonical = intent_type.upper()
+    return ALIASES.get(canonical, canonical)
+
+
+def _record(
+    intent_type: str,
+    primitive: Primitive,
+    accounting_category: AccountingCategory,
+    position_type: PositionKind | None,
+    event_kind: EventKind,
+    *,
+    is_async: bool = False,
+    lifecycle_phase: LifecyclePhase = LifecyclePhase.ATOMIC,
+    required_lifecycle: tuple[str, ...] = (),
+) -> tuple[str, PrimitiveRecord]:
+    """Construct a (key, record) pair for the TAXONOMY table."""
+    return intent_type, PrimitiveRecord(
+        intent_type=intent_type,
+        primitive=primitive,
+        accounting_category=accounting_category,
+        position_type=position_type,
+        event_kind=event_kind,
+        is_async=is_async,
+        lifecycle_phase=lifecycle_phase,
+        required_lifecycle=required_lifecycle,
+    )
+
+
+# Canonical lifecycles — kept as module-level constants so tests can assert
+# that fixture lifecycles match the declared expectation without re-declaring
+# them out-of-band.
+_LP_LIFECYCLE: tuple[str, ...] = ("LP_OPEN", "LP_CLOSE")
+_LP_LIFECYCLE_WITH_FEES: tuple[str, ...] = ("LP_OPEN", "LP_COLLECT_FEES", "LP_CLOSE")
+_PERP_LIFECYCLE: tuple[str, ...] = ("PERP_OPEN", "PERP_CLOSE")
+_LENDING_LIFECYCLE: tuple[str, ...] = ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
+_VAULT_LIFECYCLE: tuple[str, ...] = ("VAULT_DEPOSIT", "VAULT_REDEEM")
+_STAKING_LIFECYCLE: tuple[str, ...] = ("STAKE", "UNSTAKE")
+_PREDICTION_LIFECYCLE: tuple[str, ...] = (
+    "PREDICTION_BUY",
+    "PREDICTION_SELL",
+    "PREDICTION_REDEEM",
+)
+
+
+TAXONOMY: dict[str, PrimitiveRecord] = dict(
+    [
+        # ──────────────────────────────────────────────────────────────────
+        # Swap
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "SWAP",
+            Primitive.SWAP,
+            AccountingCategory.SWAP,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # LP
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "LP_OPEN",
+            Primitive.LP,
+            AccountingCategory.LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_LP_LIFECYCLE,
+        ),
+        _record(
+            "LP_CLOSE",
+            Primitive.LP,
+            AccountingCategory.LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_LP_LIFECYCLE,
+        ),
+        _record(
+            "LP_COLLECT_FEES",
+            Primitive.LP,
+            AccountingCategory.LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.COLLECT,
+            required_lifecycle=_LP_LIFECYCLE_WITH_FEES,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Lending
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "SUPPLY",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=PositionKind.LENDING_COLLATERAL,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_LENDING_LIFECYCLE,
+        ),
+        _record(
+            "WITHDRAW",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=PositionKind.LENDING_COLLATERAL,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_LENDING_LIFECYCLE,
+        ),
+        _record(
+            "BORROW",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=PositionKind.LENDING_DEBT,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_LENDING_LIFECYCLE,
+        ),
+        _record(
+            "REPAY",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=PositionKind.LENDING_DEBT,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_LENDING_LIFECYCLE,
+        ),
+        _record(
+            "DELEVERAGE",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=PositionKind.LENDING_DEBT,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_LENDING_LIFECYCLE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Perp
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "PERP_OPEN",
+            Primitive.PERP,
+            AccountingCategory.PERP,
+            position_type=PositionKind.PERP,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_PERP_LIFECYCLE,
+        ),
+        _record(
+            "PERP_CLOSE",
+            Primitive.PERP,
+            AccountingCategory.PERP,
+            position_type=PositionKind.PERP,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_PERP_LIFECYCLE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Vault (ERC-4626)
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "VAULT_DEPOSIT",
+            Primitive.VAULT,
+            AccountingCategory.VAULT,
+            position_type=PositionKind.VAULT,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_VAULT_LIFECYCLE,
+        ),
+        _record(
+            "VAULT_REDEEM",
+            Primitive.VAULT,
+            AccountingCategory.VAULT,
+            position_type=PositionKind.VAULT,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_VAULT_LIFECYCLE,
+        ),
+        _record(
+            "VAULT_REALLOCATE",
+            Primitive.VAULT,
+            AccountingCategory.VAULT,
+            position_type=PositionKind.VAULT,
+            event_kind=EventKind.ADJUST,
+            required_lifecycle=_VAULT_LIFECYCLE,
+        ),
+        _record(
+            "VAULT_MANAGE",
+            Primitive.VAULT,
+            AccountingCategory.VAULT,
+            position_type=PositionKind.VAULT,
+            event_kind=EventKind.ADJUST,
+            required_lifecycle=_VAULT_LIFECYCLE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Staking
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "STAKE",
+            Primitive.STAKING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=PositionKind.STAKING,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_STAKING_LIFECYCLE,
+        ),
+        _record(
+            "UNSTAKE",
+            Primitive.STAKING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=PositionKind.STAKING,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_STAKING_LIFECYCLE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Bridge
+        #
+        # T1 keeps BRIDGE on AccountingCategory.NO_ACCOUNTING to preserve
+        # consumer behaviour (no consumer migration in this ticket — that
+        # belongs to T2/T4 in the shred tree). T4 (VIB-4166) flips this
+        # row to AccountingCategory.TRANSFER once the gateway whitelist is
+        # widened. The TRANSFER enum value already exists in types.py so
+        # T4 is a single-line taxonomy change plus the gateway side.
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "BRIDGE",
+            Primitive.BRIDGE,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.TRANSFER,
+            is_async=True,
+            lifecycle_phase=LifecyclePhase.REQUEST,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Prediction markets (Polymarket)
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "PREDICTION_BUY",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        _record(
+            "PREDICTION_SELL",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        _record(
+            "PREDICTION_REDEEM",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Flash loan
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "FLASH_LOAN",
+            Primitive.FLASH_LOAN,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
+        # Utility intents (no position, no accounting row)
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "HOLD",
+            Primitive.UTILITY,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "ENSURE_BALANCE",
+            Primitive.UTILITY,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "WRAP_NATIVE",
+            Primitive.UTILITY,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "UNWRAP_NATIVE",
+            Primitive.UTILITY,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+    ]
+)
+
+
+class UnknownIntentTypeError(KeyError):
+    """Raised when an intent string is not present in :data:`TAXONOMY`."""
+
+    def __init__(self, intent_type: str) -> None:
+        super().__init__(intent_type)
+        self.intent_type = intent_type
+
+    def __str__(self) -> str:
+        return f"Unknown intent type: {self.intent_type!r}"
+
+
+def record_for(intent_type: str) -> PrimitiveRecord:
+    """Return the :class:`PrimitiveRecord` for ``intent_type``.
+
+    The lookup resolves :data:`ALIASES` and is case-insensitive on the input
+    (the canonical form is upper-case). Raises :class:`UnknownIntentTypeError`
+    if no row is present — callers that want a fallback should catch the
+    error explicitly rather than relying on a silent default.
+    """
+    key = _resolve_alias(intent_type)
+    try:
+        return TAXONOMY[key]
+    except KeyError as e:
+        raise UnknownIntentTypeError(intent_type) from e
+
+
+def classify(
+    intent_type: str,
+    protocol: str = "",
+    token_out: str = "",
+) -> AccountingCategory:
+    """Map an intent string to its :class:`AccountingCategory`.
+
+    Mirrors the routing rules in :mod:`almanak.framework.accounting.classifier`
+    so the two stay observationally identical until T2 deletes the local
+    classifier and re-points all consumers here. The two protocol-aware
+    special cases preserved are:
+
+    1. ``LP_OPEN`` / ``LP_CLOSE`` / ``LP_COLLECT_FEES`` on a Pendle protocol
+       resolve to ``PENDLE_LP`` rather than ``LP``.
+    2. ``SWAP`` on a Pendle protocol with a ``PT-`` token-out resolves to
+       ``PENDLE_PT`` rather than ``SWAP``.
+
+    Args:
+        intent_type: Canonical intent string (e.g. ``"LP_OPEN"``). Aliases
+            are resolved.
+        protocol: Optional protocol string (e.g. ``"pendle_v2"``). Lower-cased
+            before comparison.
+        token_out: Optional output token symbol (e.g. ``"PT-stETH"``).
+
+    Returns:
+        The accounting category for the intent. Unknown intents resolve to
+        :attr:`AccountingCategory.NO_ACCOUNTING` (matching the pre-VIB-4161
+        classifier behaviour — T2 raises instead).
+    """
+    key = _resolve_alias(intent_type)
+    record = TAXONOMY.get(key)
+    if record is None:
+        return AccountingCategory.NO_ACCOUNTING
+
+    p = protocol.lower()
+    if record.primitive is Primitive.LP and "pendle" in p:
+        return AccountingCategory.PENDLE_LP
+    if record.primitive is Primitive.SWAP and "pendle" in p and token_out.upper().startswith("PT-"):
+        return AccountingCategory.PENDLE_PT
+    return record.accounting_category
+
+
+def position_type_for(intent_type: str) -> PositionKind | None:
+    """Return the :class:`PositionKind` for ``intent_type``, or ``None``.
+
+    Returns ``None`` for intents that do not create or modify a tracked
+    position (SWAP, BRIDGE, HOLD, ENSURE_BALANCE, …) AND for intents that
+    are not present in the taxonomy. Callers that want fail-fast behaviour
+    should use :func:`record_for` and inspect ``record.position_type``.
+    """
+    key = _resolve_alias(intent_type)
+    record = TAXONOMY.get(key)
+    if record is None:
+        return None
+    return record.position_type
+
+
+def is_async(intent_type: str) -> bool:
+    """Return ``True`` if the intent has a non-atomic settlement gap.
+
+    Unknown intents return ``False`` — the safe default is "atomic / no
+    pending state". T2 fail-fasts on unknown intents instead.
+    """
+    key = _resolve_alias(intent_type)
+    record = TAXONOMY.get(key)
+    if record is None:
+        return False
+    return record.is_async
