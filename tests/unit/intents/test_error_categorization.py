@@ -175,6 +175,53 @@ class TestErrorCategorization:
             "CLOB 400 ORDER_BELOW_MINIMUM: size too small"
         ) == "COMPILATION_PERMANENT"
 
+    # VIB-2866: deterministic market/pool/Drift validation strings
+
+    def test_market_not_found_is_permanent(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Market not found: weth-perp") == "COMPILATION_PERMANENT"
+
+    def test_invalid_market_is_permanent(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Invalid market index: 999") == "COMPILATION_PERMANENT"
+
+    def test_market_does_not_exist_is_permanent(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Market does not exist on this chain") == "COMPILATION_PERMANENT"
+
+    def test_pool_not_found_is_permanent(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Pool not found for token pair USDC/WETH") == "COMPILATION_PERMANENT"
+
+    def test_invalid_pool_is_permanent(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Invalid pool address 0x0000") == "COMPILATION_PERMANENT"
+
+    def test_drift_no_user_account_is_permanent(self):
+        # DriftAdapter._get_position_size raises this when PERP_CLOSE is
+        # attempted before the wallet has an initialized Drift user PDA.
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "No Drift user account found. Cannot close position."
+        ) == "COMPILATION_PERMANENT"
+
+    def test_drift_no_active_position_for_market_is_permanent(self):
+        # DriftAdapter._get_position_size raises this when the user PDA
+        # exists but the requested market has no open position.
+        sm = self._make_state_machine()
+        assert sm._categorize_error(
+            "No active position found for market index 0"
+        ) == "COMPILATION_PERMANENT"
+
+    def test_no_market_alone_does_not_trigger_permanent(self):
+        # Regression guard: the bare token ``no market`` was deliberately
+        # excluded from the permanent list because transient market-data
+        # messages can contain it. Only the unambiguous longer phrases
+        # match.
+        sm = self._make_state_machine()
+        # No matching permanent keyword — falls through to None.
+        assert sm._categorize_error("Temporarily no market data available") is None
+
     def test_clob_5xx_stays_retryable(self):
         """Regression guard: transient CLOB 5xx / timeout must remain retryable (VIB-3141)."""
         sm = self._make_state_machine()

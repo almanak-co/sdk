@@ -1113,6 +1113,27 @@ class IntentStateMachine:
             # SDK is ever lazily constructed inside a compile path, the typed
             # error message needs to short-circuit retries here too.
             "drift discriminator mismatch",
+            # VIB-2866: deterministic market/pool configuration errors that
+            # repeat identically on every retry. Burning ~11s of exponential
+            # backoff before surfacing them is pure overhead. The bare token
+            # ``no market`` is intentionally excluded because it can appear
+            # in transient market-data-feed messages — the longer phrases
+            # below are unambiguous.
+            "market not found",
+            "invalid market",
+            "market does not exist",
+            "pool not found",
+            "invalid pool",
+            # VIB-2866: Drift-specific deterministic validation strings.
+            # ``DriftAdapter._get_position_size`` raises these when the
+            # wallet has no Drift user PDA on-chain (PERP_CLOSE before any
+            # PERP_OPEN) or the user PDA exists but has no open position
+            # for the target market index. Both repeat identically on
+            # every retry — the on-chain state can only change via a
+            # successful PERP_OPEN, which the strategy author must
+            # initiate explicitly.
+            "no drift user account found",
+            "no active position found for market index",
         )
         if any(kw in error_lower for kw in permanent_keywords):
             return "COMPILATION_PERMANENT"
