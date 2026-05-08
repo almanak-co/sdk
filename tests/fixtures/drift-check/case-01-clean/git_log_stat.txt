@@ -1,0 +1,10 @@
+commit abc123
+Author: yannick-almanak <ymyannick@gmail.com>
+Date:   2026-05-08
+
+    feat(skills): add Stage 6.5 drift check to /pr-merger
+
+ .claude/commands/pr-merger.md                         | 120 ++++++++++++++++++++
+ tests/fixtures/drift-check/_stage65.sh                | 250 +++++++++++++++++++++++++++++++++
+ tests/fixtures/drift-check/run.sh                     |  90 ++++++++++++
+ 3 files changed, 460 insertions(+)

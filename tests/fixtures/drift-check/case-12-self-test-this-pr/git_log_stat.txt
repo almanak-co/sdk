@@ -1,0 +1,9 @@
+.claude/commands/pr-merger.md
+docs/internal/uat-cards/VIB-4141.md
+docs/internal/uat-runs/VIB-4141/phase1-verdict.md
+tests/fixtures/drift-check/.gitignore
+tests/fixtures/drift-check/_stage65.sh
+tests/fixtures/drift-check/run.sh
+tests/fixtures/drift-check/case-01-clean/pr_body.md
+tests/fixtures/drift-check/case-12-self-test-this-pr/pr_body.md
+tests/fixtures/drift-check/case-13-duplicate-ticket/pr_body.md

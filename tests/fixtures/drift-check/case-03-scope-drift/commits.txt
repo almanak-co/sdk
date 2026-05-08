@@ -1,0 +1,3 @@
+fix(connectors): rename method X to Y in uniswap adapter
+feat(accounting): add LP cycle decomposition tracking
+test(perp): GMX V2 receipt parser fixtures

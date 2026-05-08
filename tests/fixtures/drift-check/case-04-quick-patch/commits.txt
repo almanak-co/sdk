@@ -1,0 +1,2 @@
+fix: silence flaky test in tests/unit/test_executor.py
+test: skip flaky perp test on macos

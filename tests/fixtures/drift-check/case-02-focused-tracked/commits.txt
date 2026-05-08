@@ -1,0 +1,2 @@
+feat(skills): add Stage 6.5 drift check to /pr-merger
+test(skills): fixtures for Stage 6.5

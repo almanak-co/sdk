@@ -1,0 +1,3 @@
++    return Decimal("0")
++except Exception:
++    pass

@@ -1,0 +1,3 @@
+ .claude/commands/pr-merger.md             | 120 ++++++++++
+ tests/fixtures/drift-check/_stage65.sh     | 250 ++++++++++++++++
+ 2 files changed, 370 insertions(+)
