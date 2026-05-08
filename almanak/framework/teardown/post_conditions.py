@@ -350,9 +350,8 @@ register_teardown_post_condition("traderjoe_v2", _traderjoe_v2_post_condition)
 # the strategy's ``on_teardown_completed`` hook clears the tracked
 # ``_position_id`` — so it returns the same NFT tokenId that the teardown
 # just torched, and the verifier raises a false-positive
-# "positions still open" error. This is the bug behind item 2 of the
-# April 30 audit (`docs/internal/AccountingApril30-Audit.md`): the on-chain
-# truth was "NFT burnt, wallet holds only USDC", but the in-memory state
+# "positions still open" error: the on-chain truth was
+# "NFT burnt, wallet holds only USDC", but the in-memory state
 # claimed the position was open.
 #
 # This post-condition reads on-chain truth via the gateway's typed

@@ -786,8 +786,7 @@ async def _build_metrics_for_snapshot(
             # cleanly isolates PnL from a shared-wallet test setup —
             # without it, a wallet that happens to hold $19 at bootstrap
             # produces a $19 baseline even when the strategy declared $4
-            # of capital. (See the May 2 reproducer in §0 of
-            # AccountingPost1977.md: phantom −77% PnL.)
+            # of capital — observed as a phantom −77% PnL.
             #
             # Fallback (legacy strategies that haven't migrated):
             # VIB-3614: total_value_usd is strategy-scoped (positive

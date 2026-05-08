@@ -11,9 +11,9 @@ All other env vars (`ALMANAK_GATEWAY_DATABASE_URL`,
 configuration *within* a mode — not signals *of* a mode. They must never be
 used to derive the deployment mode.
 
-Per `docs/internal/AccountingApril30.md` §A. This module is the single
-permitted reader of the `AGENT_ID` environment variable; every other
-production code path must consume one of the helpers below.
+This module is the single permitted reader of the `AGENT_ID` environment
+variable (VIB-3759); every other production code path must consume one of
+the helpers below.
 """
 
 from __future__ import annotations

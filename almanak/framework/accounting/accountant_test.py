@@ -1267,9 +1267,11 @@ def _cell_g14_sdk_eq_onchain(
     """G14: SDK position state ≡ on-chain state ± 1 bp dust per snapshot.
 
     Mirrors G15's gate-on-table-absence shape: when ``position_state_snapshots``
-    rows are missing (Track C library-only on this branch — VIB-3866),
-    return XFAIL pointing at the dependency. Once Track C is wired, the cell
-    must evaluate ``delta_vs_protocol_pct`` per row and flip to PASS/FAIL.
+    rows are missing, return XFAIL pointing at the missing Track C surface for
+    this run. Local SQLite has a Track C caller; hosted mode is still gated, and
+    local runs can still have zero rows when the snapshot had no recognizable
+    open positions. Once rows exist, the cell must evaluate
+    ``delta_vs_protocol_pct`` per row and flip to PASS/FAIL.
     Returning unconditional XFAIL would mean the cell can never advance even
     after the materializer lands — a violation of the matrix's "must move
     forward" contract.
@@ -1279,7 +1281,8 @@ def _cell_g14_sdk_eq_onchain(
             "G14",
             "SDK ≡ on-chain reconciliation",
             "XFAIL",
-            "position_state_snapshots not yet wired (Track C); cell is xfail by design until materializer lands",
+            "no position_state_snapshots rows for this run (Track C absent, hosted-gated, "
+            "or no recognizable open positions); cell is xfail by design until rows exist",
         )
 
     # Track C is wired: evaluate the 1-bp tolerance.
@@ -1328,15 +1331,17 @@ def _cell_g15_multi_period_self_consistency(
     and was masquerading as a PASS. The fix replaces that with a
     coverage check that actually depends on Track C inputs — and the
     cell stays XFAIL when no Track C rows exist anywhere, because
-    "no rows at all" is the deferred-tracking case (materializer not
-    wired yet), not a coverage failure.
+    "no rows at all" means Track C is absent for this run (hosted-gated,
+    unsupported backend, no recognizable open positions), not a coverage
+    mismatch between a parent snapshot and child rows.
     """
     if not position_state_rows:
         return CellResult(
             "G15",
             "Multi-period MtM self-consistency",
             "XFAIL",
-            "position_state_snapshots not yet wired (Track C); cell is xfail by design until materializer lands",
+            "no position_state_snapshots rows for this run (Track C absent, hosted-gated, "
+            "or no recognizable open positions); cell is xfail by design until rows exist",
         )
 
     # Coverage check: every snapshot that reported open positions must

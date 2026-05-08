@@ -63,10 +63,11 @@ _LP_CELLS = ("LP1", "LP2", "LP3", "LP4", "LP5", "LP6")
 _LENDING_CELLS = ("L1", "L2", "L3", "L4", "L5", "L6")
 _PERP_CELLS = ("P1", "P2", "P3", "P4", "P5", "P6")
 
-# Cells that are XFAIL by design until Track C (position_state_snapshots
-# materialiser) is wired into a hosted caller. Source: AGENTS.md
-# "Track A is wired; Tracks B and C are library code without production
-# callers (VIB-3866)".
+# Cells that require Track C (position_state_snapshots). Local SQLite has a
+# runner caller, but hosted mode still short-circuits until the metrics-database
+# table and hosted caller are available. The dashboard posture is a lightweight
+# capability summary, so Track-C-dependent cells remain XFAIL when those rows
+# are absent from the strategy's data.
 _TRACK_C_DEPENDENT = frozenset(
     {
         "G14",
@@ -629,6 +630,13 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
     return "mixed"
 
 
+# crap-allowlist: this PR's diff against ``evaluate_posture`` is pure
+# docstring-content cleanup (Track C wording refinement); zero branches added,
+# function was already over the CRAP threshold on main (cc=55, cov=86%) and
+# carries an existing ``# noqa: C901`` for the same reason. Mirror of PR #2163's
+# treatment of ``runner_state.emit_iteration_summary``. Refactor of
+# ``evaluate_posture`` should be tracked under its own ticket and is out of
+# scope for this misc cleanup PR.
 def evaluate_posture(  # noqa: C901
     primitive: str,
     ledger_entries: list[Any],
@@ -641,10 +649,11 @@ def evaluate_posture(  # noqa: C901
     """Lightweight posture: which cells PASS / FAIL / XFAIL given the
     data on disk.
 
-    XFAIL = cell depends on Track C (position_state_snapshots
-    materialiser) which has no production caller (VIB-3866). These
-    cells stay XFAIL on the dashboard regardless of data, mirroring
-    the truth-corrected Track table.
+    XFAIL = the lightweight dashboard posture cannot currently evaluate the
+    Track C table. Local SQLite may contain ``position_state_snapshots`` rows,
+    but this aggregation surface does not load them; hosted Track C also remains
+    gated. The full Accountant Test/reporting query is the authoritative path
+    for Track-C PASS/FAIL.
     """
     posture = AccountantPosture(primitive=primitive)
 

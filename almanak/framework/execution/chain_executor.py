@@ -131,6 +131,7 @@ _CHAIN_NATIVE_SYMBOL: dict[str, str] = {
     "monad": "MON",
     "berachain": "BERA",
     "xlayer": "OKB",
+    "zerog": "A0GI",
 }
 
 
