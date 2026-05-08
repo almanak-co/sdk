@@ -88,7 +88,33 @@ class TestErrorCategorization:
 
     def test_network_error_is_transient(self):
         sm = self._make_state_machine()
-        assert sm._categorize_error("Network connection refused") == "NETWORK_ERROR"
+        # Generic transient network failures (DNS hiccups, transient socket
+        # errors) keep their NETWORK_ERROR classification so they retry.
+        assert sm._categorize_error("Network unreachable: temporary failure") == "NETWORK_ERROR"
+
+    # VIB-1215: host-unreachable RPC errors are permanent (no point retrying
+    # against an Anvil that crashed or a misconfigured gateway URL).
+
+    def test_cannot_connect_to_host_is_permanent(self):
+        sm = self._make_state_machine()
+        assert (
+            sm._categorize_error("ClientConnectorError: Cannot connect to host 127.0.0.1:8545")
+            == "COMPILATION_PERMANENT"
+        )
+
+    def test_connection_refused_is_permanent(self):
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Network connection refused") == "COMPILATION_PERMANENT"
+
+    def test_connection_reset_stays_transient(self):
+        # Mid-request resets can recover; classification must remain transient.
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Connection reset by peer") == "NETWORK_ERROR"
+
+    def test_connection_timeout_stays_transient(self):
+        # Timed-out connections can recover; classification must remain transient.
+        sm = self._make_state_machine()
+        assert sm._categorize_error("Connection timed out after 30s") == "TIMEOUT"
 
     def test_revert_is_not_permanent(self):
         sm = self._make_state_machine()
@@ -147,33 +173,26 @@ class TestErrorCategorization:
     def test_clob_breaks_minimum_tick_size(self):
         # Polymarket CLOB rejects orders with off-tick prices. Deterministic.
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "CLOB 400: order 0xabc breaks minimum tick size rule: 0.001"
-        ) == "COMPILATION_PERMANENT"
+        assert (
+            sm._categorize_error("CLOB 400: order 0xabc breaks minimum tick size rule: 0.001")
+            == "COMPILATION_PERMANENT"
+        )
 
     def test_clob_minimum_order_value(self):
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "CLOB 400: order below minimum order value"
-        ) == "COMPILATION_PERMANENT"
+        assert sm._categorize_error("CLOB 400: order below minimum order value") == "COMPILATION_PERMANENT"
 
     def test_clob_invalid_order(self):
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "CLOB 400 INVALID_ORDER: validation failed"
-        ) == "COMPILATION_PERMANENT"
+        assert sm._categorize_error("CLOB 400 INVALID_ORDER: validation failed") == "COMPILATION_PERMANENT"
 
     def test_clob_invalid_tick(self):
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "CLOB 400 INVALID_TICK: price not on tick grid"
-        ) == "COMPILATION_PERMANENT"
+        assert sm._categorize_error("CLOB 400 INVALID_TICK: price not on tick grid") == "COMPILATION_PERMANENT"
 
     def test_clob_order_below_minimum(self):
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "CLOB 400 ORDER_BELOW_MINIMUM: size too small"
-        ) == "COMPILATION_PERMANENT"
+        assert sm._categorize_error("CLOB 400 ORDER_BELOW_MINIMUM: size too small") == "COMPILATION_PERMANENT"
 
     # VIB-2866: deterministic market/pool/Drift validation strings
 
@@ -201,17 +220,13 @@ class TestErrorCategorization:
         # DriftAdapter._get_position_size raises this when PERP_CLOSE is
         # attempted before the wallet has an initialized Drift user PDA.
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "No Drift user account found. Cannot close position."
-        ) == "COMPILATION_PERMANENT"
+        assert sm._categorize_error("No Drift user account found. Cannot close position.") == "COMPILATION_PERMANENT"
 
     def test_drift_no_active_position_for_market_is_permanent(self):
         # DriftAdapter._get_position_size raises this when the user PDA
         # exists but the requested market has no open position.
         sm = self._make_state_machine()
-        assert sm._categorize_error(
-            "No active position found for market index 0"
-        ) == "COMPILATION_PERMANENT"
+        assert sm._categorize_error("No active position found for market index 0") == "COMPILATION_PERMANENT"
 
     def test_no_market_alone_does_not_trigger_permanent(self):
         # Regression guard: the bare token ``no market`` was deliberately
@@ -610,5 +625,7 @@ class TestMissingStateWiringError:
         intent.intent_id = "test-intent"
         compiler = MagicMock()
 
-        with pytest.raises(ValueError, match="PREPARING_MY_NEW_INTENT.*VALIDATING_MY_NEW_INTENT.*SADFLOW_MY_NEW_INTENT"):
+        with pytest.raises(
+            ValueError, match="PREPARING_MY_NEW_INTENT.*VALIDATING_MY_NEW_INTENT.*SADFLOW_MY_NEW_INTENT"
+        ):
             IntentStateMachine(intent=intent, compiler=compiler)

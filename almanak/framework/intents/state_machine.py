@@ -1020,6 +1020,25 @@ class IntentStateMachine:
             return "SLIPPAGE"
         if "rate limit" in error_lower or "ratelimit" in error_lower:
             return "RATE_LIMIT"
+
+        # VIB-1215: host-unreachable patterns that always repeat on retry.
+        # "Cannot connect to host" / "Connection refused" mean the RPC endpoint
+        # is not listening at the configured address — typically a crashed
+        # Anvil fork or a misconfigured gateway URL. Burning ~15s of
+        # exponential backoff (1+2+4 + initial) before surfacing the failure
+        # is pure overhead; the connection cannot succeed without operator
+        # intervention. Checked BEFORE the generic ``connection / network``
+        # short-circuit so these specific patterns reach COMPILATION_PERMANENT
+        # instead of being absorbed as transient NETWORK_ERROR. Conservative
+        # by design: ``connection reset`` / ``connection timeout`` stay
+        # transient because mid-request resets and overload timeouts can
+        # legitimately recover.
+        host_unreachable_permanent = (
+            "cannot connect to host",
+            "connection refused",
+        )
+        if any(kw in error_lower for kw in host_unreachable_permanent):
+            return "COMPILATION_PERMANENT"
         if "connection" in error_lower or "network" in error_lower:
             return "NETWORK_ERROR"
 
