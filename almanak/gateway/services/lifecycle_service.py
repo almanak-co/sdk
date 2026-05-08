@@ -38,11 +38,17 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
             context.set_details(f"invalid state: {request.state}")
             return gateway_pb2.WriteAgentStateResponse(success=False, error=f"invalid state: {request.state}")
         try:
+            running_almanak_version = (
+                request.running_almanak_version
+                if request.HasField("running_almanak_version") and request.running_almanak_version
+                else None
+            )
             await asyncio.to_thread(
                 self._store.write_state,
                 agent_id=request.agent_id,
                 state=request.state,
                 error_message=request.error_message or None,
+                running_almanak_version=running_almanak_version,
             )
             return gateway_pb2.WriteAgentStateResponse(success=True)
         except Exception:

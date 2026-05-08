@@ -247,6 +247,22 @@ def collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> list |
 # Lifecycle helpers
 # -------------------------------------------------------------------------
 
+_REPORTED_ALMANAK_VERSION: str | None
+
+try:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        _REPORTED_ALMANAK_VERSION = version("almanak")
+    except PackageNotFoundError:
+        _REPORTED_ALMANAK_VERSION = None
+except Exception:
+    _REPORTED_ALMANAK_VERSION = None
+
+# Process-lifetime cache: hosted V2 runs one strategy per process, so reporting
+# once per agent avoids rewriting the same package version on pause/resume loops.
+_RUNNING_VERSION_REPORTED_AGENT_IDS: set[str] = set()
+
 
 def lifecycle_write_state(runner: Any, agent_id: str, state: str, error_message: str | None = None) -> None:
     """Write agent state to LifecycleStore via gateway.
@@ -264,7 +280,14 @@ def lifecycle_write_state(runner: Any, agent_id: str, state: str, error_message:
             state=state,
             error_message=error_message or "",
         )
+        reported_version = _REPORTED_ALMANAK_VERSION
+        reported_running_version = False
+        if state == "RUNNING" and reported_version is not None and agent_id not in _RUNNING_VERSION_REPORTED_AGENT_IDS:
+            request.running_almanak_version = reported_version
+            reported_running_version = True
         client.lifecycle.WriteState(request)
+        if reported_running_version:
+            _RUNNING_VERSION_REPORTED_AGENT_IDS.add(agent_id)
     except Exception as e:
         logger.debug(f"Failed to write lifecycle state (non-fatal): {e}")
 

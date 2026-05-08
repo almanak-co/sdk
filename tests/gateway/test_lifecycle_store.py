@@ -95,22 +95,28 @@ class TestSQLiteLifecycleStoreState:
             state = store.read_state("agent-1")
             assert state.state == state_name
 
-    def test_write_state_records_running_version(self, store):
-        """Every state write stamps the SDK version actually running in the gateway."""
-        from almanak._version import __version__
-
-        store.write_state("agent-1", "RUNNING")
+    def test_write_state_records_reported_running_version(self, store):
+        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
         state = store.read_state("agent-1")
-        assert state.running_almanak_version == __version__
+        assert state.running_almanak_version == "2.15.1rc16"
 
-    def test_heartbeat_refreshes_running_version(self, store):
-        """Heartbeat refreshes running_almanak_version so a rolled image is observable."""
-        from almanak._version import __version__
+    def test_write_state_without_running_version_preserves_existing_value(self, store):
+        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
+        store.write_state("agent-1", "PAUSED")
+        state = store.read_state("agent-1")
+        assert state.running_almanak_version == "2.15.1rc16"
 
-        store.write_state("agent-1", "RUNNING")
+    def test_heartbeat_does_not_touch_running_version(self, store):
+        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
         store.heartbeat("agent-1")
         state = store.read_state("agent-1")
-        assert state.running_almanak_version == __version__
+        assert state.running_almanak_version == "2.15.1rc16"
+
+    def test_consecutive_state_write_without_running_version_keeps_first_value(self, store):
+        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
+        store.write_state("agent-1", "RUNNING")
+        state = store.read_state("agent-1")
+        assert state.running_almanak_version == "2.15.1rc16"
 
 
 class TestSQLiteLifecycleStoreCommands:

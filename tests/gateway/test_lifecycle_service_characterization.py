@@ -102,7 +102,10 @@ class TestWriteState:
         assert response.success is True
         assert_set_code_not_called(context)
         store.write_state.assert_called_once_with(
-            agent_id="agt-1", state="RUNNING", error_message=None,
+            agent_id="agt-1",
+            state="RUNNING",
+            error_message=None,
+            running_almanak_version=None,
         )
 
     @pytest.mark.asyncio
@@ -113,7 +116,10 @@ class TestWriteState:
         response = await service.WriteState(request, context)
         assert response.success is True
         store.write_state.assert_called_once_with(
-            agent_id="agt-1", state="ERROR", error_message="rpc timeout",
+            agent_id="agt-1",
+            state="ERROR",
+            error_message="rpc timeout",
+            running_almanak_version=None,
         )
 
     @pytest.mark.asyncio

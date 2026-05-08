@@ -72,6 +72,19 @@ class TestLifecycleServiceWriteState:
         assert state.error_message == "Connection timeout"
 
     @pytest.mark.asyncio
+    async def test_write_state_forwards_running_almanak_version(self, service, store, mock_context):
+        request = gateway_pb2.WriteAgentStateRequest(
+            agent_id="agent-1",
+            state="RUNNING",
+            running_almanak_version="2.15.1rc16",
+        )
+        response = await service.WriteState(request, mock_context)
+        assert response.success is True
+
+        state = store.read_state("agent-1")
+        assert state.running_almanak_version == "2.15.1rc16"
+
+    @pytest.mark.asyncio
     async def test_write_state_error_handling(self, mock_context):
         """WriteState handles store errors gracefully."""
         broken_store = MagicMock()

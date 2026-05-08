@@ -16,8 +16,6 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
-from almanak._version import __version__ as ALMANAK_VERSION
-
 from .store import AgentCommand, AgentState
 
 logger = logging.getLogger(__name__)
@@ -98,6 +96,7 @@ class SQLiteLifecycleStore:
         agent_id: str,
         state: str,
         error_message: str | None = None,
+        running_almanak_version: str | None = None,
     ) -> None:
         if not self._initialized:
             self.initialize()
@@ -116,9 +115,12 @@ class SQLiteLifecycleStore:
                         last_heartbeat_at = excluded.last_heartbeat_at,
                         error_message = excluded.error_message,
                         source = 'gateway',
-                        running_almanak_version = excluded.running_almanak_version
+                        running_almanak_version = COALESCE(
+                            excluded.running_almanak_version,
+                            agent_state.running_almanak_version
+                        )
                     """,
-                    (agent_id, state, now, now, error_message, ALMANAK_VERSION),
+                    (agent_id, state, now, now, error_message, running_almanak_version),
                 )
                 conn.commit()
 
@@ -160,11 +162,10 @@ class SQLiteLifecycleStore:
                     """
                     UPDATE agent_state
                     SET last_heartbeat_at = ?,
-                        iteration_count = iteration_count + 1,
-                        running_almanak_version = ?
+                        iteration_count = iteration_count + 1
                     WHERE agent_id = ?
                     """,
-                    (now, ALMANAK_VERSION, agent_id),
+                    (now, agent_id),
                 )
                 conn.commit()
 
