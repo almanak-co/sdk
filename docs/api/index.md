@@ -44,6 +44,7 @@ from almanak.framework.utils.logging import configure_logging, get_logger
 | [Data](data.md) | `PriceOracle`, `BalanceProvider`, OHLCV, indicators data sources |
 | [Tokens](tokens.md) | `TokenResolver` - unified token resolution |
 | [Indicators](indicators.md) | RSI, MACD, Bollinger Bands, and more |
+| [Dashboard](dashboard.md) | `render_pnl_section`, `render_cost_stack_section`, `render_trade_tape_section`, and TA / LP / lending / perp / prediction template renderers |
 | [Connectors](connectors/index.md) | Protocol adapters (Uniswap, Aave, Morpho, etc.) |
 | [Services](services.md) | `StuckDetector`, `EmergencyManager` |
 | [Alerting](alerting.md) | `AlertManager`, Slack/Telegram channels |

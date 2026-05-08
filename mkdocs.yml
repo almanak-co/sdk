@@ -167,6 +167,7 @@ nav:
     - api/index.md
     - api/enums.md
     - api/strategies.md
+    - api/market.md
     - api/intents.md
     - api/compiler.md
     - api/state.md
@@ -174,6 +175,7 @@ nav:
     - api/data.md
     - api/tokens.md
     - api/indicators.md
+    - api/dashboard.md
     - Connectors:
       - api/connectors/index.md
       - api/connectors/uniswap_v3.md
