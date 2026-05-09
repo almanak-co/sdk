@@ -38,9 +38,59 @@ from almanak.framework.accounting.payload_schemas import (
     is_v1_event_type,
     validate_payload,
 )
+from almanak.framework.primitives.taxonomy import (
+    Primitive as _TaxonomyPrimitive,
+)
+from almanak.framework.primitives.taxonomy import (
+    UnknownIntentTypeError,
+    record_for,
+)
 
 Primitive = Literal["lp", "looping", "perp"]
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
+
+
+# VIB-4162 (T2): canonical lifecycle expectations per primitive. The
+# Accountant Test's lifecycle harness asserts the exercised intent_type
+# set in transaction_ledger (success=1 rows) is a SUPERSET of these.
+# Looping uses the lending lifecycle; lp/perp use their named lifecycles.
+_LIFECYCLE_BY_PRIMITIVE: dict[Primitive, tuple[str, ...]] = {
+    "lp": ("LP_OPEN", "LP_CLOSE"),
+    "looping": ("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    "perp": ("PERP_OPEN", "PERP_CLOSE"),
+}
+
+
+class FixtureLifecycleError(AssertionError):
+    """Raised when an Accountant Test fixture is missing required lifecycle steps.
+
+    VIB-4162 (T2): a synthetic fixture (or a real strategy DB used as one)
+    must exercise the canonical lifecycle for its primitive (LP: OPEN +
+    CLOSE; Looping: SUPPLY + BORROW + REPAY + WITHDRAW; Perp: OPEN + CLOSE)
+    so the cell predicates can be evaluated against the same shape they
+    would see on a real round-trip. A fixture that lands LP_OPEN but skips
+    LP_CLOSE produces nominally-passing G1/G7 results that mask a missing
+    half of the test surface — this assertion fails loudly instead.
+    """
+
+
+def _assert_fixture_lifecycle(conn: sqlite3.Connection, primitive: Primitive) -> None:
+    """Read transaction_ledger.intent_type for success=1 rows and assert
+    every canonical lifecycle step is present. Extra steps are allowed.
+
+    Raises :class:`FixtureLifecycleError` with a structured diagnostic that
+    names the missing step(s) AND the steps that were observed.
+    """
+    expected = set(_LIFECYCLE_BY_PRIMITIVE.get(primitive, ()))
+    if not expected:
+        return
+    cur = conn.execute("SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1")
+    actual = {row[0] for row in cur.fetchall() if row[0]}
+    missing = expected - actual
+    if missing:
+        raise FixtureLifecycleError(
+            f"primitive={primitive} fixture missing lifecycle steps: {sorted(missing)}; got: {sorted(actual)}"
+        )
 
 
 @dataclass
@@ -1197,40 +1247,75 @@ def _cell_g12_oracle_consistency(ledger: list[dict[str, Any]]) -> CellResult:
     )
 
 
+def _coerce_version(raw: Any) -> int | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _g13_collect_versions(
+    ledger: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+) -> tuple[dict[_TaxonomyPrimitive, set[int]], list[Any]]:
+    """Group matching_policy_version values by primitive.
+
+    Ledger rows carry intent_type rather than event_type, but the keys
+    are 1:1 in the taxonomy. Ledger versions fold into UTILITY (lowest-
+    volume bucket so it doesn't mask drift). Accounting-events resolve
+    primitive via taxonomy lookup; unknown event_types are skipped.
+    """
+    per_primitive: dict[_TaxonomyPrimitive, set[int]] = {}
+    bad_rows: list[Any] = []
+
+    for r in ledger:
+        v = _coerce_version(r.get("matching_policy_version"))
+        if v is not None:
+            per_primitive.setdefault(_TaxonomyPrimitive.UTILITY, set()).add(v)
+        elif r.get("matching_policy_version") not in (None, ""):
+            bad_rows.append(("ledger", r.get("id")))
+
+    for r in acct_events:
+        p = acct_payloads.get(r.get("id"), {})
+        v = _coerce_version(p.get("matching_policy_version"))
+        if v is None:
+            if p.get("matching_policy_version") not in (None, ""):
+                bad_rows.append(("acct_event", r.get("id")))
+            continue
+        et = r.get("event_type") or p.get("event_type")
+        if not isinstance(et, str) or not et:
+            continue
+        try:
+            primitive = record_for(et).primitive
+        except UnknownIntentTypeError:
+            continue
+        per_primitive.setdefault(primitive, set()).add(v)
+
+    return per_primitive, bad_rows
+
+
 def _cell_g13_lot_matching(
     ledger: list[dict[str, Any]],
     acct_events: list[dict[str, Any]],
     acct_payloads: dict[Any, dict[str, Any]],
     payload_errors: dict[Any, str],
 ) -> CellResult:
-    """G13 — Lot-matching policy declared + versioned (VIB-3868: validated reads)."""
+    """G13 — Lot-matching policy declared + versioned (per-primitive).
+
+    VIB-4162 (T2): each primitive's events must carry a SINGLE
+    matching_policy_version (per-primitive uniqueness). LP can advance
+    to v4 while Lending stays at v3 and Perp stays at v1 without
+    breaking G13 — drift is only flagged WITHIN a primitive bucket.
+    """
     blocked = _payload_block_cell("G13", "Lot-matching policy declared + versioned", acct_events, payload_errors)
     if blocked is not None:
         return blocked
-    versions: set[int] = set()
-    bad_rows: list[Any] = []
 
-    def _coerce(raw: Any) -> int | None:
-        if raw is None or raw == "":
-            return None
-        try:
-            return int(raw)
-        except (ValueError, TypeError):
-            return None
+    per_primitive, bad_rows = _g13_collect_versions(ledger, acct_events, acct_payloads)
 
-    for r in ledger:
-        v = _coerce(r.get("matching_policy_version"))
-        if v is not None:
-            versions.add(v)
-        elif r.get("matching_policy_version") not in (None, ""):
-            bad_rows.append(("ledger", r.get("id")))
-    for r in acct_events:
-        p = acct_payloads.get(r.get("id"), {})
-        v = _coerce(p.get("matching_policy_version"))
-        if v is not None:
-            versions.add(v)
-        elif p.get("matching_policy_version") not in (None, ""):
-            bad_rows.append(("acct_event", r.get("id")))
     if bad_rows:
         return CellResult(
             "G13",
@@ -1238,25 +1323,29 @@ def _cell_g13_lot_matching(
             "FAIL",
             f"{len(bad_rows)} rows have non-integer matching_policy_version (e.g. {bad_rows[:3]!r})",
         )
-    if not versions:
+    if not per_primitive:
         return CellResult(
             "G13",
             "Lot-matching policy declared + versioned",
             "FAIL",
             "no row carries matching_policy_version",
         )
-    if len(versions) > 1:
-        return CellResult(
-            "G13",
-            "Lot-matching policy",
-            "FAIL",
-            f"multiple matching_policy_version values in one run: {sorted(versions)}",
-        )
+
+    for primitive, versions in per_primitive.items():
+        if len(versions) > 1:
+            return CellResult(
+                "G13",
+                "Lot-matching policy",
+                "FAIL",
+                f"multiple matching_policy_version values for primitive={primitive.value}: {sorted(versions)}",
+            )
+
+    summary = {p.value: next(iter(v)) for p, v in per_primitive.items()}
     return CellResult(
         "G13",
         "Lot-matching policy",
         "PASS",
-        f"matching_policy_version={next(iter(versions))} (FIFO in v1)",
+        f"per-primitive: {summary}",
     )
 
 
@@ -2089,7 +2178,12 @@ def evaluate_cells(
     )
 
 
-def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> AccountantReport:
+def run_against_sqlite(
+    db_path: str | Path,
+    *,
+    primitive: Primitive,
+    strict_lifecycle: bool = False,
+) -> AccountantReport:
     """Run the Accountant Test against a SQLite DB file.
 
     Thin shim around :func:`evaluate_cells` — fetches the canonical row
@@ -2097,9 +2191,21 @@ def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> Accounta
     cycle, deployment, …) use
     :func:`almanak.framework.accounting.reporting.accountant_query.accountant_report_from_db`
     instead.
+
+    VIB-4162 (T2): when ``strict_lifecycle=True``, the harness asserts the
+    fixture's ``transaction_ledger`` exercises every canonical lifecycle
+    step for the chosen primitive (LP / Looping / Perp). Missing steps
+    raise :class:`FixtureLifecycleError` BEFORE any cell is evaluated, so
+    a half-built fixture cannot produce a partial-pass report. The default
+    is ``False`` to preserve back-compat for production callers (running
+    against real DBs that may exercise only part of a lifecycle); the
+    Accountant Test test-suite (``test_accountant_test_baseline.py``)
+    opts in.
     """
     conn = _connect(db_path)
     try:
+        if strict_lifecycle:
+            _assert_fixture_lifecycle(conn, primitive)
         ledger = _table_rows(conn, "transaction_ledger")
         pos_events = _table_rows(conn, "position_events")
         acct_events = _table_rows(conn, "accounting_events")
@@ -2126,6 +2232,7 @@ def run_against_sqlite(db_path: str | Path, *, primitive: Primitive) -> Accounta
 __all__ = [
     "AccountantReport",
     "CellResult",
+    "FixtureLifecycleError",
     "Primitive",
     "evaluate_cells",
     "run_against_sqlite",

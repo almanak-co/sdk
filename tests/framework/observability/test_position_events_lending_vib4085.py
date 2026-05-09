@@ -28,13 +28,13 @@ import pytest
 
 from almanak.framework.observability.position_events import (
     INTENT_TO_EVENT_TYPE,
-    INTENT_TO_POSITION_TYPE,
     LENDING_CLOSE_DUST_USD,
     PositionEventType,
     PositionType,
     _apply_lending,
-    lending_position_id,
+    _resolve_position_type,
     build_position_event_from_intent,
+    lending_position_id,
 )
 
 
@@ -55,7 +55,10 @@ from almanak.framework.observability.position_events import (
 )
 def test_lending_intents_in_static_dispatch(intent_type, expected_event_type, expected_position_type):
     assert INTENT_TO_EVENT_TYPE[intent_type] == expected_event_type
-    assert INTENT_TO_POSITION_TYPE[intent_type] == expected_position_type
+    # VIB-4162 (T2): position_type now comes from the taxonomy via
+    # _resolve_position_type instead of the deleted INTENT_TO_POSITION_TYPE
+    # dict. Behaviour for known position-producing intents is identical.
+    assert _resolve_position_type(intent_type) == expected_position_type
 
 
 def test_lp_and_perp_dispatch_unchanged():
@@ -64,7 +67,11 @@ def test_lp_and_perp_dispatch_unchanged():
     depends on."""
     for k in ("LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "PERP_OPEN", "PERP_CLOSE"):
         assert k in INTENT_TO_EVENT_TYPE
-        assert k in INTENT_TO_POSITION_TYPE
+        # VIB-4162 (T2): every position-producing intent resolves through
+        # the taxonomy. SWAP/BRIDGE are still not in the position-event
+        # static dispatch — they bypass the strict lookup at the seed
+        # gate.
+        assert _resolve_position_type(k) is not None
     assert "SWAP" not in INTENT_TO_EVENT_TYPE
     assert "BRIDGE" not in INTENT_TO_EVENT_TYPE
 

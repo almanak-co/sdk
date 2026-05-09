@@ -29,11 +29,16 @@ from almanak.framework.accounting.models import (
 )
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
-    MATCHING_POLICY_VERSION,
+    MATCHING_POLICY_VERSIONS,
     SCHEMA_VERSION,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
+from almanak.framework.primitives.taxonomy import (
+    UnknownIntentTypeError,
+    record_for,
+)
+from almanak.framework.primitives.types import Primitive
 from almanak.framework.state.exceptions import (
     AccountingPersistenceError,
     AccountingWriteKind,
@@ -80,12 +85,6 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
       and return the original payload unchanged so paper / dry-run / backtest
       runs do not halt on schema bugs.
     """
-    versions = {
-        "schema_version": SCHEMA_VERSION,
-        "formula_version": FORMULA_VERSION,
-        "matching_policy_version": MATCHING_POLICY_VERSION,
-    }
-
     try:
         d = json.loads(payload_json)
     except (json.JSONDecodeError, TypeError) as exc:
@@ -112,7 +111,51 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
         logger.error("%s — non-live mode, returning original payload unchanged", msg)
         return payload_json
 
-    d.update(versions)
+    # VIB-4162 (T2): per-primitive matching_policy_version stamping.
+    # Look up the primitive for this event_type via the canonical taxonomy;
+    # in live mode an unknown OR missing event_type raises (preserves
+    # VIB-3863's mode-aware contract), in non-live the writer logs ERROR
+    # and falls back to UTILITY's version.
+    event_type = d.get("event_type")
+    if not isinstance(event_type, str) or not event_type:
+        msg = (
+            "augment_accounting_payload: missing or invalid event_type; "
+            "cannot resolve per-primitive matching_policy_version"
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.ACCOUNTING,
+                message=msg,
+            )
+        logger.error(
+            "%s — non-live mode, falling back to MATCHING_POLICY_VERSIONS[Primitive.UTILITY]",
+            msg,
+        )
+        matching_version = MATCHING_POLICY_VERSIONS[Primitive.UTILITY]
+    else:
+        try:
+            primitive = record_for(event_type).primitive
+            matching_version = MATCHING_POLICY_VERSIONS[primitive]
+        except UnknownIntentTypeError as exc:
+            msg = (
+                f"augment_accounting_payload: event_type {event_type!r} has no "
+                f"taxonomy row; cannot resolve per-primitive matching_policy_version"
+            )
+            if is_live:
+                raise AccountingPersistenceError(
+                    AccountingWriteKind.ACCOUNTING,
+                    message=msg,
+                    cause=exc,
+                ) from exc
+            logger.error(
+                "%s — non-live mode, falling back to MATCHING_POLICY_VERSIONS[Primitive.UTILITY]",
+                msg,
+            )
+            matching_version = MATCHING_POLICY_VERSIONS[Primitive.UTILITY]
+
+    d["schema_version"] = SCHEMA_VERSION
+    d["formula_version"] = FORMULA_VERSION
+    d["matching_policy_version"] = matching_version
     _project_lending_aliases(d)
     return json.dumps(d)
 

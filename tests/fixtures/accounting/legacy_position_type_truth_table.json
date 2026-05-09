@@ -1,0 +1,158 @@
+[
+  {
+    "expected": {
+      "position_type": "LENDING_DEBT"
+    },
+    "intent": "BORROW"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "BRIDGE"
+  },
+  {
+    "expected": {
+      "position_type": "LENDING_DEBT"
+    },
+    "intent": "DELEVERAGE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "ENSURE_BALANCE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "FLASH_LOAN"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "HOLD"
+  },
+  {
+    "expected": {
+      "position_type": "LP"
+    },
+    "intent": "LP_CLOSE"
+  },
+  {
+    "expected": {
+      "position_type": "LP"
+    },
+    "intent": "LP_COLLECT_FEES"
+  },
+  {
+    "expected": {
+      "position_type": "LP"
+    },
+    "intent": "LP_OPEN"
+  },
+  {
+    "expected": {
+      "position_type": "PERP"
+    },
+    "intent": "PERP_CLOSE"
+  },
+  {
+    "expected": {
+      "position_type": "PERP"
+    },
+    "intent": "PERP_OPEN"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "PREDICTION_BUY"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "PREDICTION_REDEEM"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "PREDICTION_SELL"
+  },
+  {
+    "expected": {
+      "position_type": "LENDING_DEBT"
+    },
+    "intent": "REPAY"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "STAKE"
+  },
+  {
+    "expected": {
+      "position_type": "LENDING_COLLATERAL"
+    },
+    "intent": "SUPPLY"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "SWAP"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "UNSTAKE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "UNWRAP_NATIVE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "VAULT_DEPOSIT"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "VAULT_MANAGE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "VAULT_REALLOCATE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "VAULT_REDEEM"
+  },
+  {
+    "expected": {
+      "position_type": "LENDING_COLLATERAL"
+    },
+    "intent": "WITHDRAW"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "WRAP_NATIVE"
+  }
+]

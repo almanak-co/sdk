@@ -64,6 +64,11 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.primitives.taxonomy import (  # noqa: F401 — taxonomy delegation lock
+    UnknownIntentTypeError,
+    record_for,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,18 +120,27 @@ INTENT_TO_EVENT_TYPE: dict[str, PositionEventType] = {
     "DELEVERAGE": PositionEventType.CLOSE,  # mirrors REPAY refinement
 }
 
-INTENT_TO_POSITION_TYPE: dict[str, PositionType] = {
-    "LP_OPEN": PositionType.LP,
-    "LP_CLOSE": PositionType.LP,
-    "LP_COLLECT_FEES": PositionType.LP,
-    "PERP_OPEN": PositionType.PERP,
-    "PERP_CLOSE": PositionType.PERP,
-    "SUPPLY": PositionType.LENDING_COLLATERAL,
-    "WITHDRAW": PositionType.LENDING_COLLATERAL,
-    "BORROW": PositionType.LENDING_DEBT,
-    "REPAY": PositionType.LENDING_DEBT,
-    "DELEVERAGE": PositionType.LENDING_DEBT,
-}
+# VIB-4162 (T2): the legacy ``INTENT_TO_POSITION_TYPE`` dict is gone.
+# Position-type resolution delegates to :func:`_resolve_position_type`,
+# which is a strict wrapper around
+# :func:`almanak.framework.primitives.taxonomy.record_for`. The previous
+# implementation silently fell back to ``PositionType.LP`` on an unknown
+# intent string — the canonical class-of-bug T2 exists to fix.
+
+
+def _resolve_position_type(intent_type: str) -> PositionType:
+    """Strict lookup — raises ``UnknownIntentTypeError`` if no taxonomy row.
+
+    Used by :func:`_seed_event` AFTER ``INTENT_TO_EVENT_TYPE.get`` has
+    confirmed the intent is position-producing, so a missing taxonomy row
+    is a genuine inconsistency that must surface.
+    """
+    record = record_for(intent_type)  # raises UnknownIntentTypeError on miss
+    pk = record.position_type
+    if pk is None:
+        raise UnknownIntentTypeError(intent_type)
+    return PositionType(pk.value)
+
 
 # VIB-4085 — dust threshold for lending CLOSE detection. A leg with
 # remaining value <= this threshold is treated as fully closed. Aave V3
@@ -289,7 +303,11 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     if event_type is None:
         return None
 
-    position_type = INTENT_TO_POSITION_TYPE.get(intent_type, PositionType.LP)
+    # VIB-4162: strict resolution — raises UnknownIntentTypeError if the
+    # intent passed the INTENT_TO_EVENT_TYPE gate but the taxonomy has
+    # no record. The pre-T2 silent-LP fallback at this site is the
+    # canonical class-of-bug T2 fixes (see module commit history).
+    position_type = _resolve_position_type(intent_type)
     protocol = getattr(intent, "protocol", "") or ""
 
     # Position id: result.position_id takes precedence over intent.position_id.

@@ -28,6 +28,8 @@ try:
 except ImportError:  # pragma: no cover — pydantic is a hard dep
     raise
 
+from almanak.framework.primitives.types import Primitive
+
 ConfidenceLiteral = Literal["HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"]
 
 # Version constants (AttemptNo17 §1.0a). Bumping any of these requires re-
@@ -42,7 +44,43 @@ FORMULA_VERSION = 1
 # (CodeRabbit 2026-05-04): the live writer stamps this onto persisted payloads
 # and the basis store stamps the same value onto MatchResult, so a payload-vs-
 # MatchResult version mismatch would silently misroute Accountant Test scoring.
+#
+# VIB-4162 (T2): kept for back-compat (live writer reads the global on the
+# fallback path; legacy payloads on disk are stamped at this value). New
+# code should consult :data:`MATCHING_POLICY_VERSIONS` so per-primitive
+# advances do not require a global bump.
 MATCHING_POLICY_VERSION = 3
+
+# VIB-4162 (T2): per-primitive matching_policy_version map.
+#
+# Each primitive's lot-matching algorithm advances independently — bumping
+# LP from v3 to v4 (e.g. on a new IL decomposition) MUST NOT force-restamp
+# every Lending or Perp event. The ``writer.augment_accounting_payload``
+# chokepoint reads ``record.primitive`` for the event_type and stamps the
+# corresponding per-primitive version onto the payload. The Accountant
+# Test's G13 cell (``_cell_g13_lot_matching``) verifies *per-primitive*
+# uniqueness (one version per primitive bucket) instead of "one version
+# across all events", so a Lending bump cannot regress LP scoring.
+#
+# Initial values (precursor parity):
+#   LP            v3   (was global v3 pre-T2)
+#   LENDING       v3   (was global v3 pre-T2)
+#   PERP          v1   (the global v3 was lending-specific; perp was always v1)
+#   UTILITY/SWAP/VAULT/STAKING/BRIDGE/PREDICTION/FLASH_LOAN  v1
+#
+# Every Primitive value MUST appear here so a writer lookup never KeyError-s.
+MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
+    Primitive.LP: 3,
+    Primitive.LENDING: 3,
+    Primitive.PERP: 1,
+    Primitive.UTILITY: 1,
+    Primitive.SWAP: 3,
+    Primitive.VAULT: 1,
+    Primitive.STAKING: 1,
+    Primitive.BRIDGE: 1,
+    Primitive.PREDICTION: 1,
+    Primitive.FLASH_LOAN: 1,
+}
 
 
 class _Base(BaseModel):

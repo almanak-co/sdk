@@ -1,0 +1,229 @@
+[
+  {
+    "expected": {
+      "lifecycle": [
+        "SUPPLY",
+        "BORROW",
+        "REPAY",
+        "WITHDRAW"
+      ]
+    },
+    "intent": "BORROW"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "BRIDGE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "SUPPLY",
+        "BORROW",
+        "REPAY",
+        "WITHDRAW"
+      ]
+    },
+    "intent": "DELEVERAGE"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "ENSURE_BALANCE"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "FLASH_LOAN"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "HOLD"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "LP_OPEN",
+        "LP_CLOSE"
+      ]
+    },
+    "intent": "LP_CLOSE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "LP_OPEN",
+        "LP_COLLECT_FEES",
+        "LP_CLOSE"
+      ]
+    },
+    "intent": "LP_COLLECT_FEES"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "LP_OPEN",
+        "LP_CLOSE"
+      ]
+    },
+    "intent": "LP_OPEN"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "PERP_OPEN",
+        "PERP_CLOSE"
+      ]
+    },
+    "intent": "PERP_CLOSE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "PERP_OPEN",
+        "PERP_CLOSE"
+      ]
+    },
+    "intent": "PERP_OPEN"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "PREDICTION_BUY",
+        "PREDICTION_SELL",
+        "PREDICTION_REDEEM"
+      ]
+    },
+    "intent": "PREDICTION_BUY"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "PREDICTION_BUY",
+        "PREDICTION_SELL",
+        "PREDICTION_REDEEM"
+      ]
+    },
+    "intent": "PREDICTION_REDEEM"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "PREDICTION_BUY",
+        "PREDICTION_SELL",
+        "PREDICTION_REDEEM"
+      ]
+    },
+    "intent": "PREDICTION_SELL"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "SUPPLY",
+        "BORROW",
+        "REPAY",
+        "WITHDRAW"
+      ]
+    },
+    "intent": "REPAY"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "STAKE",
+        "UNSTAKE"
+      ]
+    },
+    "intent": "STAKE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "SUPPLY",
+        "BORROW",
+        "REPAY",
+        "WITHDRAW"
+      ]
+    },
+    "intent": "SUPPLY"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "SWAP"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "STAKE",
+        "UNSTAKE"
+      ]
+    },
+    "intent": "UNSTAKE"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "UNWRAP_NATIVE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "VAULT_DEPOSIT",
+        "VAULT_REDEEM"
+      ]
+    },
+    "intent": "VAULT_DEPOSIT"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "VAULT_DEPOSIT",
+        "VAULT_REDEEM"
+      ]
+    },
+    "intent": "VAULT_MANAGE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "VAULT_DEPOSIT",
+        "VAULT_REDEEM"
+      ]
+    },
+    "intent": "VAULT_REALLOCATE"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "VAULT_DEPOSIT",
+        "VAULT_REDEEM"
+      ]
+    },
+    "intent": "VAULT_REDEEM"
+  },
+  {
+    "expected": {
+      "lifecycle": [
+        "SUPPLY",
+        "BORROW",
+        "REPAY",
+        "WITHDRAW"
+      ]
+    },
+    "intent": "WITHDRAW"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "WRAP_NATIVE"
+  }
+]

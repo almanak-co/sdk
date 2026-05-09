@@ -1,0 +1,23 @@
+{
+  "G1": "PASS",
+  "G10": "PASS",
+  "G11": "SKIP",
+  "G12": "PASS",
+  "G13": "PASS",
+  "G14": "XFAIL",
+  "G15": "XFAIL",
+  "G2": "PASS",
+  "G3": "PASS",
+  "G4": "PASS",
+  "G5": "PASS",
+  "G6": "FAIL",
+  "G7": "PASS",
+  "G8": "PASS",
+  "G9": "PASS",
+  "L1": "PASS",
+  "L2": "XFAIL",
+  "L3": "XFAIL",
+  "L4": "PASS",
+  "L5": "XFAIL",
+  "L6": "FAIL"
+}

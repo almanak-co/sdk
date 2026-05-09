@@ -40,15 +40,35 @@ def test_taxonomy_covers_every_intent_type() -> None:
 
 
 def test_taxonomy_has_no_extra_rows() -> None:
-    """Every TAXONOMY key must be a declared IntentType (no ghost keys).
+    """Every TAXONOMY key must be either a declared IntentType OR a
+    declared payload-only ``AccountingEventType`` (no ghost keys).
+
+    T2 (VIB-4162) extended TAXONOMY with rows for event-type values
+    emitted by the typed accounting models (PendleAccountingEvent,
+    PerpAccountingEvent, VaultAccountingEvent, PredictionAccountingEvent,
+    LendingAccountingEvent, LPAccountingEvent) that are NOT declared in
+    IntentType — e.g. ``PT_BUY``, ``PENDLE_LP_OPEN``, ``PERP_INCREASE``,
+    ``VAULT_HARVEST``, ``PREDICTION_OPEN``, ``LIQUIDATION_RISK_UPDATE``.
+    These rows are required so the writer's augment chokepoint can stamp
+    a per-primitive ``matching_policy_version`` for legitimate handler
+    output without raising in live mode. Without them, every Pendle /
+    Prediction / extended-Perp/Vault/Lending live write would halt the
+    runner.
 
     Aliases (e.g. ``VAULT_WITHDRAW``) live in :data:`ALIASES`, not in the
-    table itself, so this assertion holds even for the deliberate ghost-name
-    scrub.
+    table itself, so this assertion still holds for the deliberate
+    ghost-name scrub.
     """
-    declared = {it.value for it in IntentType}
-    extras = set(TAXONOMY.keys()) - declared
-    assert extras == set(), f"TAXONOMY has rows not declared in IntentType: {sorted(extras)}"
+    from almanak.framework.accounting.models import ALL_ACCOUNTING_EVENT_TYPES
+
+    declared_intents = {it.value for it in IntentType}
+    declared_event_types = set(ALL_ACCOUNTING_EVENT_TYPES)
+    allowed = declared_intents | declared_event_types
+    extras = set(TAXONOMY.keys()) - allowed
+    assert extras == set(), (
+        f"TAXONOMY has rows not declared in IntentType nor "
+        f"ALL_ACCOUNTING_EVENT_TYPES: {sorted(extras)}"
+    )
 
 
 def test_aliases_map_vault_withdraw_to_vault_redeem() -> None:

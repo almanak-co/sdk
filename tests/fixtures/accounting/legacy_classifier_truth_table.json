@@ -1,0 +1,8322 @@
+[
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "BORROW",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "BRIDGE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "DELEVERAGE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "ENSURE_BALANCE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "FLASH_LOAN",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "HOLD",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_COLLECT_FEES",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "pendle_lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lp"
+    },
+    "intent": "LP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_CLOSE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "perp"
+    },
+    "intent": "PERP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_BUY",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "prediction"
+    },
+    "intent": "PREDICTION_SELL",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "REPAY",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "STAKE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "SUPPLY",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "pendle_pt"
+    },
+    "intent": "SWAP",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "swap"
+    },
+    "intent": "SWAP",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNSTAKE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "UNWRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_DEPOSIT",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_MANAGE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REALLOCATE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "vault"
+    },
+    "intent": "VAULT_REDEEM",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "lending"
+    },
+    "intent": "WITHDRAW",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "WRAP_NATIVE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  }
+]

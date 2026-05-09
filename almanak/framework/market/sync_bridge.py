@@ -11,14 +11,11 @@ import asyncio
 import concurrent.futures
 import threading
 from collections.abc import Awaitable
-from typing import TypeVar
-
-T = TypeVar("T")
 
 DEFAULT_TIMEOUT_SEC: float = 30.0
 
 
-def run_sync(
+def run_sync[T](
     coro: Awaitable[T],
     *,
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
@@ -58,5 +55,5 @@ def run_sync(
     return result_holder["value"]  # type: ignore[return-value]
 
 
-async def _run_with_timeout(coro: Awaitable[T], timeout_sec: float) -> T:
+async def _run_with_timeout[T](coro: Awaitable[T], timeout_sec: float) -> T:
     return await asyncio.wait_for(coro, timeout=timeout_sec)

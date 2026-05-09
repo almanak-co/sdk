@@ -92,7 +92,17 @@ class PositionType(StrEnum):
 
     @property
     def priority(self) -> int:
-        """Return close order priority (lower = close first)."""
+        """Return close order priority (lower = close first).
+
+        VIB-4162 (T2): priority is teardown-protocol-specific (risk-ordered
+        close); the underlying primitive mapping lives in
+        :func:`almanak.framework.primitives.taxonomy.materializer_primitive_for`.
+        A unit test
+        (``tests/unit/teardown/test_position_type_taxonomy_coverage.py``)
+        asserts every ``PositionType`` value has a corresponding
+        ``Primitive`` so a new teardown PositionType cannot ship without a
+        taxonomy row.
+        """
         priorities = {
             PositionType.PERP: 1,
             PositionType.BORROW: 2,

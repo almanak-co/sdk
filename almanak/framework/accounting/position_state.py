@@ -41,6 +41,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from almanak.framework.deployment.mode import is_hosted
+from almanak.framework.primitives.taxonomy import materializer_primitive_for
 
 logger = logging.getLogger(__name__)
 
@@ -190,37 +191,27 @@ def _classify_position(position: Any) -> PositionType | None:
     """Classify a PositionInfo / PositionValue / equivalent into the
     materializer's enum.
 
-    Recognises:
+    VIB-4162 (T2): the if-ladder is consolidated into
+    :func:`almanak.framework.primitives.taxonomy.materializer_primitive_for`.
+    The local function now reads the position-type field, delegates the
+    label-to-primitive mapping to the canonical taxonomy helper, then
+    folds the resulting :class:`Primitive` enum value back into the
+    materializer's local ``Literal["LP", "LENDING", "PERP"]`` shape.
 
-    * ``teardown.models.PositionType`` values used on ``PortfolioSnapshot.positions``
-      (``LP`` / ``SUPPLY`` / ``BORROW`` / ``PERP`` / ``VAULT`` / ``STAKE``).
-      ``SUPPLY`` and ``BORROW`` are two sides of the same lending position
-      and collapse into ``LENDING`` here — Track-C-dependent cells (L2/L3/L5)
-      are protocol-side metrics, not side-specific.
-    * Protocol-name-style strings used by older callers
-      (``UNISWAP_V3``, ``AAVE_V3``, ``GMX_V2``, …) for backward compat.
-
-    Returns ``None`` for ``VAULT`` / ``STAKE`` / ``PREDICTION`` / ``CEX`` /
-    ``TOKEN`` and any other shape the materializer doesn't understand —
-    the caller logs a debug-level skip and moves on.
+    Returns ``None`` for VAULT / STAKING / PREDICTION / CEX / TOKEN and
+    any other shape the materializer doesn't yet handle — the caller
+    logs a debug-level skip and moves on. Adding observability for the
+    None branch is deferred to the Position Tracking rework epic.
     """
     pt = getattr(position, "position_type", None) or getattr(position, "type", None) or ""
-    pt = str(pt).upper()
-    if pt in ("LP", "UNI_V3", "UNISWAP_V3", "AERODROME", "AERODROME_LP", "TRADERJOE_LP"):
+    primitive = materializer_primitive_for(str(pt))
+    if primitive is None:
+        return None
+    if primitive.value == "lp":
         return "LP"
-    if pt in (
-        "LENDING",
-        "SUPPLY",
-        "BORROW",
-        "AAVE_V3",
-        "AAVE",
-        "MORPHO",
-        "MORPHO_BLUE",
-        "COMPOUND_V3",
-        "COMPOUND",
-    ):
+    if primitive.value == "lending":
         return "LENDING"
-    if pt in ("PERP", "GMX", "GMX_V2", "DRIFT", "HYPERLIQUID"):
+    if primitive.value == "perp":
         return "PERP"
     return None
 

@@ -296,6 +296,155 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
         ),
         # ──────────────────────────────────────────────────────────────────
+        # Payload-only event types — emitted by typed accounting models
+        # (`accounting.models.*EventType`) but NOT declared in
+        # `intents.vocabulary.IntentType`. The augment chokepoint
+        # (`writer.augment_accounting_payload`) looks up the primitive
+        # via `record_for(payload['event_type'])` and stamps the
+        # per-primitive `matching_policy_version`. Without these rows,
+        # live Pendle / PT / Prediction / extended-Perp / extended-Vault
+        # writes raise `AccountingPersistenceError(cause=UnknownIntentTypeError)`
+        # and halt the writer for legitimate handler output. These rows
+        # are payload-side only — the dispatcher consumes IntentType
+        # values, never these.
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "PT_BUY",
+            Primitive.SWAP,
+            AccountingCategory.PENDLE_PT,
+            position_type=None,
+            event_kind=EventKind.OPEN,
+        ),
+        _record(
+            "PT_SELL",
+            Primitive.SWAP,
+            AccountingCategory.PENDLE_PT,
+            position_type=None,
+            event_kind=EventKind.CLOSE,
+        ),
+        _record(
+            "PT_REDEEM",
+            Primitive.SWAP,
+            AccountingCategory.PENDLE_PT,
+            position_type=None,
+            event_kind=EventKind.CLOSE,
+        ),
+        _record(
+            "PENDLE_LP_OPEN",
+            Primitive.LP,
+            AccountingCategory.PENDLE_LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_LP_LIFECYCLE,
+        ),
+        _record(
+            "PENDLE_LP_CLOSE",
+            Primitive.LP,
+            AccountingCategory.PENDLE_LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_LP_LIFECYCLE,
+        ),
+        _record(
+            "LP_SNAPSHOT",
+            Primitive.LP,
+            AccountingCategory.LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "LP_REBALANCE",
+            Primitive.LP,
+            AccountingCategory.LP,
+            position_type=PositionKind.LP,
+            event_kind=EventKind.ADJUST,
+        ),
+        _record(
+            "PERP_INCREASE",
+            Primitive.PERP,
+            AccountingCategory.PERP,
+            position_type=PositionKind.PERP,
+            event_kind=EventKind.ADJUST,
+            required_lifecycle=_PERP_LIFECYCLE,
+        ),
+        _record(
+            "PERP_DECREASE",
+            Primitive.PERP,
+            AccountingCategory.PERP,
+            position_type=PositionKind.PERP,
+            event_kind=EventKind.ADJUST,
+            required_lifecycle=_PERP_LIFECYCLE,
+        ),
+        _record(
+            "PERP_LIQUIDATE",
+            Primitive.PERP,
+            AccountingCategory.PERP,
+            position_type=PositionKind.PERP,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_PERP_LIFECYCLE,
+        ),
+        _record(
+            "VAULT_HARVEST",
+            Primitive.VAULT,
+            AccountingCategory.VAULT,
+            position_type=PositionKind.VAULT,
+            event_kind=EventKind.COLLECT,
+            required_lifecycle=_VAULT_LIFECYCLE,
+        ),
+        _record(
+            "VAULT_SNAPSHOT",
+            Primitive.VAULT,
+            AccountingCategory.VAULT,
+            position_type=PositionKind.VAULT,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "CLOSE",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=None,
+            event_kind=EventKind.CLOSE,
+        ),
+        _record(
+            "LIQUIDATION_RISK_UPDATE",
+            Primitive.LENDING,
+            AccountingCategory.LENDING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "PREDICTION_OPEN",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.OPEN,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        _record(
+            "PREDICTION_INCREASE",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.ADJUST,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        _record(
+            "PREDICTION_REDUCE",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.ADJUST,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        _record(
+            "PREDICTION_CLOSE",
+            Primitive.PREDICTION,
+            AccountingCategory.PREDICTION,
+            position_type=None,
+            event_kind=EventKind.CLOSE,
+            required_lifecycle=_PREDICTION_LIFECYCLE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
         # Utility intents (no position, no accounting row)
         # ──────────────────────────────────────────────────────────────────
         _record(
@@ -411,6 +560,61 @@ def position_type_for(intent_type: str) -> PositionKind | None:
     if record is None:
         return None
     return record.position_type
+
+
+def materializer_primitive_for(position_type_str: str) -> Primitive | None:
+    """Map a position-type string (teardown-side or protocol alias) to a top-level primitive.
+
+    T2 (VIB-4162) — consolidates the if-ladder previously hard-coded in
+    :func:`almanak.framework.accounting.position_state._classify_position`.
+    Recognises the two label families that historically reached the
+    materializer:
+
+    * ``teardown.models.PositionType`` values (``LP`` / ``SUPPLY`` /
+      ``BORROW`` / ``PERP`` / ``VAULT`` / ``STAKE`` / ``PREDICTION`` /
+      ``CEX`` / ``TOKEN``).
+    * Protocol-name strings used by older callers (``UNISWAP_V3`` /
+      ``AAVE_V3`` / ``GMX_V2`` etc.) for backward compat.
+
+    Every ``teardown.models.PositionType`` value resolves to a non-None
+    primitive (``CEX`` and ``TOKEN`` collapse to ``Primitive.UTILITY``
+    because they have no protocol-side state machine — they are bookkeeping
+    legs the teardown system unwinds via plain swap/withdraw flows). The
+    materializer caller in ``accounting.position_state._classify_position``
+    only knows what to do with LP / LENDING / PERP and treats every other
+    primitive as "skip" — that's the current materializer scope, not a
+    statement about teardown coverage.
+    """
+    s = position_type_str.upper().strip()
+    if s in {"LP", "UNI_V3", "UNISWAP_V3", "AERODROME", "AERODROME_LP", "TRADERJOE_LP"}:
+        return Primitive.LP
+    if s in {
+        "LENDING",
+        "SUPPLY",
+        "BORROW",
+        "AAVE_V3",
+        "AAVE",
+        "MORPHO",
+        "MORPHO_BLUE",
+        "COMPOUND_V3",
+        "COMPOUND",
+    }:
+        return Primitive.LENDING
+    if s in {"PERP", "GMX", "GMX_V2", "DRIFT", "HYPERLIQUID"}:
+        return Primitive.PERP
+    if s in {"VAULT", "ERC4626"}:
+        return Primitive.VAULT
+    if s in {"STAKE", "STAKING", "STAKED"}:
+        return Primitive.STAKING
+    if s in {"PREDICTION", "POLYMARKET"}:
+        return Primitive.PREDICTION
+    if s in {"CEX", "TOKEN", "BALANCE"}:
+        # CEX holdings + plain token balances are bookkeeping legs the
+        # teardown system unwinds via swap / withdraw — no protocol state
+        # machine. Mapping to UTILITY documents the "no primitive of its
+        # own" invariant while keeping the teardown-coverage test green.
+        return Primitive.UTILITY
+    return None
 
 
 def is_async(intent_type: str) -> bool:
