@@ -132,9 +132,54 @@ def test_classify_prediction_intents() -> None:
 
 
 def test_classify_no_accounting_intents() -> None:
-    """T1 keeps BRIDGE on NO_ACCOUNTING for back-compat. T4 flips it to TRANSFER."""
-    for intent in ("BRIDGE", "HOLD", "WRAP_NATIVE", "UNWRAP_NATIVE", "ENSURE_BALANCE", "FLASH_LOAN"):
+    """T4 (VIB-4164) flipped BRIDGE to TRANSFER (see test_classify_bridge_returns_transfer below).
+    The remaining intents stay on NO_ACCOUNTING."""
+    for intent in ("HOLD", "WRAP_NATIVE", "UNWRAP_NATIVE", "ENSURE_BALANCE", "FLASH_LOAN"):
         assert classify(intent) == AccountingCategory.NO_ACCOUNTING
+
+
+def test_classify_bridge_returns_transfer() -> None:
+    """T4 (VIB-4164): BRIDGE classifies to AccountingCategory.TRANSFER, irrespective of protocol.
+
+    The two protocol-aware special cases in ``classify`` (Pendle LP, Pendle SWAP+PT) only fire
+    when the record's primitive is LP or SWAP — BRIDGE rolls up to ``Primitive.BRIDGE``, so
+    every protocol value still routes the same way.
+    """
+    assert classify("BRIDGE") == AccountingCategory.TRANSFER
+
+
+@pytest.mark.parametrize(
+    "protocol",
+    ["across", "stargate", "lifi", "debridge", "synapse", "hop", "celer", "pendle_v2", ""],
+)
+def test_classify_bridge_returns_transfer_across_protocols(protocol: str) -> None:
+    """D2.V1 — BRIDGE on every known + neutral + Pendle-decoy protocol routes to TRANSFER."""
+    assert classify("BRIDGE", protocol=protocol) == AccountingCategory.TRANSFER
+
+
+def test_classify_bridge_is_deterministic_under_repeats() -> None:
+    """D3.F1 — repeated calls return the same value (no hidden mutation in TAXONOMY/ALIASES)."""
+    for _ in range(1000):
+        assert classify("BRIDGE", protocol="across") == AccountingCategory.TRANSFER
+
+
+def test_taxonomy_has_transfer_event_type_row() -> None:
+    """D1.S2 — payload-only ``"TRANSFER"`` row exists with the contract the writer chokepoint expects.
+
+    Without this row, ``record_for("TRANSFER")`` raises ``UnknownIntentTypeError`` and every
+    live BRIDGE write halts at ``writer.augment_accounting_payload``.
+    """
+    record = record_for("TRANSFER")
+    assert record.intent_type == "TRANSFER"
+    assert record.primitive is Primitive.BRIDGE, (
+        f"TRANSFER row must point at Primitive.BRIDGE so the writer stamps "
+        f"MATCHING_POLICY_VERSIONS[Primitive.BRIDGE]; got {record.primitive!r}"
+    )
+    assert record.accounting_category is AccountingCategory.TRANSFER
+    assert record.position_type is None
+    assert record.event_kind is EventKind.TRANSFER
+    assert record.is_async is True
+    assert record.lifecycle_phase is LifecyclePhase.REQUEST
 
 
 def test_classify_staking_intents_are_no_accounting() -> None:

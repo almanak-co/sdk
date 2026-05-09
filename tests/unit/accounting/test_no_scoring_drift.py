@@ -1,18 +1,18 @@
 """D4 — no scoring drift between pre-T2 baseline and post-T2 expected cells.
 
 VIB-4162. Loads ``baseline_pre_T2.json`` (precursor-frozen) and
-``expected_cells.json`` (post-T2) for each primitive, asserts:
+``expected_cells.json`` (post-T2) for each primitive, asserts no cell
+regressed: STATUS_RANK[post] >= STATUS_RANK[pre] where rank is
+``{"PASS": 3, "XFAIL": 2, "SKIP": 1, "FAIL": 0}``.
 
-* No cell regressed: STATUS_RANK[post] >= STATUS_RANK[pre] where rank is
-  ``{"PASS": 3, "XFAIL": 2, "SKIP": 1, "FAIL": 0}``.
-* Each precursor-frozen file has been touched by EXACTLY ONE git commit,
-  and that SHA is NOT the T2 SHA (skipped when no T2 SHA exists).
+(VIB-4164 removed the companion git-discipline test — see the post-mortem
+comment at the bottom of this file. The constants/helpers it relied on were
+removed alongside.)
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,49 +20,6 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 STATUS_RANK = {"PASS": 3, "XFAIL": 2, "SKIP": 1, "FAIL": 0}
-
-_PRECURSOR_FROZEN_FILES = [
-    *[f"tests/fixtures/accounting/{p}/baseline_pre_T2.json" for p in ("lp", "looping", "perp")],
-    "tests/fixtures/accounting/legacy_classifier_truth_table.json",
-    "tests/fixtures/accounting/legacy_position_type_truth_table.json",
-    "tests/fixtures/accounting/legacy_lifecycle_truth_table.json",
-]
-
-
-def _git(*args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=_REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"git {' '.join(args)} failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
-        )
-    return result.stdout.strip()
-
-
-def _find_t2_sha() -> str | None:
-    """Find the T2 commit by file-touch signature, not subject heuristics.
-
-    See ``test_same_commit_discipline._find_t2_sha`` — same rationale: the
-    branch carries two VIB-4162 commits and T2 is the one that touches
-    ``accounting/classifier.py``.
-    """
-    log = _git("log", "--pretty=%H %s")
-    for line in log.splitlines():
-        if not line.strip():
-            continue
-        sha, subject = line.split(" ", 1)
-        if "VIB-4162" not in subject:
-            continue
-        files = _git("show", "--name-only", "--pretty=", sha).splitlines()
-        if "almanak/framework/accounting/classifier.py" in files:
-            return sha
-    return None
 
 
 @pytest.mark.parametrize("primitive", ["lp", "looping", "perp"])
@@ -84,21 +41,19 @@ def test_no_cell_regressed(primitive: str) -> None:
     assert not failures, "\n".join(failures)
 
 
-def test_precursor_files_committed_separately() -> None:
-    t2_sha = _find_t2_sha()
-    if not t2_sha:
-        pytest.skip("T2 commit not found in git log (pre-merge / branch context).")
-
-    failures: list[str] = []
-    for rel in _PRECURSOR_FROZEN_FILES:
-        sha_log = _git("log", "--pretty=format:%H", "--", rel)
-        shas = [s for s in sha_log.splitlines() if s.strip()]
-        if not shas:
-            failures.append(f"{rel}: no commits touched the file")
-            continue
-        if len(shas) != 1:
-            failures.append(f"{rel}: edited after freeze ({len(shas)} commits)")
-            continue
-        if shas[0] == t2_sha:
-            failures.append(f"{rel}: co-committed with T2 SHA {t2_sha} (must be precursor)")
-    assert not failures, "\n".join(failures)
+# test_precursor_files_committed_separately — REMOVED (VIB-4164, T4).
+#
+# The test was a pre-merge review-discipline guard for T2 (VIB-4162): each
+# `_PRECURSOR_FROZEN_FILES` entry must be touched by exactly one commit, and
+# that commit must NOT be the T2 SHA. After T2's squash-merge (`2eda14c70`),
+# both files share that commit by construction — the test became a permanent
+# false negative on main. T4 (VIB-4164) additionally re-runs
+# `_freeze_legacy_routing_truth_tables.py` to flip the BRIDGE rows from
+# `no_accounting` to `transfer` (the entire point of T4), giving the file a
+# second commit, which would have tripped the "edited after freeze" branch
+# even on a clean main. The runtime contract is preserved by
+# `test_classifier_parity_against_frozen_truth_table` (delegation parity) and
+# `test_no_cell_regressed` (status-rank monotonicity). Removing this stale
+# guard alongside the analogous `test_truth_table_precursor_is_not_the_t3_commit`
+# (in `test_dispatch_truth_table_freeze_discipline.py`) which T4 also drops
+# for the same reason.

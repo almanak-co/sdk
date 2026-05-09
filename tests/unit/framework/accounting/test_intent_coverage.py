@@ -121,7 +121,8 @@ def test_swap_without_pt_token_routes_to_swap() -> None:
 
 
 @pytest.mark.parametrize("intent_type", [
-    IntentType.BRIDGE,
+    # VIB-4164 (T4) reclassified BRIDGE → AccountingCategory.TRANSFER. The
+    # rest of the originally-excluded intents stay on NO_ACCOUNTING.
     IntentType.HOLD,
     IntentType.WRAP_NATIVE,
     IntentType.UNWRAP_NATIVE,
@@ -138,6 +139,21 @@ def test_explicitly_excluded_intents_are_no_accounting(intent_type: IntentType) 
         )
 
 
+def test_bridge_routes_to_transfer_after_t4() -> None:
+    """VIB-4164 (T4) — BRIDGE intent now routes to AccountingCategory.TRANSFER.
+
+    Pre-T4 BRIDGE was in the explicitly-excluded NO_ACCOUNTING set; T4 flipped
+    it to TRANSFER and added a payload-only TAXONOMY row keyed on "TRANSFER"
+    so the writer's augment chokepoint can stamp the BRIDGE matching version.
+    """
+    for protocol in ("any_protocol", "across", "stargate", "lifi", "pendle_v2", ""):
+        category = classify(IntentType.BRIDGE.value, protocol=protocol)
+        assert category == AccountingCategory.TRANSFER, (
+            f"BRIDGE should route to AccountingCategory.TRANSFER for "
+            f"protocol={protocol!r}, got {category!r}"
+        )
+
+
 def test_no_intent_type_is_silently_unhandled() -> None:
     """Verify that the set of known IntentType values matches what the classifier handles.
 
@@ -148,17 +164,28 @@ def test_no_intent_type_is_silently_unhandled() -> None:
 
     Intentionally NO_ACCOUNTING intent types (those with no meaningful financial
     event to record at the accounting layer):
-      - BRIDGE, HOLD, WRAP_NATIVE, UNWRAP_NATIVE, ENSURE_BALANCE, FLASH_LOAN:
-        explicitly excluded in classifier._NO_ACCOUNTING_TYPES
-      - STAKE, UNSTAKE: no accounting handler yet (Phase 2+)
-      - PREDICTION_BUY, PREDICTION_SELL, PREDICTION_REDEEM: no accounting handler yet
-      - VAULT_MANAGE: no accounting handler yet
+      - HOLD, WRAP_NATIVE, UNWRAP_NATIVE, ENSURE_BALANCE, FLASH_LOAN:
+        explicitly excluded — utility / liquidity-management intents that
+        do not produce a typed accounting event.
+      - STAKE, UNSTAKE: no accounting handler yet (Phase 2+).
+      - PREDICTION_BUY, PREDICTION_SELL, PREDICTION_REDEEM: prediction
+        markets are routed to AccountingCategory.PREDICTION; this list
+        documents that they are still observably NO_ACCOUNTING-equivalent
+        for non-prediction protocols (the classifier does not look at
+        protocol for them by default; the prediction handler is wired but
+        the classifier returns the row's accounting_category which is
+        PREDICTION, not NO_ACCOUNTING — so they should NOT be in this
+        list. They are kept here as a historical artifact pending T7's
+        reclassification audit).
+      - VAULT_MANAGE: no accounting handler yet.
+
+    VIB-4164 (T4) removed BRIDGE from this list — it now routes to
+    AccountingCategory.TRANSFER. See ``test_bridge_routes_to_transfer_after_t4``.
 
     Any IntentType NOT in this list that classifies as NO_ACCOUNTING is a bug.
     """
     _INTENTIONALLY_NO_ACCOUNTING = frozenset({
-        # Explicitly excluded in classifier
-        "BRIDGE",
+        # Explicitly excluded in classifier (utility / liquidity-management intents)
         "HOLD",
         "WRAP_NATIVE",
         "UNWRAP_NATIVE",

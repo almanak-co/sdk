@@ -1,18 +1,19 @@
-"""FROZEN-PRE-T3 truth-table commit discipline (VIB-4163).
+"""Frozen dispatch-truth-table guard (VIB-4163, post-merge survivor).
 
-D4.A4 in the UAT card. The frozen dispatch truth table at
-``tests/fixtures/accounting/legacy_dispatch_truth_table.json`` MUST be touched by
-exactly ONE git commit (the precursor commit), and that commit must NOT be the same
-as the one that touches ``almanak/framework/accounting/processor.py`` to introduce
-the registry-driven dispatch (the T3 commit).
+D4.A4 in the T3 UAT card. After T3 (VIB-4163) merged the registry-driven
+dispatcher and T4 (VIB-4164) re-classified BRIDGE→TRANSFER, only the
+``test_truth_table_committed_exactly_once`` guard remains here — it asserts
+that ``tests/fixtures/accounting/legacy_dispatch_truth_table.json`` is
+touched by exactly one commit (a future PR that hand-edits the frozen
+dispatch fixture instead of regenerating it would trip this).
 
-The two-commit shape mirrors T2's ``test_same_commit_discipline.py``: the truth
-table is captured against the LEGACY if-ladder before T3 changes anything, then
-the T3 commit rewrites the dispatcher and adds a parity test that compares the
-new dispatch against the frozen JSON.
-
-This test skips on branches where the precursor commit doesn't exist yet (e.g.
-during PR development before the precursor lands).
+The companion guard (``test_truth_table_precursor_is_not_the_t3_commit``)
+was a pre-merge review-discipline check that became a permanent false
+negative after T3's squash-merge collapsed the precursor and dispatcher
+commits into one — see the comment block below for the removal rationale.
+The runtime contract is preserved by
+``test_classifier_parity_against_frozen_truth_table`` in
+``test_classifier_taxonomy_parity.py``.
 """
 
 from __future__ import annotations
@@ -67,38 +68,13 @@ def test_truth_table_committed_exactly_once() -> None:
     )
 
 
-def test_truth_table_precursor_is_not_the_t3_commit() -> None:
-    """The truth-table commit must precede the T3 dispatcher rewrite.
-
-    Identifying the T3 commit by the same mechanical signature used in T2's
-    ``test_same_commit_discipline._find_t2_sha``: walk the log most-recent-first,
-    pick the first commit whose subject contains "VIB-4163" and which touched
-    ``processor.py``. If none, skip (pre-T3 / branch context).
-    """
-    truth_shas = _commits_touching(_TRUTH_TABLE_REL)
-    if not truth_shas:
-        pytest.skip(f"{_TRUTH_TABLE_REL} not yet committed.")
-    truth_sha = truth_shas[0]
-
-    log = _git("log", "--pretty=%H %s")
-    t3_sha = None
-    for line in log.splitlines():
-        if not line.strip():
-            continue
-        sha, subject = line.split(" ", 1)
-        if "VIB-4163" not in subject:
-            continue
-        files = _git("show", "--name-only", "--pretty=", sha).splitlines()
-        if _PROCESSOR_REL in files:
-            t3_sha = sha
-            break
-
-    if t3_sha is None:
-        pytest.skip(
-            "T3 commit (touching processor.py with VIB-4163 subject) not yet on this branch."
-        )
-
-    assert truth_sha != t3_sha, (
-        f"truth table and T3 dispatcher rewrite share commit {t3_sha}; "
-        "the precursor freeze MUST land in a separate earlier commit."
-    )
+# test_truth_table_precursor_is_not_the_t3_commit — REMOVED (VIB-4164, T4).
+#
+# The test was a pre-merge review-discipline guard for T3 (VIB-4163): "precursor
+# freeze and T3 dispatcher rewrite must be in different commits". After T3's
+# squash-merge to main (commit 325e3d3ca), both files share that commit by
+# construction — the discipline window has closed. The runtime contract (legacy
+# ladder vs registry parity) is enforced by `test_classifier_parity_against_frozen_truth_table`
+# which remains in `test_classifier_taxonomy_parity.py`. Removing this stale
+# guard alongside the analogous `test_precursor_files_committed_separately`
+# (in `test_no_scoring_drift.py`) which T4 also drops for the same reason.

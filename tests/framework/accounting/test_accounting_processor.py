@@ -154,10 +154,16 @@ async def test_drain_one_idempotent_when_event_already_written() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_one_no_accounting_intent() -> None:
-    """BRIDGE intent → no_accounting → no accounting_events row written, but outbox marked processed."""
+    """HOLD intent → no_accounting → no accounting_events row written, but outbox marked processed.
+
+    Uses HOLD as the canonical NO_ACCOUNTING intent. VIB-4164 (T4) reclassified
+    BRIDGE from NO_ACCOUNTING to TRANSFER, so BRIDGE no longer satisfies this
+    fixture's "no accounting event written" precondition. HOLD remains
+    NO_ACCOUNTING (utility intent with no financial event to record).
+    """
     led_id = str(uuid.uuid4())
-    outbox_row = _make_outbox_row(led_id, intent_type="BRIDGE")
-    ledger_row = _make_ledger_row(led_id, intent_type="BRIDGE")
+    outbox_row = _make_outbox_row(led_id, intent_type="HOLD")
+    ledger_row = _make_ledger_row(led_id, intent_type="HOLD")
     store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row, already_written=False)
     proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
 

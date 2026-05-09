@@ -87,14 +87,14 @@ class PredictionEventType(StrEnum):
 
 
 class TransferEventType(StrEnum):
-    """Lifecycle event for value transfer / bridge primitives (VIB-4163).
+    """Lifecycle event for value transfer / bridge primitives.
 
-    Stub introduced by T3 of the Primitives Refactor (VIB-4160). Used by
-    ``transfer_handler.py`` to emit a payload-only typed event when the
-    classifier routes an intent to ``AccountingCategory.TRANSFER``. T4
-    (VIB-4164) wires the BRIDGE classification path so this event actually
-    appears in production data; until then the handler is registered but
-    not reachable.
+    Introduced by T3 of the Primitives Refactor (VIB-4163) as a registered
+    but unreached handler stub. T4 (VIB-4164) wired the BRIDGE classification
+    path: ``classify("BRIDGE") == AccountingCategory.TRANSFER`` and the
+    payload-only ``TAXONOMY['TRANSFER']`` row resolves the BRIDGE primitive
+    for the writer's augment chokepoint, so this event appears in production
+    data for every BRIDGE intent.
     """
 
     TRANSFER = "TRANSFER"
@@ -118,14 +118,15 @@ class TransferSettlementStatus(StrEnum):
 # Union of all valid accounting event type strings — used by the gateway
 # whitelist (state_service.py) and the AccountingProcessor classifier.
 #
-# VIB-4163 (T3): ``TransferEventType`` is intentionally NOT in this set yet.
-# The gateway imports this constant for the SaveAccountingEvent whitelist; if
-# TRANSFER were here, the gateway would accept ``event_type='TRANSFER'`` rows
-# from any client, but the writer's augment chokepoint cannot yet resolve a
-# primitive for them (no taxonomy row), so paper-mode writes would persist
-# rows the live path treats as unsupported. T4 (VIB-4164) adds TRANSFER to
-# both ``primitives.taxonomy.TAXONOMY`` AND to this whitelist atomically when
-# the BRIDGE classification is flipped.
+# VIB-4164 (T4): ``TransferEventType`` is now included. The three changes —
+# (a) BRIDGE → AccountingCategory.TRANSFER in primitives/taxonomy.py,
+# (b) payload-only ``"TRANSFER"`` row in the same TAXONOMY table,
+# (c) ``TransferEventType`` in this whitelist —
+# landed atomically in PR for VIB-4164 so the gateway accepts
+# ``event_type='TRANSFER'`` only after the writer's augment chokepoint can
+# resolve `record_for("TRANSFER").primitive` and stamp the correct
+# `matching_policy_version`. Reverting any one of the three legs without the
+# others fails ``test_atomic_bridge_transfer_alignment``.
 ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
     e.value
     for cls in (
@@ -136,6 +137,7 @@ ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
         VaultEventType,
         SwapEventType,
         PredictionEventType,
+        TransferEventType,
     )
     for e in cls
 )

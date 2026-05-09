@@ -244,19 +244,36 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_STAKING_LIFECYCLE,
         ),
         # ──────────────────────────────────────────────────────────────────
-        # Bridge
+        # Bridge / Transfer (VIB-4164, T4)
         #
-        # T1 keeps BRIDGE on AccountingCategory.NO_ACCOUNTING to preserve
-        # consumer behaviour (no consumer migration in this ticket — that
-        # belongs to T2/T4 in the shred tree). T4 (VIB-4166) flips this
-        # row to AccountingCategory.TRANSFER once the gateway whitelist is
-        # widened. The TRANSFER enum value already exists in types.py so
-        # T4 is a single-line taxonomy change plus the gateway side.
+        # T4 reclassifies BRIDGE from `NO_ACCOUNTING` to `TRANSFER`: a bridge
+        # is a typed `transfer_out` on chain A and `transfer_in` on chain B
+        # with a settlement gap, not "no accounting". The gateway whitelist
+        # (`ALL_ACCOUNTING_EVENT_TYPES`) is widened atomically in this same
+        # PR so the writer can persist the typed event the dispatcher now
+        # routes to `transfer_handler`.
         # ──────────────────────────────────────────────────────────────────
         _record(
             "BRIDGE",
             Primitive.BRIDGE,
-            AccountingCategory.NO_ACCOUNTING,
+            AccountingCategory.TRANSFER,
+            position_type=None,
+            event_kind=EventKind.TRANSFER,
+            is_async=True,
+            lifecycle_phase=LifecyclePhase.REQUEST,
+        ),
+        # Payload-only event-type row (mirrors the VIB-4162 payload-only
+        # rows for PT_BUY / PERP_INCREASE / etc.). The writer's augment
+        # chokepoint at `accounting/writer.py:139` calls
+        # `record_for(payload['event_type'])` with `event_type="TRANSFER"`
+        # for every `TransferAccountingEvent`; without this row, every live
+        # write would raise `UnknownIntentTypeError`. The `primitive` is
+        # `Primitive.BRIDGE` so the augment step stamps
+        # `MATCHING_POLICY_VERSIONS[Primitive.BRIDGE]`.
+        _record(
+            "TRANSFER",
+            Primitive.BRIDGE,
+            AccountingCategory.TRANSFER,
             position_type=None,
             event_kind=EventKind.TRANSFER,
             is_async=True,

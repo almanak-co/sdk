@@ -116,11 +116,22 @@ def test_swap_generic() -> None:
 
 @pytest.mark.parametrize(
     "intent_type",
-    ["BRIDGE", "HOLD", "WRAP_NATIVE", "UNWRAP_NATIVE", "ENSURE_BALANCE", "FLASH_LOAN"],
+    # VIB-4164 (T4) reclassified BRIDGE → AccountingCategory.TRANSFER. The
+    # remaining utility / placeholder intents stay on NO_ACCOUNTING.
+    ["HOLD", "WRAP_NATIVE", "UNWRAP_NATIVE", "ENSURE_BALANCE", "FLASH_LOAN"],
 )
 def test_no_accounting_types(intent_type: str) -> None:
     assert classify(intent_type) == AccountingCategory.NO_ACCOUNTING
     assert classify(intent_type, protocol="any") == AccountingCategory.NO_ACCOUNTING
+
+
+def test_bridge_classifies_to_transfer() -> None:
+    """VIB-4164 (T4) — BRIDGE was NO_ACCOUNTING pre-T4, now routes to TRANSFER."""
+    assert classify("BRIDGE") == AccountingCategory.TRANSFER
+    # Protocol-aware special cases in classify() never apply to BRIDGE
+    # (the row's primitive is BRIDGE, not LP / SWAP).
+    for protocol in ("across", "stargate", "lifi", "pendle_v2", "any"):
+        assert classify("BRIDGE", protocol=protocol) == AccountingCategory.TRANSFER
 
 
 def test_unknown_intent_type() -> None:

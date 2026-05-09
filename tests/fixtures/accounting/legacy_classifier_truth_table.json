@@ -321,7 +321,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "",
@@ -329,7 +329,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "",
@@ -337,7 +337,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "",
@@ -345,7 +345,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "",
@@ -353,7 +353,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aave_v3",
@@ -361,7 +361,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aave_v3",
@@ -369,7 +369,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aave_v3",
@@ -377,7 +377,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aave_v3",
@@ -385,7 +385,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aerodrome",
@@ -393,7 +393,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aerodrome",
@@ -401,7 +401,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aerodrome",
@@ -409,7 +409,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "aerodrome",
@@ -417,7 +417,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "compound_v3",
@@ -425,7 +425,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "compound_v3",
@@ -433,7 +433,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "compound_v3",
@@ -441,7 +441,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "compound_v3",
@@ -449,7 +449,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "gmx_v2",
@@ -457,7 +457,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "gmx_v2",
@@ -465,7 +465,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "gmx_v2",
@@ -473,7 +473,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "gmx_v2",
@@ -481,7 +481,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "jupiter",
@@ -489,7 +489,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "jupiter",
@@ -497,7 +497,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "jupiter",
@@ -505,7 +505,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "jupiter",
@@ -513,7 +513,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "kamino",
@@ -521,7 +521,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "kamino",
@@ -529,7 +529,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "kamino",
@@ -537,7 +537,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "kamino",
@@ -545,7 +545,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "morpho_blue",
@@ -553,7 +553,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "morpho_blue",
@@ -561,7 +561,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "morpho_blue",
@@ -569,7 +569,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "morpho_blue",
@@ -577,7 +577,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "pendle_v2",
@@ -585,7 +585,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "pendle_v2",
@@ -593,7 +593,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "pendle_v2",
@@ -601,7 +601,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "pendle_v2",
@@ -609,7 +609,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "uniswap_v3",
@@ -617,7 +617,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "uniswap_v3",
@@ -625,7 +625,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "uniswap_v3",
@@ -633,7 +633,7 @@
   },
   {
     "expected": {
-      "category": "no_accounting"
+      "category": "transfer"
     },
     "intent": "BRIDGE",
     "protocol": "uniswap_v3",

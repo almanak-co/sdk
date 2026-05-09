@@ -417,6 +417,54 @@ class BridgeWaitState:
 
 
 # =============================================================================
+# Position-key helpers (module-level so the parent function stays under CRAP)
+# =============================================================================
+
+
+def _bridge_outbox_position_key(intent: Any, chain: str, wallet_address: str) -> str:
+    """Derive the BRIDGE outbox position_key (VIB-4164, T4).
+
+    Returns the canonical ``bridge:{from_chain}:{to_chain}:{token}:{wallet}``
+    string, or ``""`` when any required field is missing. Extracted from
+    :meth:`StrategyRunner._compute_outbox_position_key` to keep the parent
+    method under the CRAP threshold (cc-allowance budget already consumed
+    by the pre-existing primitive branches).
+
+    Auditors join a source-leg PENDING row to its eventual destination-leg
+    SETTLED row by ``position_key`` alone; an empty key here would lose the
+    join across cross-chain settlement gaps.
+    """
+    from_chain = str(getattr(intent, "from_chain", "") or chain).lower().strip()
+    to_chain = str(getattr(intent, "to_chain", "") or "").lower().strip()
+    token = str(getattr(intent, "token", "") or "").upper().strip()
+    if from_chain and to_chain and token and wallet_address:
+        return f"bridge:{from_chain}:{to_chain}:{token}:{wallet_address.lower()}"
+    return ""
+
+
+def _prediction_outbox_position_key(intent: Any, protocol: str, chain: str, wallet_address: str) -> tuple[str, str]:
+    """Derive (position_key, market_id) for prediction-market intents (VIB-3707).
+
+    Per-(market_id, outcome) aggregate position. ``PREDICTION_REDEEM``
+    intents may carry ``outcome=None`` when redeeming all winning positions;
+    in that case we cannot key the position_key here — the handler falls
+    back to extracted_data/position_key reconstruction or surfaces an
+    unavailable event. Extracted as a sibling to
+    :func:`_bridge_outbox_position_key` to keep the parent method under
+    the CRAP threshold; semantics are unchanged from the inline form.
+    """
+    market_id = str(getattr(intent, "market_id", "") or "")
+    outcome_raw = getattr(intent, "outcome", None)
+    outcome = str(outcome_raw) if outcome_raw is not None else ""
+    proto_norm = protocol or "polymarket"
+    if market_id and outcome and chain and wallet_address:
+        position_key = f"prediction:{proto_norm}:{chain.lower()}:{wallet_address.lower()}:{market_id}:{outcome}"
+    else:
+        position_key = ""
+    return position_key, market_id
+
+
+# =============================================================================
 # Strategy Runner
 # =============================================================================
 
@@ -2541,6 +2589,14 @@ class StrategyRunner:
             lending_pre_state=lending_pre_state,
         )
 
+    # Pre-T4 this function was cc=37; VIB-4164 (T4) extracted the BRIDGE and
+    # Prediction branches into module-level helpers (cc dropped to 27). The
+    # architectural shape — a registry-pattern dispatch parallel to T3's
+    # category_handlers.HANDLERS — is tracked in VIB-4222; bundling that
+    # multi-branch refactor into the BRIDGE→TRANSFER PR violates
+    # .claude/rules/crap-refactor.md (registry shape needs a plan-agent
+    # design pass + truth-table parity precursor).
+    # crap-allowlist: VIB-4222 — pre-existing primitive-dispatch ladder; T4 reduced cc 37→27
     def _compute_outbox_position_key(
         self,
         intent: "AnyIntent",
@@ -2619,22 +2675,16 @@ class StrategyRunner:
                 return position_key, vault_address
 
             # Prediction (PREDICTION_BUY / PREDICTION_SELL / PREDICTION_REDEEM) — VIB-3707.
-            # Per-(market_id, outcome) aggregate position. PREDICTION_REDEEM intents
-            # may carry outcome=None when redeeming all winning positions; in that
-            # case we cannot key the position_key here — the handler falls back to
-            # extracted_data/position_key reconstruction or surfaces an unavailable
-            # event.
+            # Delegated to module-level helper to keep this function under
+            # the CRAP threshold.
             if t in {"PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"}:
-                market_id = str(getattr(intent, "market_id", "") or "")
-                outcome_raw = getattr(intent, "outcome", None)
-                outcome = str(outcome_raw) if outcome_raw is not None else ""
-                proto_norm = protocol or "polymarket"
-                position_key = (
-                    f"prediction:{proto_norm}:{chain.lower()}:{wallet_address.lower()}:{market_id}:{outcome}"
-                    if market_id and outcome and chain and wallet_address
-                    else ""
-                )
-                return position_key, market_id
+                return _prediction_outbox_position_key(intent, protocol, chain, wallet_address)
+
+            # BRIDGE — VIB-4164 (T4). Delegated to module-level helper to
+            # keep `_compute_outbox_position_key`'s cyclomatic complexity
+            # under the CRAP threshold.
+            if t == "BRIDGE":
+                return _bridge_outbox_position_key(intent, chain, wallet_address), ""
 
         except Exception:
             logger.debug("_compute_outbox_position_key failed", exc_info=True)
