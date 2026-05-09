@@ -1,0 +1,35 @@
+
+AccountingQuant-Perp audit — DB: <TMPDIR>/perp.db
+
+=== Q5 — Wallet snapshots (n=1) ===
+  t=0   : 2026-05-10T00:00:00  total=$5000.0000  cash=$5000.0000  deployed=$0.0000
+  final : 2026-05-10T00:00:00  total=$5000.0000  cash=$5000.0000  deployed=$0.0000
+  delta : $+0.0000
+  t=0 wallet tokens: [('USDC', '5000')]
+  final wallet tokens: [('USDC', '5000')]
+
+=== Q1 — Money flow (transaction_ledger n=1) ===
+  2026-05-10T00:00:10  PERP_OPEN    1000.0 USDC -> 0.01 BTC-PERP  eff=100000.0  slip=10.0bps  gas=300000 ($0.8000)  tx=0xb1…  ok=1 
+
+=== Q2 — Perp execution costs (n=1) ===
+  PERP_OPEN  in=1000.0 USDC  out=0.01 BTC-PERP  eff_price=100000.0  slip=10.0bps
+
+=== Q3 — Gas per TX ===
+  PERP_OPEN    gas=300000  cost=$0.8000
+  TOTAL: gas_units=300000  gas_cost=$0.8000
+
+=== Q4 — Perp position events (position_events n=0) ===
+
+=== Q6 — Realised PnL / funding (n=0) ===
+  (no PERP_CLOSE rows yet — funding/PnL realisation is computable on teardown only)
+
+=== Q7 — Portfolio metrics (n=1) ===
+  2026-05-10T00:00:10  initial=$5000.0000  current=$5000.0000  deposits=$0.0000  withdrawals=—  gas=$0.8000  complete=0
+
+=== Layer-5 accounting_events (n=0) ===
+
+=== Outbox status ===
+  pending       1
+
+--- Audit complete ---
+

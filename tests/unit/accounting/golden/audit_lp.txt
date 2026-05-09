@@ -1,0 +1,43 @@
+
+AccountingQuant-LP audit — DB: <TMPDIR>/lp.db
+
+=== Q5 — Wallet snapshots (n=3) ===
+  t=0   : 2026-05-10T00:00:00  total=—  cash=—  deployed=—
+  final : 2026-05-10T00:01:00  total=$100.5000  cash=$10.0000  deployed=$90.5000
+  delta : — (one or both totals unmeasured)
+  t=0 wallet tokens: [('USDC', '100')]
+  final wallet tokens: [('USDC', '50'), ('WETH', '0.02')]
+
+=== Q1 — Money flow (transaction_ledger n=3) ===
+  2026-05-10T00:00:10  SWAP        50.0 USDC -> 0.02 WETH  eff=2500.0  slip=5.0bps  gas=120000 ($0.5000)  tx=0xabc123def456…  ok=1 
+  2026-05-10T00:00:20  LP_OPEN     50.0 USDC -> 1 LP-NFT  eff=—  slip=—bps  gas=250000 (—)  tx=0xdef789abc123…  ok=1 
+  2026-05-10T00:01:00  LP_CLOSE    1 LP-NFT -> 51.0 USDC  eff=—  slip=—bps  gas=180000 ($0.0000)  tx=0xfeebee012345…  ok=1 
+
+=== Q2 — Swap costs (n=1) ===
+  Σ slippage_bps: 5.0
+
+=== Q3 — Gas per TX ===
+  SWAP        gas=120000  cost=$0.5000
+  LP_OPEN     gas=250000  cost=—
+  LP_CLOSE    gas=180000  cost=$0.0000
+  TOTAL: gas_units=550000  gas_cost=$0.5000
+
+=== Q4 — LP composition (position_events n=2) ===
+  2026-05-10T00:00:20  OPEN            pos=lp-pos-1  a0=50.0 a1=0.02  value=$100.0000  in_range=1  fees=(—, —)
+  2026-05-10T00:01:00  CLOSE           pos=lp-pos-1  a0=51.0 a1=0.0  value=$51.0000  in_range=1  fees=(0.05, 0.000001)
+
+=== Q6 — LP fees earned (n=1) ===
+  2026-05-10T00:01:00  fees_token0=0.05  fees_token1=0.000001
+
+=== Q7 — Portfolio metrics (n=1) ===
+  2026-05-10T00:01:00  initial=$100.0000  current=$100.5000  deposits=$0.0000  withdrawals=—  gas=$0.5000  complete=1
+
+=== Layer-5 accounting_events (n=1) ===
+  2026-05-10T00:00:20  LP_OPEN         pos=uniswap_v3:lp-pos-1  conf=HIGH
+
+=== Outbox status ===
+  pending       1
+  processed     1
+
+--- Audit complete ---
+

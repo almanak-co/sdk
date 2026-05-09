@@ -1,0 +1,42 @@
+
+AccountingQuant-Looping audit — DB: <TMPDIR>/looping.db
+
+=== Q5 — Wallet snapshots (n=2) ===
+  t=0   : 2026-05-10T00:00:00  total=—  cash=—  deployed=—
+  final : 2026-05-10T00:01:00  total=$1000.0000  cash=$100.0000  deployed=$900.0000
+  delta : — (one or both totals unmeasured)
+  t=0 wallet tokens: [('USDC', '1000')]
+  final wallet tokens: [('USDC', '100')]
+
+=== Q1 — Money flow (transaction_ledger n=3) ===
+  2026-05-10T00:00:10  SUPPLY      900.0 USDC -> — None  eff=—  slip=—bps  gas=200000 ($0.3000)  tx=0xa1…  ok=1 
+  2026-05-10T00:00:20  BORROW      300.0 USDT -> — None  eff=—  slip=—bps  gas=180000 (—)  tx=0xa2…  ok=1 
+  2026-05-10T00:00:30  SWAP        300.0 USDT -> 299.5 USDC  eff=0.998333  slip=5.0bps  gas=120000 ($0.2000)  tx=0xa3…  ok=1 
+
+=== Q2 — Swap costs (n=1) ===
+  Σ slippage_bps: 5.0
+  SWAP  USDT->USDC  in=300.0 out=299.5  eff_price=0.998333  slip=5.0bps
+
+=== Q3 — Gas per TX ===
+  SUPPLY      gas=200000  cost=$0.3000
+  BORROW      gas=180000  cost=—
+  SWAP        gas=120000  cost=$0.2000
+  TOTAL: gas_units=500000  gas_cost=$0.5000
+
+=== Q4 — Lending position composition (position_events n=1) ===
+  2026-05-10T00:00:10  OPEN            pos=aave-pos-1  a0=900.0 a1=300.0  value=—  hf=n/a
+
+=== Q6 — Realised carry / repay events (n=0) ===
+  (no REPAY rows yet — interest realisation is computable on teardown only)
+
+=== Q7 — Portfolio metrics (n=1) ===
+  2026-05-10T00:01:00  initial=$1000.0000  current=$1000.0000  deposits=$0.0000  withdrawals=—  gas=—  complete=0
+
+=== Layer-5 accounting_events (n=1) ===
+  2026-05-10T00:00:10  SUPPLY          pos=aave_v3:USDC  conf=HIGH
+
+=== Outbox status ===
+  processed     1
+
+--- Audit complete ---
+
