@@ -178,6 +178,15 @@ def test_no_intent_type_is_silently_unhandled() -> None:
         list. They are kept here as a historical artifact pending T7's
         reclassification audit).
       - VAULT_MANAGE: no accounting handler yet.
+      - VIB-4165 P0 placeholders (LIQUIDATE / OPEN_CDP / MINT_STABLE /
+        REPAY_STABLE / CLOSE_CDP): intentional placeholders that fail-fast
+        at the compiler with NotImplementedError before any accounting handler
+        is reached. See almanak/framework/intents/compiler.py
+        :func:`_raise_if_placeholder_intent` and
+        tests/unit/intents/test_placeholder_compilers.py. Their TAXONOMY rows
+        carry AccountingCategory.NO_ACCOUNTING because they have no real
+        connector / position bucket — those land in P1 with the actual
+        primitive implementation.
 
     VIB-4164 (T4) removed BRIDGE from this list — it now routes to
     AccountingCategory.TRANSFER. See ``test_bridge_routes_to_transfer_after_t4``.
@@ -198,6 +207,12 @@ def test_no_intent_type_is_silently_unhandled() -> None:
         "PREDICTION_SELL",
         "PREDICTION_REDEEM",
         "VAULT_MANAGE",
+        # VIB-4165 P0 placeholders — fail-fast at compiler, no real handler
+        "LIQUIDATE",
+        "OPEN_CDP",
+        "MINT_STABLE",
+        "REPAY_STABLE",
+        "CLOSE_CDP",
     })
 
     unexpected_no_accounting = []

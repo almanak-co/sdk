@@ -8,6 +8,7 @@ states. Without this guard, missing states cause cryptic runtime errors
 
 import pytest
 
+from almanak.framework.intents.compiler import _PLACEHOLDER_INTENT_TYPES
 from almanak.framework.intents.state_machine import (
     IntentState,
     get_preparing_state,
@@ -18,8 +19,14 @@ from almanak.framework.intents.vocabulary import IntentType
 
 # These IntentTypes intentionally bypass the standard state machine flow:
 # - ENSURE_BALANCE: utility intent resolved before compilation
+# - VIB-4165 P0 placeholders (LIQUIDATE / OPEN_CDP / MINT_STABLE / REPAY_STABLE
+#   / CLOSE_CDP): the compiler raises NotImplementedError BEFORE the state
+#   machine is reached (see ``_raise_if_placeholder_intent`` in compiler.py),
+#   so the state machine intentionally has no entries for them. Coverage is
+#   handled by tests/unit/intents/test_placeholder_compilers.py.
 EXCLUDED_TYPES = {
     IntentType.ENSURE_BALANCE,
+    *_PLACEHOLDER_INTENT_TYPES,
 }
 
 

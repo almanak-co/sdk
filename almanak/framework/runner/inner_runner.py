@@ -780,6 +780,17 @@ class _MinimalIntent:
             "prediction_redeem": IntentType.PREDICTION_REDEEM,
             "ensure_balance": IntentType.ENSURE_BALANCE,
             "flash_loan": IntentType.FLASH_LOAN,
+            # VIB-4165 P0 placeholders — present here for the round-trip
+            # coverage gate (test_every_intent_type_enum_value_is_mapped).
+            # In production these IntentTypes never reach ResultEnricher
+            # because IntentCompiler.compile() raises NotImplementedError on
+            # them before any on-chain execution. See
+            # almanak/framework/intents/compiler.py:_raise_if_placeholder_intent.
+            "liquidate": IntentType.LIQUIDATE,
+            "open_cdp": IntentType.OPEN_CDP,
+            "mint_stable": IntentType.MINT_STABLE,
+            "repay_stable": IntentType.REPAY_STABLE,
+            "close_cdp": IntentType.CLOSE_CDP,
         }
 
         mapped = _TYPE_MAP.get(intent_type.lower())

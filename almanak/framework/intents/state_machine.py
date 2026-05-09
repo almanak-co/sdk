@@ -41,6 +41,7 @@ from .compiler import (
     CompilationResult,
     CompilationStatus,
     IntentCompiler,
+    _raise_if_placeholder_intent,
 )
 from .vocabulary import (
     AnyIntent,
@@ -899,6 +900,16 @@ class IntentStateMachine:
         self._started_at: datetime | None = None
         self._completed_at: datetime | None = None
         self._last_step_start: float | None = None
+
+        # VIB-4165 fail-fast: if the caller wrapped a P0 placeholder IntentType
+        # (LIQUIDATE / OPEN_CDP / MINT_STABLE / REPAY_STABLE / CLOSE_CDP) in an
+        # ad-hoc Intent and reached the state machine without going through
+        # IntentCompiler.compile() first, raise NotImplementedError here too —
+        # otherwise the get_preparing_state() lookup below would surface the
+        # generic "missing state machine wiring" ValueError, masking the fact
+        # that the placeholder is intentionally unimplemented (HRC-5 of the
+        # primitives refactor PRD).
+        _raise_if_placeholder_intent(intent.intent_type)
 
         # Initialize to PREPARING state
         preparing = get_preparing_state(intent.intent_type)

@@ -239,6 +239,23 @@ class IntentType(Enum):
     # (trigger_reason, observed_hf, target_hf) so dashboards and accounting can
     # distinguish forced unwinds from routine repays.
     DELEVERAGE = "DELEVERAGE"
+    # ──────────────────────────────────────────────────────────────────────
+    # P0 PLACEHOLDERS (VIB-4165 / VIB-4160 T5) — locked design item #5.
+    #
+    # These five enum values exist WITHOUT real connectors so future code paths
+    # (LLM tool calls, strategy templates, the agent_tools PolicyEngine) cannot
+    # silently smuggle CDP / liquidation / stablecoin-mint operations through
+    # generic BORROW / REPAY / SUPPLY and pollute lending accounting before the
+    # real connector ships in P1. The compiler MUST raise NotImplementedError on
+    # each — see ``_raise_if_placeholder_intent`` in
+    # ``almanak/framework/intents/compiler.py`` and
+    # ``tests/unit/intents/test_placeholder_compilers.py`` (Hard Ratification
+    # Condition #5).
+    LIQUIDATE = "LIQUIDATE"
+    OPEN_CDP = "OPEN_CDP"
+    MINT_STABLE = "MINT_STABLE"
+    REPAY_STABLE = "REPAY_STABLE"
+    CLOSE_CDP = "CLOSE_CDP"
 
 
 # =============================================================================

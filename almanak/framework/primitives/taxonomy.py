@@ -466,6 +466,58 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_PREDICTION_LIFECYCLE,
         ),
         # ──────────────────────────────────────────────────────────────────
+        # P0 placeholders (VIB-4165, T5 of VIB-4160) — locked design item #5.
+        #
+        # These five rows exist so ``record_for(...)`` returns a row for every
+        # ``IntentType`` value (parity invariant). All five map to
+        # ``Primitive.LENDING`` because CDP is collateralized debt, liquidation
+        # closes a lending position, and stablecoin mint/repay against
+        # collateral is lending-family. ``AccountingCategory.NO_ACCOUNTING``
+        # and ``position_type=None`` because no real handler / position bucket
+        # exists yet — that lands in P1 with the real connector.
+        #
+        # The compiler raises ``NotImplementedError`` for each — guarded by
+        # ``_raise_if_placeholder_intent`` in
+        # ``almanak/framework/intents/compiler.py`` and a parameterised test
+        # in ``tests/unit/intents/test_placeholder_compilers.py`` (Hard
+        # Ratification Condition #5).
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "LIQUIDATE",
+            Primitive.LENDING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "OPEN_CDP",
+            Primitive.LENDING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "MINT_STABLE",
+            Primitive.LENDING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "REPAY_STABLE",
+            Primitive.LENDING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "CLOSE_CDP",
+            Primitive.LENDING,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
         # Utility intents (no position, no accounting row)
         # ──────────────────────────────────────────────────────────────────
         _record(

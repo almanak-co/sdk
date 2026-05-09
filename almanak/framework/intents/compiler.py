@@ -265,6 +265,63 @@ _CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
 _SLOT0_NOT_FETCHED: Any = object()
 
 
+# =============================================================================
+# P0 placeholder fail-fast (VIB-4165 / VIB-4160 T5) — Hard Ratification
+# Condition #5 of the primitives refactor.
+#
+# These five ``IntentType`` values exist so that future code paths (LLM tool
+# calls, strategy templates, the agent_tools PolicyEngine) cannot silently
+# smuggle CDP / liquidation / stablecoin-mint operations through generic
+# BORROW / REPAY / SUPPLY and pollute lending accounting before the real
+# connectors land in P1. The compiler MUST refuse to compile any of these.
+#
+# The set is the single canonical source of truth — adding or removing a
+# placeholder is a one-line change here. ``_raise_if_placeholder_intent`` is
+# called from ``IntentCompiler.compile`` immediately after ``intent_type`` is
+# resolved.
+#
+# Anti-drift contract: ``tests/unit/intents/test_placeholder_compilers.py``
+# asserts (a) the set equals exactly these 5 values, (b) the helper raises on
+# each, (c) the helper does NOT raise on any of the 24 real intent types, (d)
+# every placeholder has a TAXONOMY row, (e) ``IntentCompiler.compile`` still
+# references the helper by name. Without (e), the helper could exist in
+# isolation while ``compile`` silently skips it — that is the literal
+# silent-failure mode this guard was created to prevent.
+# =============================================================================
+
+_PLACEHOLDER_INTENT_TYPES: frozenset[IntentType] = frozenset(
+    {
+        IntentType.LIQUIDATE,
+        IntentType.OPEN_CDP,
+        IntentType.MINT_STABLE,
+        IntentType.REPAY_STABLE,
+        IntentType.CLOSE_CDP,
+    }
+)
+
+
+def _raise_if_placeholder_intent(intent_type: IntentType) -> None:
+    """Fail-fast guard for P0 placeholder ``IntentType`` values.
+
+    Args:
+        intent_type: The intent type to check.
+
+    Raises:
+        NotImplementedError: if ``intent_type`` is one of the 5 P0 placeholders
+            declared by VIB-4165 (locked design item #5 of the primitives
+            refactor PRD). The error message names the offending value so the
+            caller can locate it without reading the helper source.
+    """
+    if intent_type in _PLACEHOLDER_INTENT_TYPES:
+        raise NotImplementedError(
+            f"IntentType {intent_type.value!r} is a P0 placeholder declared "
+            f"by VIB-4160 (primitives refactor, locked design item #5). "
+            f"Compilation is intentionally disabled until the real connector "
+            f"lands in P1. See "
+            f"docs/internal/discussions/primitives-refactor-20260508.md §5."
+        )
+
+
 class IntentCompiler:
     """Compiles Intents into executable ActionBundles.
 
@@ -702,6 +759,13 @@ class IntentCompiler:
         """
         return self._polymarket_adapter
 
+    # crap-allowlist: VIB-4222 — pre-existing primitive-dispatch ladder
+    # (cc=31, the SWAP/LP_OPEN/LP_CLOSE/.../UNWRAP_NATIVE if/elif chain). T5
+    # (VIB-4165) only added a 1-line `_raise_if_placeholder_intent` call plus
+    # an 8-line comment ABOVE the dispatch — zero new branches, zero new
+    # control flow. The function was already over threshold on main; the
+    # registry-pattern refactor that decomposes this ladder is tracked under
+    # VIB-4222.
     def compile(self, intent: AnyIntent) -> CompilationResult:  # noqa: C901
         """Compile an intent into an ActionBundle.
 
@@ -714,6 +778,15 @@ class IntentCompiler:
         Returns:
             CompilationResult with ActionBundle and metadata
         """
+        # VIB-4165 fail-fast: refuse to compile P0 placeholder intent types
+        # BEFORE entering the outer try/except below. The outer block catches
+        # ``Exception`` and converts errors to ``CompilationResult.FAILED`` —
+        # if the placeholder check ran inside it, ``NotImplementedError`` would
+        # be silently swallowed and the placeholder would compile to a FAILED
+        # result rather than raise. That is exactly the silent-failure mode
+        # HRC-5 of the primitives refactor PRD was created to prevent.
+        _raise_if_placeholder_intent(intent.intent_type)
+
         try:
             # Step 0: Resolve amount="all" before dispatching.
             # This is the single mandatory resolution point for all intent types.
