@@ -20,6 +20,8 @@ Design rules:
 
 from __future__ import annotations
 
+import logging
+
 from almanak.framework.primitives.types import (
     AccountingCategory,
     EventKind,
@@ -28,6 +30,8 @@ from almanak.framework.primitives.types import (
     Primitive,
     PrimitiveRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 ALIASES: dict[str, str] = {
     # Ghost name from accounting/classifier.py:24 (pre-VIB-4161). The intent
@@ -614,6 +618,18 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
         # machine. Mapping to UTILITY documents the "no primitive of its
         # own" invariant while keeping the teardown-coverage test green.
         return Primitive.UTILITY
+    # T05 (VIB-4190): unknown position-type strings are silently coerced to
+    # None today, then the caller in accounting.position_state._classify_position
+    # treats them as "skip". WARN here so the operator sees the unrecognized
+    # string rather than the silent skip — primitives T2 (VIB-4162) deferred
+    # this diagnostic to the position-registry epic.
+    logger.warning(
+        "materializer_primitive_for: unknown position_type_str=%r (normalized=%r); "
+        "returning None — caller will treat as no-primitive. Add a mapping in "
+        "almanak/framework/primitives/taxonomy.py if this is a real primitive.",
+        position_type_str,
+        s,
+    )
     return None
 
 

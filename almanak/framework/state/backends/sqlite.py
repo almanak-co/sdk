@@ -470,6 +470,77 @@ ON position_state_snapshots (deployment_id, position_id, captured_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_pss_cycle
 ON position_state_snapshots (cycle_id);
+
+-- Position registry (VIB-4190 / T05 of multi-position-tracking epic VIB-4185).
+--
+-- Authoritative table for "is this position open?". Columns ratified by
+-- docs/internal/prds/multi-position-tracking.md §Registry Data Shape.
+-- Transactional surface specified in blueprints/28-position-registry.md.
+--
+-- T05 lands the schema only. No production code reads or writes this table
+-- yet; T11 (VIB-4197) introduces the atomic save_ledger_and_registry primitive
+-- and T12+ flips primitives to registry mode one at a time. The
+-- schema_contract entry is intentionally deferred to T11 (no writers means
+-- the contract guard would gate boot against a column shape no production
+-- path depends on).
+--
+-- The dual-key model is load-bearing:
+--   physical_identity_hash   = durable PK from receipt facts only.
+--   semantic_grouping_key    = auto-mode uniqueness predicate (partial unique
+--                              index, bypassed when handle is supplied).
+-- primitive uses Primitive enum value; accounting_category uses
+-- AccountingCategory enum value (sourced via record_for(intent_type)).
+CREATE TABLE IF NOT EXISTS position_registry (
+    deployment_id            TEXT NOT NULL,
+    chain                    TEXT NOT NULL,
+    primitive                TEXT NOT NULL,
+    accounting_category      TEXT NOT NULL,
+    physical_identity_hash   TEXT NOT NULL,
+    semantic_grouping_key    TEXT NOT NULL,
+    grouping_policy_version  TEXT NOT NULL,
+    handle                   TEXT,
+    -- The CHECK pins `status` to the three canonical values ratified by PRD
+    -- §Registry Data Shape (and blueprint 28 §4.3 status-priority table).
+    -- Without it, a case-variant typo (`OPEN`, `Open`, …) would bypass the
+    -- partial unique index `ix_registry_auto_mode` (which guards rows where
+    -- `status = 'open'`) and admit duplicate semantic groups silently.
+    status                   TEXT NOT NULL
+                              CHECK (status IN ('open', 'closed', 'reorg_invalidated')),
+    -- PRD §Registry Data Shape declares this as `JSON NOT NULL`. SQLite has
+    -- no native JSON type — a `JSON` declaration falls under NUMERIC affinity
+    -- and would coerce JSON-valued strings unexpectedly. The realization here
+    -- uses `TEXT NOT NULL`, matching the existing JSON-storing columns in
+    -- this file (clob_orders.fills/metadata, transaction_ledger.*_json,
+    -- accounting_events.payload_json, accounting_outbox.error,
+    -- position_state_snapshots.attribution_json). T11 (VIB-4197) writers
+    -- serialize via json.dumps; a CHECK(json_valid(payload)) constraint may
+    -- be added in T11 with the writer code (see PR #2197 audit notes).
+    payload                  TEXT NOT NULL,
+    opened_at_block          INTEGER,
+    opened_tx                TEXT,
+    closed_at_block          INTEGER,
+    closed_tx                TEXT,
+    last_reconciled_at_block INTEGER,
+    matching_policy_version  INTEGER NOT NULL,
+    PRIMARY KEY (deployment_id, chain, primitive, physical_identity_hash)
+);
+
+-- Handle uniqueness within a deployment+accounting_category when set.
+-- (UniV3 LP and Pendle LP share Primitive='lp' but have distinct
+-- AccountingCategory values, so a single deployment can carry one "leg_a"
+-- handle on a UniV3 NFT and another "leg_a" handle on a Pendle LP without
+-- collision.)
+CREATE UNIQUE INDEX IF NOT EXISTS ix_registry_handle
+    ON position_registry (deployment_id, accounting_category, handle)
+    WHERE handle IS NOT NULL;
+
+-- Auto-mode collision guard: reject duplicate semantic groups within
+-- deployment+chain+accounting_category when no handle is supplied AND the
+-- existing row is still open. Closed rows do not block reopening; handles
+-- bypass the guard (per §Strategy author UX).
+CREATE UNIQUE INDEX IF NOT EXISTS ix_registry_auto_mode
+    ON position_registry (deployment_id, chain, accounting_category, semantic_grouping_key)
+    WHERE status = 'open' AND handle IS NULL;
 """
 
 
