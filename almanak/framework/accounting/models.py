@@ -86,8 +86,46 @@ class PredictionEventType(StrEnum):
     PREDICTION_REDEEM = "PREDICTION_REDEEM"
 
 
+class TransferEventType(StrEnum):
+    """Lifecycle event for value transfer / bridge primitives (VIB-4163).
+
+    Stub introduced by T3 of the Primitives Refactor (VIB-4160). Used by
+    ``transfer_handler.py`` to emit a payload-only typed event when the
+    classifier routes an intent to ``AccountingCategory.TRANSFER``. T4
+    (VIB-4164) wires the BRIDGE classification path so this event actually
+    appears in production data; until then the handler is registered but
+    not reachable.
+    """
+
+    TRANSFER = "TRANSFER"
+
+
+class TransferSettlementStatus(StrEnum):
+    """Settlement state of a TRANSFER accounting event (VIB-4163).
+
+    BRIDGE intents in particular settle asynchronously across two chains,
+    so a single TRANSFER event may be written PENDING (source-side leg
+    landed; destination-side not observed yet), advanced to SETTLED when
+    the destination-side credit is observed, or marked FAILED when the
+    bridge guarantees the value will not arrive.
+    """
+
+    PENDING = "pending"
+    SETTLED = "settled"
+    FAILED = "failed"
+
+
 # Union of all valid accounting event type strings — used by the gateway
 # whitelist (state_service.py) and the AccountingProcessor classifier.
+#
+# VIB-4163 (T3): ``TransferEventType`` is intentionally NOT in this set yet.
+# The gateway imports this constant for the SaveAccountingEvent whitelist; if
+# TRANSFER were here, the gateway would accept ``event_type='TRANSFER'`` rows
+# from any client, but the writer's augment chokepoint cannot yet resolve a
+# primitive for them (no taxonomy row), so paper-mode writes would persist
+# rows the live path treats as unsupported. T4 (VIB-4164) adds TRANSFER to
+# both ``primitives.taxonomy.TAXONOMY`` AND to this whitelist atomically when
+# the BRIDGE classification is flipped.
 ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
     e.value
     for cls in (
@@ -538,6 +576,109 @@ class PredictionAccountingEvent:
             position_basis_after=(
                 Decimal(d["position_basis_after"]) if d.get("position_basis_after") is not None else Decimal("0")
             ),
+            gas_usd=_dec(d.get("gas_usd")),
+            confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
+            unavailable_reason=d.get("unavailable_reason") or "",
+            schema_version=schema_version,
+        )
+
+
+@dataclass
+class TransferAccountingEvent:
+    """Payload-only typed event for TRANSFER / BRIDGE intents (VIB-4163).
+
+    Stub introduced by T3 of the Primitives Refactor. Settles in the existing
+    ``accounting_events.payload_json`` column — no DDL change.
+
+    ``settlement_status`` is the load-bearing field: it tracks whether the
+    transfer has landed on the destination side. BRIDGE intents in particular
+    settle asynchronously across two chains, so a single ``TransferAccountingEvent``
+    may be written ``PENDING`` (source-leg landed, destination not yet observed)
+    and advanced later. T4 (VIB-4164) wires the classifier so BRIDGE intents
+    actually reach this handler; T3 ships only the typed shape.
+    """
+
+    identity: AccountingIdentity
+    event_type: TransferEventType  # always TRANSFER
+
+    # Transfer subject — what was moved.
+    asset: str
+    amount: Decimal | None
+    amount_usd: Decimal | None
+
+    # Cross-chain support (BRIDGE-shaped). When the transfer is single-chain
+    # (e.g. an internal value move) source_chain == destination_chain.
+    source_chain: str
+    destination_chain: str
+
+    # Settlement contract — see TransferSettlementStatus docstring.
+    settlement_status: TransferSettlementStatus
+
+    # Position-tracking key. Both state backends read ``getattr(event,
+    # "position_key", "")`` to populate ``accounting_events.position_key``;
+    # an empty string here makes per-position queries silently miss transfer
+    # rows (dashboard rollups, basis-store rehydration). Set explicitly by
+    # ``transfer_handler`` from ``outbox_row['position_key']``. Default ``""``
+    # is intentionally typed as str (not None) to match the column contract.
+    position_key: str = ""
+
+    gas_usd: Decimal | None = None
+    confidence: AccountingConfidence = AccountingConfidence.HIGH
+    unavailable_reason: str = ""
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        """Coerce enum-typed fields so raw strings raise at construction.
+
+        Without this, ``TransferAccountingEvent(..., settlement_status="garbage")``
+        silently stores the string and only crashes at serialization time
+        (``self.settlement_status.value`` → AttributeError). Coercing via the
+        enum constructor surfaces invalid values immediately. CodeRabbit Major
+        finding on PR #2194.
+        """
+        self.event_type = TransferEventType(self.event_type)
+        self.settlement_status = TransferSettlementStatus(self.settlement_status)
+        self.confidence = AccountingConfidence(self.confidence)
+
+    def to_payload_json(self) -> str:
+        def _enc(v: Any) -> Any:
+            if isinstance(v, Decimal):
+                return str(v)
+            if isinstance(v, AccountingConfidence | TransferEventType | TransferSettlementStatus):
+                return v.value
+            return v
+
+        d = {
+            "event_type": self.event_type.value,
+            "position_key": self.position_key,
+            "asset": self.asset,
+            "amount": _enc(self.amount),
+            "amount_usd": _enc(self.amount_usd),
+            "source_chain": self.source_chain,
+            "destination_chain": self.destination_chain,
+            "settlement_status": self.settlement_status.value,
+            "gas_usd": _enc(self.gas_usd),
+            "confidence": self.confidence.value,
+            # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
+            "unavailable_reason": self.unavailable_reason or None,
+            "schema_version": self.schema_version,
+        }
+        return json.dumps(d)
+
+    @classmethod
+    def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> TransferAccountingEvent:
+        d = json.loads(payload)
+        schema_version = _validate_schema_version(d, "TransferAccountingEvent")
+        return cls(
+            identity=identity,
+            event_type=TransferEventType(d["event_type"]),
+            position_key=d.get("position_key", ""),
+            asset=d.get("asset", ""),
+            amount=_dec(d.get("amount")),
+            amount_usd=_dec(d.get("amount_usd")),
+            source_chain=d.get("source_chain", ""),
+            destination_chain=d.get("destination_chain", ""),
+            settlement_status=TransferSettlementStatus(d["settlement_status"]),
             gas_usd=_dec(d.get("gas_usd")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason") or "",

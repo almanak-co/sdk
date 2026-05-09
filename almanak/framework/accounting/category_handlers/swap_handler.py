@@ -389,3 +389,16 @@ def _token_usd(symbol: str, amount: Decimal | None, oracle: dict[str, Decimal]) 
         return price * amount
     except (ArithmeticError, TypeError):
         return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapter (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.SWAP)
+def _dispatch_swap(ctx: HandlerContext) -> SwapAccountingEvent | None:
+    return handle_swap(ctx.outbox_row, ctx.ledger_row, ctx.basis_store)

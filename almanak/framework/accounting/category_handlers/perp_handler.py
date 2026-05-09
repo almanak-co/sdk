@@ -159,3 +159,16 @@ def handle_perp(
         confidence=AccountingConfidence.ESTIMATED,
         unavailable_reason="entry_price and realized_pnl require perp receipt parser (pending)",
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapter (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.PERP)
+def _dispatch_perp(ctx: HandlerContext) -> PerpAccountingEvent | None:
+    return handle_perp(ctx.outbox_row, ctx.ledger_row)

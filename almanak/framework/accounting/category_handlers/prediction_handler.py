@@ -727,3 +727,16 @@ def _str_or_none(value: Any) -> str | None:
         return None
     s = str(value)
     return s if s else None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapter (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.PREDICTION)
+def _dispatch_prediction(ctx: HandlerContext) -> PredictionAccountingEvent | None:
+    return handle_prediction(ctx.outbox_row, ctx.ledger_row, ctx.basis_store)

@@ -33,6 +33,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.accounting.category_handlers import HANDLERS, HandlerContext
 from almanak.framework.accounting.classifier import AccountingCategory, classify
 from almanak.framework.accounting.writer import AccountingWriter
 
@@ -192,51 +193,51 @@ class AccountingProcessor:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _dispatch(self, outbox_row: dict[str, Any], ledger_row: dict[str, Any]) -> Any:
-        """Classify the intent and dispatch to the matching category handler."""
-        from almanak.framework.accounting.category_handlers.lending_handler import handle_lending
-        from almanak.framework.accounting.category_handlers.lp_handler import handle_lp
-        from almanak.framework.accounting.category_handlers.pendle_handler import handle_pendle_lp, handle_pendle_pt
-        from almanak.framework.accounting.category_handlers.perp_handler import handle_perp
-        from almanak.framework.accounting.category_handlers.prediction_handler import handle_prediction
-        from almanak.framework.accounting.category_handlers.swap_handler import handle_swap
-        from almanak.framework.accounting.category_handlers.vault_handler import handle_vault
+        """Classify the intent and dispatch to the registered category handler.
 
+        VIB-4163 (T3): the legacy if-ladder is replaced by a single registry
+        lookup. Each handler module registers itself with ``@register(category)``
+        at package import time; ``HANDLERS`` is then a dense
+        ``dict[AccountingCategory, HandlerFn]``.
+
+        Behaviour for ``NO_ACCOUNTING`` and for any (future) category whose
+        handler is missing from the registry: return ``None`` (no event
+        written). Missing-handler-for-classified-category emits an ERROR log
+        line so the silent-degradation case is loud.
+        """
         intent_type = ledger_row.get("intent_type") or ""
         protocol = ledger_row.get("protocol") or ""
         token_out = ledger_row.get("token_out") or ""
 
         category = classify(intent_type, protocol, token_out)
-        logger.debug("drain_one: intent_type=%s protocol=%s → category=%s", intent_type, protocol, category)
+        logger.debug(
+            "drain_one: intent_type=%s protocol=%s → category=%s",
+            intent_type,
+            protocol,
+            category,
+        )
 
-        if category == AccountingCategory.LENDING:
-            return handle_lending(outbox_row, ledger_row, self._basis_store)
-        if category == AccountingCategory.PENDLE_LP:
-            return handle_pendle_lp(outbox_row, ledger_row)
-        if category == AccountingCategory.PENDLE_PT:
-            return handle_pendle_pt(outbox_row, ledger_row, self._basis_store)
-        if category == AccountingCategory.LP:
-            # LP_CLOSE / LP_COLLECT_FEES need the prior LP_OPEN's cost_basis
-            # and tick range to populate ``realized_pnl_usd`` and the position
-            # bracket on the close payload. Look up by ``position_key`` via
-            # the state manager (already used by ``PortfolioValuer`` cost-
-            # basis enrichment) and pass the most recent LP_OPEN payload
-            # into the handler. Read-side fail-quiet — if the lookup
-            # returns nothing the handler still emits a populated CLOSE
-            # payload, just without ``realized_pnl_usd``.
-            prior_open: dict[str, Any] | None = None
-            if (intent_type or "").upper() in {"LP_CLOSE", "LP_COLLECT_FEES"}:
-                prior_open = self._lookup_prior_lp_open(outbox_row.get("position_key") or "")
-            return handle_lp(outbox_row, ledger_row, prior_open_payload=prior_open)
-        if category == AccountingCategory.PERP:
-            return handle_perp(outbox_row, ledger_row)
-        if category == AccountingCategory.VAULT:
-            return handle_vault(outbox_row, ledger_row)
-        if category == AccountingCategory.SWAP:
-            return handle_swap(outbox_row, ledger_row, self._basis_store)
-        if category == AccountingCategory.PREDICTION:
-            return handle_prediction(outbox_row, ledger_row, self._basis_store)
-        # NO_ACCOUNTING — no event written
-        return None
+        if category == AccountingCategory.NO_ACCOUNTING:
+            return None
+
+        handler = HANDLERS.get(category)
+        if handler is None:
+            logger.error(
+                "_dispatch: no handler registered for category=%s "
+                "(ledger_entry_id=%s, intent_type=%s) — accounting event NOT written",
+                category.value,
+                ledger_row.get("id") or "",
+                intent_type,
+            )
+            return None
+
+        ctx = HandlerContext(
+            outbox_row=outbox_row,
+            ledger_row=ledger_row,
+            basis_store=self._basis_store,
+            prior_open_lookup=self._lookup_prior_lp_open,
+        )
+        return handler(ctx)
 
     def _lookup_prior_lp_open(self, position_key: str) -> dict[str, Any] | None:
         """Return the most recent LP_OPEN payload for ``position_key``.

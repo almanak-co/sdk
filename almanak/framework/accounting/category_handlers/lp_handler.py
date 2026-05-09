@@ -578,3 +578,26 @@ def handle_lp(
         current_tick=current_tick_v,
         in_range=in_range_v,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapter (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.LP)
+def _dispatch_lp(ctx: HandlerContext) -> LPAccountingEvent | None:
+    """Adapter that resolves prior_open_payload before calling ``handle_lp``.
+
+    The legacy ladder did this resolution inside ``AccountingProcessor._dispatch``;
+    pulling it here keeps the LP-specific pre-work co-located with the handler
+    and lets the dispatcher stay generic over every registered category.
+    """
+    intent_type = (ctx.ledger_row.get("intent_type") or "").upper()
+    prior_open: dict[str, Any] | None = None
+    if intent_type in {"LP_CLOSE", "LP_COLLECT_FEES"}:
+        prior_open = ctx.prior_open_lookup(ctx.outbox_row.get("position_key") or "")
+    return handle_lp(ctx.outbox_row, ctx.ledger_row, prior_open_payload=prior_open)

@@ -26,6 +26,7 @@ from almanak.framework.accounting.models import (
     LendingAccountingEvent,
     PendleAccountingEvent,
     PredictionAccountingEvent,
+    TransferAccountingEvent,
 )
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
@@ -56,6 +57,7 @@ AccountingEvent = (
     | PerpAccountingEvent
     | VaultAccountingEvent
     | PredictionAccountingEvent
+    | TransferAccountingEvent
 )
 
 

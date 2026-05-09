@@ -315,3 +315,21 @@ def _market_from_position_key(position_key: str) -> str:
         return ""
     parts = position_key.split(":")
     return parts[-1] if len(parts) >= 4 else ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapters (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.PENDLE_LP)
+def _dispatch_pendle_lp(ctx: HandlerContext) -> PendleAccountingEvent | None:
+    return handle_pendle_lp(ctx.outbox_row, ctx.ledger_row)
+
+
+@register(AccountingCategory.PENDLE_PT)
+def _dispatch_pendle_pt(ctx: HandlerContext) -> PendleAccountingEvent | None:
+    return handle_pendle_pt(ctx.outbox_row, ctx.ledger_row, ctx.basis_store)

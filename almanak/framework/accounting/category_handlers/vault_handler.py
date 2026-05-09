@@ -139,3 +139,16 @@ def handle_vault(
         confidence=AccountingConfidence.ESTIMATED,
         unavailable_reason="shares, share_price, and yield require vault receipt parser (pending)",
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapter (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.VAULT)
+def _dispatch_vault(ctx: HandlerContext) -> VaultAccountingEvent | None:
+    return handle_vault(ctx.outbox_row, ctx.ledger_row)

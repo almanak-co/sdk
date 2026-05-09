@@ -451,3 +451,21 @@ def _extract_amount_human(
     except Exception:
         logger.debug("token decimal resolution failed for %s on %s", asset, chain)
         return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry adapter (VIB-4163, T3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from almanak.framework.accounting.category_handlers import HandlerContext, register
+from almanak.framework.primitives.types import AccountingCategory
+
+
+@register(AccountingCategory.LENDING)
+def _dispatch_lending(ctx: HandlerContext) -> LendingAccountingEvent | None:
+    """Adapter that converts ``HandlerContext`` to the legacy ``handle_lending`` signature.
+
+    Kept thin so the legacy public function stays usable by existing tests
+    (``test_lending_accounting.py`` etc.) without signature changes.
+    """
+    return handle_lending(ctx.outbox_row, ctx.ledger_row, ctx.basis_store)
