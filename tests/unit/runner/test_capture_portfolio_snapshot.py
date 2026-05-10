@@ -145,6 +145,15 @@ def _make_snapshot(
     iteration_number: int = 0,
     snapshot_metadata: dict | None = None,
 ) -> PortfolioSnapshot:
+    # VIB-4225 ACC-02: production ``PortfolioValuer.value`` always stamps
+    # ``gas_native_status`` on snapshot_metadata, and
+    # ``_enforce_native_gas_status_in_live`` raises in live mode on any
+    # missing/non-ok status. The fixture must mirror that contract so the
+    # capture-pipeline tests don't hit the runner-level enforcer's
+    # missing-stamp guard. Tests that want to exercise a non-ok path can
+    # pass an explicit ``snapshot_metadata={"gas_native_status": "..."}``.
+    md = dict(snapshot_metadata) if snapshot_metadata else {}
+    md.setdefault("gas_native_status", "ok")
     return PortfolioSnapshot(
         timestamp=datetime.now(UTC),
         strategy_id=strategy_id,
@@ -153,7 +162,7 @@ def _make_snapshot(
         value_confidence=confidence,
         chain=chain,
         iteration_number=iteration_number,
-        snapshot_metadata=snapshot_metadata or {},
+        snapshot_metadata=md,
     )
 
 

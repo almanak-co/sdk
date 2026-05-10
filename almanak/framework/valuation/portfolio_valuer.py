@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from almanak.framework.portfolio.models import (
     PortfolioSnapshot,
     PositionValue,
+    TokenBalance,
     ValueConfidence,
 )
 from almanak.framework.teardown.models import PositionInfo
@@ -203,6 +204,21 @@ class PortfolioValuer:
                         wallet_data_incomplete = True
                     logger.debug("Could not fetch price for %s", token)
 
+            # VIB-4225 ACC-02 — append the chain's NATIVE gas-token to the
+            # wallet so wallet-method PnL captures gas spend (G6 reconciliation).
+            # The strategy stays fail-open at this layer — typed status lands on
+            # snapshot.snapshot_metadata after construction below; runner-level
+            # ``_enforce_native_gas_status_in_live`` then halts in live mode if
+            # the status is non-ok / non-already_tracked.
+            gas_native_status, native_row = self._resolve_native_gas(chain or "", market, balances, prices)
+
+            # pr-auditor finding #4: when the gas helper reports a non-success
+            # status, the snapshot's value_confidence MUST drop to ESTIMATED
+            # rather than HIGH — otherwise dashboards trust a row whose typed
+            # status says it's degraded.
+            if gas_native_status not in ("ok", "already_tracked"):
+                wallet_data_incomplete = True
+
             # Check for tokens with positive balance but missing/non-positive price
             for token in balances:
                 token_price = prices.get(token)
@@ -211,6 +227,11 @@ class PortfolioValuer:
 
             # Step 3: Apply spot valuation math (pure, deterministic)
             wallet_balances = value_tokens(balances, prices)
+            # Append the native row directly — value_tokens filters
+            # ``balance <= 0`` so a measured-zero native would otherwise be
+            # silently dropped and re-introduce empty-vs-zero ambiguity.
+            if native_row is not None and not any(tb.symbol == native_row.symbol for tb in wallet_balances):
+                wallet_balances.append(native_row)
             wallet_value = total_value(wallet_balances)
 
             # Step 4: Get non-wallet positions (LP, lending, perps) if available
@@ -259,6 +280,7 @@ class PortfolioValuer:
                 token_prices=token_price_records,
                 chain=chain,
                 iteration_number=iteration_number,
+                snapshot_metadata={"gas_native_status": gas_native_status},
             )
             # Reconciliation is advisory — never let it downgrade the framework snapshot.
             try:
@@ -359,16 +381,24 @@ class PortfolioValuer:
         # comparison so that wallet-only strategies still reconcile correctly.
         framework_total = framework_snapshot.wallet_total_value_usd
 
-        metadata = {
-            "valuation_source": "framework",
-            "external_provider": external["provider"],
-            "framework_total_value_usd": str(framework_total),
-            "external_total_value_usd": str(external_total),
-            "reconciliation_status": "framework_only",
-            "external_cache_hit": external["cache_hit"],
-            "external_timestamp": external["timestamp"].isoformat(),
-            "external_positions_count": len(external["positions"]),
-        }
+        # VIB-4225: preserve any pre-existing typed status (e.g.
+        # gas_native_status set by _resolve_native_gas) by merging the new
+        # reconciliation metadata into the existing dict rather than wholesale
+        # replacing it. Without this merge, the runner-level enforcer at
+        # _enforce_native_gas_status_in_live would never see the stamp.
+        metadata = dict(framework_snapshot.snapshot_metadata or {})
+        metadata.update(
+            {
+                "valuation_source": "framework",
+                "external_provider": external["provider"],
+                "framework_total_value_usd": str(framework_total),
+                "external_total_value_usd": str(external_total),
+                "reconciliation_status": "framework_only",
+                "external_cache_hit": external["cache_hit"],
+                "external_timestamp": external["timestamp"].isoformat(),
+                "external_positions_count": len(external["positions"]),
+            }
+        )
 
         if external_total <= 0:
             metadata["reconciliation_status"] = "external_non_positive"
@@ -595,6 +625,113 @@ class PortfolioValuer:
         if baseline <= 0:
             return Decimal("0")
         return abs(framework_total - external_total) / baseline
+
+    @staticmethod
+    def _resolve_native_gas(
+        chain: str,
+        market: Any,
+        balances: dict[str, Decimal],
+        prices: dict[str, Decimal],
+    ) -> tuple[str, TokenBalance | None]:
+        """VIB-4225 ACC-02 — fold the chain's native gas-token into the wallet.
+
+        Returns ``(status, native_row)``:
+
+        - ``status`` is one of ``"ok"`` / ``"already_tracked"`` /
+          ``"unknown_chain"`` / ``"balance_failed"`` / ``"price_missing"`` —
+          the runner-level enforcer reads it off
+          ``snapshot.snapshot_metadata["gas_native_status"]``.
+        - ``native_row`` is a :class:`TokenBalance` for the native token (even
+          when the balance is exactly ``Decimal("0")``, preserving "Empty !=
+          Zero": measured zero is durable, absence means unmeasured) when the
+          status is ``"ok"``. ``None`` for every other status, including
+          ``"already_tracked"`` (in that case, the row was already produced
+          by the upstream tracked-tokens loop).
+
+        Mutates the ``balances`` + ``prices`` dicts only on the ``"ok"``
+        path so downstream price-records / confidence calc see the native
+        symbol — but the caller is responsible for appending ``native_row``
+        to ``wallet_balances`` so ``value_tokens``'s ``balance <= 0`` filter
+        does NOT silently drop a measured-zero native (Codex P2 #2 +
+        pr-auditor finding #2).
+
+        Strategy stays fail-open: this method NEVER raises; the live-mode
+        halt is enforced at ``runner_state._enforce_native_gas_status_in_live``
+        which inspects the typed status after the snapshot is built.
+        """
+        try:
+            from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+            native_symbol = native_token_for_chain(chain)
+        except Exception as e:  # noqa: BLE001 — typed status path
+            logger.debug("native gas-token chain resolve failed: %s", e)
+            return ("unknown_chain", None)
+        if not native_symbol:
+            return ("unknown_chain", None)
+
+        canon = native_symbol.upper()
+        # Case-insensitive dedupe — a strategy that already tracks the native
+        # symbol (rare) keeps its single entry.
+        existing_key = next(
+            (tok for tok in balances if (tok or "").upper() == canon),
+            None,
+        )
+        if existing_key is not None:
+            # Codex P2 #1: when the upstream tracked-tokens loop fetched the
+            # native balance but its price lookup failed, the native is in
+            # ``balances`` without a matching ``prices`` entry, and
+            # ``value_tokens`` will silently drop the row. Surface the
+            # mismatch as ``price_missing`` so the runner-level enforcer
+            # halts (live) or stamps ERROR (paper) instead of stamping a
+            # misleading "already_tracked" trail.
+            existing_price = prices.get(existing_key)
+            if existing_price is None or existing_price <= 0:
+                return ("price_missing", None)
+            return ("already_tracked", None)
+
+        # CodeRabbit thread #11: keep the fail-open contract around
+        # malformed balance/price values. A market stub that returns a
+        # ``TokenBalance(balance=None)`` or a non-Decimal price object
+        # would crash ``Decimal(str(...))`` and bubble up to the
+        # snapshot-wide UNAVAILABLE handler, losing the typed-status
+        # trail. Pulling the conversion inside the try/except keeps the
+        # helper truly fail-open: malformed shape surfaces as
+        # ``balance_failed`` / ``price_missing`` instead of an
+        # unhandled exception.
+        try:
+            balance_result = market.balance(native_symbol)
+            raw_balance = balance_result.balance if hasattr(balance_result, "balance") else balance_result
+            bal = Decimal(str(raw_balance))
+        except Exception as e:  # noqa: BLE001 — typed status path
+            logger.debug("native gas-token balance fetch failed: %s", e)
+            return ("balance_failed", None)
+
+        try:
+            price = market.price(native_symbol)
+            if price is None:
+                return ("price_missing", None)
+            price_d = Decimal(str(price))
+        except Exception as e:  # noqa: BLE001 — typed status path
+            logger.debug("native gas-token price fetch failed: %s", e)
+            return ("price_missing", None)
+        # Build a TokenBalance row directly so the caller can append it to
+        # ``wallet_balances`` even when ``bal == 0``. ``value_tokens``'s
+        # ``balance <= 0`` filter would otherwise drop measured zero, which
+        # silently re-introduces the empty-vs-zero ambiguity this PR fixes.
+        native_row = TokenBalance(
+            symbol=canon,
+            balance=bal,
+            value_usd=bal * price_d,
+            price_usd=price_d,
+        )
+        # Mirror into balances/prices so downstream consumers (price-records
+        # audit map, confidence calc) see the native symbol; positive
+        # balances flow through ``value_tokens`` normally, zero balances are
+        # carried by ``native_row`` instead.
+        if bal > 0:
+            balances[canon] = bal
+        prices[canon] = price_d
+        return ("ok", native_row)
 
     @staticmethod
     def _build_token_price_records(

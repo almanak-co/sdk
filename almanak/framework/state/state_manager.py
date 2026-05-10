@@ -36,6 +36,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import Enum, IntEnum, auto
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
@@ -875,6 +876,33 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
         return [_pg_row_to_ledger_entry(row) for row in rows]
+
+    async def sum_ledger_gas_usd(
+        self,
+        deployment_id: str,
+        strategy_id: str | None = None,
+    ) -> Decimal:
+        """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
+
+        Postgres counterpart of :meth:`SQLiteStore.sum_ledger_gas_usd`.
+        ``NULLIF(gas_usd, '')::numeric`` handles the parser-didn't-emit
+        empty-string case; ``COALESCE(SUM(...), 0)`` handles the no-rows
+        case. Postgres reads are ``agent_id``-keyed (mirrors the rest of
+        :class:`PostgresStateStore`).
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        sql = """
+            SELECT COALESCE(SUM(NULLIF(gas_usd, '')::numeric), 0) AS total
+            FROM transaction_ledger
+            WHERE deployment_id = $1
+               OR (deployment_id = '' AND agent_id = $2)
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(sql, deployment_id, strategy_id or deployment_id)
+        total = (row or {"total": 0})["total"]
+        return Decimal(str(total or 0))
 
     async def get_accounting_events(
         self,
@@ -2458,6 +2486,54 @@ class StateManager:
             self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, False, str(e))
             logger.error(f"Failed to get ledger entries: {e}")
             return []
+
+    async def sum_ledger_gas_usd(
+        self,
+        deployment_id: str,
+        strategy_id: str | None = None,
+    ) -> Decimal:
+        """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
+
+        Delegates to the WARM backend's aggregator. Returns ``Decimal("0")``
+        on no rows, no warm backend, or unsupported backend (the runner's
+        ``_build_metrics_for_snapshot`` reads ``hasattr`` first; this fallback
+        guards against an old backend that pre-dates the aggregator method).
+        Raises :class:`AccountingPersistenceError` so the runner halts the
+        cycle in live mode (VIB-3762 contract).
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "sum_ledger_gas_usd"):
+            return Decimal("0")
+        start = time.perf_counter()
+        try:
+            result = await self._warm.sum_ledger_gas_usd(deployment_id, strategy_id)
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "sum_ledger_gas_usd", latency, True)
+            return result
+        except AccountingPersistenceError:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "sum_ledger_gas_usd", latency, False, "AccountingPersistenceError")
+            raise
+        except NotImplementedError:
+            # CodeRabbit thread #6: hosted-mode contract depends on
+            # ``GatewayStateManager.sum_ledger_gas_usd`` surfacing
+            # ``NotImplementedError`` as the typed "hosted unsupported"
+            # signal. Wrapping it here as ``AccountingPersistenceError``
+            # would shadow the type-narrow catch in
+            # ``runner_state._populate_gas_spent_usd``. Propagate unchanged.
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "sum_ledger_gas_usd", latency, False, "NotImplementedError")
+            raise
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "sum_ledger_gas_usd", latency, False, str(e))
+            logger.error("Failed to sum ledger gas_usd for %s: %s", deployment_id, e)
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id or deployment_id,
+                cause=e,
+            ) from e
 
     # -------------------------------------------------------------------------
     # PositionEvent delegation (VIB-3204 audit fix)

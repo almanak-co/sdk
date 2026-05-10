@@ -451,6 +451,38 @@ class GatewayStateManager:
                 cause=e,
             ) from e
 
+    async def sum_ledger_gas_usd(
+        self,
+        deployment_id: str,
+        strategy_id: str | None = None,
+    ) -> Decimal:
+        """Hosted-mode placeholder — VIB-4247 follow-up will replace this.
+
+        VIB-4225 (ACC-02) ships the local-mode `sum_ledger_gas_usd` aggregator
+        but the gateway gRPC has no `SumLedgerGasUsd` method today; adding
+        one is a gateway-service surface change tracked under VIB-4247
+        (Infra-labeled, parented under VIB-4225).
+
+        The runner's :func:`_build_metrics_for_snapshot` catches this
+        `NotImplementedError` specifically (NOT a bare ``except Exception``),
+        leaves ``gas_spent_usd = Decimal("0")``, stamps
+        ``snapshot.snapshot_metadata["gas_aggregator_status"] =
+        "hosted_unsupported"``, and logs WARN once. This preserves the
+        pre-PR hosted-mode behaviour (gas_spent_usd was always 0 in hosted)
+        but adds a typed durable trail so operators can see the gap on
+        every snapshot row instead of after the next quarterly audit.
+
+        DO NOT change this raise to anything else (silent zero, generic
+        Exception subclass, etc.) — the runner's catch is type-narrow on
+        ``NotImplementedError`` and only ``NotImplementedError`` triggers
+        the ``hosted_unsupported`` typed status. Any other exception will
+        bubble up as ``AccountingPersistenceError`` and halt the live runner.
+        """
+        del deployment_id, strategy_id  # arguments are part of the contract once VIB-4247 lands
+        raise NotImplementedError(
+            "sum_ledger_gas_usd is local-mode-only — hosted gateway aggregator is follow-up VIB-4247"
+        )
+
     async def save_portfolio_metrics(self, metrics: "PortfolioMetrics") -> bool:
         """Save portfolio metrics via gateway gRPC.
 

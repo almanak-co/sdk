@@ -40,6 +40,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -3181,6 +3182,59 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
+
+    async def sum_ledger_gas_usd(
+        self,
+        deployment_id: str,
+        strategy_id: str | None = None,
+    ) -> Decimal:
+        """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
+
+        NULL / empty-string `gas_usd` rows coalesce to 0 inside the SUM (the
+        empty-string case is the parser-didn't-emit signal — must not silently
+        drop the row). Returns ``Decimal("0")`` on no rows.
+
+        The fallback to ``strategy_id`` covers the bootstrap window where a
+        ledger row was written before ``deployment_id`` was stamped (only
+        on the very first iteration pre-_stamp_snapshot_identity); without
+        the fallback that single row's gas_usd would be lost from the SUM.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_sum() -> Decimal:
+            # pr-auditor finding #1: SUM(CAST(... AS REAL)) routes Decimal-as-
+            # TEXT through IEEE-754 double before re-wrapping in Decimal,
+            # silently violating the lossless-precision invariant the rest
+            # of the accounting stack maintains. Read raw rows and sum in
+            # Python with Decimal — preserves measurement semantics, keeps
+            # NULL/empty-as-zero coalescing (F5 pin), and stays well under
+            # the F6 perf budget (10k rows in <100ms).
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT gas_usd
+                    FROM transaction_ledger
+                    WHERE deployment_id = ?
+                       OR (deployment_id = '' AND strategy_id = ?)
+                    """,
+                    (deployment_id, strategy_id or deployment_id),
+                )
+                rows = cursor.fetchall()
+            total = Decimal("0")
+            for row in rows:
+                raw = row["gas_usd"]
+                if raw is None or raw == "":
+                    # F5 pin: NULL / empty-string rows coalesce to zero
+                    # (parser-didn't-emit, not silent-drop signal). The row
+                    # is counted as measured-but-zero; the row itself is
+                    # preserved.
+                    continue
+                total += Decimal(str(raw))
+            return total
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_sum)
 
     # -------------------------------------------------------------------------
     # Typed accounting events (VIB-3417)

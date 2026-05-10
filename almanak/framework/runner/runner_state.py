@@ -15,7 +15,7 @@ import structlog
 
 from ..intents.vocabulary import AnyIntent, HoldIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
-from ..state.exceptions import AccountingPersistenceError
+from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from ..state.state_manager import StateData, StateNotFoundError
 from .reconciliation import BalanceSnapshot, build_reconciliation_report
 from .runner_models import IterationStatus
@@ -105,6 +105,78 @@ def _stamp_snapshot_identity(runner: Any, snapshot: PortfolioSnapshot) -> None:
             getattr(snapshot, "strategy_id", "?"),
         )
         snapshot.execution_mode = existing_mode
+
+
+def _enforce_native_gas_status_in_live(runner: Any, snapshot: PortfolioSnapshot) -> None:
+    """Live-mode enforcer for VIB-4225 native-gas status (F1-F3 contract).
+
+    The strategy's ``IntentStrategy.get_portfolio_snapshot`` stamps a typed
+    ``snapshot.snapshot_metadata["gas_native_status"]`` indicating whether
+    the native-gas-token append succeeded:
+
+    - ``"ok"``: native row appended successfully.
+    - ``"already_tracked"``: strategy's tracked-tokens list already includes
+      the native; dedupe path. (Acceptable, no append needed.)
+    - ``"unknown_chain"`` (F1): ``native_token_for_chain`` returned None.
+    - ``"balance_failed"`` (F2): ``market.balance(native)`` raised.
+    - ``"price_missing"`` (F3): ``market.price(native)`` raised or returned None.
+
+    Per the frozen UAT card §6 F1-F3: live mode raises
+    ``AccountingPersistenceError("snapshot", ...)`` on any non-ok /
+    non-already_tracked status. Paper / dry_run leaves the typed status on
+    the snapshot (durable trail through ``positions_json``) and continues —
+    a partial snapshot is more useful than an UNAVAILABLE row.
+
+    Called from ``capture_portfolio_snapshot`` between
+    ``_stamp_snapshot_identity`` (which sets ``execution_mode``) and
+    ``_persist_snapshot_and_metrics``.
+    """
+    # UNAVAILABLE snapshots are constructed by the runner's no-valuation
+    # fallback path (no PortfolioValuer, no strategy fallback) and already
+    # carry an error stamp — the gas-native helper never had a chance to
+    # run. Treating that as a separate ACCOUNTING_FAILED breach would just
+    # double-fire on a snapshot that's already degraded by definition.
+    if getattr(snapshot, "value_confidence", None) == ValueConfidence.UNAVAILABLE:
+        return
+
+    status = (snapshot.snapshot_metadata or {}).get("gas_native_status", "")
+    # Only the explicit success states short-circuit. An empty/missing status
+    # means the gas-native helper never ran on this snapshot — treat that as
+    # a durable-trail breach (CodeRabbit major #6) so live mode halts and
+    # paper mode logs the missing stamp instead of silently passing.
+    if status in ("ok", "already_tracked"):
+        return
+    if not status:
+        status = "missing"
+    # Bare-mode discriminator: derive directly from runner.config to avoid
+    # reading a stale ``snapshot.execution_mode`` attribute.
+    try:
+        from almanak.framework.runner.strategy_runner import (
+            derive_execution_mode_from_config,
+        )
+
+        mode = derive_execution_mode_from_config(runner.config)
+        mode_value = mode.value if hasattr(mode, "value") else str(mode)
+    except Exception:  # noqa: BLE001 — never crash on config-derive
+        mode_value = ""
+    if mode_value != "live":
+        logger.error(
+            "gas_native_status=%s on %s in mode=%s — snapshot persists with typed-status trail; "
+            "live mode would have halted with ACCOUNTING_FAILED here.",
+            status,
+            getattr(snapshot, "strategy_id", "?"),
+            mode_value or "(unknown)",
+        )
+        return
+    raise AccountingPersistenceError(
+        write_kind=AccountingWriteKind.SNAPSHOT,
+        strategy_id=getattr(snapshot, "strategy_id", "") or "",
+        message=(
+            f"native-gas append failed in live mode "
+            f"(gas_native_status={status!r}) — runner halts with ACCOUNTING_FAILED "
+            f"per VIB-4225 §6 F1-F3 contract."
+        ),
+    )
 
 
 async def update_state(
@@ -558,7 +630,7 @@ async def _persist_snapshot_and_metrics(
             raise
         except Exception as exc:
             raise AccountingPersistenceError(
-                write_kind="metrics",
+                write_kind=AccountingWriteKind.METRICS,
                 strategy_id=snapshot.strategy_id,
                 message=str(exc),
                 cause=exc,
@@ -681,6 +753,16 @@ async def capture_portfolio_snapshot(
         # other half of the loop.
         _stamp_snapshot_identity(runner, snapshot)
 
+        # VIB-4225 (ACC-02) §6 F1-F3 contract — inspect the typed
+        # ``gas_native_status`` the strategy stamped during snapshot
+        # construction; in live mode raise ``AccountingPersistenceError``
+        # on any non-ok / non-already_tracked status so the runner halts
+        # with ACCOUNTING_FAILED. Paper / dry_run leaves the typed status
+        # on the snapshot (durable trail through ``positions_json``) and
+        # continues. The snapshot is NOT persisted yet — raising here
+        # avoids leaving a half-stamped row.
+        _enforce_native_gas_status_in_live(runner, snapshot)
+
         # Build metrics for atomic co-write (VIB-2765).
         # VIB-3882: pass the strategy so its declared ``allocation_usd``
         # anchors the portfolio baseline.
@@ -727,7 +809,102 @@ async def capture_portfolio_snapshot(
         return None
 
 
-async def _build_metrics_for_snapshot(
+async def _populate_gas_spent_usd(
+    runner: Any,
+    metrics: PortfolioMetrics,
+    snapshot: PortfolioSnapshot,
+    *,
+    deployment_id: str,
+    strategy_id: str,
+    is_live: bool,
+) -> None:
+    """Populate ``metrics.gas_spent_usd = Σ transaction_ledger.gas_usd`` (VIB-4225 ACC-02).
+
+    Stamps a typed status into ``snapshot.snapshot_metadata["gas_aggregator_status"]``
+    that rides through the ``positions_json`` envelope so a forensic auditor
+    can see the gap on the snapshot row itself, not just in stdout logs.
+
+    Failure-mode contract (frozen in UAT card §6 F4a/F4b/F4c):
+
+    - ``"ok"``: aggregator returned a value (possibly 0) — happy path.
+    - ``"hosted_unsupported"`` (F4b): backend raised ``NotImplementedError``
+      (see :meth:`GatewayStateManager.sum_ledger_gas_usd` — VIB-4247
+      follow-up). All modes leave ``gas_spent_usd = Decimal("0")`` and log
+      WARN once. **No raise**, even in live hosted mode — preserves the
+      pre-PR behaviour where hosted strategies silently had 0 gas_spent_usd.
+    - ``"query_failed"`` (F4a + F4c): backend raised any other exception.
+      **Live mode raises** ``AccountingPersistenceError("metrics", ...)``;
+      paper/dry_run leaves ``gas_spent_usd = Decimal("0")`` and logs ERROR.
+      The catch is type-narrow on ``NotImplementedError`` — F4c asserts
+      that a synthetic ``ValueError`` raises in live mode.
+
+    The ``snapshot_metadata`` mutation happens before the snapshot is
+    persisted by the caller (``capture_portfolio_snapshot`` calls this via
+    ``_build_metrics_for_snapshot`` BEFORE ``_persist_snapshot_and_metrics``),
+    so the typed status lands in ``portfolio_snapshots.positions_json``.
+    """
+
+    def _stamp(status: str) -> None:
+        # Tolerant of stub snapshots that don't expose snapshot_metadata
+        # (production PortfolioSnapshot always does — VIB-4099 frame).
+        metadata = getattr(snapshot, "snapshot_metadata", None)
+        if isinstance(metadata, dict):
+            metadata["gas_aggregator_status"] = status
+
+    aggregator = getattr(runner.state_manager, "sum_ledger_gas_usd", None)
+    if aggregator is None:
+        # Older backend that pre-dates the aggregator. Treat as hosted-style
+        # deferred surface: no raise, durable typed-status stamp, WARN log.
+        # Reset gas_spent_usd so a stale value from a prior iteration doesn't
+        # leak forward and contradict the stamped failure status (CodeRabbit
+        # major #4).
+        metrics.gas_spent_usd = Decimal("0")
+        _stamp("hosted_unsupported")
+        logger.warning(
+            "gas_aggregator: state_manager has no sum_ledger_gas_usd method; "
+            "leaving portfolio_metrics.gas_spent_usd at 0 for deployment_id=%s. "
+            "Follow-up: VIB-4247.",
+            deployment_id,
+        )
+        return
+
+    try:
+        total = await aggregator(deployment_id, strategy_id)
+    except NotImplementedError:
+        # F4b — explicit hosted-mode deferred surface. Type-narrow catch.
+        metrics.gas_spent_usd = Decimal("0")
+        _stamp("hosted_unsupported")
+        logger.warning(
+            "gas_aggregator: hosted backend has not yet implemented sum_ledger_gas_usd "
+            "(VIB-4247); leaving portfolio_metrics.gas_spent_usd at 0 for deployment_id=%s.",
+            deployment_id,
+        )
+        return
+    except Exception as e:  # noqa: BLE001 — type-narrow happens above; this is F4a+F4c
+        # F4a (sqlite/PG OperationalError) and F4c (any other ValueError /
+        # RuntimeError / etc.). Live raises; paper logs + stamps query_failed.
+        metrics.gas_spent_usd = Decimal("0")
+        _stamp("query_failed")
+        logger.error(
+            "gas_aggregator query failed for deployment_id=%s: %s",
+            deployment_id,
+            e,
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.METRICS,
+                strategy_id=strategy_id,
+                message=f"sum_ledger_gas_usd failed for {deployment_id}",
+                cause=e,
+            ) from e
+        return
+
+    metrics.gas_spent_usd = total
+    _stamp("ok")
+
+
+# crap-allowlist: VIB-4248 — function predates VIB-4225 (cc=24 on main); branches are mode-aware accounting-failure paths covered by test_portfolio_baseline.py + test_stamp_snapshot_identity.py + test_portfolio_metrics_gas_aggregator.py. Refactor protocol (.claude/rules/crap-refactor.md) requires fresh-context Plan agent; deferred to VIB-4248 alongside other test-quality follow-ups.
+async def _build_metrics_for_snapshot(  # noqa: C901
     runner: Any,
     strategy_id: str,
     snapshot: PortfolioSnapshot,
@@ -834,6 +1011,14 @@ async def _build_metrics_for_snapshot(
                 cycle_id=cycle_id,
             )
             logger.info(f"Portfolio baseline established for {strategy_id}: ${initial:.2f}")
+            await _populate_gas_spent_usd(
+                runner,
+                metrics,
+                snapshot,
+                deployment_id=deployment_id,
+                strategy_id=strategy_id,
+                is_live=execution_mode == "live",
+            )
             return metrics
 
         existing.timestamp = snapshot.timestamp
@@ -843,8 +1028,21 @@ async def _build_metrics_for_snapshot(
         existing.cycle_id = cycle_id
         if not existing.deployment_id:
             existing.deployment_id = deployment_id
+        await _populate_gas_spent_usd(
+            runner,
+            existing,
+            snapshot,
+            deployment_id=existing.deployment_id or deployment_id,
+            strategy_id=strategy_id,
+            is_live=execution_mode == "live",
+        )
         return existing
 
+    except AccountingPersistenceError:
+        # _populate_gas_spent_usd raised in live mode on a query_failed.
+        # Don't swallow — the runner's outer handler must see it so
+        # ACCOUNTING_FAILED fires. (VIB-3762 contract.)
+        raise
     except Exception as e:
         logger.warning(f"Failed to build portfolio metrics: {e}")
         return None

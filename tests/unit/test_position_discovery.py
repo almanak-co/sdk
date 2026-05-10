@@ -716,8 +716,18 @@ class TestPortfolioValuerFullIntegration:
         del strategy.get_open_positions  # No strategy cooperation
 
         market = MagicMock()
-        market.balance.return_value = Decimal("100")  # 100 USDC in wallet
-        market.price.return_value = Decimal("1.0")  # $1 per USDC
+        # Per-symbol balance/price so the gas-native helper (VIB-4225 ACC-02)
+        # gets a deterministic ETH=0 row instead of inheriting the
+        # MagicMock-default $100 USDC value, which would silently double the
+        # wallet total. Tracked-token loop reads USDC; gas helper reads ETH.
+        balance_stub = MagicMock()
+        balance_stub.balance = Decimal("100")
+        eth_stub = MagicMock()
+        eth_stub.balance = Decimal("0")
+        market.balance.side_effect = lambda sym: eth_stub if sym == "ETH" else balance_stub
+        market.price.side_effect = lambda sym, *a, **kw: (
+            Decimal("3500") if sym == "ETH" else Decimal("1.0")
+        )
 
         # Discovery finds a supply position
         supply_pos = PositionInfo(

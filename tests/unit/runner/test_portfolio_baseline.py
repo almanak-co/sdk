@@ -30,10 +30,17 @@ def _make_snapshot(total_value_usd: str, available_cash_usd: str) -> MagicMock:
 
 
 def _make_runner() -> MagicMock:
+    from decimal import Decimal
+
     runner = MagicMock()
     runner.state_manager = MagicMock()
     runner.state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
     runner.state_manager.save_portfolio_metrics = AsyncMock()
+    # VIB-4225 ACC-02: the runner-side metrics builder calls sum_ledger_gas_usd
+    # to populate gas_spent_usd. The bare MagicMock attribute can't be
+    # awaited, so we explicitly wire it as an AsyncMock returning 0
+    # (these baseline tests don't assert on the gas trail).
+    runner.state_manager.sum_ledger_gas_usd = AsyncMock(return_value=Decimal("0"))
     runner.deployment_id = "dep-test"
     runner._last_cycle_id = "cycle-1"
     return runner

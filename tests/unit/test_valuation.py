@@ -603,14 +603,20 @@ class TestPortfolioValuer:
         )
         valuer = PortfolioValuer(gateway_client=client)
         strategy = _make_strategy(tracked_tokens=["USDC"])
-        market = _make_market(prices={"USDC": Decimal("1")}, balances={"USDC": Decimal("10")})
+        # VIB-4225 ACC-02: include ETH=0 / price so the gas-native helper
+        # stamps `gas_native_status="ok"`; otherwise the test trips the
+        # `wallet_data_incomplete=True` path and confidence drops to ESTIMATED.
+        market = _make_market(
+            prices={"USDC": Decimal("1"), "ETH": Decimal("3500")},
+            balances={"USDC": Decimal("10"), "ETH": Decimal("0")},
+        )
 
         snapshot = valuer.value(strategy, market)
 
         # Framework on-chain value is authoritative; external is advisory
         # VIB-3614: wallet-only → total_value_usd == 0; framework wallet in wallet_total_value_usd
         assert snapshot.total_value_usd == Decimal("0")
-        assert snapshot.wallet_total_value_usd == Decimal("10")  # framework wallet (10 USDC)
+        assert snapshot.wallet_total_value_usd == Decimal("10")  # framework wallet (10 USDC + 0 ETH)
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_large_divergence"
         assert snapshot.snapshot_metadata["external_total_value_usd"] == "15"
@@ -628,13 +634,18 @@ class TestPortfolioValuer:
         )
         valuer = PortfolioValuer(gateway_client=client)
         strategy = _make_strategy(tracked_tokens=["USDC"])
-        market = _make_market(prices={"USDC": Decimal("1")}, balances={"USDC": Decimal("100")})
+        # VIB-4225 ACC-02: see large-divergence sibling — ETH=0 / price for
+        # gas-native helper success.
+        market = _make_market(
+            prices={"USDC": Decimal("1"), "ETH": Decimal("3500")},
+            balances={"USDC": Decimal("100"), "ETH": Decimal("0")},
+        )
 
         snapshot = valuer.value(strategy, market)
 
         # VIB-3614: wallet-only → total_value_usd == 0; framework wallet in wallet_total_value_usd
         assert snapshot.total_value_usd == Decimal("0")
-        assert snapshot.wallet_total_value_usd == Decimal("100")  # framework wallet (100 USDC)
+        assert snapshot.wallet_total_value_usd == Decimal("100")  # framework wallet (100 USDC + 0 ETH)
         assert snapshot.value_confidence == ValueConfidence.HIGH
         assert snapshot.snapshot_metadata["reconciliation_status"] == "framework_won_moderate_divergence"
 
@@ -644,14 +655,23 @@ class TestPortfolioValuer:
         client.integration.GetWalletPortfolio.side_effect = RuntimeError("rpc failed")
         valuer = PortfolioValuer(gateway_client=client)
         strategy = _make_strategy(tracked_tokens=["USDC"])
-        market = _make_market(prices={"USDC": Decimal("1")}, balances={"USDC": Decimal("10")})
+        # VIB-4225 ACC-02: include ETH=0 / price so the gas-native helper
+        # stamps `gas_native_status="ok"` (the test's purpose is RPC fallback,
+        # not gas-native — keep the gas trail clean).
+        market = _make_market(
+            prices={"USDC": Decimal("1"), "ETH": Decimal("3500")},
+            balances={"USDC": Decimal("10"), "ETH": Decimal("0")},
+        )
 
         snapshot = valuer.value(strategy, market)
 
         # VIB-3614: RPC failure falls back to framework snapshot; wallet-only → total == 0
         assert snapshot.total_value_usd == Decimal("0")
         assert snapshot.wallet_total_value_usd == Decimal("10")
-        assert snapshot.snapshot_metadata == {}
+        # VIB-4225 ACC-02: gas-native helper stamps `ok` on every framework
+        # snapshot. Reconciliation keys are NOT set on the RPC-failure path
+        # (no external snapshot to reconcile against).
+        assert snapshot.snapshot_metadata == {"gas_native_status": "ok"}
 
 
 class TestPortfolioValuerEdgeCases:
@@ -698,16 +718,27 @@ class TestPortfolioValuerEdgeCases:
         assert snapshot.wallet_total_value_usd == Decimal("10500")
 
     def test_empty_tracked_tokens(self):
-        """Strategy with no tracked tokens produces empty but valid snapshot."""
+        """Strategy with no tracked tokens produces empty but valid snapshot.
+
+        VIB-4225 ACC-02: ``_resolve_native_gas`` always appends the chain's
+        native row (even at balance=0), so the wallet now has exactly one
+        entry — the measured-zero native row — and confidence stays HIGH.
+        """
         valuer = PortfolioValuer()
         strategy = _make_strategy(tracked_tokens=[])
-        market = _make_market()
+        # Provide ETH=0 / price so the gas-native helper stamps "ok".
+        market = _make_market(
+            prices={"ETH": Decimal("3500")},
+            balances={"ETH": Decimal("0")},
+        )
 
         snapshot = valuer.value(strategy, market)
 
         assert snapshot.total_value_usd == Decimal("0")
         assert snapshot.value_confidence == ValueConfidence.HIGH
-        assert snapshot.wallet_balances == []
+        assert len(snapshot.wallet_balances) == 1
+        assert snapshot.wallet_balances[0].symbol == "ETH"
+        assert snapshot.wallet_balances[0].balance == Decimal("0")
 
     def test_balance_failure_with_values_gives_estimated(self):
         """Some balance queries fail but we have partial values -> ESTIMATED."""
