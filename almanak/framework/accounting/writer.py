@@ -30,10 +30,10 @@ from almanak.framework.accounting.models import (
 )
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
-    MATCHING_POLICY_VERSIONS,
     SCHEMA_VERSION,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
+from almanak.framework.accounting.policy import MatchingPolicy
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
@@ -113,11 +113,11 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
         logger.error("%s — non-live mode, returning original payload unchanged", msg)
         return payload_json
 
-    # VIB-4162 (T2): per-primitive matching_policy_version stamping.
-    # Look up the primitive for this event_type via the canonical taxonomy;
-    # in live mode an unknown OR missing event_type raises (preserves
-    # VIB-3863's mode-aware contract), in non-live the writer logs ERROR
-    # and falls back to UTILITY's version.
+    # VIB-4162 (T2) / VIB-4195 (T09): per-primitive matching_policy_version
+    # stamping via the typed accessor. Look up the primitive for this
+    # event_type via the canonical taxonomy; in live mode an unknown OR
+    # missing event_type raises (preserves VIB-3863's mode-aware contract),
+    # in non-live the writer logs ERROR and falls back to UTILITY's version.
     event_type = d.get("event_type")
     if not isinstance(event_type, str) or not event_type:
         msg = (
@@ -130,14 +130,14 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
                 message=msg,
             )
         logger.error(
-            "%s — non-live mode, falling back to MATCHING_POLICY_VERSIONS[Primitive.UTILITY]",
+            "%s — non-live mode, falling back to MatchingPolicy.for_primitive(Primitive.UTILITY)",
             msg,
         )
-        matching_version = MATCHING_POLICY_VERSIONS[Primitive.UTILITY]
+        matching_version = MatchingPolicy.for_primitive(Primitive.UTILITY)
     else:
         try:
             primitive = record_for(event_type).primitive
-            matching_version = MATCHING_POLICY_VERSIONS[primitive]
+            matching_version = MatchingPolicy.for_primitive(primitive)
         except UnknownIntentTypeError as exc:
             msg = (
                 f"augment_accounting_payload: event_type {event_type!r} has no "
@@ -150,10 +150,10 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
                     cause=exc,
                 ) from exc
             logger.error(
-                "%s — non-live mode, falling back to MATCHING_POLICY_VERSIONS[Primitive.UTILITY]",
+                "%s — non-live mode, falling back to MatchingPolicy.for_primitive(Primitive.UTILITY)",
                 msg,
             )
-            matching_version = MATCHING_POLICY_VERSIONS[Primitive.UTILITY]
+            matching_version = MatchingPolicy.for_primitive(Primitive.UTILITY)
 
     d["schema_version"] = SCHEMA_VERSION
     d["formula_version"] = FORMULA_VERSION
