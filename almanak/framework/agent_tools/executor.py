@@ -280,6 +280,30 @@ class ToolExecutor:
             return self._catalog.to_openai_tools()
         return self._catalog.to_openai_tools(allowed=allowed)
 
+    def _raise_if_cached_args_are_placeholder(self, cached_args: dict, *, tool_name: str) -> None:
+        """VIB-4167 Gate A — refuse a cached bundle whose original
+        ``compile_intent`` args carry a placeholder ``intent_type``.
+
+        Used by both ``_execute_compiled_bundle`` AND ``simulate_intent``
+        (the cached-bundle path). Both paths bypass the normal
+        ``PolicyEngine.check()`` chokepoint because they consume cached
+        bundle bytes directly; without this re-validation a placeholder
+        bundle written by a regressed earlier build would dispatch to the
+        gateway. Raises ``RiskBlockedError`` (caught by ``execute()`` and
+        surfaced as ``risk_blocked`` in the response envelope).
+        """
+        violations: list[str] = []
+        suggestions: list[str] = []
+        self._policy_engine._check_intent_type_allowed(cached_args, violations, suggestions)
+        if violations:
+            from almanak.framework.agent_tools.errors import RiskBlockedError
+
+            raise RiskBlockedError(
+                f"Cached bundle blocked by policy: {'; '.join(violations)}",
+                tool_name=tool_name,
+                suggestion="; ".join(suggestions),
+            )
+
     def _lookup_token_price(self, token: str) -> Decimal | None:
         """Synchronous price lookup for spend-limit pre-checks.
 
@@ -860,6 +884,9 @@ class ToolExecutor:
                 if cached_entry is not None:
                     cached_chain = cached_entry.chain
                     bundle_bytes = cached_entry.bundle_bytes
+                    # VIB-4167 — Gate A on the cached-bundle simulate path.
+                    # See ``_raise_if_cached_args_are_placeholder`` docstring.
+                    self._raise_if_cached_args_are_placeholder(cached_entry.args, tool_name=tool_name)
 
             if bundle_bytes is None:
                 if not args.get("intent_type"):
@@ -1098,10 +1125,27 @@ class ToolExecutor:
                 tool_name="execute_compiled_bundle",
             )
 
+        # VIB-4167 — Gate A: refuse cached bundles that reference a P0
+        # placeholder primitive. This MUST run for both dry_run and live
+        # invocations: Gate A's contract is "no gRPC dispatch for a
+        # placeholder", and a dry_run still calls Execute() in simulation
+        # mode (so the gateway IS reached, defeating the contract).
+        # The compiler-side Gate B (VIB-4165) already raises
+        # NotImplementedError on placeholders, but Gate A's promise is
+        # faster feedback and no gateway round-trip — both are violated
+        # if the dry_run branch skips this check. Load-bearing test:
+        # ``test_execute_compiled_bundle_refuses_cached_placeholder_via_executor``
+        # (parameterized over dry_run ∈ {True, False}).
+        self._raise_if_cached_args_are_placeholder(original_args, tool_name="execute_compiled_bundle")
+
         # Pre-execution policy gate: re-validate the original compile_intent args
         # against the full policy chain (token/protocol/chain allowlists + spend limits).
         # This closes the gap where compile_intent policy checks only inspected top-level
         # args while actual trade semantics were buried in nested params (VIB-504).
+        # Spend / chain / token / position checks remain dry_run-scoped because they
+        # represent live-only economic gates (a simulated trade has no cost / no
+        # real position impact); the placeholder check above is the architectural
+        # gate (intent type itself is illegal) and applies regardless.
         if not dry_run:
             violations: list[str] = []
             suggestions: list[str] = []

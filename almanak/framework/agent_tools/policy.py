@@ -7,9 +7,11 @@ before reaching the gateway.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import math
+import re
 import statistics
 import time
 from collections.abc import Callable
@@ -21,7 +23,52 @@ from pathlib import Path
 from almanak.framework.agent_tools.catalog import RiskTier, ToolDefinition
 from almanak.framework.agent_tools.errors import RiskBlockedError
 
+# Single source of truth — the placeholder ``IntentType`` set introduced by
+# VIB-4165 (T5 of the VIB-4160 primitives refactor). Importing the frozenset
+# directly (rather than copying the string values) is enforced by VIB-4167's
+# ``test_gate_a_and_gate_b_share_placeholder_set`` (runtime ``is`` identity
+# check). The derived ``_PLACEHOLDER_INTENT_NAMES`` set below is the only
+# permitted local computation — its single comprehension over
+# ``_PLACEHOLDER_INTENT_TYPES`` keeps the two consumers in lock-step.
+from almanak.framework.intents.compiler import _PLACEHOLDER_INTENT_TYPES
+
 logger = logging.getLogger(__name__)
+
+
+# Pre-computed normalised set of placeholder intent_type *names* for O(1)
+# matching against the LLM-supplied string. The compiler (Gate B) compares
+# ``IntentType`` enum members directly; the agent_tools boundary (Gate A)
+# receives raw strings from ``compile_intent`` / ``simulate_intent`` /
+# cached ``execute_compiled_bundle`` args and so must normalise.
+#
+# Normalisation matches the gateway's ``_normalize_intent_type`` semantics
+# (``almanak/gateway/services/execution_service.py``) — strip whitespace,
+# lowercase, drop both ``-`` and ``_`` — so an LLM cannot smuggle a
+# placeholder past Gate A by passing an alias the gateway would have
+# normalised to the same enum (e.g. ``"open-cdp"``, ``"opencdp"`` would
+# silently round-trip without the strip). Without this, Gate B catches the
+# alias correctly but the "no gRPC, no bundle cached" property of Gate A
+# is silently lost. See ``_normalize_intent_type_for_gate`` and
+# ``_check_intent_type_allowed`` for the call site.
+_INTENT_TYPE_STRIP_RE = re.compile(r"[\s_\-]+")
+
+
+def _normalize_intent_type_for_gate(intent_type: str) -> str:
+    """Normalise an LLM-supplied ``intent_type`` for Gate A matching.
+
+    Mirrors the gateway-side ``ExecutionService._normalize_intent_type`` so
+    Gate A and Gate B refuse the same set of placeholder aliases. Drops
+    ALL whitespace (leading, trailing, AND embedded — so ``"open cdp"``
+    cannot smuggle past Gate A by hiding behind a space), strips ``-`` and
+    ``_``, and lowercases. Whitespace inside the string is the
+    CodeRabbit-major regression: ``str.strip`` only handles edges.
+    """
+    return _INTENT_TYPE_STRIP_RE.sub("", intent_type).lower()
+
+
+_PLACEHOLDER_INTENT_NAMES: frozenset[str] = frozenset(
+    _normalize_intent_type_for_gate(t.value) for t in _PLACEHOLDER_INTENT_TYPES
+)
 
 # Vault lifecycle tools that do NOT transfer user funds and thus skip spend
 # limit checks. deposit_vault is intentionally excluded because it moves
@@ -757,11 +804,51 @@ class PolicyEngine:
 
     def _check_intent_type_allowed(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
         intent_type = args.get("intent_type")
-        if (
-            intent_type
-            and self.policy.allowed_intent_types is not None
-            and intent_type.lower() not in {t.lower() for t in self.policy.allowed_intent_types}
-        ):
+        if not intent_type:
+            return
+        # Accept either a string or an Enum member (e.g. IntentType.LIQUIDATE).
+        # Pydantic ``model_dump()`` typically returns a string for the
+        # ``intent_type: str`` schema field, but defense-in-depth: if a
+        # caller (test fixture, future internal helper) passes the enum
+        # directly, do not silently skip the gate.
+        if isinstance(intent_type, enum.Enum):
+            intent_type = intent_type.value
+        if not isinstance(intent_type, str):
+            return
+
+        # VIB-4167 — Defense-in-depth Gate A. Refuse the 5 P0 placeholder
+        # primitives (LIQUIDATE / OPEN_CDP / MINT_STABLE / REPAY_STABLE /
+        # CLOSE_CDP) at the agent_tools boundary, BEFORE the
+        # user-configurable ``allowed_intent_types`` check, BEFORE any gRPC
+        # dispatch. The compiler (Gate B, VIB-4165) already raises
+        # NotImplementedError on the same set, but a regression in Gate B
+        # would silently expose placeholders to the LLM-mediated path. This
+        # gate is hard-coded — it is NOT defeatable by adding a placeholder
+        # to ``policy.allowed_intent_types``. Removed only when P1 wires the
+        # real connector AND the corresponding entry is dropped from
+        # ``_PLACEHOLDER_INTENT_TYPES`` in
+        # ``almanak/framework/intents/compiler.py``.
+        if _normalize_intent_type_for_gate(intent_type) in _PLACEHOLDER_INTENT_NAMES:
+            violations.append(
+                f"Intent type {intent_type!r} is a placeholder primitive — not yet wired "
+                f"to a connector (P1 work, VIB-4160 primitives refactor)."
+            )
+            # Hint covers the 19 wired intent_type values currently registered in
+            # the gateway's execution service (see ``_create_intent`` in
+            # ``almanak/gateway/services/execution_service.py``). Kept exhaustive
+            # so the LLM's next attempt does not pick another placeholder by
+            # accident.
+            suggestions.append(
+                "Use a wired primitive: swap, hold, lp_open, lp_close, borrow, repay, "
+                "supply, withdraw, perp_open, perp_close, flashloan, stake, unstake, "
+                "prediction_buy, prediction_sell, prediction_redeem, bridge, wrap_native, "
+                "unwrap_native (until the placeholder connector lands in P1)."
+            )
+            return
+
+        if self.policy.allowed_intent_types is not None and intent_type.lower() not in {
+            t.lower() for t in self.policy.allowed_intent_types
+        }:
             violations.append(f"Intent type '{intent_type}' is not allowed.")
             suggestions.append(f"Allowed intent types: {sorted(self.policy.allowed_intent_types)}")
 
