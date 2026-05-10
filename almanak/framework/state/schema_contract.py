@@ -154,6 +154,62 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
             "updated_at",
         }
     ),
+    # VIB-4197 / T11 — atomic ledger+registry+handle commit primitive.
+    # The 16-column shape ratified by PRD §Registry Data Shape and the
+    # blueprint 28 §3 reference. Adding the contract entry was deferred
+    # from T05 (schema-only PR) per blueprint 28 §5.1; T11 adds it
+    # atomically with the writer code so the LOCAL SQLite boot guard refuses
+    # to start when the column shape is missing (VIB-3763 pattern).
+    #
+    # NOT in the hosted Postgres contract until T19 (VIB-4205) lands the
+    # Postgres writer + corresponding ``metrics-database`` migration —
+    # auto-flow from ``_SQLITE`` to ``_POSTGRES`` is suppressed via
+    # ``_POSTGRES_DEFERRED_TABLES`` below. Including it earlier would block
+    # hosted gateway boot for a table the hosted runtime can't use.
+    "position_registry": frozenset(
+        {
+            "deployment_id",
+            "chain",
+            "primitive",
+            "accounting_category",
+            "physical_identity_hash",
+            "semantic_grouping_key",
+            "grouping_policy_version",
+            "handle",
+            "status",
+            "payload",
+            "opened_at_block",
+            "opened_tx",
+            "closed_at_block",
+            "closed_tx",
+            "last_reconciled_at_block",
+            "matching_policy_version",
+        }
+    ),
+    # VIB-4197 / T11 — per-(deployment_id, primitive, cutover_key) cutover
+    # progress tracking. Schema lives in SCHEMA_SQL; per the cutover spec
+    # §2.1 the SDK adds the contract entry with the writer (here) but the
+    # boot-time guard / BackfillReader runner-side wiring lands in a
+    # follow-up ticket. Hosted Postgres ships via metrics-database per
+    # AGENTS.md "Database schema ownership"; the SDK does NOT apply
+    # Postgres DDL.
+    "migration_state": frozenset(
+        {
+            "deployment_id",
+            "primitive",
+            "cutover_key",
+            "position_registry_backfill_complete",
+            "backfill_started_at",
+            "backfill_completed_at",
+            "backfill_source_table",
+            "backfill_reader_version",
+            "rows_synthesized",
+            "rows_skipped_already_present",
+            "notes",
+            "created_at",
+            "updated_at",
+        }
+    ),
 }
 
 
@@ -166,8 +222,25 @@ def _swap_strategy_for_agent(cols: frozenset[str]) -> frozenset[str]:
     return frozenset({"agent_id" if c == "strategy_id" else c for c in cols})
 
 
+# Tables introduced by VIB-4197 / T11 (``position_registry``) and the cutover
+# infrastructure (``migration_state``). The hosted Postgres writer + corresponding
+# ``metrics-database`` migration land in T19 (VIB-4205). Including these in the
+# Postgres contract before T19 would block hosted gateway boot for tables the
+# hosted runtime cannot use (CLAUDE.md "Database schema ownership" — Postgres
+# DDL is owned outside this repo). Auto-flow from ``_SQLITE`` to ``_POSTGRES``
+# is suppressed for these tables until T19 lands; the local SQLite contract
+# still covers them.
+_POSTGRES_DEFERRED_TABLES: frozenset[str] = frozenset(
+    {
+        "position_registry",
+        "migration_state",
+    }
+)
+
 ACCOUNTING_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
-    table: _swap_strategy_for_agent(cols) for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
+    table: _swap_strategy_for_agent(cols)
+    for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
+    if table not in _POSTGRES_DEFERRED_TABLES
 }
 
 

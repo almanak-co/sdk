@@ -53,6 +53,12 @@ def test_t_3763_1_contract_lists_all_accounting_tables() -> None:
     Anti-gaming guard: a future PR that adds a new accounting table but
     forgets to register it here would skip schema validation entirely.
     Pinning the table set forces explicit registration.
+
+    VIB-4197 / T11 added ``position_registry`` (the atomic-commit primitive
+    target) and ``migration_state`` (cutover-progress tracking) to the
+    SQLite contract. The Postgres contract excludes both until VIB-4205 /
+    T19 ships the hosted writer + ``metrics-database`` migration; that
+    asymmetry is asserted in T-3763-2b (below).
     """
     expected_tables = {
         "portfolio_snapshots",
@@ -60,6 +66,9 @@ def test_t_3763_1_contract_lists_all_accounting_tables() -> None:
         "transaction_ledger",
         "accounting_events",
         "accounting_outbox",
+        # T11 — local SQLite only until T19 lands hosted Postgres support.
+        "position_registry",
+        "migration_state",
     }
     assert set(ACCOUNTING_SCHEMA_CONTRACT) == expected_tables
 
@@ -79,10 +88,30 @@ def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
     metrics-database column names and ``ACCOUNTING_SCHEMA_CONTRACT_POSTGRES``
     will fail this test loudly rather than silently bricking the hosted
     validator.
+
+    VIB-4197 / T11: the PG contract now legitimately excludes
+    ``position_registry`` and ``migration_state`` (deferred until VIB-4205
+    / T19 lands the hosted writer + ``metrics-database`` migration). The
+    equality assertion below is therefore scoped to the table set the PG
+    contract DOES cover; the deferred set is asserted separately so a
+    future PR cannot silently add hosted boot requirements.
     """
+    from almanak.framework.state.schema_contract import _POSTGRES_DEFERRED_TABLES
+
     sqlite = ACCOUNTING_SCHEMA_CONTRACT  # alias to SQLite variant
-    assert set(sqlite) == set(ACCOUNTING_SCHEMA_CONTRACT_POSTGRES), "PG and SQLite contracts must cover the same tables"
-    for table in sqlite:
+    pg_tables = set(ACCOUNTING_SCHEMA_CONTRACT_POSTGRES)
+    sqlite_tables = set(sqlite)
+    assert pg_tables <= sqlite_tables, (
+        f"PG contract has tables SQLite doesn't: {pg_tables - sqlite_tables}"
+    )
+    sqlite_only = sqlite_tables - pg_tables
+    assert sqlite_only == _POSTGRES_DEFERRED_TABLES, (
+        f"SQLite-only tables {sqlite_only} should equal "
+        f"_POSTGRES_DEFERRED_TABLES {_POSTGRES_DEFERRED_TABLES}. If you added "
+        "a new local-only table, list it in _POSTGRES_DEFERRED_TABLES; if "
+        "you shipped a hosted Postgres writer, remove from the deferred set."
+    )
+    for table in pg_tables:
         sqlite_cols = sqlite[table]
         pg_cols = ACCOUNTING_SCHEMA_CONTRACT_POSTGRES[table]
         # ``strategy_id`` must NOT appear in any PG-shaped contract.

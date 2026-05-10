@@ -40,6 +40,7 @@ from enum import Enum, IntEnum, auto
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from almanak.framework.accounting.commit import HandleMapping, RegistryRow
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
     from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.observability.position_events import PositionEvent
@@ -2273,6 +2274,110 @@ class StateManager:
             logger.error("Failed to save ledger entry for %s: %s", strategy_id, e)
             raise AccountingPersistenceError(
                 write_kind=AccountingWriteKind.LEDGER,
+                strategy_id=strategy_id,
+                cause=e,
+            ) from e
+
+    # =========================================================================
+    # Atomic ledger + position_registry + handle commit (VIB-4197 / T11)
+    # =========================================================================
+
+    async def save_ledger_and_registry(
+        self,
+        *,
+        ledger: "LedgerEntry",
+        registry: "RegistryRow",
+        handle: "HandleMapping | None" = None,
+    ) -> None:
+        """Atomic single-transaction commit of ledger + registry + handle.
+
+        Per blueprint 28 §4.1. Delegates to the SQLite backend's
+        ``save_ledger_and_registry_atomic`` method which wraps all three
+        writes in one ``BEGIN IMMEDIATE`` ... ``COMMIT``. Idempotent on
+        ``(deployment_id, chain, primitive, physical_identity_hash)`` with
+        a strict monotone status-priority guard.
+
+        This is the runtime registry-mode write path. The function-level
+        primitive at :func:`almanak.framework.accounting.commit.save_ledger_and_registry`
+        validates inputs and dispatches here for ``mode='registry'`` calls;
+        ``mode='accounting_only'`` callers use :meth:`save_ledger_entry`
+        directly. Callers MUST go through one of those two surfaces — see
+        ``tests/unit/state/test_position_registry_no_writers.py`` for the
+        anti-bypass guard.
+
+        Failure contract: any backend error (CHECK violation, OperationalError,
+        etc.) is wrapped as :class:`AccountingPersistenceError` with
+        ``write_kind=ACCOUNTING`` so the runner's existing fail-closed
+        pipeline (VIB-3157 / VIB-3762) handles it. The transaction is rolled
+        back by the backend method before the exception propagates; no
+        partial state lands on disk.
+
+        Args:
+            ledger: ``LedgerEntry`` for ``transaction_ledger``.
+            registry: ``RegistryRow`` for ``position_registry``.
+            handle: Optional ``HandleMapping`` (handle column on
+                ``position_registry``; no separate table per blueprint 28
+                §4.2). May also be encoded directly on ``registry.handle``.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        strategy_id = getattr(ledger, "strategy_id", "") or ""
+
+        if not self._warm:
+            logger.error("Cannot save ledger+registry: no WARM backend configured")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.ACCOUNTING,
+                strategy_id=strategy_id,
+                message="No WARM backend configured for ledger+registry atomic commit",
+            )
+
+        if not hasattr(self._warm, "save_ledger_and_registry_atomic"):
+            logger.error("WARM backend does not support save_ledger_and_registry_atomic")
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.ACCOUNTING,
+                strategy_id=strategy_id,
+                message=(
+                    "WARM backend does not support atomic ledger+registry commit "
+                    "(hosted Postgres path ships in T19 / VIB-4205)"
+                ),
+            )
+
+        start = time.perf_counter()
+        try:
+            await self._warm.save_ledger_and_registry_atomic(  # type: ignore[attr-defined]
+                ledger,
+                registry,
+                handle,
+            )
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "save_ledger_and_registry", latency, True)
+        except AccountingPersistenceError:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(
+                StateTier.WARM,
+                "save_ledger_and_registry",
+                latency,
+                False,
+                "AccountingPersistenceError",
+            )
+            raise
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(
+                StateTier.WARM,
+                "save_ledger_and_registry",
+                latency,
+                False,
+                str(e),
+            )
+            logger.error(
+                "Failed to save ledger+registry atomically for %s: %s",
+                strategy_id,
+                e,
+            )
+            raise AccountingPersistenceError(
+                write_kind=AccountingWriteKind.ACCOUNTING,
                 strategy_id=strategy_id,
                 cause=e,
             ) from e
