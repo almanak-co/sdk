@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import grpc
 
@@ -2252,7 +2252,25 @@ class StrategyRunner:
                 # The fail-closed contract now applies uniformly: any exception
                 # propagates to the AccountingPersistenceError path below. No
                 # backend-specific NotImplementedError escape hatch remains.
-                await self.state_manager.save_ledger_entry(entry)
+                #
+                # VIB-4198 / T12 — registry-mode dispatch. When the boot
+                # guard has cleared the (Primitive.LP, 'lp') cutover for
+                # this deployment AND the intent is a UniV3 LP_OPEN /
+                # LP_CLOSE that landed on-chain successfully AND the
+                # parser produced a valid registry payload, route through
+                # the atomic ledger+registry primitive instead of the
+                # bare save_ledger_entry path. Falls back to plain
+                # save_ledger_entry on any miss (cutover not active, not
+                # a UniV3 LP intent, parser couldn't build payload).
+                used_atomic = await self._maybe_save_ledger_with_registry(
+                    strategy=strategy,
+                    intent=intent,
+                    result=result,
+                    success=success,
+                    entry=entry,
+                )
+                if not used_atomic:
+                    await self.state_manager.save_ledger_entry(entry)
 
             # Emit position event whenever the chain TX succeeded — the framework
             # ``success`` verdict can be False on slippage-breach / reconciliation-
@@ -2301,6 +2319,724 @@ class StrategyRunner:
                 ) from e
             logger.error(f"Failed to write ledger entry (non-live): {e}")
         return None
+
+    @staticmethod
+    def _registry_intent_type_str(intent: AnyIntent) -> str:
+        """Canonical intent-type string for the registry dispatch gate.
+
+        Returns ``"LP_OPEN"`` / ``"LP_CLOSE"`` / ``""`` (empty for any
+        non-LP type — the caller treats that as a path-applicability
+        miss).
+        """
+        intent_type_val = getattr(getattr(intent, "intent_type", None), "value", None) or getattr(
+            intent, "intent_type", None
+        )
+        return str(intent_type_val).upper() if intent_type_val is not None else ""
+
+    def _registry_resolve_chain_and_nft_manager(
+        self,
+        strategy: StrategyProtocol,
+        intent_type_str: str,
+    ) -> tuple[str, str] | None:
+        """Resolve ``(chain, nft_manager_addr)`` from the strategy.
+
+        Returns ``None`` and INFO-logs when no canonical NPM address is
+        registered for the strategy's chain (the caller falls back to
+        ``save_ledger_entry``).
+        """
+        from almanak.framework.migration.backfill import _nft_manager_for_chain
+
+        chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+        chain = (chain or "").lower()
+        nft_manager = _nft_manager_for_chain(chain)
+        if not nft_manager:
+            logger.info(
+                "Registry-mode skip: no NPM known for chain %r; falling back to save_ledger_entry for %s",
+                chain,
+                intent_type_str,
+            )
+            return None
+        return chain, nft_manager
+
+    def _registry_resolve_receipt_and_parser(
+        self,
+        *,
+        result: Any,
+        chain: str,
+        intent_type_str: str,
+    ) -> tuple[dict, Any] | None:
+        """Resolve ``(receipt, parser)`` from the execution result.
+
+        Returns ``None`` and INFO-logs when (a) the receipt isn't
+        recoverable from the result shape or (b) the
+        ``UniswapV3ReceiptParser`` import fails (defensive — module
+        load shouldn't fail in production).
+        """
+        receipt = self._extract_receipt_from_result(result)
+        if receipt is None:
+            logger.info(
+                "Registry-mode skip: no receipt on result for %s; falling back to save_ledger_entry",
+                intent_type_str,
+            )
+            return None
+        try:
+            from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+                UniswapV3ReceiptParser,
+            )
+        except Exception:  # noqa: BLE001 — defensive
+            return None
+        return receipt, UniswapV3ReceiptParser(chain=chain)
+
+    def _build_lp_open_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        entry: Any,
+        chain: str,
+        nft_manager: str,
+        receipt: dict,
+        parser: Any,
+        fee_tier: int | None,
+    ) -> tuple[Any, dict, int] | None:
+        """Build the LP_OPEN ``RegistryRow`` from the receipt.
+
+        Returns ``(registry_row, payload, token_id)`` on success, or
+        ``None`` when the parser couldn't produce a valid payload (the
+        caller falls back to ``save_ledger_entry`` with an INFO log).
+        """
+        from almanak.framework.migration.backfill import (
+            physical_identity_hash_univ3,
+            semantic_grouping_key_univ3,
+        )
+        from almanak.framework.primitives.types import Primitive
+
+        payload = parser.extract_registry_payload_open(receipt, fee_tier=fee_tier)
+        if payload is None:
+            logger.info(
+                "Registry-mode skip: parser returned no LP_OPEN registry payload "
+                "(token_id / pool / ticks missing); falling back to "
+                "save_ledger_entry",
+            )
+            return None
+        try:
+            token_id = int(payload["token_id"])
+        except (KeyError, TypeError, ValueError):
+            logger.info(
+                "Registry-mode skip: parser payload missing valid token_id; falling back",
+            )
+            return None
+        pih = physical_identity_hash_univ3(
+            chain=chain,
+            nft_manager_addr=nft_manager,
+            token_id=token_id,
+        )
+        sgk = semantic_grouping_key_univ3(
+            chain=chain,
+            pool_address=str(payload["pool_address"]),
+        )
+        opened_at_block = self._extract_block_number_from_result(result)
+        registry_row = self._build_registry_row(
+            strategy=strategy,
+            primitive=Primitive.LP,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status="open",
+            opened_at_block=opened_at_block,
+            opened_tx=getattr(entry, "tx_hash", "") or None,
+            closed_at_block=None,
+            closed_tx=None,
+            handle=getattr(intent, "registry_handle", None),
+        )
+        return registry_row, payload, token_id
+
+    async def _build_lp_close_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        entry: Any,
+        chain: str,
+        nft_manager: str,
+        receipt: dict,
+        parser: Any,
+        fee_tier: int | None,
+    ) -> tuple[Any, dict, int] | None:
+        """Build the LP_CLOSE ``RegistryRow`` from the receipt.
+
+        Looks up the matching OPEN-side row first (so OPEN-time fields
+        merge into the close payload via ``extract_registry_payload_close``).
+        Returns ``(registry_row, payload, token_id)`` on success, or
+        ``None`` on any path-miss (parser refuse, missing token_id, etc.).
+        """
+        from almanak.framework.migration.backfill import (
+            physical_identity_hash_univ3,
+            semantic_grouping_key_univ3,
+        )
+        from almanak.framework.primitives.types import Primitive
+
+        open_payload = await self._lookup_open_registry_payload(
+            deployment_id=getattr(strategy, "deployment_id", "") or strategy.strategy_id,
+            chain=chain,
+            token_id=None,
+            receipt=receipt,
+            parser=parser,
+        )
+        payload = parser.extract_registry_payload_close(
+            receipt,
+            open_payload=open_payload,
+            fee_tier=fee_tier,
+        )
+        if payload is None:
+            logger.info(
+                "Registry-mode skip: parser returned no LP_CLOSE registry payload "
+                "(token_id / pool missing); falling back to save_ledger_entry",
+            )
+            return None
+        try:
+            token_id = int(payload["token_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        pih = physical_identity_hash_univ3(
+            chain=chain,
+            nft_manager_addr=nft_manager,
+            token_id=token_id,
+        )
+        sgk = semantic_grouping_key_univ3(
+            chain=chain,
+            pool_address=str(payload["pool_address"]),
+        )
+        closed_at_block = self._extract_block_number_from_result(result)
+        opened_at_block = (open_payload or {}).get("opened_at_block") if isinstance(open_payload, dict) else None
+        opened_tx = (open_payload or {}).get("opened_tx") if isinstance(open_payload, dict) else None
+        registry_row = self._build_registry_row(
+            strategy=strategy,
+            primitive=Primitive.LP,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status="closed",
+            opened_at_block=opened_at_block,
+            opened_tx=opened_tx,
+            closed_at_block=closed_at_block,
+            closed_tx=getattr(entry, "tx_hash", "") or None,
+            handle=getattr(intent, "registry_handle", None),
+        )
+        return registry_row, payload, token_id
+
+    def _update_lp_registry_id_cache(
+        self,
+        *,
+        chain: str,
+        pool_addr: str,
+        token_id: int,
+        is_open: bool,
+    ) -> None:
+        """Sync the ``_lp_registry_id_cache`` after a registry-mode write.
+
+        Audit P2 (CodeRabbit): the cache key
+        ``(protocol, chain, pool_address)`` collides for multiple NFTs
+        in the same pool (multi-open delta-neutral hedge). On OPEN, if
+        a different token_id already lives at this key, drop the entry
+        so the sync lookup returns ``None`` and the tracker fallback
+        fires. On CLOSE, only evict when the cached token_id matches
+        the closing one — otherwise leave the other position's
+        token_id in place. The complete fix plumbs a per-position
+        discriminator (``registry_handle``) through the
+        :class:`LPPositionTracker` contract; that's a deferred
+        follow-up. The registry's authoritative read remains
+        ``get_position_registry_open_rows`` keyed on
+        ``physical_identity_hash``.
+        """
+        from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
+
+        cache: dict[tuple[str, str, str], str] = getattr(self, "_lp_registry_id_cache", {})
+        if not pool_addr:
+            self._lp_registry_id_cache = cache
+            return
+        token_str = str(token_id)
+        for protocol_slug in _UNIV3_LP_PROTOCOLS:
+            key = (protocol_slug, chain, pool_addr)
+            if is_open:
+                existing = cache.get(key)
+                if existing is not None and existing != token_str:
+                    cache.pop(key, None)
+                    logger.warning(
+                        "LP registry-id cache: multi-NFT collision on "
+                        "(protocol=%s chain=%s pool=%s); cache cleared, "
+                        "tracker fallback for subsequent injection. "
+                        "Multi-NFT-per-pool needs a per-position "
+                        "discriminator (follow-up).",
+                        protocol_slug,
+                        chain,
+                        pool_addr,
+                    )
+                else:
+                    cache[key] = token_str
+            else:  # closed
+                if cache.get(key) == token_str:
+                    cache.pop(key, None)
+                # else: another live position holds this key — leave it.
+        self._lp_registry_id_cache = cache
+
+    async def _maybe_save_ledger_with_registry(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any | None,
+        success: bool,
+        entry: Any,
+    ) -> bool:
+        """Route UniV3 LP_OPEN / LP_CLOSE through ``save_ledger_and_registry``.
+
+        VIB-4198 / T12 — registry-mode atomic write hook. Returns ``True``
+        if the call routed through the atomic primitive (ledger + registry
+        + handle in one transaction); ``False`` if the path didn't apply
+        and the caller should fall back to plain ``save_ledger_entry``.
+
+        Path-applicability gate (ALL must hold):
+
+        - UniV3 LP cutover boot-guard has cleared ``(Primitive.LP, 'lp')``.
+        - ``intent.intent_type`` is ``IntentType.LP_OPEN`` or ``IntentType.LP_CLOSE``.
+        - ``intent.protocol`` is one of the UniV3 LP family
+          (uniswap_v3 / sushiswap_v3 / pancakeswap_v3 / aerodrome_slipstream / velodrome_slipstream).
+        - The on-chain TX landed (``result.success``) — chain truth, NOT
+          the framework verdict (audit P1: slippage / reconciliation can
+          flip ``success`` to False post-confirmation, but registry must
+          still record the landed state).
+        - The strategy's chain matches a known NPM address.
+        - The parser produced a valid registry payload from the receipt
+          (``extract_registry_payload_open`` / ``_close`` returned
+          non-None).
+
+        Any miss falls back to ``save_ledger_entry`` with an INFO log so
+        the runner's behavior is identical to the pre-cutover path. Per
+        CLAUDE.md "Empty ≠ zero": we NEVER substitute a fabricated value
+        to make the registry write succeed.
+
+        Failures inside the atomic primitive propagate as
+        ``AccountingPersistenceError`` per T11's contract; the caller's
+        fail-closed pipeline (VIB-3157 / VIB-3762) handles it.
+
+        CRAP refactor (VIB-4198 round 8): the path-applicability gate,
+        OPEN-side row build, CLOSE-side row build, atomic write, and
+        cache update each live in dedicated helpers
+        (``_registry_intent_type_str``,
+        ``_registry_resolve_chain_and_nft_manager``,
+        ``_registry_resolve_receipt_and_parser``,
+        ``_build_lp_open_registry_row``, ``_build_lp_close_registry_row``,
+        ``_update_lp_registry_id_cache``). This orchestrator sequences
+        them. Each helper has narrow responsibility, narrow cc, and is
+        unit-tested in isolation.
+        """
+        try:
+            from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
+            from almanak.framework.primitives.types import Primitive
+            from almanak.framework.runner.cutover import is_cutover_active
+        except Exception:  # noqa: BLE001 — guard against optional import miss
+            return False
+
+        # Path-applicability gate — boot guard, intent type, protocol family,
+        # chain truth (audit P1).
+        if not is_cutover_active(self, Primitive.LP, "lp"):
+            return False
+        intent_type_str = self._registry_intent_type_str(intent)
+        if intent_type_str not in ("LP_OPEN", "LP_CLOSE"):
+            return False
+        protocol = (getattr(intent, "protocol", "") or "").lower()
+        if protocol not in _UNIV3_LP_PROTOCOLS:
+            return False
+        if result is None or not bool(getattr(result, "success", False)):
+            return False
+        # ``success`` is forwarded only for telemetry; do NOT gate on it.
+        _ = success
+
+        # Resolve chain + NPM + receipt + parser. Each step short-circuits
+        # to ``False`` on miss with an INFO log inside the helper.
+        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str)
+        if chain_resolved is None:
+            return False
+        chain, nft_manager = chain_resolved
+        receipt_resolved = self._registry_resolve_receipt_and_parser(
+            result=result, chain=chain, intent_type_str=intent_type_str
+        )
+        if receipt_resolved is None:
+            return False
+        receipt, parser = receipt_resolved
+        fee_tier = self._intent_fee_tier(intent)
+
+        # Build the registry row by intent type.
+        if intent_type_str == "LP_OPEN":
+            built = self._build_lp_open_registry_row(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                entry=entry,
+                chain=chain,
+                nft_manager=nft_manager,
+                receipt=receipt,
+                parser=parser,
+                fee_tier=fee_tier,
+            )
+        else:  # LP_CLOSE
+            built = await self._build_lp_close_registry_row(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                entry=entry,
+                chain=chain,
+                nft_manager=nft_manager,
+                receipt=receipt,
+                parser=parser,
+                fee_tier=fee_tier,
+            )
+        if built is None:
+            return False
+        registry_row, payload, token_id = built
+
+        from almanak.framework.accounting.commit import save_ledger_and_registry
+
+        await save_ledger_and_registry(
+            self.state_manager,
+            ledger=entry,
+            registry=registry_row,
+            mode="registry",
+        )
+        # Keep the LP-tracker registry-id cache in sync so subsequent
+        # LP_CLOSE intents see the OPEN row's token_id without an extra
+        # state-manager read. The collision-aware semantics live in
+        # ``_update_lp_registry_id_cache``.
+        self._update_lp_registry_id_cache(
+            chain=chain,
+            pool_addr=str(payload.get("pool_address") or "").lower(),
+            token_id=token_id,
+            is_open=registry_row.status == "open",
+        )
+        logger.info(
+            "Registry-mode write OK for %s on %s NFT=%s pih=%s",
+            intent_type_str,
+            chain,
+            token_id,
+            registry_row.physical_identity_hash,
+        )
+        return True
+
+    def _build_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        primitive: Any,
+        physical_identity_hash: str,
+        semantic_grouping_key: str,
+        payload: dict,
+        status: Literal["open", "closed", "reorg_invalidated"],
+        opened_at_block: int | None,
+        opened_tx: str | None,
+        closed_at_block: int | None,
+        closed_tx: str | None,
+        handle: str | None,
+    ) -> Any:
+        """Construct a ``RegistryRow`` for the runtime atomic-primitive call.
+
+        Pulled out as a helper so the LP_OPEN and LP_CLOSE call sites in
+        :meth:`_maybe_save_ledger_with_registry` share one row-construction
+        implementation. Stamps ``matching_policy_version`` from
+        ``MatchingPolicy.for_primitive(primitive)`` (T09 contract — never
+        hardcoded). Stamps ``grouping_policy_version`` from the per-primitive
+        constant.
+        """
+        from almanak.framework.accounting.commit import RegistryRow
+        from almanak.framework.accounting.policy import MatchingPolicy
+        from almanak.framework.migration.backfill import _UNIV3_GROUPING_POLICY_VERSION
+        from almanak.framework.primitives.types import AccountingCategory
+
+        deployment_id = getattr(strategy, "deployment_id", "") or strategy.strategy_id
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        return RegistryRow(
+            deployment_id=deployment_id,
+            chain=chain,
+            primitive=primitive,
+            accounting_category=AccountingCategory.LP,
+            physical_identity_hash=physical_identity_hash,
+            semantic_grouping_key=semantic_grouping_key,
+            grouping_policy_version=_UNIV3_GROUPING_POLICY_VERSION,
+            handle=handle,
+            status=status,
+            payload=dict(payload),
+            opened_at_block=opened_at_block,
+            opened_tx=opened_tx,
+            closed_at_block=closed_at_block,
+            closed_tx=closed_tx,
+            last_reconciled_at_block=None,
+            matching_policy_version=MatchingPolicy.for_primitive(primitive),
+        )
+
+    @staticmethod
+    def _coerce_receipt_to_dict(r: Any) -> dict | None:
+        """Coerce a Receipt-shaped object (dict / object with ``to_dict`` /
+        object with ``logs``) into a dict carrying ``logs``, or ``None``.
+
+        Mirrors the canonical coercion used in
+        :mod:`almanak.framework.execution.receipt_registry`. Pulled out as
+        a helper so :meth:`_extract_receipt_from_result` stays under the
+        CRAP threshold while still walking every candidate-source.
+        """
+        if r is None:
+            return None
+        if isinstance(r, dict):
+            return r if r.get("logs") is not None else None
+        if hasattr(r, "to_dict"):
+            d = r.to_dict()
+            if isinstance(d, dict) and d.get("logs") is not None:
+                return d
+        if hasattr(r, "logs"):
+            logs = r.logs
+            if logs is not None:
+                return {"logs": logs}
+        return None
+
+    @staticmethod
+    def _collect_candidate_receipts(result: Any) -> list[dict]:
+        """Collect every dict-shaped receipt candidate from a result.
+
+        Walks the four shapes the framework actually produces:
+
+        - Singular ``transaction_receipt`` / ``receipt`` / ``tx_receipt`` /
+          ``raw_receipt`` attrs (legacy single-tx).
+        - ``transaction_results[*].receipt`` (local ``ExecutionResult`` —
+          dominant shape on Anvil-managed gateway runs).
+        - ``receipts`` / ``transaction_receipts`` lists
+          (``GatewayExecutionResult``).
+        """
+        candidates: list[dict] = []
+
+        for attr in ("transaction_receipt", "receipt", "tx_receipt", "raw_receipt"):
+            d = StrategyRunner._coerce_receipt_to_dict(getattr(result, attr, None))
+            if d is not None:
+                candidates.append(d)
+
+        tx_results = getattr(result, "transaction_results", None)
+        if tx_results is None and isinstance(result, dict):
+            tx_results = result.get("transaction_results")
+        if isinstance(tx_results, list):
+            for tx in tx_results:
+                if isinstance(tx, dict):
+                    if not tx.get("success", True):
+                        continue
+                    rec = tx.get("receipt")
+                else:
+                    if not getattr(tx, "success", True):
+                        continue
+                    rec = getattr(tx, "receipt", None)
+                d = StrategyRunner._coerce_receipt_to_dict(rec)
+                if d is not None:
+                    candidates.append(d)
+
+        receipts = getattr(result, "receipts", None) or getattr(result, "transaction_receipts", None)
+        if isinstance(receipts, list):
+            for r in receipts:
+                d = StrategyRunner._coerce_receipt_to_dict(r)
+                if d is not None:
+                    candidates.append(d)
+
+        return candidates
+
+    @staticmethod
+    def _receipt_has_lp_topic(rec: dict) -> bool:
+        """True iff the receipt carries an NPM IncreaseLiquidity /
+        DecreaseLiquidity topic.
+
+        Pulled out so :meth:`_extract_receipt_from_result` can ask the
+        question without inlining the topic-extraction loop.
+        """
+        from almanak.framework.connectors.uniswap_v3.receipt_parser import (
+            EVENT_TOPICS,
+        )
+
+        lp_topics_lower = {
+            EVENT_TOPICS["IncreaseLiquidity"].lower(),
+            EVENT_TOPICS["DecreaseLiquidity"].lower(),
+        }
+        for log in rec.get("logs") or []:
+            topics = log.get("topics") if isinstance(log, dict) else getattr(log, "topics", None)
+            if not topics:
+                continue
+            first = topics[0]
+            if isinstance(first, bytes):
+                first = "0x" + first.hex()
+            first = str(first).lower()
+            if not first.startswith("0x"):
+                first = "0x" + first
+            if first in lp_topics_lower:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_receipt_from_result(result: Any) -> dict | None:
+        """Pull the raw EVM receipt dict out of an execution result.
+
+        Audit P1 (CodeRabbit + Codex): the previous shape (a) missed the
+        local ``ExecutionResult.transaction_results[*].receipt`` shape
+        entirely (fall-back to ``save_ledger_entry`` for every gateway-
+        backed run), and (b) for ``GatewayExecutionResult.receipts`` /
+        ``transaction_receipts`` lists, picked the first receipt with
+        any logs — typically the approval, not the NPM mint/burn the
+        registry parser needs.
+
+        The fix:
+
+        1. Walk every candidate-source the framework uses (see
+           :meth:`_collect_candidate_receipts`).
+        2. Among the collected receipts, prefer one that carries the NPM
+           ``IncreaseLiquidity`` (LP_OPEN) or ``DecreaseLiquidity``
+           (LP_CLOSE) topic. Fall back to the LAST receipt with logs
+           when no LP-event-bearing receipt is found — in multi-tx
+           bundles the terminal TX is the one that mutated the position
+           (the prefix is approves / swaps).
+
+        Returns ``None`` when no candidate yields a receipt with logs.
+        """
+        if result is None:
+            return None
+        candidates = StrategyRunner._collect_candidate_receipts(result)
+        if not candidates:
+            return None
+        for cand in candidates:
+            if StrategyRunner._receipt_has_lp_topic(cand):
+                return cand
+        return candidates[-1]
+
+    @staticmethod
+    def _extract_block_number_from_result(result: Any) -> int | None:
+        """Best-effort block number extraction from the result's receipt."""
+        if result is None:
+            return None
+        rec = StrategyRunner._extract_receipt_from_result(result)
+        if rec is None:
+            return None
+        bn = rec.get("blockNumber")
+        if isinstance(bn, int):
+            return bn
+        try:
+            return int(bn) if bn is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _intent_fee_tier(intent: Any) -> int | None:
+        """Recover ``fee_tier`` from an LP intent's protocol_params if set."""
+        if intent is None:
+            return None
+        params = getattr(intent, "protocol_params", None) or {}
+        if isinstance(params, dict):
+            ft = params.get("fee_tier") or params.get("feeTier")
+            try:
+                return int(ft) if ft is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def _lookup_open_registry_payload(
+        self,
+        *,
+        deployment_id: str,
+        chain: str,
+        token_id: int | None,
+        receipt: dict,
+        parser: Any,
+    ) -> dict | None:
+        """Find the OPEN-side registry payload for a close-side write.
+
+        The close needs OPEN-time fields (ticks, liquidity, fee_tier,
+        token labels) the close receipt does not carry. We look those up
+        from ``position_registry`` keyed on the close receipt's token_id
+        — the OPEN row is the first authoritative carrier of those
+        fields.
+
+        Returns the payload dict (parsed JSON) or ``None`` when no OPEN
+        row exists yet — in that case the close path uses
+        ``open_payload=None`` and the registry row has a minimal payload
+        (still correct under blueprint 28 §4.3 ON CONFLICT semantics).
+        """
+        if token_id is None:
+            token_id = parser._decreaseliquidity_token_id(receipt)
+        if token_id is None:
+            return None
+        try:
+            rows = await self.state_manager.get_position_registry_open_rows(
+                deployment_id,
+                chain=chain,
+                primitive="lp",
+                accounting_category="lp",
+            )
+        except Exception:  # noqa: BLE001 — best effort
+            return None
+        for row in rows:
+            payload = row.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            try:
+                if int(payload.get("token_id", 0)) == int(token_id):
+                    enriched = dict(payload)
+                    if row.get("opened_at_block") is not None:
+                        enriched["opened_at_block"] = row["opened_at_block"]
+                    if row.get("opened_tx"):
+                        enriched["opened_tx"] = row["opened_tx"]
+                    return enriched
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    async def get_open_lp_positions_from_registry(
+        self,
+        *,
+        deployment_id: str | None = None,
+        chain: str | None = None,
+    ) -> list[dict]:
+        """Return open UniV3 LP rows from ``position_registry``.
+
+        VIB-4198 / T12 acceptance criterion #5 — runner-side helper that
+        the teardown / dashboard / strategy-author surfaces consult after
+        cutover. Filters to ``primitive='lp' AND accounting_category='lp'
+        AND status='open'`` so other LP-family primitives (Pendle LP,
+        future TraderJoe LB) do not bleed into the UniV3 result. Returns
+        an empty list when:
+
+        - The state manager backend doesn't support registry reads
+          (hosted gateway today; T19 lands the equivalent).
+        - No rows match.
+        - The boot guard hasn't cleared the cutover for this deployment
+          (defense-in-depth — stale callers can't accidentally read a
+          half-populated registry).
+        """
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.runner.cutover import is_cutover_active
+
+        if not is_cutover_active(self, Primitive.LP, "lp"):
+            return []
+        # Audit M3: defense-in-depth. ``is_cutover_active=True`` means the
+        # boot guard already cleared the storage check; the
+        # ``CutoverStorageNotSupported`` should not fire here. Catching
+        # it anyway leaves the helper safe under a hypothetical future
+        # state-manager swap mid-run.
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        if self.state_manager is None:
+            return []
+        dep = deployment_id or ""
+        try:
+            return await self.state_manager.get_position_registry_open_rows(
+                dep,
+                chain=chain,
+                primitive="lp",
+                accounting_category="lp",
+            )
+        except (CutoverStorageNotSupported, NotImplementedError):
+            return []
 
     async def _emit_position_event_for_intent(
         self,
@@ -4790,10 +5526,24 @@ class StrategyRunner:
         if result.tx_result and hasattr(result.tx_result, "actual_amount_received"):
             state.previous_amount_received = result.tx_result.actual_amount_received
         else:
-            # Fallback to intent amount
+            # Fallback to intent amount.
+            #
+            # Audit F3 (VIB-4062 caller-bifurcation): ``get_amount_field``
+            # returns ``ChainedAmount | None`` where
+            # ``ChainedAmount = Decimal | Literal["all"]``. The sentinel
+            # ``"all"`` means "chain the previous step's output amount" and
+            # is resolved by ``set_resolved_amount`` BEFORE this code runs;
+            # by the time the orchestrator hits this fallback, an
+            # un-resolved ``"all"`` indicates the chaining contract is
+            # broken upstream. We discriminate against the sentinel by
+            # value (``!= "all"``) rather than by class — the consumer
+            # treats the producer's union type by value, not by class —
+            # to keep the no-bifurcation invariant intact. The ``cast``
+            # narrows the typed remainder to ``Decimal`` once the
+            # literal "all" branch is excluded.
             amount_field = Intent.get_amount_field(intent_to_execute)
-            if amount_field is not None and isinstance(amount_field, Decimal):
-                state.previous_amount_received = amount_field
+            if amount_field is not None and amount_field != "all":
+                state.previous_amount_received = cast(Decimal, amount_field)
 
         # For cross-chain swaps, verify source TX and wait for bridge completion.
         #

@@ -15,7 +15,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from almanak.framework.gateway_client import GatewayClient
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
@@ -886,6 +886,122 @@ class GatewayStateManager:
         except Exception as e:
             logger.warning("Failed to save position event via gateway: %s", e)
             return False
+
+    # -------------------------------------------------------------------------
+    # Cutover storage stubs — VIB-4198 / T12. Audit M3 (CodeRabbit).
+    # -------------------------------------------------------------------------
+    #
+    # The hosted ``GatewayStateManager`` does NOT implement
+    # ``position_registry`` / ``migration_state`` storage; the corresponding
+    # gateway gRPC RPCs + Postgres DDL ship with T19 (VIB-4205). Until then,
+    # every cutover-storage method on this class explicitly raises
+    # :class:`almanak.framework.migration.CutoverStorageNotSupported` so the
+    # boot guard in ``almanak.framework.runner.cutover.enforce_or_run_cutover``
+    # can detect "this backend cannot host cutover storage" and degrade to
+    # accounting_only mode in a controlled, observable way (cutover spec
+    # §2.4). The previous behavior — having the methods missing entirely so
+    # ``hasattr(sm, "...")`` returned False — was indistinguishable from
+    # "the SDK forgot to implement them" and made the silent-error class
+    # easier to introduce. Explicit raise makes the contract testable.
+    #
+    # Removing these stubs is a breaking change tracked by T19 (the same
+    # PR that lands the gateway gRPC + metrics-database DDL).
+
+    async def get_position_registry_open_rows(
+        self,
+        deployment_id: str,
+        *,
+        chain: str | None = None,
+        primitive: str | None = None,
+        accounting_category: str | None = None,
+    ) -> list[dict]:
+        """Audit M3: explicit fail-closed for the hosted backend."""
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported(
+            "GatewayStateManager: position_registry reads land with T19 "
+            "(VIB-4205); registry-mode dispatch is OFF for hosted runs "
+            "until then."
+        )
+
+    async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
+        """Audit M3: explicit fail-closed for the hosted backend."""
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported("GatewayStateManager: position_registry writes land with T19.")
+
+    async def upsert_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> None:
+        """Audit M3: explicit fail-closed for the hosted backend."""
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported("GatewayStateManager: migration_state lands with T19.")
+
+    async def get_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> Any | None:
+        """Audit M3: explicit fail-closed for the hosted backend."""
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported("GatewayStateManager: migration_state reads land with T19.")
+
+    async def update_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        backfill_started_at: str | None = None,
+        rows_synthesized: int | None = None,
+        rows_skipped_already_present: int | None = None,
+    ) -> None:
+        """Audit M3: explicit fail-closed for the hosted backend."""
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported("GatewayStateManager: migration_state updates land with T19.")
+
+    async def mark_backfill_complete(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        rows_synthesized: int,
+        rows_skipped_already_present: int,
+        backfill_completed_at: str,
+    ) -> None:
+        """Audit M3: explicit fail-closed for the hosted backend."""
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported("GatewayStateManager: migration_state writes land with T19.")
+
+    async def get_position_events_filtered(
+        self,
+        *,
+        deployment_id: str,
+        position_types: frozenset[str],
+    ) -> list[dict]:
+        """Audit M3: explicit fail-closed for the hosted backend.
+
+        The hosted Postgres position_events table does exist, but the
+        backfill never runs against the hosted backend (T19 lands the
+        full path). Until then, refuse so the boot guard's degrade
+        decision is explicit.
+        """
+        from almanak.framework.migration import CutoverStorageNotSupported
+
+        raise CutoverStorageNotSupported(
+            "GatewayStateManager: position_events filtered reads for backfill land with T19."
+        )
 
     # -------------------------------------------------------------------------
     # Accounting outbox — gateway gRPC layer (SaveOutboxEntry / GetOutboxEntry /

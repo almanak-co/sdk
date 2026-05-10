@@ -58,6 +58,16 @@ _ALLOWLIST_WRITERS_QUALNAMED: frozenset[tuple[str, str]] = frozenset({
         "almanak/framework/state/backends/sqlite.py",
         "SQLiteStore.save_ledger_and_registry_atomic",
     ),
+    # VIB-4198 / T12 — backfill writer (cutover spec §3.4 idempotent
+    # `INSERT … ON CONFLICT DO NOTHING`). Distinct from the runtime
+    # atomic primitive: backfill is one-time observation of legacy
+    # `position_events` rows, never mutates already-existing registry
+    # rows. The runtime status flips on CLOSE go through
+    # `save_ledger_and_registry_atomic` per blueprint 28 §4.3.
+    (
+        "almanak/framework/state/backends/sqlite.py",
+        "SQLiteStore.insert_position_registry_row_if_absent",
+    ),
 })
 
 

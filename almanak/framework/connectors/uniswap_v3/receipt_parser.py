@@ -53,6 +53,12 @@ EVENT_TOPICS: dict[str, str] = {
     # NonfungiblePositionManager.IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
     # keccak("IncreaseLiquidity(uint256,uint128,uint256,uint256)")
     "IncreaseLiquidity": "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
+    # NonfungiblePositionManager.DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+    # keccak("DecreaseLiquidity(uint256,uint128,uint256,uint256)") — VIB-4198 (T12) so the
+    # close-side parser can recover token_id from receipt facts alone (mirrors LP_OPEN's
+    # IncreaseLiquidity → token_id pattern; required for physical_identity_hash on
+    # registry-mode LP_CLOSE writes).
+    "DecreaseLiquidity": "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
 }
 
 # Uniswap V3 NonfungiblePositionManager addresses (varies by chain; forks use different addresses)
@@ -1904,6 +1910,383 @@ class UniswapV3ReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
+
+    # =============================================================================
+    # Registry payload extraction — VIB-4198 (T12) UniV3 LP cutover
+    # =============================================================================
+    #
+    # The position_registry's ``payload`` column carries the per-primitive
+    # JSON shape ratified by PRD §Registry Data Shape and the T08 goldens
+    # (``tests/fixtures/multi-position-tracking/univ3-arbitrum/``). For UniV3
+    # LP, the shape is:
+    #
+    #   token_id          str — NFT tokenId, decimal-string formatted (matches
+    #                            the T08 golden encoding)
+    #   pool_address      str — lowercased hex address of the V3 pool
+    #   tick_lower        int — lower tick boundary (int24, signed)
+    #   tick_upper        int — upper tick boundary (int24, signed)
+    #   liquidity         str — uint128 liquidity, decimal-string formatted
+    #   amount0           str — token0 deposited (LP_OPEN) (raw uint256)
+    #   amount1           str — token1 deposited (LP_OPEN) (raw uint256)
+    #   amount0_open      str — LP_CLOSE only: principal+ open-side amount0
+    #   amount1_open      str — LP_CLOSE only: principal open-side amount1
+    #   amount0_close     str — LP_CLOSE only: amount0 reported by Burn
+    #   amount1_close     str — LP_CLOSE only: amount1 reported by Burn
+    #   fee_owed_0        str — LP_CLOSE only: collected fee in token0
+    #   fee_owed_1        str — LP_CLOSE only: collected fee in token1
+    #   fee_tier          int — pool fee tier (e.g. 500 for 0.05%); None if
+    #                            not derivable from the receipt alone
+    #   nft_manager_addr  str — lowercased hex address of the position manager
+    #
+    # The hash inputs for ``physical_identity_hash`` are
+    # ``(chain, nft_manager_addr.lower(), token_id)`` — receipt-derivable
+    # only, no off-chain calls. Two different LP_OPENs on the same NFT id
+    # collide by design (NFT id IS the identity); two different NFTs on the
+    # same pool produce distinct hashes and distinct registry rows.
+
+    def _decreaseliquidity_token_id(self, receipt: dict[str, Any]) -> int | None:
+        """Recover ``tokenId`` from a ``DecreaseLiquidity`` log on the close-side
+        receipt.
+
+        The NPM emits ``DecreaseLiquidity(uint256 indexed tokenId, …)`` on
+        every ``decreaseLiquidity()`` call. ``topics[1]`` is the indexed
+        tokenId. Returns ``None`` if no such log is in the receipt or
+        the NPM emitter doesn't match the configured chain — the close-side
+        identity is then derivable only from strategy-supplied state, which
+        is the legacy path the registry cutover is replacing. T12's caller
+        treats ``None`` as "fall back to ``accounting_only`` for this intent"
+        with an ERROR log; no ``Decimal("0")`` substitution.
+        """
+        logs = receipt.get("logs") or []
+        if not logs:
+            return None
+
+        decrease_topic = EVENT_TOPICS["DecreaseLiquidity"].lower()
+        position_manager = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
+        if not position_manager:
+            position_manager = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
+
+        for log in logs:
+            if hasattr(log, "get"):
+                topics = log.get("topics", [])
+                address = log.get("address", "")
+            else:
+                topics = getattr(log, "topics", [])
+                address = getattr(log, "address", "")
+
+            if isinstance(address, bytes):
+                address = "0x" + address.hex()
+            address = str(address).lower()
+
+            if not topics or len(topics) < 2:
+                continue
+
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            first_topic = str(first_topic).lower()
+            if not first_topic.startswith("0x"):
+                first_topic = "0x" + first_topic
+
+            if first_topic != decrease_topic:
+                continue
+            if address != position_manager:
+                continue
+
+            token_id_topic = topics[1]
+            if isinstance(token_id_topic, bytes):
+                token_id_topic = "0x" + token_id_topic.hex()
+            token_id_topic = str(token_id_topic)
+            if not token_id_topic.startswith("0x"):
+                token_id_topic = "0x" + token_id_topic
+            try:
+                return int(token_id_topic, 16)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def _nft_manager_address(self) -> str:
+        """Return the canonical NPM address for ``self.chain``, lowercased.
+
+        The address is part of the ``physical_identity_hash`` input tuple
+        (per T08 invariant #1). It is a parser-side configuration constant
+        — NOT an off-chain RPC call — so the hash stays receipt-derivable
+        from the receipt + parser config alone.
+        """
+        addr = POSITION_MANAGER_ADDRESSES.get(self.chain, "").lower()
+        if not addr:
+            addr = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".lower()
+        return addr
+
+    def _resolve_fee_tier_from_pool_event(self, receipt: dict[str, Any]) -> int | None:
+        """Best-effort fee-tier resolution from receipt-side hints.
+
+        The fee tier is NOT carried on the LP_OPEN / LP_CLOSE event payload
+        (UniV3's Mint / Burn / IncreaseLiquidity / DecreaseLiquidity events
+        do not include it). The strategy-supplied compile-time metadata is
+        the canonical source — but on Day-1 backfill we don't have that, and
+        the goldens carry ``fee_tier=500`` as a shape constant.
+
+        For T12 we return ``None`` here and let the caller (registry-payload
+        builder) inject the value from the intent's ``fee_tier`` field when
+        present. Returning ``None`` (not 0) honors CLAUDE.md "Empty ≠ zero".
+        """
+        # Registry-payload builder supplies fee_tier from intent.protocol_params
+        # at the call site. The parser stays receipt-only here.
+        _ = receipt
+        return None
+
+    def extract_registry_payload_open(
+        self,
+        receipt: dict[str, Any],
+        *,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the LP_OPEN ``position_registry.payload`` dict.
+
+        Reads the existing :meth:`extract_lp_open_data` output for
+        ``token_id`` / ``tick_lower`` / ``tick_upper`` / ``liquidity`` /
+        ``amount0`` / ``amount1`` / ``pool_address`` and composes the
+        canonical 8-key shape (plus optional ``fee_tier`` and the
+        per-chain ``nft_manager_addr``). Returns ``None`` when any of the
+        load-bearing identity fields are missing — the caller treats that
+        as "fall back to accounting_only", per CLAUDE.md "Empty ≠ zero"
+        (a zero-substituted token_id would silently corrupt the
+        physical_identity_hash).
+
+        Args:
+            receipt: Transaction receipt dict with ``logs`` field.
+            fee_tier: Optional pool fee tier (e.g. ``500`` for 0.05%);
+                forwarded from the intent's compile-time metadata. ``None``
+                when unknown — the payload key stays absent rather than
+                substituting ``0`` (Empty ≠ zero).
+
+        Returns:
+            ``dict`` JSON-serializable with the 8 (or 9 with fee_tier) keys
+            ratified by PRD §Registry Data Shape and the T08 golden, OR
+            ``None`` when the LP_OPEN data isn't extractable from the
+            receipt.
+        """
+        lp_data = self.extract_lp_open_data(receipt)
+        if lp_data is None:
+            return None
+        if lp_data.position_id is None or lp_data.position_id <= 0:
+            # token_id is the identity anchor; a zero/negative value would
+            # corrupt physical_identity_hash. Refuse to build the payload.
+            return None
+        if not lp_data.pool_address:
+            # pool_address is the semantic_grouping_key anchor; missing it
+            # would let two un-grouped rows in the same pool collide on
+            # ix_registry_auto_mode. Refuse rather than emit a partial row.
+            return None
+        if lp_data.tick_lower is None or lp_data.tick_upper is None:
+            # Range is part of the position's economic identity; missing
+            # ticks would let teardown / rebalancing read malformed bounds.
+            return None
+        if lp_data.liquidity is None:
+            return None
+
+        payload: dict[str, Any] = {
+            "token_id": str(lp_data.position_id),
+            "pool_address": lp_data.pool_address.lower(),
+            "tick_lower": lp_data.tick_lower,
+            "tick_upper": lp_data.tick_upper,
+            "liquidity": str(lp_data.liquidity),
+            "amount0": str(lp_data.amount0) if lp_data.amount0 is not None else None,
+            "amount1": str(lp_data.amount1) if lp_data.amount1 is not None else None,
+            "nft_manager_addr": self._nft_manager_address(),
+        }
+        if fee_tier is not None and fee_tier > 0:
+            payload["fee_tier"] = int(fee_tier)
+        if self.token0_symbol:
+            payload["_token0_label"] = self.token0_symbol
+        if self.token1_symbol:
+            payload["_token1_label"] = self.token1_symbol
+        return payload
+
+    @staticmethod
+    def _open_payload_token_id_int(open_payload: dict[str, Any]) -> int | None:
+        """Coerce ``open_payload['token_id']`` to ``int`` or ``None``.
+
+        Returns ``None`` for missing / empty / non-integer values. Pulled
+        out of the close-payload extractor's cross-check so the coercion
+        path stays trivially testable on its own.
+        """
+        raw = open_payload.get("token_id")
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _open_payload_disagrees(
+        cls,
+        *,
+        open_payload: dict[str, Any] | None,
+        token_id: int,
+        pool_address: str,
+    ) -> bool:
+        """Audit M1 cross-check.
+
+        Return ``True`` iff ``open_payload`` is non-None AND its identity
+        anchors disagree with the close receipt's anchors. The caller
+        treats a True here as "wrong OPEN row threaded — refuse the
+        close" and returns ``None`` so the registry doesn't overwrite the
+        close-receipt anchors with stale data.
+        ``open_payload=None`` (legacy / orphan close) returns ``False``
+        — there's nothing to disagree with.
+        """
+        if open_payload is None:
+            return False
+        open_token_id = cls._open_payload_token_id_int(open_payload)
+        if open_token_id is not None and open_token_id != token_id:
+            return True
+        open_pool = str(open_payload.get("pool_address") or "").lower()
+        return bool(open_pool and open_pool != pool_address)
+
+    @staticmethod
+    def _build_close_receipt_payload(
+        *,
+        token_id: int,
+        pool_address: str,
+        lp_close: Any,
+        nft_manager_addr: str,
+    ) -> dict[str, Any]:
+        """Compose the receipt-only portion of the LP_CLOSE registry payload.
+
+        T08 golden contract: ``amount0_close`` / ``amount1_close`` equal
+        ``LPCloseData.amount{0,1}_collected`` AS-EMITTED by the parser
+        (the NPM Collect → user totals), NOT a derived principal-only
+        figure. ``fee_owed_{0,1}`` carry the parser's fees emission
+        alongside. Round-3 attempted to subtract fees out; that
+        contradicted the T08 goldens — see audit m8 in the L2 contract
+        test for the full rationale.
+        """
+        payload: dict[str, Any] = {
+            "token_id": str(token_id),
+            "pool_address": pool_address,
+            "amount0_close": str(lp_close.amount0_collected),
+            "amount1_close": str(lp_close.amount1_collected),
+            "fee_owed_0": str(lp_close.fees0),
+            "fee_owed_1": str(lp_close.fees1),
+            "nft_manager_addr": nft_manager_addr,
+        }
+        if lp_close.liquidity_removed is not None:
+            payload["liquidity"] = str(lp_close.liquidity_removed)
+        return payload
+
+    @staticmethod
+    def _merge_open_payload_fields(
+        payload: dict[str, Any],
+        open_payload: dict[str, Any] | None,
+    ) -> None:
+        """Merge OPEN-time fields onto a close ``payload`` in place.
+
+        The close receipt cannot re-derive ticks, OPEN-time amounts, the
+        original mint liquidity, the fee tier, or the token labels —
+        those come from the OPEN-side registry row threaded through by
+        the strategy author / runner. When ``open_payload`` is ``None``
+        (legacy / orphan close), this is a no-op; the registry's
+        ON CONFLICT clause preserves the existing OPEN-side values via
+        ``COALESCE``-style merges (blueprint 28 §4.3 / sqlite store
+        contract).
+
+        OPEN-time liquidity wins for the registry row's ``liquidity``
+        payload field — matches the goldens which preserve the original
+        mint amount, not the burned amount.
+        """
+        if open_payload is None:
+            return
+        for key in ("tick_lower", "tick_upper"):
+            if open_payload.get(key) is not None and key not in payload:
+                payload[key] = open_payload[key]
+        if "amount0" in open_payload and open_payload["amount0"] is not None:
+            payload.setdefault("amount0_open", open_payload["amount0"])
+        if "amount1" in open_payload and open_payload["amount1"] is not None:
+            payload.setdefault("amount1_open", open_payload["amount1"])
+        if "liquidity" in open_payload and open_payload["liquidity"] is not None:
+            # OPEN-time liquidity wins (see docstring).
+            payload["liquidity"] = open_payload["liquidity"]
+        if "fee_tier" in open_payload and open_payload["fee_tier"] is not None:
+            payload.setdefault("fee_tier", open_payload["fee_tier"])
+        for label in ("_token0_label", "_token1_label"):
+            if open_payload.get(label):
+                payload.setdefault(label, open_payload[label])
+
+    def extract_registry_payload_close(
+        self,
+        receipt: dict[str, Any],
+        *,
+        open_payload: dict[str, Any] | None = None,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the LP_CLOSE ``position_registry.payload`` dict.
+
+        Reads the existing :meth:`extract_lp_close_data` output (Burn /
+        Collect amounts) and the close-side ``DecreaseLiquidity`` event
+        for the NFT ``token_id``, then composes the 13-key shape that
+        the T08 ``lp_close/expected_registry_row.json`` golden
+        specifies.
+
+        Audit M1 (CodeRabbit): a real UniV3 LP_CLOSE proves itself with
+        DecreaseLiquidity on the receipt AND a Burn log carrying the
+        pool address. A Collect-only receipt is NOT a close — it's a fee
+        harvest. If we silently synthesized ``token_id`` /
+        ``pool_address`` from ``open_payload`` here, a Collect-only
+        receipt or a malformed close would produce a "successful" close
+        payload with stale OPEN-side anchors, and the registry would
+        mark a still-open NFT as closed (the cutover spec D3.F6
+        silent-error class).
+
+        The flow is:
+
+        1. Decode close-side events (``extract_lp_close_data``) and the
+           DecreaseLiquidity log (``_decreaseliquidity_token_id``).
+        2. Verify the receipt-derived identity anchors are present and
+           non-zero.
+        3. Cross-check against ``open_payload`` if supplied — refuse on
+           any disagreement (``_open_payload_disagrees``).
+        4. Compose the receipt-only payload
+           (``_build_close_receipt_payload``).
+        5. Merge OPEN-time fields the close receipt cannot re-derive
+           (``_merge_open_payload_fields``) — ticks, OPEN-time amounts,
+           original mint liquidity, fee tier, token labels.
+        6. Apply the ``fee_tier`` argument if open_payload didn't carry
+           one.
+
+        Returns ``None`` when the close-side identity anchors (token_id
+        + pool_address) cannot be derived OR cross-checks fail. The
+        caller treats that as "fall back to accounting_only" with an
+        ERROR log (no zero substitution).
+        """
+        lp_close = self.extract_lp_close_data(receipt)
+        if lp_close is None:
+            return None
+        token_id = self._decreaseliquidity_token_id(receipt)
+        if token_id is None or token_id <= 0:
+            return None
+        pool_address = (lp_close.pool_address or "").lower()
+        if not pool_address:
+            return None
+        if self._open_payload_disagrees(
+            open_payload=open_payload,
+            token_id=token_id,
+            pool_address=pool_address,
+        ):
+            return None
+
+        payload = self._build_close_receipt_payload(
+            token_id=token_id,
+            pool_address=pool_address,
+            lp_close=lp_close,
+            nft_manager_addr=self._nft_manager_address(),
+        )
+        self._merge_open_payload_fields(payload, open_payload)
+        if fee_tier is not None and fee_tier > 0:
+            payload.setdefault("fee_tier", int(fee_tier))
+        return payload
 
     # =============================================================================
     # Protocol Fee Extraction (VIB-3204)

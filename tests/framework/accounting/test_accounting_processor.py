@@ -370,6 +370,7 @@ async def test_drain_one_lending_borrow_records_fifo_lot(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_initialize_run_loop_drains_pending_outbox() -> None:
     """drain_pending() is called in initialize_run_loop with deployment_id set first."""
+    from almanak.framework.migration import CutoverStorageNotSupported
     from almanak.framework.runner._run_loop_helpers import initialize_run_loop
 
     strategy = MagicMock()
@@ -386,6 +387,18 @@ async def test_initialize_run_loop_drains_pending_outbox() -> None:
     state_manager.initialize = AsyncMock()
     state_manager.get_accounting_events_sync = MagicMock(return_value=[])
     state_manager.load_state = AsyncMock(return_value=None)
+    # Audit F4 (T12 cutover): the boot guard added by VIB-4198 awaits
+    # ``upsert_migration_state`` on the state manager. A bare MagicMock
+    # returns a non-awaitable MagicMock for this attr. Wire AsyncMock
+    # stubs that raise ``CutoverStorageNotSupported`` — that's the
+    # canonical "this backend doesn't support cutover storage" signal
+    # the boot guard catches and degrades on (controlled-degrade path).
+    state_manager.upsert_migration_state = AsyncMock(
+        side_effect=CutoverStorageNotSupported("test stub: cutover storage not implemented")
+    )
+    state_manager.get_migration_state = AsyncMock(
+        side_effect=CutoverStorageNotSupported("test stub: cutover storage not implemented")
+    )
     runner.state_manager = state_manager
 
     processor = MagicMock()
@@ -421,6 +434,7 @@ async def test_initialize_run_loop_drains_pending_outbox() -> None:
 @pytest.mark.asyncio
 async def test_initialize_run_loop_drain_pending_raises_in_live_mode() -> None:
     """drain_pending exception raises RuntimeError in live mode."""
+    from almanak.framework.migration import CutoverStorageNotSupported
     from almanak.framework.runner._run_loop_helpers import initialize_run_loop
 
     strategy = MagicMock()
@@ -436,6 +450,14 @@ async def test_initialize_run_loop_drain_pending_raises_in_live_mode() -> None:
     state_manager = MagicMock()
     state_manager.initialize = AsyncMock()
     state_manager.get_accounting_events_sync = MagicMock(return_value=[])
+    # See test_initialize_run_loop_drains_pending_outbox above for the
+    # rationale on these two stubs (audit F4).
+    state_manager.upsert_migration_state = AsyncMock(
+        side_effect=CutoverStorageNotSupported("test stub: cutover storage not implemented")
+    )
+    state_manager.get_migration_state = AsyncMock(
+        side_effect=CutoverStorageNotSupported("test stub: cutover storage not implemented")
+    )
     runner.state_manager = state_manager
 
     processor = MagicMock()

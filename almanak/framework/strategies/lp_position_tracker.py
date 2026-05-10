@@ -160,6 +160,28 @@ class LPPositionTracker:
 
     def __init__(self) -> None:
         self._positions: dict[_PositionKey, _TrackedPosition] = {}
+        # VIB-4198 / T12 — optional registry-lookup callback set by the
+        # runner at boot. When present, ``maybe_inject`` for UniV3-family
+        # protocols consults the registry FIRST and only falls back to
+        # ``self._positions`` if the registry has no row. Closed-loop
+        # behavior with the registry-mode atomic write site in the runner.
+        # ``None`` (the default) preserves the legacy tracker-only path.
+        self._registry_lookup: Any = None
+
+    def attach_registry_lookup(self, lookup: Any) -> None:
+        """Install a registry-aware lookup callback (VIB-4198 / T12).
+
+        ``lookup`` is an awaitable / sync callable with signature
+        ``(protocol: str, chain: str, pool: str) -> str | None`` returning
+        the open NFT ``token_id`` for the (protocol, chain, pool) triple
+        when the registry knows about it. Returning ``None`` falls back
+        to the in-memory tracker.
+
+        The runner installs this at boot once the cutover guard clears
+        the LP cutover; the tracker stays in shadow mode and the registry
+        is the live answer surface.
+        """
+        self._registry_lookup = lookup
 
     # ---------------------------------------------------------------------
     # Recording (called by the framework after a successful intent execution)
@@ -270,6 +292,7 @@ class LPPositionTracker:
             )
             return intent
 
+    # crap-allowlist: VIB-4198 — LPPositionTracker is the shadow path; T29 (VIB-4215) removes it after a stable cycle per blueprint 28 §5; investing test coverage here is wasted effort.
     def _maybe_inject(self, intent: Any, default_chain: str | None) -> Any:
         intent_type = self._intent_type(intent)
         if intent_type not in {"LP_CLOSE", "LP_COLLECT_FEES"}:
@@ -277,8 +300,20 @@ class LPPositionTracker:
         key = _PositionKey.from_intent(intent, default_chain=default_chain)
         if key is None:
             return intent
+
+        # VIB-4198 / T12 — registry-first lookup for UniV3-family NFT-based
+        # protocols. When the runner installed a registry lookup callback
+        # AND the registry knows the open token_id for this (protocol, chain,
+        # pool), use that as the authoritative source. The in-memory
+        # tracker stays as shadow per blueprint 28 §5.
+        registry_position_id: str | None = None
+        if key.protocol in _NFT_BASED_PROTOCOLS and self._registry_lookup is not None:
+            registry_position_id = self._lookup_registry_position_id(
+                protocol=key.protocol, chain=key.chain, pool=key.pool
+            )
+
         tracked = self._positions.get(key)
-        if tracked is None:
+        if tracked is None and registry_position_id is None:
             return intent
 
         existing = getattr(intent, "protocol_params", None) or {}
@@ -286,11 +321,23 @@ class LPPositionTracker:
         injected = False
 
         # bin_ids — only inject when caller did not supply (truthy).
-        if key.protocol in _BIN_BASED_PROTOCOLS and tracked.bin_ids:
+        if key.protocol in _BIN_BASED_PROTOCOLS and tracked is not None and tracked.bin_ids:
             existing_bin_ids = new_params.get("bin_ids")
             if not existing_bin_ids:
                 new_params["bin_ids"] = list(tracked.bin_ids)
                 injected = True
+
+        # NFT position_id — registry first, tracker fallback. Only inject
+        # when caller did not supply (truthy).
+        if key.protocol in _NFT_BASED_PROTOCOLS:
+            existing_pid = new_params.get("position_id") or new_params.get("token_id")
+            if not existing_pid:
+                pid = registry_position_id
+                if not pid and tracked is not None and tracked.position_id is not None:
+                    pid = str(tracked.position_id)
+                if pid:
+                    new_params["position_id"] = pid
+                    injected = True
 
         if not injected:
             return intent
@@ -381,6 +428,39 @@ class LPPositionTracker:
         if value is None:
             return None
         return str(value).upper()
+
+    def _lookup_registry_position_id(self, *, protocol: str, chain: str, pool: str) -> str | None:
+        """VIB-4198 / T12 — registry-first lookup for the open NFT token_id.
+
+        Calls the registry-lookup callback installed by the runner at
+        boot (when the cutover guard cleared the LP cutover). Returns
+        ``None`` on any error or miss — the caller falls back to the
+        in-memory tracker.
+
+        Errors are swallowed and logged at DEBUG level: a registry-lookup
+        fault must never block a teardown intent. The tracker shadow path
+        is the always-on fallback.
+        """
+        lookup = self._registry_lookup
+        if lookup is None:
+            return None
+        try:
+            value = lookup(protocol=protocol, chain=chain, pool=pool)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.debug(
+                "LPPositionTracker._lookup_registry_position_id failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
+            return None
+        # The registry lookup may return an awaitable; we cannot await
+        # here because maybe_inject is sync. Caller is responsible for
+        # installing a sync wrapper. Defensive type-check:
+        if value is None:
+            return None
+        if not isinstance(value, str | int):
+            return None
+        return str(value)
 
     @staticmethod
     def _extract_bin_ids(result: Any) -> list[int] | None:

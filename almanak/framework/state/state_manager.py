@@ -2410,6 +2410,232 @@ class StateManager:
                 cause=e,
             ) from e
 
+    # =========================================================================
+    # position_registry / migration_state passthroughs (VIB-4198 / T12)
+    # =========================================================================
+    #
+    # Local-SQLite-only delegates to the WARM backend's typed methods. The
+    # hosted Postgres equivalents land in T19 (VIB-4205) — the framework
+    # path here raises ``NotImplementedError`` from the backend if the WARM
+    # backend doesn't support the call (e.g., a remote-only gateway state
+    # manager). The runner's ``_enforce_or_run_cutover`` catches that case
+    # and degrades to the legacy accounting_only path with an ERROR log.
+
+    async def get_position_registry_open_rows(
+        self,
+        deployment_id: str,
+        *,
+        chain: str | None = None,
+        primitive: str | None = None,
+        accounting_category: str | None = None,
+    ) -> list[dict]:
+        """Return the OPEN ``position_registry`` rows for a deployment.
+
+        Backed by the WARM backend's typed read. Used by:
+
+        - ``runner.get_open_lp_positions_from_registry`` (UniV3 LP path
+          today; broadened by future cutovers).
+        - Teardown's pre-flight ("what's open?") check for cutover-flipped
+          primitives.
+
+        Audit M3 (CodeRabbit): on a backend that does not implement
+        cutover storage (``GatewayStateManager`` until T19/VIB-4205
+        ships the Postgres equivalent), this method raises
+        :class:`CutoverStorageNotSupported` rather than silently
+        returning ``[]``. A silent ``[]`` is indistinguishable from
+        "fresh DB, no rows" — the boot guard would interpret the
+        empty result as "registry is the source of truth and it is
+        empty", potentially marking still-open positions as gone. The
+        cutover boot guard catches this exception and chooses degrade
+        vs hard refusal based on whether the cutover is meant to be
+        active for this build.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "get_position_registry_open_rows"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement get_position_registry_open_rows; cutover storage "
+                "is unavailable on this backend (T19/VIB-4205 lands the hosted "
+                "equivalent)."
+            )
+        return await self._warm.get_position_registry_open_rows(
+            deployment_id,
+            chain=chain,
+            primitive=primitive,
+            accounting_category=accounting_category,
+        )
+
+    async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
+        """Backfill insert (``INSERT … ON CONFLICT DO NOTHING``).
+
+        Idempotent under restart. Used by
+        :class:`almanak.framework.migration.BackfillReader`. Raises
+        :class:`CutoverStorageNotSupported` on backends that don't
+        implement the typed write — see ``get_position_registry_open_rows``
+        for the rationale.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "insert_position_registry_row_if_absent"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement insert_position_registry_row_if_absent."
+            )
+        return await self._warm.insert_position_registry_row_if_absent(row=row)
+
+    async def upsert_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> None:
+        """Idempotent insert of a baseline migration_state row.
+
+        Raises :class:`CutoverStorageNotSupported` on backends that
+        don't implement migration_state — silent no-op would let the
+        boot guard's read return ``None`` and trigger
+        ``RegistryCutoverNotDeployedError`` even when the build's
+        intent is "this backend doesn't support cutover storage yet".
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "upsert_migration_state"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement upsert_migration_state."
+            )
+        await self._warm.upsert_migration_state(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+        )
+
+    async def get_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> Any | None:
+        """Return the parsed migration_state row, or None when missing.
+
+        Raises :class:`CutoverStorageNotSupported` on backends that
+        don't implement migration_state. Returning ``None`` on an
+        unsupported backend would be indistinguishable from "row not
+        yet created", which the boot guard treats as
+        ``RegistryCutoverNotDeployedError`` — wrong error class, wrong
+        recovery path.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "get_migration_state"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement get_migration_state."
+            )
+        return await self._warm.get_migration_state(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+        )
+
+    async def update_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        backfill_started_at: str | None = None,
+        rows_synthesized: int | None = None,
+        rows_skipped_already_present: int | None = None,
+    ) -> None:
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "update_migration_state"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement update_migration_state."
+            )
+        await self._warm.update_migration_state(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            backfill_started_at=backfill_started_at,
+            rows_synthesized=rows_synthesized,
+            rows_skipped_already_present=rows_skipped_already_present,
+        )
+
+    async def mark_backfill_complete(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        rows_synthesized: int,
+        rows_skipped_already_present: int,
+        backfill_completed_at: str,
+    ) -> None:
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "mark_backfill_complete"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement mark_backfill_complete. A silent no-op here "
+                "would let the runner re-run the full backfill on every restart."
+            )
+        await self._warm.mark_backfill_complete(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            rows_synthesized=rows_synthesized,
+            rows_skipped_already_present=rows_skipped_already_present,
+            backfill_completed_at=backfill_completed_at,
+        )
+
+    async def get_position_events_filtered(
+        self,
+        *,
+        deployment_id: str,
+        position_types: frozenset[str],
+    ) -> list[dict]:
+        """Read the deployment's ``position_events`` rows whose
+        ``position_type`` is in the filter set.
+
+        Used by the backfill driver loop. Raises
+        :class:`CutoverStorageNotSupported` on backends that don't
+        implement the typed read — silent ``[]`` would let the
+        backfill complete with zero synthesized rows on a deployment
+        that actually has historical positions.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "get_position_events_filtered"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement get_position_events_filtered. Silent [] would "
+                "look like a deployment with zero historical positions."
+            )
+        return await self._warm.get_position_events_filtered(
+            deployment_id=deployment_id,
+            position_types=position_types,
+        )
+
     async def get_ledger_entries(
         self,
         strategy_id: str,

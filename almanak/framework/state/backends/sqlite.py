@@ -3620,3 +3620,436 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync)
+
+    # =========================================================================
+    # Position-registry CRUD + migration_state CRUD — VIB-4198 / T12
+    # =========================================================================
+    #
+    # Per blueprint 28 §4.1 / cutover spec §2.1 / §3 — these accessors are
+    # the SDK-owned local-SQLite implementation of the position_registry +
+    # migration_state surfaces. Hosted Postgres equivalents land in T19
+    # (VIB-4205) via the metrics-database repo.
+    #
+    # The atomic primitive `save_ledger_and_registry_atomic` (T11, above)
+    # is the production write path for runtime LP_OPEN / LP_CLOSE. The
+    # backfill READ path uses `insert_position_registry_row_if_absent`
+    # (`INSERT … ON CONFLICT DO NOTHING`) so the backfill is idempotent
+    # under restart per cutover spec §3.4.
+
+    async def get_position_registry_open_rows(
+        self,
+        deployment_id: str,
+        *,
+        chain: str | None = None,
+        primitive: str | None = None,
+        accounting_category: str | None = None,
+    ) -> list[dict]:
+        """Return open ``position_registry`` rows for a deployment.
+
+        The runtime "is this open?" answer surface for cutover-flipped
+        primitives. The runner / teardown call this after cutover instead
+        of consulting LPPositionTracker / position_events.
+
+        Filters: ``status='open'`` always; chain / primitive /
+        accounting_category narrow the set when supplied. The payload
+        column is returned as the parsed dict (caller does not need to
+        re-deserialize).
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> list[dict]:
+            if not self._conn:
+                return []
+            sql = "SELECT * FROM position_registry WHERE deployment_id = ? AND status = 'open'"
+            params: list[Any] = [deployment_id]
+            if chain is not None:
+                sql += " AND chain = ?"
+                params.append(chain)
+            if primitive is not None:
+                sql += " AND primitive = ?"
+                params.append(primitive)
+            if accounting_category is not None:
+                sql += " AND accounting_category = ?"
+                params.append(accounting_category)
+            sql += " ORDER BY opened_at_block ASC, opened_tx ASC"
+            with self._db_lock:
+                cursor = self._conn.execute(sql, params)
+                rows = cursor.fetchall()
+            out: list[dict] = []
+            for row in rows:
+                d = dict(row)
+                payload_raw = d.get("payload") or "{}"
+                try:
+                    parsed = json.loads(payload_raw)
+                except (TypeError, ValueError) as exc:
+                    # A corrupt payload row stays opaque rather than tripping
+                    # the iterator, but we surface a WARNING + structured
+                    # diagnostic field so corruption is visible to operators
+                    # rather than silently degrading to {}.
+                    logger.warning(
+                        "position_registry.payload JSON decode failed for "
+                        "deployment_id=%s chain=%s primitive=%s "
+                        "physical_identity_hash=%s: %s",
+                        d.get("deployment_id"),
+                        d.get("chain"),
+                        d.get("primitive"),
+                        d.get("physical_identity_hash"),
+                        exc,
+                    )
+                    d["payload_raw"] = payload_raw
+                    d["payload_decode_error"] = str(exc)
+                    d["payload"] = {}
+                else:
+                    # Audit m5 (CodeRabbit): the accessor's contract is
+                    # "parsed dict". ``json.loads`` accepts arrays /
+                    # strings / numbers too — those would slip through
+                    # the decode-error guard above and break callers
+                    # that do ``payload.get(...)``. Normalize non-dict
+                    # JSON to ``{}`` and surface a diagnostic field so
+                    # malformed-by-shape rows are observable.
+                    if isinstance(parsed, dict):
+                        d["payload"] = parsed
+                    else:
+                        logger.warning(
+                            "position_registry.payload is not a JSON "
+                            "object (got %s) for deployment_id=%s chain=%s "
+                            "primitive=%s physical_identity_hash=%s — "
+                            "coercing to {}.",
+                            type(parsed).__name__,
+                            d.get("deployment_id"),
+                            d.get("chain"),
+                            d.get("primitive"),
+                            d.get("physical_identity_hash"),
+                        )
+                        d["payload_raw"] = payload_raw
+                        d["payload_shape_error"] = f"expected JSON object, got {type(parsed).__name__}"
+                        d["payload"] = {}
+                out.append(d)
+            return out
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
+
+    async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
+        """Backfill insert: add a registry row only if absent.
+
+        Used by :class:`almanak.framework.migration.BackfillReader` per
+        cutover spec §3.4. Uses ``INSERT … ON CONFLICT DO NOTHING`` keyed
+        on ``(deployment_id, chain, primitive, physical_identity_hash)``
+        so a SIGKILL-and-restart of the backfill leaves the existing row
+        untouched. Runtime status flips on CLOSE go through the live
+        atomic primitive (`save_ledger_and_registry_atomic`), NOT this
+        path — the backfill is observation, not mutation.
+
+        Args:
+            row: A ``RegistryRow`` (see :mod:`almanak.framework.accounting.commit`).
+
+        Returns:
+            ``True`` if a new row was inserted; ``False`` if the row
+            already existed.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        primitive_str = row.primitive_value()
+        category_str = row.accounting_category_value()
+        payload_json = row.payload_json()
+
+        def _sync() -> bool:
+            if not self._conn:
+                return False
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO position_registry
+                    (deployment_id, chain, primitive, accounting_category,
+                     physical_identity_hash, semantic_grouping_key, grouping_policy_version,
+                     handle, status, payload,
+                     opened_at_block, opened_tx, closed_at_block, closed_tx,
+                     last_reconciled_at_block, matching_policy_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (deployment_id, chain, primitive, physical_identity_hash)
+                    DO NOTHING
+                    """,
+                    (
+                        row.deployment_id,
+                        row.chain,
+                        primitive_str,
+                        category_str,
+                        row.physical_identity_hash,
+                        row.semantic_grouping_key,
+                        row.grouping_policy_version,
+                        row.handle,
+                        row.status,
+                        payload_json,
+                        row.opened_at_block,
+                        row.opened_tx,
+                        row.closed_at_block,
+                        row.closed_tx,
+                        row.last_reconciled_at_block,
+                        row.matching_policy_version,
+                    ),
+                )
+                self._conn.commit()
+                return cursor.rowcount > 0
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)
+
+    async def upsert_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> None:
+        """Idempotent insert of a ``migration_state`` row at the deploy-time
+        baseline (``complete=0``).
+
+        Cutover spec §2.1 says the cutover ticket creates the row at
+        deploy time. T12 (this PR) creates it lazily on the runner's
+        first start when the registry-mode dispatch for UniV3 LP is
+        active. This is functionally equivalent to "deploy time" for
+        local SDK; hosted (T19) does the same lazy create on first
+        gateway startup.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        now = datetime.now(UTC).isoformat()
+
+        def _sync() -> None:
+            if not self._conn:
+                return
+            with self._db_lock:
+                self._conn.execute(
+                    """
+                    INSERT INTO migration_state
+                    (deployment_id, primitive, cutover_key,
+                     position_registry_backfill_complete, backfill_source_table,
+                     backfill_reader_version, rows_synthesized,
+                     rows_skipped_already_present, notes, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, 'position_events', 1, 0, 0, '{}', ?, ?)
+                    ON CONFLICT (deployment_id, primitive, cutover_key)
+                    DO NOTHING
+                    """,
+                    (deployment_id, primitive, cutover_key, now, now),
+                )
+                self._conn.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync)
+
+    async def get_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> Any | None:
+        """Return the migration_state row as a parsed dataclass, or None.
+
+        Returns a :class:`almanak.framework.migration.MigrationStateRow`
+        with ``notes`` parsed as ``dict``. ``None`` indicates the row has
+        not been created yet — the caller (boot guard) raises
+        :class:`RegistryCutoverNotDeployedError` per cutover spec §2.2.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync() -> dict | None:
+            if not self._conn:
+                return None
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    """
+                    SELECT * FROM migration_state
+                    WHERE deployment_id = ? AND primitive = ? AND cutover_key = ?
+                    """,
+                    (deployment_id, primitive, cutover_key),
+                )
+                row = cursor.fetchone()
+            return dict(row) if row else None
+
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(None, _sync)
+        if raw is None:
+            return None
+        from almanak.framework.migration.backfill import MigrationStateRow
+
+        try:
+            notes = json.loads(raw.get("notes") or "{}")
+        except (TypeError, ValueError):
+            notes = {}
+        # Defensive: ``notes`` is contractually an object on the
+        # migration_state JSON column, but ``json.loads`` accepts arrays /
+        # strings / numbers too. ``MigrationStateRow.notes`` is typed
+        # ``dict[str, Any]``, so coerce non-dict shapes back to {} rather
+        # than letting a malformed row break downstream consumers.
+        if not isinstance(notes, dict):
+            notes = {}
+        return MigrationStateRow(
+            deployment_id=raw["deployment_id"],
+            primitive=raw["primitive"],
+            cutover_key=raw["cutover_key"],
+            position_registry_backfill_complete=bool(raw.get("position_registry_backfill_complete", 0)),
+            backfill_started_at=raw.get("backfill_started_at"),
+            backfill_completed_at=raw.get("backfill_completed_at"),
+            backfill_source_table=raw.get("backfill_source_table") or "position_events",
+            backfill_reader_version=int(raw.get("backfill_reader_version") or 1),
+            rows_synthesized=int(raw.get("rows_synthesized") or 0),
+            rows_skipped_already_present=int(raw.get("rows_skipped_already_present") or 0),
+            notes=notes,
+            created_at=raw.get("created_at") or "",
+            updated_at=raw.get("updated_at") or "",
+        )
+
+    async def update_migration_state(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        backfill_started_at: str | None = None,
+        rows_synthesized: int | None = None,
+        rows_skipped_already_present: int | None = None,
+    ) -> None:
+        """Partial update — only the supplied columns are written.
+
+        ``mark_backfill_complete`` is the dedicated terminal flip; this
+        method handles in-flight progress writes (start time, batch
+        counter checkpoints).
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        sets: list[str] = []
+        params: list[Any] = []
+        if backfill_started_at is not None:
+            sets.append("backfill_started_at = ?")
+            params.append(backfill_started_at)
+        if rows_synthesized is not None:
+            sets.append("rows_synthesized = ?")
+            params.append(rows_synthesized)
+        if rows_skipped_already_present is not None:
+            sets.append("rows_skipped_already_present = ?")
+            params.append(rows_skipped_already_present)
+        if not sets:
+            return
+        sets.append("updated_at = ?")
+        params.append(datetime.now(UTC).isoformat())
+        params.extend([deployment_id, primitive, cutover_key])
+
+        def _sync() -> None:
+            if not self._conn:
+                return
+            with self._db_lock:
+                self._conn.execute(
+                    f"""
+                    UPDATE migration_state
+                    SET {", ".join(sets)}
+                    WHERE deployment_id = ? AND primitive = ? AND cutover_key = ?
+                    """,
+                    params,
+                )
+                self._conn.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync)
+
+    async def mark_backfill_complete(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        rows_synthesized: int,
+        rows_skipped_already_present: int,
+        backfill_completed_at: str,
+    ) -> None:
+        """Terminal flip — set ``complete=1`` + final counters + completed_at.
+
+        Single statement so the flip is atomic at the SQLite-page level.
+        Per cutover spec §3.3 step 4 — only invoked AFTER the read cursor
+        is exhausted; a failure mid-loop leaves the flag at 0 and the
+        next start re-runs the (idempotent) loop.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        now = datetime.now(UTC).isoformat()
+
+        def _sync() -> None:
+            if not self._conn:
+                return
+            with self._db_lock:
+                self._conn.execute(
+                    """
+                    UPDATE migration_state
+                    SET position_registry_backfill_complete = 1,
+                        rows_synthesized = ?,
+                        rows_skipped_already_present = ?,
+                        backfill_completed_at = ?,
+                        updated_at = ?
+                    WHERE deployment_id = ? AND primitive = ? AND cutover_key = ?
+                    """,
+                    (
+                        rows_synthesized,
+                        rows_skipped_already_present,
+                        backfill_completed_at,
+                        now,
+                        deployment_id,
+                        primitive,
+                        cutover_key,
+                    ),
+                )
+                self._conn.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync)
+
+    async def get_position_events_filtered(
+        self,
+        *,
+        deployment_id: str,
+        position_types: frozenset[str],
+    ) -> list[dict]:
+        """Read all ``position_events`` rows for a deployment matching one
+        of the legacy ``position_type`` values in ``position_types``.
+
+        Used by the backfill — it streams all events for the deployment
+        and groups by ``position_id`` in Python (memory-bound by the
+        largest single position's history, typically <100 rows). Returns
+        the rows in ``(position_id ASC, timestamp ASC, id ASC)`` order
+        so the downstream group-by-position_id is stable even though
+        the fold is order-independent (cutover spec §3.5). Audit P3
+        (CodeRabbit): the ``id ASC`` tiebreaker makes the read order
+        fully deterministic when two rows share a timestamp — without
+        it, ``fold_position_events_for_univ3`` could pick a different
+        first OPEN / last CLOSE across restarts on the same dataset.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not position_types:
+            return []
+        placeholders = ",".join("?" for _ in position_types)
+        params: list[Any] = [deployment_id, *position_types]
+
+        def _sync() -> list[dict]:
+            if not self._conn:
+                return []
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    f"""
+                    SELECT * FROM position_events
+                    WHERE deployment_id = ?
+                      AND position_type IN ({placeholders})
+                    ORDER BY position_id ASC, timestamp ASC, id ASC
+                    """,
+                    params,
+                )
+                return [dict(r) for r in cursor.fetchall()]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync)

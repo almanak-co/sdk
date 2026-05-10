@@ -261,6 +261,13 @@ async def initialize_run_loop(  # noqa: C901
     if state_manager_ready:
         await hydrate_recent_open_events_cache(runner, strategy)
 
+    # VIB-4198 / T12 — registry-mode cutover boot guard + registry-lookup
+    # install. Both extracted into ``_run_cutover_boot_guard`` so they don't
+    # contribute to ``initialize_run_loop``'s already-D-rated cyclomatic
+    # complexity. See that helper's docstring for the contract.
+    if state_manager_ready:
+        await _run_cutover_boot_guard(runner, strategy, strategy_id)
+
     # VIB-3467: drain pending/failed outbox rows from the previous run.
     if runner.config.enable_state_persistence and state_manager_ready:
         try:
@@ -1063,3 +1070,298 @@ async def finalize_run_loop(
             await runner.state_manager.close()
         except Exception as e:
             logger.error(f"Error closing state manager: {e}")
+
+
+# =============================================================================
+# Registry-lookup installer (VIB-4198 / T12)
+# =============================================================================
+
+
+async def _run_cutover_boot_guard(
+    runner: StrategyRunner,
+    strategy: Any,
+    strategy_id: str,
+) -> None:
+    """Run the VIB-4198 / T12 registry-mode cutover boot guard.
+
+    For every primitive whose cutover is active for this build, the
+    runner refuses to enter the iteration loop until the per-primitive
+    backfill from ``position_events`` is complete. The guard runs the
+    backfill inline on first call (cutover spec §2.2 outcome (b)). On
+    success, the registry is the authoritative answer to "is this
+    open?" for the cutover-flipped slice; on failure, the runner exits
+    non-zero and the operator restarts.
+
+    T12 only flips UniV3 LP. Future cutover tickets (T16 / T23 / T28)
+    add their own primitives to ``ACTIVE_CUTOVERS`` and ride this
+    same loop without further code change.
+
+    Acceptance #6 — once the cutover is cleared, install a registry-
+    first NFT-id lookup on the strategy's ``LPPositionTracker`` so
+    ``LP_CLOSE`` intent injection (and the teardown lifecycle) read
+    ``token_id`` from ``position_registry`` instead of the in-memory
+    tracker. The tracker stays as shadow per blueprint 28 §5.
+
+    Audit M2 (CodeRabbit): fail closed if the lookup install fails
+    while the cutover is ACTIVE. Post-cutover the registry is the
+    source of truth — silently swallowing an install failure would
+    downgrade LP_CLOSE token-id resolution back to the in-memory
+    tracker, which is exactly the surface that loses preexisting-LP
+    state across a restart. The cutover spec D3.F6 silent-error class.
+
+    - cutover ACTIVE + install fails → raise
+      ``RegistryLookupInstallError`` (runner halts loud).
+    - cutover NOT active (controlled-degrade path on a backend that
+      doesn't support migration_state — boot guard already degraded
+      via :class:`CutoverStorageNotSupported`) → log + continue;
+      tracker fallback is the legacy behavior and is correct.
+
+    Extracted from ``initialize_run_loop`` (CRAP refactor, round 9)
+    so the cutover block doesn't push the run-loop initialiser past
+    its CRAP-gate threshold. Full design intent is preserved one-to-
+    one — this is a structural extraction, not a redesign.
+    """
+    from almanak.framework.migration import RegistryLookupInstallError
+    from almanak.framework.primitives.types import Primitive
+    from almanak.framework.runner.cutover import (
+        ACTIVE_CUTOVERS,
+        enforce_or_run_cutover,
+        is_cutover_active,
+    )
+    from almanak.framework.strategies.lp_position_tracker import (
+        LPPositionTracker,
+    )
+
+    deployment_id = getattr(strategy, "deployment_id", "") or strategy_id
+    for cutover_spec in ACTIVE_CUTOVERS:
+        await enforce_or_run_cutover(
+            runner=runner,
+            deployment_id=deployment_id,
+            primitive=cutover_spec.primitive,
+            cutover_key=cutover_spec.cutover_key,
+        )
+
+    tracker = getattr(strategy, "_lp_position_tracker", None)
+    if not isinstance(tracker, LPPositionTracker):
+        return
+
+    cutover_live = is_cutover_active(runner, Primitive.LP, "lp")
+    try:
+        await _install_registry_lookup_for_lp_tracker(runner, tracker, deployment_id)
+    except RegistryLookupInstallError:
+        # Already-structured error — propagate AS-IS so the runner's
+        # outer error handler halts the strategy.
+        raise
+    except Exception as exc:  # noqa: BLE001 — convert to structured error
+        if cutover_live:
+            raise RegistryLookupInstallError(
+                deployment_id=deployment_id,
+                primitive=Primitive.LP,
+                cutover_key="lp",
+                cause=f"{type(exc).__name__}: {exc}",
+            ) from exc
+        # Cutover not active — tracker fallback is the legacy contract.
+        logger.warning(
+            "Could not install registry lookup on LPPositionTracker "
+            "(non-fatal — cutover not active for this build): %s",
+            exc,
+        )
+
+
+async def _install_registry_lookup_for_lp_tracker(
+    runner: StrategyRunner,
+    tracker: Any,
+    deployment_id: str,
+) -> None:
+    """Install a sync registry-lookup callback on ``tracker`` and prime the
+    registry-id cache before returning.
+
+    The lookup signature is ``(protocol, chain, pool) -> str | None`` — sync
+    by design because :meth:`LPPositionTracker.maybe_inject` runs inside the
+    runner's intent-extraction step (sync). We snapshot the registry state
+    once at boot via the state-manager surface and resolve the
+    (protocol, chain, pool) → token_id map in O(1).
+
+    Audit P2 (CodeRabbit): the prime is awaited HERE rather than fired
+    off as a task. The previous fire-and-forget left a race where the
+    first post-restart LP_CLOSE / LP_COLLECT_FEES could run before the
+    cache was populated.
+
+    Audit M2 (CodeRabbit): the prime failure surface is now mode-aware.
+    When the cutover is ACTIVE for ``(Primitive.LP, "lp")``, a prime
+    failure raises :class:`RegistryLookupInstallError` so the runner
+    halts loud — silent fallback to the in-memory tracker is exactly
+    the D3.F6 silent-error class the cutover spec prohibits. When the
+    cutover is NOT active (graceful-degrade path on a backend that
+    doesn't support migration_state), the prime failure is informational
+    — tracker fallback is the legacy / correct behavior.
+
+    Refreshes after boot ride on the registry-mode write site
+    (``_maybe_save_ledger_with_registry``) which keeps the cache in sync
+    as a side effect. Cache-driven rather than per-injection async I/O
+    so we don't introduce a per-intent state-manager call.
+    """
+    from almanak.framework.migration import RegistryLookupInstallError
+    from almanak.framework.primitives.types import Primitive
+    from almanak.framework.runner.cutover import is_cutover_active
+
+    runner_ref = runner
+
+    def _sync_lookup(*, protocol: str, chain: str, pool: str) -> str | None:
+        try:
+            # Ask the runner for the registry rows. The cache here is the
+            # state manager's; calling the async accessor isn't possible
+            # in a sync hook, so we consult the runner's
+            # ``_lp_registry_id_cache`` (populated at boot via
+            # ``_refresh_lp_registry_id_cache`` and refreshed on every
+            # registry-mode write).
+            cache: dict[tuple[str, str, str], str] = getattr(runner_ref, "_lp_registry_id_cache", {})
+            return cache.get((protocol.lower(), chain.lower(), pool.lower()))
+        except Exception:  # noqa: BLE001 — defensive
+            return None
+
+    tracker.attach_registry_lookup(_sync_lookup)
+    # Prime the cache once at boot.
+    runner_ref._lp_registry_id_cache = {}
+    try:
+        await _refresh_lp_registry_id_cache(runner_ref, deployment_id)
+    except Exception as exc:  # noqa: BLE001
+        if is_cutover_active(runner_ref, Primitive.LP, "lp"):
+            raise RegistryLookupInstallError(
+                deployment_id=deployment_id,
+                primitive=Primitive.LP,
+                cutover_key="lp",
+                cause=f"prime failed: {type(exc).__name__}: {exc}",
+            ) from exc
+        logger.warning(
+            "Initial registry-id cache prime failed (non-fatal — cutover "
+            "not active for this build); tracker fallback active: %s",
+            exc,
+        )
+
+
+# UniV3-family protocol slugs the registry-id cache indexes under.
+# The registry doesn't carry ``protocol`` directly — UniV3 LP rows
+# are tagged primitive='lp', accounting_category='lp', and the NPM
+# address in the payload identifies the family. We index under every
+# UniV3 family slug so a strategy registered as ``uniswap_v3`` /
+# ``sushiswap_v3`` / etc. on the same NFT manager finds the same row.
+_UNIV3_FAMILY_PROTOCOL_SLUGS: tuple[str, ...] = (
+    "uniswap_v3",
+    "sushiswap_v3",
+    "pancakeswap_v3",
+    "aerodrome_slipstream",
+    "velodrome_slipstream",
+)
+
+
+def _index_lp_registry_row_into_cache(
+    *,
+    row: dict[str, Any],
+    cache: dict[tuple[str, str, str], str],
+    ambiguous: set[tuple[str, str, str]],
+) -> None:
+    """Index one OPEN ``position_registry`` row into the runner's
+    registry-id cache (in place).
+
+    Audit P2 (CodeRabbit): the cache key
+    ``(protocol, chain, pool_address)`` is the same shape
+    :class:`LPPositionTracker._PositionKey` uses, so multiple open
+    NFTs in the same pool collide on it. Using last-write-wins would
+    let teardown target an arbitrary token_id when a delta-neutral
+    hedge or any other multi-NFT-per-pool strategy is active. We
+    detect ambiguity here and DROP the cache entry so the sync lookup
+    returns ``None`` and the in-memory tracker fallback fires (legacy
+    behavior preserved). The registry's authoritative read is still
+    ``get_position_registry_open_rows`` keyed on
+    ``physical_identity_hash``; this cache is the legacy projection
+    for the tracker-injection compatibility shim. A complete fix
+    plumbs a per-position discriminator (registry_handle) through the
+    LPPositionTracker contract — out of scope for T12 cutover.
+
+    No-op when:
+    - ``row.payload`` is not a dict (corrupt payload).
+    - ``token_id`` or ``pool_address`` is missing / falsy.
+    """
+    payload = row.get("payload") or {}
+    if not isinstance(payload, dict):
+        return
+    token_id = payload.get("token_id")
+    pool = payload.get("pool_address")
+    if not token_id or not pool:
+        return
+    chain = (row.get("chain") or "").lower()
+    pool_lower = str(pool).lower()
+    token_str = str(token_id)
+    for protocol_slug in _UNIV3_FAMILY_PROTOCOL_SLUGS:
+        key = (protocol_slug, chain, pool_lower)
+        if key in ambiguous:
+            continue
+        existing = cache.get(key)
+        if existing is not None and existing != token_str:
+            # Multi-NFT-per-pool collision detected — mark ambiguous
+            # so subsequent rows don't last-write-wins. Drop the entry
+            # so the lookup returns None (tracker fallback).
+            ambiguous.add(key)
+            cache.pop(key, None)
+            logger.warning(
+                "LP registry-id cache: multiple OPEN NFTs in same pool "
+                "(protocol=%s chain=%s pool=%s); cache entry dropped, "
+                "tracker fallback active. Multi-NFT-per-pool injection "
+                "needs a per-position discriminator (follow-up).",
+                protocol_slug,
+                chain,
+                pool,
+            )
+        else:
+            cache[key] = token_str
+
+
+async def _refresh_lp_registry_id_cache(runner: StrategyRunner, deployment_id: str) -> None:
+    """Repopulate ``runner._lp_registry_id_cache`` from
+    ``position_registry``.
+
+    Indexed by ``(protocol, chain, pool_address)`` keys — the same lookup
+    triple the legacy in-memory tracker uses. Only OPEN rows. The cache
+    is a per-runner instance attribute; the runner's snapshot is
+    independent of any concurrent strategy that might happen to share
+    the chain (though the 1:1 strategy-gateway invariant precludes
+    that).
+
+    Audit M2 (CodeRabbit): when the cutover is active, a refresh
+    failure is a hard error — the tracker shadow has lost preexisting
+    state across the restart. Re-raise so the installer can surface
+    ``RegistryLookupInstallError``. When the cutover is not active
+    (controlled-degrade path), debug-log + return so the boot
+    continues with an empty cache (no harm — registry-mode dispatch
+    is OFF on that path anyway).
+
+    Per-row indexing lives in :func:`_index_lp_registry_row_into_cache`
+    so the orchestrator stays narrow (cc <=4) and each indexing
+    branch is unit-testable in isolation.
+    """
+    from almanak.framework.primitives.types import Primitive
+    from almanak.framework.runner.cutover import is_cutover_active
+
+    try:
+        rows = await runner.state_manager.get_position_registry_open_rows(
+            deployment_id,
+            primitive="lp",
+            accounting_category="lp",
+        )
+    except Exception as exc:  # noqa: BLE001
+        if is_cutover_active(runner, Primitive.LP, "lp"):
+            # Re-raise — the installer wraps this as
+            # ``RegistryLookupInstallError`` so the runner halts loud.
+            raise
+        logger.debug(
+            "Registry-id cache refresh failed for %s (non-fatal — cutover not active): %s",
+            deployment_id,
+            exc,
+        )
+        return
+    cache: dict[tuple[str, str, str], str] = {}
+    ambiguous: set[tuple[str, str, str]] = set()
+    for row in rows:
+        _index_lp_registry_row_into_cache(row=row, cache=cache, ambiguous=ambiguous)
+    runner._lp_registry_id_cache = cache
