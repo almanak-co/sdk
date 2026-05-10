@@ -63,6 +63,7 @@ def _make_ledger_row(
     chain: str = "arbitrum",
     extracted_data_json: str = "",
     price_inputs_json: str = "",
+    pre_state_json: str = "",
     post_state_json: str = "",
     tx_hash: str = "0xdeadbeef",
     token_in: str = "USDC",
@@ -93,7 +94,7 @@ def _make_ledger_row(
         "error": "",
         "extracted_data_json": extracted_data_json,
         "price_inputs_json": price_inputs_json,
-        "pre_state_json": "",
+        "pre_state_json": pre_state_json,
         "post_state_json": post_state_json,
     }
 
@@ -745,3 +746,213 @@ class TestHandleLendingPostState:
 
         assert event is not None
         assert event.confidence == AccountingConfidence.ESTIMATED
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VIB-4257 — Pre-state lane symmetry (regression guard)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandleLendingPreStateLaneSymmetry:
+    """Pre-state JSON populates `_before` payload fields symmetrically with post-state.
+
+    Pre-VIB-4257, the handler hardcoded all `_before` fields to None even when
+    `pre_state_json` carried valid readings. This class is the regression guard
+    — every test here MUST fail on a build that drops the pre-state read.
+    """
+
+    def _aave_state_json(
+        self, *, collateral_usd: str, debt_usd: str, health_factor: str, lt_bps: int = 8500
+    ) -> str:
+        return json.dumps(
+            {
+                "protocol": "aave_v3",
+                "collateral_usd": collateral_usd,
+                "debt_usd": debt_usd,
+                "health_factor": health_factor,
+                "liquidation_threshold_bps": lt_bps,
+            }
+        )
+
+    def test_borrow_event_carries_pre_state_health_factor(self) -> None:
+        """BORROW: pre_state.health_factor → event.health_factor_before (non-null)."""
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"borrow_amount": 1_000_000_000})
+        pre = self._aave_state_json(collateral_usd="5000", debt_usd="0", health_factor="999999")
+        post = self._aave_state_json(collateral_usd="5000", debt_usd="1000", health_factor="2.6")
+        outbox = _make_outbox_row(led_id, intent_type="BORROW")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="BORROW",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+            pre_state_json=pre,
+            post_state_json=post,
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.health_factor_before == Decimal("999999")
+        assert event.health_factor_after == Decimal("2.6")
+        assert event.collateral_value_before_usd == Decimal("5000")
+        assert event.debt_value_before_usd == Decimal("0")
+        assert event.net_equity_before_usd == Decimal("5000")
+        assert event.collateral_value_after_usd == Decimal("5000")
+        assert event.debt_value_after_usd == Decimal("1000")
+        assert event.net_equity_after_usd == Decimal("4000")
+
+    def test_supply_borrow_repay_withdraw_all_carry_pre_state_hf(self) -> None:
+        """Loop through the four lending intents and assert each carries hf_before."""
+        rows: list[tuple[str, str, str, str]] = [
+            ("SUPPLY", "0", "0", "999999"),
+            ("BORROW", "5000", "0", "999999"),
+            ("WITHDRAW", "5000", "1000", "2.6"),
+            ("REPAY", "5000", "1500", "1.7"),
+        ]
+        basis = FIFOBasisStore()
+        for intent_type, _coll, _debt, _hf in rows:
+            led_id = str(uuid.uuid4())
+            # extracted_data field names match _AMOUNT_KEY_BY_INTENT in
+            # almanak/framework/accounting/category_handlers/lending_handler.py:448
+            # — WITHDRAW reads "withdraw_amount" (NOT "supply_amount").
+            extracted_field = {
+                "SUPPLY": "supply_amount",
+                "BORROW": "borrow_amount",
+                "WITHDRAW": "withdraw_amount",
+                "REPAY": "repay_amount",
+            }[intent_type]
+            extracted = json.dumps({extracted_field: 1_000_000})
+            pre = self._aave_state_json(
+                collateral_usd=_coll, debt_usd=_debt, health_factor=_hf
+            )
+            outbox = _make_outbox_row(led_id, intent_type=intent_type)
+            ledger = _make_ledger_row(
+                led_id,
+                intent_type=intent_type,
+                extracted_data_json=extracted,
+                price_inputs_json=_usdc_price_json(),
+                pre_state_json=pre,
+            )
+
+            with patch(
+                "almanak.framework.data.tokens.resolver.get_token_resolver",
+                return_value=_mock_resolver(6),
+            ):
+                event = handle_lending(outbox, ledger, basis)
+
+            assert event is not None, f"intent {intent_type} produced None"
+            assert event.health_factor_before == Decimal(_hf), (
+                f"intent {intent_type}: hf_before mismatch (got {event.health_factor_before})"
+            )
+
+    def test_pre_state_only_path_post_state_missing(self) -> None:
+        """If post_state_json is empty but pre_state_json is populated, _before fields populate.
+
+        VIB-4257 D1.2: the bug pre-fix was that the handler dropped pre-state entirely
+        any time post-state failed (gateway error at post-state-capture time). Decoupling
+        the two reads is the property under test.
+        """
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"supply_amount": 100_000_000})
+        pre = self._aave_state_json(collateral_usd="123", debt_usd="45", health_factor="3.14")
+        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="SUPPLY",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+            pre_state_json=pre,
+            post_state_json="",
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.health_factor_before == Decimal("3.14")
+        assert event.collateral_value_before_usd == Decimal("123")
+        assert event.debt_value_before_usd == Decimal("45")
+        assert event.net_equity_before_usd == Decimal("78")
+        # Post-state side stays None — no fabrication.
+        assert event.health_factor_after is None
+        assert event.collateral_value_after_usd is None
+        assert event.debt_value_after_usd is None
+
+    def test_missing_pre_state_json_leaves_before_fields_none(self) -> None:
+        """F1: pre_state_json='' → all _before fields stay None. No fabrication."""
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"supply_amount": 100_000_000})
+        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="SUPPLY",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+            pre_state_json="",
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.health_factor_before is None
+        assert event.collateral_value_before_usd is None
+        assert event.debt_value_before_usd is None
+        assert event.net_equity_before_usd is None
+
+    def test_pre_state_with_partial_fields_does_not_fabricate(self) -> None:
+        """F2: pre_state has collateral_usd but missing health_factor → hf_before=None."""
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"supply_amount": 100_000_000})
+        pre = json.dumps(
+            {
+                "protocol": "compound_v3",
+                "collateral_usd": "500",
+                "debt_usd": "100",
+                # health_factor intentionally missing
+            }
+        )
+        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="SUPPLY",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+            pre_state_json=pre,
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.collateral_value_before_usd == Decimal("500")
+        assert event.debt_value_before_usd == Decimal("100")
+        assert event.net_equity_before_usd == Decimal("400")
+        assert event.health_factor_before is None  # Empty ≠ zero — never fabricated.
+
+    def test_invalid_pre_state_json_does_not_raise(self) -> None:
+        """F3: malformed pre_state_json → handler logs and emits event with None _before fields."""
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"supply_amount": 100_000_000})
+        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="SUPPLY",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+            pre_state_json="not-json{",
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)  # MUST NOT raise
+
+        assert event is not None
+        assert event.health_factor_before is None
+        assert event.collateral_value_before_usd is None

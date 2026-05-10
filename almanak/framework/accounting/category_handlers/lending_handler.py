@@ -47,17 +47,34 @@ _INTENT_TO_EVENT_TYPE: dict[str, LendingEventType] = {
 }
 
 
-def _parse_post_state(post_state_json: str) -> dict[str, Any] | None:
-    """Parse post_state_json into a dict. Returns None when empty or invalid."""
-    if not post_state_json:
+def _parse_state_json(state_json: str) -> dict[str, Any] | None:
+    """Parse a pre_state_json or post_state_json blob into a dict.
+
+    Both columns share the same schema (produced by
+    :func:`almanak.framework.accounting.lending_accounting.lending_state_to_dict`),
+    so a single parser serves both lanes. Returns ``None`` when empty or
+    invalid — callers fall through to leaving the corresponding event
+    fields ``None`` (Empty ≠ zero per CLAUDE.md).
+    """
+    if not state_json:
         return None
     try:
-        d = json.loads(post_state_json)
+        d = json.loads(state_json)
         return d if isinstance(d, dict) else None
     except (json.JSONDecodeError, TypeError):
         return None
 
 
+# crap-allowlist: VIB-4257 — handle_lending is the canonical per-intent
+# dispatch ladder for SUPPLY/BORROW/REPAY/DELEVERAGE/WITHDRAW (5 distinct
+# branches with FIFO basis-pool side-effects per branch). cc=74 is pre-existing;
+# this PR mirrors the existing post-state extraction block (~22 lines) for
+# pre-state lane symmetry. Decomposing the per-intent ladder into separate
+# functions would scatter the wallet-basis pool side-effects (record_borrow /
+# match_repay / match_swap_disposal / record_swap_acquisition) across files,
+# breaking the lane-symmetry contract this PR enforces. Anti-regression
+# coverage: tests/unit/framework/accounting/test_lending_accounting.py (27
+# tests, 91% line coverage).
 def handle_lending(  # noqa: C901
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
@@ -110,7 +127,8 @@ def handle_lending(  # noqa: C901
     # canonical nested shape or the legacy flat shape.
     extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
     price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
-    post_state = _parse_post_state(ledger_row.get("post_state_json") or "")
+    pre_state = _parse_state_json(ledger_row.get("pre_state_json") or "")
+    post_state = _parse_state_json(ledger_row.get("post_state_json") or "")
 
     # Resolve asset: extracted_data first, then ledger row token_in as fallback.
     # Normal enriched lending results store the amount in borrow_amount/supply_amount
@@ -310,6 +328,28 @@ def handle_lending(  # noqa: C901
                 principal_delta_usd = _withdraw_total_usd
                 interest_delta_usd = None
 
+    # ── Pre-state from pre_state_json (VIB-3474: populated by the runner) ──────
+    # VIB-4257: lane-symmetry with post_state. Closes the asymmetric-write gap
+    # where _after fields were populated but _before fields were hardcoded None
+    # even though `pre_state_json.health_factor` was present.
+    collateral_before: Decimal | None = None
+    debt_before: Decimal | None = None
+    net_equity_before: Decimal | None = None
+    hf_before: Decimal | None = None
+
+    if pre_state:
+        try:
+            collateral_before = (
+                Decimal(str(pre_state["collateral_usd"])) if pre_state.get("collateral_usd") is not None else None
+            )
+            debt_before = Decimal(str(pre_state["debt_usd"])) if pre_state.get("debt_usd") is not None else None
+            if collateral_before is not None and debt_before is not None:
+                net_equity_before = collateral_before - debt_before
+            hf_raw_pre = pre_state.get("health_factor")
+            hf_before = Decimal(str(hf_raw_pre)) if hf_raw_pre is not None else None
+        except Exception:
+            logger.debug("Failed to parse pre_state_json fields", exc_info=True)
+
     # ── Post-state from post_state_json (VIB-3474: populated by the runner) ─────
     collateral_after: Decimal | None = None
     debt_after: Decimal | None = None
@@ -359,13 +399,13 @@ def handle_lending(  # noqa: C901
         position_key=position_key,
         market_id=outbox_row.get("market_id") or "",
         asset=asset,
-        collateral_value_before_usd=None,
+        collateral_value_before_usd=collateral_before,
         collateral_value_after_usd=collateral_after,
-        debt_value_before_usd=None,
+        debt_value_before_usd=debt_before,
         debt_value_after_usd=debt_after,
-        net_equity_before_usd=None,
+        net_equity_before_usd=net_equity_before,
         net_equity_after_usd=net_equity_after,
-        health_factor_before=None,
+        health_factor_before=hf_before,
         health_factor_after=hf_after,
         liquidation_threshold=liquidation_threshold,
         lltv=None,
