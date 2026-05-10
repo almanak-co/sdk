@@ -3082,6 +3082,145 @@ class SQLiteStore:
                             ),
                         )
                     conn.commit()
+                except sqlite3.IntegrityError as ie:
+                    # Roll back the transaction FIRST so the DB is in a
+                    # clean state regardless of how we classify the error.
+                    # The rollback must happen before the row-fetch SELECT
+                    # below so the SELECT cannot accidentally see rows in
+                    # an uncommitted-pending state on this connection.
+                    conn.rollback()
+
+                    # Distinguish the auto-mode-collision case
+                    # (ix_registry_auto_mode partial unique index) from
+                    # other IntegrityErrors (CHECK violations, handle
+                    # uniqueness via ix_registry_handle, NOT NULL, …).
+                    #
+                    # Detection contract (VIB-4200 / UAT card §D3.F1, F8,
+                    # F10):
+                    #   - The classifier is two-layered:
+                    #     (1) The IntegrityError MESSAGE PREFIX
+                    #         distinguishes the constraint TYPE: SQLite
+                    #         emits "UNIQUE constraint failed: ..." for
+                    #         unique-index violations and "CHECK constraint
+                    #         failed: ..." for CHECK violations. The
+                    #         constraint-type prefix IS reliable across
+                    #         SQLite versions even when the constraint
+                    #         NAME is not (UAT D3.F8). A CHECK violation
+                    #         is NEVER a collision regardless of whether
+                    #         a same-group row exists (UAT D3.F1
+                    #         over-broad-classifier guard).
+                    #     (2) Among UNIQUE-constraint violations, the
+                    #         row-existence check on the partial-index
+                    #         predicate distinguishes
+                    #         ``ix_registry_auto_mode`` (auto-mode
+                    #         collision) from ``ix_registry_handle``
+                    #         (duplicate handle, UAT D3.F10) and from the
+                    #         primary-key conflict (which the upstream
+                    #         ON CONFLICT clause already handles, so it
+                    #         shouldn't reach here).
+                    #   - Pre-INSERT SELECT-then-INSERT is forbidden (UAT
+                    #     D3.F7.b) because it races under concurrent
+                    #     writers; the check happens here, post-INSERT,
+                    #     post-rollback, in a fresh read.
+                    # Detect UNIQUE-constraint violation in two layers
+                    # (gemini-code-assist medium finding, PR #2222 review):
+                    # the ``sqlite3`` module exposes the extended errorcode
+                    # on ``IntegrityError.sqlite_errorcode`` (Python 3.11+,
+                    # and this repo requires 3.12+) as the authoritative,
+                    # locale- and SQLite-version-independent signal. The
+                    # canonical constant is
+                    # ``sqlite3.SQLITE_CONSTRAINT_UNIQUE`` (extended code
+                    # 2067). The string-prefix fallback covers the
+                    # (theoretical) case where ``sqlite_errorcode`` is
+                    # missing because the underlying SQLite library was
+                    # built without extended-errorcode support — falling
+                    # back to ``False`` in that case would silently
+                    # downgrade every UNIQUE violation to
+                    # ``AccountingPersistenceError``, which is SAFE (errs
+                    # on the generic-error side, NEVER silently swallows)
+                    # but loses the typed-collision signal.
+                    sqlite_errorcode = getattr(ie, "sqlite_errorcode", None)
+                    if sqlite_errorcode is not None:
+                        is_unique_violation = sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+                    else:
+                        is_unique_violation = "unique constraint failed" in str(ie).lower()
+                    if not is_unique_violation:
+                        # CHECK / NOT NULL / FOREIGN KEY etc. — never a
+                        # collision. Re-raise so the caller wraps as
+                        # AccountingPersistenceError.
+                        raise
+
+                    # CodeRabbit MAJOR finding (PR #2228 review): The
+                    # partial unique index ``ix_registry_auto_mode`` is
+                    # defined ``WHERE status = 'open' AND handle IS NULL``
+                    # — it CANNOT fire on an INSERT whose row carries a
+                    # handle. If the incoming row has a handle, the only
+                    # plausible UNIQUE-constraint source is
+                    # ``ix_registry_handle`` (duplicate handle, UAT D3.F10)
+                    # — and the row-existence check below could otherwise
+                    # mis-classify it as an auto-mode collision when an
+                    # unrelated handle-less open row happens to occupy the
+                    # same semantic group. Short-circuit here to preserve
+                    # the AccountingPersistenceError surface for that case.
+                    if effective_handle is not None:
+                        raise
+
+                    # UNIQUE-constraint violation. Run the row-existence
+                    # check on the auto-mode partial-index predicate.
+                    cursor = conn.execute(
+                        """
+                        SELECT physical_identity_hash, opened_tx
+                        FROM position_registry
+                        WHERE deployment_id = ?
+                          AND chain = ?
+                          AND accounting_category = ?
+                          AND semantic_grouping_key = ?
+                          AND status = 'open'
+                          AND handle IS NULL
+                        LIMIT 1
+                        """,
+                        (
+                            registry.deployment_id,
+                            registry.chain,
+                            category_str,
+                            registry.semantic_grouping_key,
+                            # status='open' AND handle IS NULL are inlined
+                            # because they MUST exactly mirror the partial
+                            # unique index's WHERE clause (sqlite.py:677).
+                        ),
+                    )
+                    existing = cursor.fetchone()
+
+                    if existing is not None:
+                        # The partial unique index group is occupied by an
+                        # open handle-less row, and the IntegrityError is a
+                        # UNIQUE-constraint violation — therefore the
+                        # offending index IS ix_registry_auto_mode.
+                        # Distinguish from the idempotent-retry path: if
+                        # the incoming row's PIH equals the existing row's
+                        # PIH, the upstream ON CONFLICT clause should have
+                        # handled it (so we shouldn't be here), but guard
+                        # defensively.
+                        existing_pih, existing_tx = existing
+                        new_pih = registry.physical_identity_hash
+                        if existing_pih != new_pih:
+                            # Auto-mode collision confirmed.
+                            from ..registry_errors import (  # local import: keep state.exceptions module lean
+                                RegistryAutoCollisionError,
+                            )
+
+                            raise RegistryAutoCollisionError(
+                                semantic_grouping_key=registry.semantic_grouping_key,
+                                existing_physical_identity_hash=existing_pih,
+                                opened_tx=existing_tx or "",
+                                accounting_category=category_str,
+                            ) from ie
+
+                    # UNIQUE violation but not the auto-mode collision —
+                    # most likely ix_registry_handle (duplicate handle,
+                    # UAT D3.F10). Re-raise so the caller wraps as
+                    # AccountingPersistenceError.
+                    raise
                 except Exception:
                     # Roll back to leave the DB unchanged. Re-raise so the
                     # caller (StateManager) wraps in AccountingPersistenceError.

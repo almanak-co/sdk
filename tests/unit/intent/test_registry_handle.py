@@ -22,9 +22,14 @@ Acceptance criteria covered:
         :func:`test_round_trip_via_serialize_result_parallel`,
         :func:`test_flash_loan_callback_round_trip` (D2.M2),
         :func:`test_full_per_class_matrix_with_handle_and_default_none` (D2.M1)
-    AC #5 — No collision-guard logic wired yet (T14 wires it):
-        :func:`test_no_collision_guard_runtime` (D3.F7 Half A)
-        :func:`test_no_collision_guard_static_grep` (D3.F7 Half B)
+    AC #5 — Same-iteration duplicate handles do not raise (T06's contract).
+            T14 (VIB-4200, shipped 2026-05-10) wires the collision-guard
+            typed exception at the StateManager write site, not at intent
+            construction:
+        :func:`test_no_collision_guard_runtime` (D3.F7 Half A — T06 still asserts
+            no construction-time guard)
+        :func:`test_collision_guard_symbol_is_wired_post_t14` (D3.F7 Half B —
+            asserts T14's symbol IS present, post-T14 inversion)
         :func:`test_factory_helpers_do_not_accept_registry_handle` (D3.F11)
 """
 
@@ -642,49 +647,54 @@ def test_no_collision_guard_runtime() -> None:
     assert out[1].registry_handle == DUP
 
 
-_T14_FORBIDDEN_SYMBOLS = (
-    "RegistryAutoCollisionError",
-    "registry_uniqueness",
-    "duplicate_handle",
-    "registry_handle_collision",
-    "check_handle_collision",
-    "_assert_unique_handle",
-)
+# T14 (VIB-4200) shipped the collision-guard symbol on 2026-05-10 — see
+# `almanak/framework/state/registry_errors.py:RegistryAutoCollisionError`.
+# This test (D3.F7 Half B) was authored under T06 to *block* T14 work from
+# leaking into the T06 PR before T14 was ready. Now that T14 has shipped,
+# the guard's invariant has flipped: the symbol MUST be present (otherwise
+# T14 would have been silently regressed). The other predicted names
+# ("registry_uniqueness", "duplicate_handle", "_assert_unique_handle", …)
+# were speculative — T14's actual implementation introduced
+# ``RegistryAutoCollisionError`` only, so the post-T14 invariant is
+# narrower than the pre-T14 prohibition.
+def test_collision_guard_symbol_is_wired_post_t14() -> None:
+    """D3.F7 Half B (post-T14 inversion) — ``RegistryAutoCollisionError``
+    MUST exist in ``almanak/``: it was wired by VIB-4200 / T14 on
+    2026-05-10. A regression that drops the symbol would silently revert
+    the typed-error contract every other ticket in epic VIB-4185 depends
+    on.
 
-
-def test_no_collision_guard_static_grep() -> None:
-    """D3.F7 Half B — the named T14 collision-guard symbols (
-    RegistryAutoCollisionError, registry_uniqueness, etc.) MUST NOT exist
-    anywhere in almanak/ today. T14 ships them later. A dormant exception
-    class or no-op helper landed under T06 still violates AC #5.
-
-    The grep deliberately scans the entire ``almanak/`` tree (not just
-    the intents module) so a guard wired from a separate sub-package
-    is also caught.
+    The grep scans the entire ``almanak/`` tree for at least one
+    occurrence of the canonical exception class. A future PR is welcome to
+    rename / restructure as long as a typed exception with this exact
+    name remains importable from
+    ``almanak.framework.state.registry_errors`` (the import-side check
+    below pins that surface explicitly).
     """
+    # Side A — static grep proves the symbol is somewhere in almanak/.
     repo_root = Path(__file__).resolve().parents[3]
     almanak_dir = repo_root / "almanak"
-    pattern = "|".join(_T14_FORBIDDEN_SYMBOLS)
     result = subprocess.run(
-        ["grep", "-rEn", pattern, str(almanak_dir)],
+        ["grep", "-rEn", "RegistryAutoCollisionError", str(almanak_dir)],
         capture_output=True, text=True, check=False,
     )
-    # grep semantics:
-    #   exit 0 = matches found (T14 symbols leaked — PRODUCT_FAIL)
-    #   exit 1 = no matches found (PASS)
-    #   exit ≥2 = scan error (file unreadable, permission, etc. — fail loud,
-    #             do NOT silently treat as PASS as the previous form did per
-    #             CodeRabbit PR #2205 review).
     assert result.returncode != 2, (
-        f"grep scan errored (exit code {result.returncode}). The static "
-        f"guard cannot prove T14 symbols are absent if the scan itself "
-        f"failed.\nstderr:\n{result.stderr}"
+        f"grep scan errored (exit code {result.returncode}); the static "
+        f"guard cannot prove the symbol is present.\nstderr:\n{result.stderr}"
     )
-    assert result.returncode == 1, (
-        "T14 collision-guard symbols found in almanak/. "
-        "T06 must NOT wire collision-guard logic — that is T14's job. "
-        f"Hits:\n{result.stdout}"
+    assert result.returncode == 0, (
+        "RegistryAutoCollisionError NOT found in almanak/. T14 (VIB-4200) "
+        "was supposed to ship it on 2026-05-10. A silent revert here would "
+        "regress every downstream ticket in epic VIB-4185."
     )
+
+    # Side B — import-side surface pin: the canonical import path must
+    # resolve to a class. Catches the case where the symbol exists only
+    # in a comment or docstring (grep hits) but is NOT importable.
+    from almanak.framework.state.registry_errors import RegistryAutoCollisionError
+
+    assert isinstance(RegistryAutoCollisionError, type)
+    assert issubclass(RegistryAutoCollisionError, Exception)
 
 
 # ---------------------------------------------------------------------------

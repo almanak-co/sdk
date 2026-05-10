@@ -51,6 +51,7 @@ from .exceptions import (  # noqa: E402 (re-exported for callers)
     AccountingPersistenceError,
     AccountingWriteKind,
 )
+from .registry_errors import RegistryAutoCollisionError  # noqa: E402
 
 
 def _default_local_db_path_str() -> str:
@@ -2333,12 +2334,20 @@ class StateManager:
         ``tests/unit/state/test_position_registry_no_writers.py`` for the
         anti-bypass guard.
 
-        Failure contract: any backend error (CHECK violation, OperationalError,
-        etc.) is wrapped as :class:`AccountingPersistenceError` with
-        ``write_kind=ACCOUNTING`` so the runner's existing fail-closed
-        pipeline (VIB-3157 / VIB-3762) handles it. The transaction is rolled
-        back by the backend method before the exception propagates; no
-        partial state lands on disk.
+        Failure contract:
+        - :class:`RegistryAutoCollisionError` (auto-mode partial-unique-index
+          violation, VIB-4200) propagates UNCHANGED — it is a programming-bug
+          class distinct from :class:`AccountingPersistenceError`. The
+          VIB-3762 paper-mode-leniency rule does NOT apply: collisions
+          surface uniformly across ``live`` / ``paper`` / ``dry_run`` so the
+          author's missing ``registry_handle`` cannot ship to live unnoticed.
+        - Any other backend error (CHECK violation, OperationalError,
+          ``ix_registry_handle`` violation, etc.) is wrapped as
+          :class:`AccountingPersistenceError` with ``write_kind=ACCOUNTING``
+          so the runner's existing fail-closed pipeline (VIB-3157 / VIB-3762)
+          handles it.
+        The transaction is rolled back by the backend method before either
+        exception propagates; no partial state lands on disk.
 
         Args:
             ledger: ``LedgerEntry`` for ``transaction_ledger``.
@@ -2380,6 +2389,23 @@ class StateManager:
             )
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_ledger_and_registry", latency, True)
+        except RegistryAutoCollisionError:
+            # Auto-mode collision is a programming bug (the strategy author
+            # forgot a registry_handle), NOT an infrastructure failure.
+            # Per VIB-4200 / PRD §"Loud Failure, Not Confusing Failure",
+            # this exception MUST propagate as a distinct class — never
+            # converted to AccountingPersistenceError, never downgraded by
+            # the paper-mode-leniency rule (VIB-3762). Mode-uniform raise
+            # is enforced here by letting the typed exception pass through.
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(
+                StateTier.WARM,
+                "save_ledger_and_registry",
+                latency,
+                False,
+                "RegistryAutoCollisionError",
+            )
+            raise
         except AccountingPersistenceError:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(
