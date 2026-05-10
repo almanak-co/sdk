@@ -33,7 +33,8 @@
         "amount_token": null,
         "confidence": "ESTIMATED",
         "unavailable_reason": "post_state_json missing or invalid (gateway read unavailable for this row)",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -64,7 +65,8 @@
         "liquidity": null,
         "current_tick": null,
         "in_range": null,
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -95,7 +97,8 @@
         "liquidity": null,
         "current_tick": null,
         "in_range": null,
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -121,7 +124,8 @@
         "basis_lot_id": null,
         "confidence": "ESTIMATED",
         "unavailable_reason": "SY/PT scaled by assumed 18-decimal precision; pt_token and USD price absent",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -147,7 +151,8 @@
         "basis_lot_id": null,
         "confidence": "ESTIMATED",
         "unavailable_reason": "PT buy amounts unavailable from receipt",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -171,7 +176,8 @@
         "funding_paid_usd": null,
         "confidence": "ESTIMATED",
         "unavailable_reason": "entry_price and realized_pnl require perp receipt parser (pending)",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -193,7 +199,8 @@
         "yield_usd": null,
         "confidence": "ESTIMATED",
         "unavailable_reason": "shares, share_price, and yield require vault receipt parser (pending)",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -220,7 +227,8 @@
         "confidence": "ESTIMATED",
         "unavailable_reason": "missing prices in price_inputs_json: USDC price, WETH price; swap amounts unmeasured (token decimals could not be resolved by receipt parser)",
         "swap_position_key": "swap:arbitrum:0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     },
     {
@@ -244,7 +252,8 @@
         "gas_usd": null,
         "confidence": "UNAVAILABLE",
         "unavailable_reason": "PREDICTION_BUY missing market_id, outcome, shares, usd_value on extracted_data",
-        "schema_version": 1
+        "schema_version": 1,
+        "primitive_version": 1
       }
     }
   ]

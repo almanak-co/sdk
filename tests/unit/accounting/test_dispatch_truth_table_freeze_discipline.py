@@ -1,73 +1,94 @@
-"""Frozen dispatch-truth-table guard (VIB-4163, post-merge survivor).
+"""Hand-edit guard for the frozen dispatch truth table (VIB-4163 origin,
+VIB-4166 contract update).
 
-D4.A4 in the T3 UAT card. After T3 (VIB-4163) merged the registry-driven
-dispatcher and T4 (VIB-4164) re-classified BRIDGE→TRANSFER, only the
-``test_truth_table_committed_exactly_once`` guard remains here — it asserts
-that ``tests/fixtures/accounting/legacy_dispatch_truth_table.json`` is
-touched by exactly one commit (a future PR that hand-edits the frozen
-dispatch fixture instead of regenerating it would trip this).
+The fixture ``tests/fixtures/accounting/legacy_dispatch_truth_table.json``
+captures the legacy if-ladder dispatcher's output for the parity test
+``test_dispatch_parity_against_legacy_truth_table``. The intent of THIS
+file is to catch hand-edits to the fixture — i.e. someone tweaking
+expected payloads to make a parity failure go away instead of fixing the
+underlying dispatcher.
 
-The companion guard (``test_truth_table_precursor_is_not_the_t3_commit``)
-was a pre-merge review-discipline check that became a permanent false
-negative after T3's squash-merge collapsed the precursor and dispatcher
-commits into one — see the comment block below for the removal rationale.
-The runtime contract is preserved by
+Contract evolution:
+    * **VIB-4163 (origin)**: the guard asserted "exactly 1 commit ever
+      touched the file" because at T3 there was a single precursor freeze
+      commit and the discipline was "freeze it and never touch it".
+    * **VIB-4166 (T6 of VIB-4160)**: T6 added ``primitive_version`` to
+      every event's ``to_payload_json`` output. The fixture's
+      ``expected_payload`` blocks had to mirror this additive change
+      (otherwise the parity test would fail, and rightly so). The
+      "exactly 1 commit" rule was thus mathematically incompatible with
+      ANY legitimate payload-shape evolution of the legacy dispatcher's
+      output. The contract is now stricter AND more precise: the
+      committed file must be byte-identical to what the generator
+      (``_generate_legacy_dispatch_truth_table.build_truth_table_json_text``)
+      would produce TODAY. Hand-edits diverge from generator output;
+      legitimate regenerations don't.
+
+The runtime contract (legacy ladder vs registry parity) is still
+enforced by ``test_dispatch_parity_against_legacy_truth_table`` in
+``test_category_handler_registry.py`` and
 ``test_classifier_parity_against_frozen_truth_table`` in
-``test_classifier_taxonomy_parity.py``.
+``test_classifier_taxonomy_parity.py``. The companion freeze-discipline
+guard ``test_truth_table_precursor_is_not_the_t3_commit`` was removed
+during T4 (VIB-4164) — see the comment block below for the rationale.
 """
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.fixtures.accounting._generate_legacy_dispatch_truth_table import (
+    build_truth_table_json_text,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_TRUTH_TABLE_REL = "tests/fixtures/accounting/legacy_dispatch_truth_table.json"
-_PROCESSOR_REL = "almanak/framework/accounting/processor.py"
+_TRUTH_TABLE_PATH = _REPO_ROOT / "tests/fixtures/accounting/legacy_dispatch_truth_table.json"
 
 
-def _git(*args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=_REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"git {' '.join(args)} failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
-        )
-    return result.stdout.strip()
+def test_truth_table_matches_generator_output() -> None:
+    """The committed truth-table must be byte-identical to what the
+    regenerator script produces in-process today.
 
+    Catches hand-edits to ``legacy_dispatch_truth_table.json`` — the
+    original VIB-4163 concern — without falsely failing when a legitimate
+    payload-shape evolution (e.g. VIB-4166's additive ``primitive_version``
+    stamp) is regenerated through the canonical generator. If THIS test
+    fails, EITHER the file was hand-edited (re-run the generator and
+    commit) OR the dispatcher's output drifted without the fixture being
+    refreshed (re-run the generator and commit).
 
-def _commits_touching(rel_path: str) -> list[str]:
-    log = _git("log", "--pretty=format:%H", "--", rel_path)
-    return [s for s in log.splitlines() if s.strip()]
+    Re-run with::
 
-
-def test_truth_table_committed_exactly_once() -> None:
-    """The truth-table JSON must be touched by exactly ONE git commit (the precursor).
-
-    A second commit modifying the file would mean the freeze was broken — either the
-    legacy dispatcher was edited after T3, or the truth table was hand-modified.
-    Both are review-discipline violations. Re-run the generator script and amend the
-    precursor commit, do not stack a fix-up commit.
+        uv run python tests/fixtures/accounting/_generate_legacy_dispatch_truth_table.py
     """
-    shas = _commits_touching(_TRUTH_TABLE_REL)
-    if not shas:
-        pytest.skip(
-            f"{_TRUTH_TABLE_REL} not yet committed (pre-precursor / branch context)."
-        )
-    assert len(shas) == 1, (
-        f"{_TRUTH_TABLE_REL} touched by {len(shas)} commits; expected exactly 1 "
-        f"(the precursor freeze). SHAs: {shas}"
+    expected_bytes = build_truth_table_json_text().encode("utf-8")
+    actual_bytes = _TRUTH_TABLE_PATH.read_bytes()
+    assert actual_bytes == expected_bytes, (
+        f"{_TRUTH_TABLE_PATH.relative_to(_REPO_ROOT)} content diverges from generator output. "
+        f"Either the file was hand-edited (re-run "
+        f"`uv run python tests/fixtures/accounting/_generate_legacy_dispatch_truth_table.py` "
+        f"and commit) OR the legacy dispatcher's output changed without the fixture being "
+        f"refreshed (same fix). Lengths: actual={len(actual_bytes)} bytes, "
+        f"expected={len(expected_bytes)} bytes."
     )
 
 
+# test_truth_table_committed_exactly_once — REPLACED by the content-based
+# guard above (VIB-4166, T6 of VIB-4160).
+#
+# The original "exactly 1 commit ever touched this file" check was a
+# heuristic for "didn't hand-edit", but it's mathematically incompatible
+# with ANY legitimate evolution of the legacy dispatcher's `to_payload_json`
+# output: when the shape changes (additively or otherwise), the fixture
+# MUST be regenerated for the parity test to pass, which then trips the
+# commit-count rule. The new content-based check is strictly stronger:
+# (a) catches hand-edits (the original concern) by detecting any
+#     divergence from generator output, including subtle ones the
+#     commit-count check would have missed (e.g. a "fix-up" commit that
+#     introduced a tiny wrong value), and
+# (b) allows legitimate regenerations under any future payload-shape
+#     change without locking the codebase out of evolution.
+#
 # test_truth_table_precursor_is_not_the_t3_commit — REMOVED (VIB-4164, T4).
 #
 # The test was a pre-merge review-discipline guard for T3 (VIB-4163): "precursor

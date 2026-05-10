@@ -12,10 +12,37 @@ these models. That is the "validated typed-payload reads" rail in
 AttemptNo17 §1.1.
 
 Versioning (AttemptNo17 §1.0a): every payload carries `schema_version`,
-`formula_version`, and `matching_policy_version`. v1 = 1 across the board.
-Bumping any of them triggers a separate Accountant Test score keyed by
-that version triple — historical comparisons require re-running the test
-under the new versions.
+`formula_version`, `matching_policy_version`, and `primitive_version`. v1 = 1
+across the board. Bumping any of them triggers a separate Accountant Test
+score keyed by that version tuple — historical comparisons require re-running
+the test under the new versions.
+
+Bump policy for `primitive_version` (VIB-4166, T6 of VIB-4160):
+    Bump :data:`PRIMITIVE_VERSIONS[primitive]` ONLY when the primitive's
+    semantics change — i.e. when the SET of fields the primitive emits, the
+    LIFECYCLE STATES it tracks, or the FINANCIAL INVARIANTS it enforces
+    change. Examples that warrant a bump:
+
+      * LP_CLOSE starts emitting per-token fee accruals it didn't before.
+      * BRIDGE adds destination-side observation (PENDING → SETTLED → ...).
+      * LIQUIDATE emerges from placeholder to a real implemented primitive.
+      * CDP gains leverage-normalisation that changes how `principal_*`
+        columns are derived.
+
+    Examples that DO NOT warrant a bump:
+
+      * Classifier tweaks that re-route an existing event_type.
+      * Receipt-parser fixes that recover a previously-empty field.
+      * New event_type strings WITHIN an existing primitive (e.g. LP_REBALANCE
+        added to LP — same fields, same lifecycle, just one more transition).
+      * Fee structure changes from the protocol side that flow through the
+        existing fields untouched.
+
+    Procedure (mirrors :data:`MATCHING_POLICY_VERSIONS`): edit the
+    per-primitive int below, regenerate ONLY the affected primitive's
+    Accountant Test fixture, no global re-baselining of sibling primitives.
+    The writer's per-primitive lookup at the augment chokepoint guarantees
+    a bump in one primitive cannot contaminate another.
 """
 
 from __future__ import annotations
@@ -82,6 +109,38 @@ MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     Primitive.FLASH_LOAN: 1,
 }
 
+# VIB-4166 (T6): per-primitive primitive_version map.
+#
+# Stamped by ``writer.augment_accounting_payload`` onto every accounting-event
+# payload alongside the existing version triple (see module docstring for the
+# bump policy). Initial value is 1 for every primitive; bumping is per-primitive
+# so a CDP semantics change cannot retroactively re-baseline LP, Lending or
+# Perp scoring.
+#
+# Why a separate version from ``matching_policy_version``: the latter tracks
+# changes to the lot-matching ALGORITHM (FIFO vs LIFO, wallet-basis vs
+# position-basis, etc.) and is consumed by the Accountant Test G13 cell.
+# ``primitive_version`` tracks changes to the primitive's BROADER CONTRACT
+# (fields emitted, lifecycle states, financial invariants). The two can move
+# independently — e.g. switching FIFO to LIFO inside LP bumps lot-matching
+# without bumping the primitive contract; adding fee-collection events to LP
+# bumps the primitive contract without changing lot matching.
+#
+# Every Primitive value MUST appear here so the writer lookup never KeyError-s.
+PRIMITIVE_VERSION_DEFAULT = 1
+PRIMITIVE_VERSIONS: dict[Primitive, int] = {
+    Primitive.LP: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.LENDING: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.PERP: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.UTILITY: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.SWAP: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.PREDICTION: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.FLASH_LOAN: PRIMITIVE_VERSION_DEFAULT,
+}
+
 
 class _Base(BaseModel):
     """Shared config for all payload models.
@@ -106,6 +165,11 @@ class _Versioned(_Base):
     schema_version: int = SCHEMA_VERSION
     formula_version: int = FORMULA_VERSION
     matching_policy_version: int = MATCHING_POLICY_VERSION
+    # VIB-4166 (T6): per-primitive primitive_version. Default to the global
+    # initial of 1 so pre-T6 payloads on disk (which lack this field) round-
+    # trip through the read rail without crashing — the augment chokepoint
+    # writes the canonical per-primitive value at write time.
+    primitive_version: int = PRIMITIVE_VERSION_DEFAULT
 
     @model_validator(mode="after")
     def _enforce_confidence_exclusivity(self) -> _Versioned:

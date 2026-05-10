@@ -4,6 +4,16 @@ Design rules:
 - None = unmeasured / unavailable. Decimal("0") = measured zero. Never conflate.
 - Every event carries AccountingIdentity for full traceability.
 - schema_version on every model so formula upgrades don't corrupt old records.
+- primitive_version on every model so per-primitive contract changes (set of
+  fields, lifecycle states, financial invariants) can be tracked independently
+  from the lot-matching algorithm version. See
+  ``almanak.framework.accounting.payload_schemas`` module docstring for the
+  bump policy: bump ONLY on a primitive-semantics change (NOT classifier
+  tweaks, parser fixes, or new event_type strings within an existing
+  primitive). Stamping defaults to 1 now (VIB-4166, T6 of VIB-4160) — pre-T6
+  rows on disk lack the field; the read rail tolerates absence via
+  ``_Versioned.extra='ignore'``, and the augment chokepoint stamps the
+  canonical per-primitive value at write time.
 - All monetary fields use Decimal or string — never float.
 """
 
@@ -189,6 +199,28 @@ def _validate_schema_version(data: dict[str, Any], model_name: str) -> int:
     return version
 
 
+def _validate_primitive_version(data: dict[str, Any], model_name: str) -> int:
+    """Return primitive_version from *data*, defaulting to 1 for legacy records.
+
+    Mirrors :func:`_validate_schema_version`'s strict type discipline (VIB-4166):
+    rejects bool subclass (``True == 1`` in Python), floats, and stringified
+    ints. Production exposure on the read rail is bounded because
+    :func:`writer.augment_accounting_payload` is authoritative at write time
+    and overwrites any tampered value — but if a future PR introduces a read
+    path that bypasses the augment, strict validation here surfaces the
+    drift loudly instead of silently coercing.
+    """
+    version = data.get("primitive_version", 1)
+    if type(version) is not int:
+        raise ValueError(
+            f"Invalid primitive_version type {type(version).__name__!r} in {model_name} payload"
+            f"; expected int, got {version!r}"
+        )
+    if version < 1:
+        raise ValueError(f"Invalid primitive_version {version!r} in {model_name} payload; expected int >= 1")
+    return version
+
+
 def _dec(v: Any) -> Decimal | None:
     """Convert a string/number value to Decimal, or return None."""
     return Decimal(v) if v is not None else None
@@ -228,6 +260,8 @@ class LendingAccountingEvent:
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
+    # VIB-4166 (T6) — see module docstring for bump policy.
+    primitive_version: int = 1
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -262,6 +296,7 @@ class LendingAccountingEvent:
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
             "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
+            "primitive_version": self.primitive_version,
         }
         return json.dumps(d)
 
@@ -269,6 +304,7 @@ class LendingAccountingEvent:
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> LendingAccountingEvent:
         d = json.loads(payload)
         schema_version = _validate_schema_version(d, "LendingAccountingEvent")
+        primitive_version = _validate_primitive_version(d, "LendingAccountingEvent")
         return cls(
             identity=identity,
             event_type=LendingEventType(d["event_type"]),
@@ -294,6 +330,7 @@ class LendingAccountingEvent:
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
+            primitive_version=primitive_version,
         )
 
 
@@ -322,6 +359,8 @@ class PendleAccountingEvent:
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
+    # VIB-4166 (T6) — see module docstring for bump policy.
+    primitive_version: int = 1
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -351,6 +390,7 @@ class PendleAccountingEvent:
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
             "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
+            "primitive_version": self.primitive_version,
         }
         return json.dumps(d)
 
@@ -358,6 +398,7 @@ class PendleAccountingEvent:
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> PendleAccountingEvent:
         d = json.loads(payload)
         schema_version = _validate_schema_version(d, "PendleAccountingEvent")
+        primitive_version = _validate_primitive_version(d, "PendleAccountingEvent")
 
         def _dt(v: Any) -> datetime | None:
             return datetime.fromisoformat(v) if v is not None else None
@@ -380,6 +421,7 @@ class PendleAccountingEvent:
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH)),
             unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
+            primitive_version=primitive_version,
         )
 
 
@@ -430,6 +472,8 @@ class SwapAccountingEvent:
     # Stored in payload for reconstruct_from_events reconstruction.
     swap_position_key: str = ""
     schema_version: int = 1
+    # VIB-4166 (T6) — see module docstring for bump policy.
+    primitive_version: int = 1
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -458,6 +502,7 @@ class SwapAccountingEvent:
             "unavailable_reason": self.unavailable_reason or None,
             "swap_position_key": self.swap_position_key,
             "schema_version": self.schema_version,
+            "primitive_version": self.primitive_version,
         }
         return json.dumps(d)
 
@@ -465,6 +510,7 @@ class SwapAccountingEvent:
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> SwapAccountingEvent:
         d = json.loads(payload)
         schema_version = _validate_schema_version(d, "SwapAccountingEvent")
+        primitive_version = _validate_primitive_version(d, "SwapAccountingEvent")
         return cls(
             identity=identity,
             event_type=SwapEventType(d["event_type"]),
@@ -484,6 +530,7 @@ class SwapAccountingEvent:
             unavailable_reason=d.get("unavailable_reason") or "",
             swap_position_key=d.get("swap_position_key", ""),
             schema_version=schema_version,
+            primitive_version=primitive_version,
         )
 
 
@@ -530,6 +577,8 @@ class PredictionAccountingEvent:
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
+    # VIB-4166 (T6) — see module docstring for bump policy.
+    primitive_version: int = 1
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -555,6 +604,7 @@ class PredictionAccountingEvent:
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
             "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
+            "primitive_version": self.primitive_version,
         }
         return json.dumps(d)
 
@@ -562,6 +612,7 @@ class PredictionAccountingEvent:
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> PredictionAccountingEvent:
         d = json.loads(payload)
         schema_version = _validate_schema_version(d, "PredictionAccountingEvent")
+        primitive_version = _validate_primitive_version(d, "PredictionAccountingEvent")
         return cls(
             identity=identity,
             event_type=PredictionEventType(d["event_type"]),
@@ -582,6 +633,7 @@ class PredictionAccountingEvent:
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
+            primitive_version=primitive_version,
         )
 
 
@@ -628,6 +680,8 @@ class TransferAccountingEvent:
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
+    # VIB-4166 (T6) — see module docstring for bump policy.
+    primitive_version: int = 1
 
     def __post_init__(self) -> None:
         """Coerce enum-typed fields so raw strings raise at construction.
@@ -664,6 +718,7 @@ class TransferAccountingEvent:
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
             "unavailable_reason": self.unavailable_reason or None,
             "schema_version": self.schema_version,
+            "primitive_version": self.primitive_version,
         }
         return json.dumps(d)
 
@@ -671,6 +726,7 @@ class TransferAccountingEvent:
     def from_payload_json(cls, identity: AccountingIdentity, payload: str) -> TransferAccountingEvent:
         d = json.loads(payload)
         schema_version = _validate_schema_version(d, "TransferAccountingEvent")
+        primitive_version = _validate_primitive_version(d, "TransferAccountingEvent")
         return cls(
             identity=identity,
             event_type=TransferEventType(d["event_type"]),
@@ -685,6 +741,7 @@ class TransferAccountingEvent:
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),
             unavailable_reason=d.get("unavailable_reason") or "",
             schema_version=schema_version,
+            primitive_version=primitive_version,
         )
 
 

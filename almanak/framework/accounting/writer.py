@@ -26,6 +26,7 @@ from almanak.framework.accounting.models import (
     LendingAccountingEvent,
     PendleAccountingEvent,
     PredictionAccountingEvent,
+    SwapAccountingEvent,
     TransferAccountingEvent,
 )
 from almanak.framework.accounting.payload_schemas import (
@@ -33,7 +34,7 @@ from almanak.framework.accounting.payload_schemas import (
     SCHEMA_VERSION,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
-from almanak.framework.accounting.policy import MatchingPolicy
+from almanak.framework.accounting.policy import MatchingPolicy, PrimitiveVersion
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
@@ -57,6 +58,7 @@ AccountingEvent = (
     | PerpAccountingEvent
     | VaultAccountingEvent
     | PredictionAccountingEvent
+    | SwapAccountingEvent
     | TransferAccountingEvent
 )
 
@@ -69,8 +71,11 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
     :meth:`GatewayStateManager.save_accounting_event`) so every accounting
     row ends up with:
 
-    * ``schema_version`` / ``formula_version`` / ``matching_policy_version``
-      (G13: lot-matching policy declared + versioned).
+    * ``schema_version`` / ``formula_version`` / ``matching_policy_version`` /
+      ``primitive_version`` (G13: lot-matching policy declared + versioned;
+      VIB-4166: per-primitive contract version stamped before the upcoming
+      primitives — Bridge dest-leg, CDP, Liquidate, Vault-async, Claim — land
+      so we never need to backfill a missing version across millions of rows).
     * ``principal_repaid_usd`` / ``interest_paid_usd`` projection from
       ``principal_delta_usd`` / ``interest_delta_usd`` for REPAY (L4).
     * ``interest_accrued_usd`` projection from ``interest_delta_usd`` for
@@ -113,35 +118,35 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
         logger.error("%s — non-live mode, returning original payload unchanged", msg)
         return payload_json
 
-    # VIB-4162 (T2) / VIB-4195 (T09): per-primitive matching_policy_version
-    # stamping via the typed accessor. Look up the primitive for this
-    # event_type via the canonical taxonomy; in live mode an unknown OR
-    # missing event_type raises (preserves VIB-3863's mode-aware contract),
-    # in non-live the writer logs ERROR and falls back to UTILITY's version.
+    # VIB-4162 (T2) + VIB-4195 (T09) + VIB-4166 (T6): per-primitive version
+    # stamping via typed accessors. Look up the primitive for this event_type
+    # via the canonical taxonomy ONCE; both `matching_policy_version` AND
+    # `primitive_version` are resolved from the same primitive, so a
+    # fallback (paper-mode unknown / missing event_type) lands the same
+    # fallback primitive in BOTH lookups and an asymmetric stamp is
+    # impossible. In live mode an unknown OR missing event_type raises
+    # (preserves VIB-3863's mode-aware contract); in non-live the writer
+    # logs ERROR and falls back to Primitive.UTILITY for both versions.
     event_type = d.get("event_type")
     if not isinstance(event_type, str) or not event_type:
-        msg = (
-            "augment_accounting_payload: missing or invalid event_type; "
-            "cannot resolve per-primitive matching_policy_version"
-        )
+        msg = "augment_accounting_payload: missing or invalid event_type; cannot resolve per-primitive version stamps"
         if is_live:
             raise AccountingPersistenceError(
                 AccountingWriteKind.ACCOUNTING,
                 message=msg,
             )
         logger.error(
-            "%s — non-live mode, falling back to MatchingPolicy.for_primitive(Primitive.UTILITY)",
+            "%s — non-live mode, falling back to Primitive.UTILITY for both versions",
             msg,
         )
-        matching_version = MatchingPolicy.for_primitive(Primitive.UTILITY)
+        primitive = Primitive.UTILITY
     else:
         try:
             primitive = record_for(event_type).primitive
-            matching_version = MatchingPolicy.for_primitive(primitive)
         except UnknownIntentTypeError as exc:
             msg = (
                 f"augment_accounting_payload: event_type {event_type!r} has no "
-                f"taxonomy row; cannot resolve per-primitive matching_policy_version"
+                f"taxonomy row; cannot resolve per-primitive version stamps"
             )
             if is_live:
                 raise AccountingPersistenceError(
@@ -150,14 +155,20 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
                     cause=exc,
                 ) from exc
             logger.error(
-                "%s — non-live mode, falling back to MatchingPolicy.for_primitive(Primitive.UTILITY)",
+                "%s — non-live mode, falling back to Primitive.UTILITY for both versions",
                 msg,
             )
-            matching_version = MatchingPolicy.for_primitive(Primitive.UTILITY)
+            primitive = Primitive.UTILITY
 
     d["schema_version"] = SCHEMA_VERSION
     d["formula_version"] = FORMULA_VERSION
-    d["matching_policy_version"] = matching_version
+    # Both per-primitive stamps land here, against the same `d` and from the
+    # same `primitive`, through parallel typed accessors so a future bump
+    # propagates uniformly. The AST guard
+    # `test_augment_stamps_both_versions_at_every_per_primitive_lookup_site`
+    # asserts these two assignments cannot drift apart on a future code path.
+    d["matching_policy_version"] = MatchingPolicy.for_primitive(primitive)
+    d["primitive_version"] = PrimitiveVersion.for_primitive(primitive)
     _project_lending_aliases(d)
     return json.dumps(d)
 

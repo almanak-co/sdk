@@ -27,6 +27,11 @@ class PerpAccountingEvent:
     """Duck-typed perp accounting event consumed by AccountingWriter and both backends."""
 
     schema_version: int = 1
+    # VIB-4166 (T6) — see ``almanak.framework.accounting.payload_schemas`` module
+    # docstring for the bump policy. Class attribute so the augment chokepoint
+    # has a sane fallback when writers don't override it; the chokepoint
+    # overwrites with the canonical per-primitive value at write time.
+    primitive_version: int = 1
 
     def __init__(
         self,
@@ -82,6 +87,7 @@ class PerpAccountingEvent:
                 "confidence": str(self.confidence),
                 "unavailable_reason": self.unavailable_reason,
                 "schema_version": self.schema_version,
+                "primitive_version": self.primitive_version,
             }
         )
 

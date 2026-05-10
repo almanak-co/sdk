@@ -196,7 +196,18 @@ def _normalize_payload(raw: str) -> dict[str, Any]:
     return json.loads(raw)
 
 
-def main() -> None:
+def build_truth_table_json_text() -> str:
+    """Return the canonical truth-table JSON text the generator would write.
+
+    Pure function — used by ``main()`` to write the file AND by the
+    hand-edit-detection test (``test_truth_table_matches_generator_output``)
+    to verify the committed file is byte-identical to what the generator
+    would produce today. Catches hand-edits without hard-coding a single
+    permitted commit (which would block legitimate additive payload-shape
+    changes — VIB-4166 added ``primitive_version`` to every event's
+    ``to_payload_json`` output, which the legacy dispatcher's captured
+    payloads must mirror, regenerated through this same function).
+    """
     processor = _build_processor()
     rows = []
     for category, label, outbox, ledger, expected_class in _FIXTURE_MATRIX:
@@ -239,10 +250,15 @@ def main() -> None:
         ),
         "fixtures": rows,
     }
+    return json.dumps(out, indent=2, sort_keys=False) + "\n"
 
+
+def main() -> None:
+    text = build_truth_table_json_text()
     target = Path(__file__).parent / "legacy_dispatch_truth_table.json"
-    target.write_text(json.dumps(out, indent=2, sort_keys=False) + "\n")
-    print(f"wrote {target} ({len(rows)} fixtures)")
+    target.write_text(text)
+    fixture_count = json.loads(text)["fixtures"]
+    print(f"wrote {target} ({len(fixture_count)} fixtures)")
 
 
 if __name__ == "__main__":
