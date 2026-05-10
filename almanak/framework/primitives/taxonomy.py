@@ -467,52 +467,66 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
         ),
         # ──────────────────────────────────────────────────────────────────
         # P0 placeholders (VIB-4165, T5 of VIB-4160) — locked design item #5.
+        # Primitive split: VIB-4248.
         #
         # These five rows exist so ``record_for(...)`` returns a row for every
-        # ``IntentType`` value (parity invariant). All five map to
-        # ``Primitive.LENDING`` because CDP is collateralized debt, liquidation
-        # closes a lending position, and stablecoin mint/repay against
-        # collateral is lending-family. ``AccountingCategory.NO_ACCOUNTING``
-        # and ``position_type=None`` because no real handler / position bucket
-        # exists yet — that lands in P1 with the real connector.
+        # ``IntentType`` value (parity invariant). The CDP-family rows
+        # (``OPEN_CDP``, ``MINT_STABLE``, ``REPAY_STABLE``, ``CLOSE_CDP``)
+        # resolve to ``Primitive.CDP``; ``LIQUIDATE`` resolves to
+        # ``Primitive.LIQUIDATION``. They do NOT resolve to ``Primitive.LENDING``
+        # because the source PRD (VIB-4159 / 2026-05-08) explicitly required
+        # the split: "without them, future code paths smuggle CDP through
+        # BORROW/REPAY and pollute lending accounting before P1 lands."
+        # Mapping these to LENDING here would have re-created at the data
+        # layer the exact conflation the placeholders exist to prevent —
+        # every CDP / liquidation event would consume LENDING's per-primitive
+        # ``matching_policy_version`` slot, defeating the VIB-4166 (T6)
+        # isolation contract.
+        #
+        # ``AccountingCategory.NO_ACCOUNTING`` and ``position_type=None`` because
+        # no real handler / position bucket exists yet — that lands in P1
+        # with the real connector.
         #
         # The compiler raises ``NotImplementedError`` for each — guarded by
         # ``_raise_if_placeholder_intent`` in
         # ``almanak/framework/intents/compiler.py`` and a parameterised test
         # in ``tests/unit/intents/test_placeholder_compilers.py`` (Hard
-        # Ratification Condition #5).
+        # Ratification Condition #5). VIB-4248 leaves Gate A (PolicyEngine)
+        # and Gate B (compiler) untouched: the corrected primitive only
+        # matters when a P1 ticket removes one of these IntentTypes from
+        # ``_PLACEHOLDER_INTENT_TYPES`` and starts emitting real events.
         # ──────────────────────────────────────────────────────────────────
         _record(
             "LIQUIDATE",
-            Primitive.LENDING,
+            Primitive.LIQUIDATION,
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
         ),
         _record(
             "OPEN_CDP",
-            Primitive.LENDING,
+            Primitive.CDP,
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
         ),
         _record(
             "MINT_STABLE",
-            Primitive.LENDING,
+            Primitive.CDP,
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
         ),
         _record(
             "REPAY_STABLE",
-            Primitive.LENDING,
+            Primitive.CDP,
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
         ),
         _record(
             "CLOSE_CDP",
-            Primitive.LENDING,
+            Primitive.CDP,
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
@@ -673,6 +687,12 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
         "COMPOUND",
     }:
         return Primitive.LENDING
+    # VIB-4248: when the first CDP connector lands (Maker, Liquity, crvUSD,
+    # Lybra, Prisma, Aave GHO, etc.), extend this branch with the CDP protocol
+    # strings so the materialiser does not silently misclassify CDP positions
+    # back into LENDING. The Primitive.CDP slot already exists in
+    # MATCHING_POLICY_VERSIONS / PRIMITIVE_VERSIONS — adding the string mapping
+    # is the only step missing.
     if s in {"PERP", "GMX", "GMX_V2", "DRIFT", "HYPERLIQUID"}:
         return Primitive.PERP
     if s in {"VAULT", "ERC4626"}:

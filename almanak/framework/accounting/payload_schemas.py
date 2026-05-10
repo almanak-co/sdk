@@ -93,12 +93,16 @@ MATCHING_POLICY_VERSION = 3
 #   LP            v3   (was global v3 pre-T2)
 #   LENDING       v3   (was global v3 pre-T2)
 #   PERP          v1   (the global v3 was lending-specific; perp was always v1)
+#   CDP           v1   (split from LENDING in VIB-4248; greenfield primitive)
+#   LIQUIDATION   v1   (split from LENDING in VIB-4248; greenfield primitive)
 #   UTILITY/SWAP/VAULT/STAKING/BRIDGE/PREDICTION/FLASH_LOAN  v1
 #
 # Every Primitive value MUST appear here so a writer lookup never KeyError-s.
 MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     Primitive.LP: 3,
     Primitive.LENDING: 3,
+    Primitive.CDP: 1,
+    Primitive.LIQUIDATION: 1,
     Primitive.PERP: 1,
     Primitive.UTILITY: 1,
     Primitive.SWAP: 3,
@@ -131,6 +135,8 @@ PRIMITIVE_VERSION_DEFAULT = 1
 PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     Primitive.LP: PRIMITIVE_VERSION_DEFAULT,
     Primitive.LENDING: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.CDP: PRIMITIVE_VERSION_DEFAULT,
+    Primitive.LIQUIDATION: PRIMITIVE_VERSION_DEFAULT,
     Primitive.PERP: PRIMITIVE_VERSION_DEFAULT,
     Primitive.UTILITY: PRIMITIVE_VERSION_DEFAULT,
     Primitive.SWAP: PRIMITIVE_VERSION_DEFAULT,

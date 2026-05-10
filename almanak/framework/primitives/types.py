@@ -28,11 +28,21 @@ class Primitive(StrEnum):
     A primitive describes the *kind* of action a strategy is taking. It is
     coarser than ``IntentType`` (e.g. ``LP_OPEN``, ``LP_CLOSE``,
     ``LP_COLLECT_FEES`` all roll up to ``Primitive.LP``).
+
+    ``CDP`` and ``LIQUIDATION`` are split from ``LENDING`` (VIB-4248):
+    collateralized debt positions (Maker, Liquity, Curve crvUSD) have a
+    different lifecycle and liquidation fingerprint than money-market
+    lending; liquidations are third-party forced closes whose accounting
+    contract differs from voluntary REPAY. The split preserves per-primitive
+    matching-policy isolation so a CDP semantics change cannot retroactively
+    re-baseline LENDING (or vice-versa).
     """
 
     SWAP = "swap"
     LP = "lp"
     LENDING = "lending"
+    CDP = "cdp"
+    LIQUIDATION = "liquidation"
     PERP = "perp"
     VAULT = "vault"
     STAKING = "staking"
