@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     SafeDecimal,
     default_intent_id,
     default_timestamp,
@@ -20,6 +20,7 @@ from almanak.framework.models.base import (
     ChainedAmount as PydanticChainedAmount,
 )
 
+from .base import BaseIntent
 from .intent_errors import InvalidProtocolParameterError
 from .vocabulary import (
     PROTOCOL_CAPABILITIES,
@@ -28,7 +29,7 @@ from .vocabulary import (
 )
 
 
-class BorrowIntent(AlmanakImmutableModel):
+class BorrowIntent(BaseIntent):
     """Intent to borrow tokens from a lending protocol.
 
     Attributes:
@@ -141,7 +142,7 @@ class BorrowIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class RepayIntent(AlmanakImmutableModel):
+class RepayIntent(BaseIntent):
     """Intent to repay borrowed tokens.
 
     Attributes:
@@ -254,7 +255,7 @@ class RepayIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class SupplyIntent(AlmanakImmutableModel):
+class SupplyIntent(BaseIntent):
     """Intent to supply tokens to a lending protocol.
 
     Attributes:
@@ -357,7 +358,7 @@ class SupplyIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class WithdrawIntent(AlmanakImmutableModel):
+class WithdrawIntent(BaseIntent):
     """Intent to withdraw tokens from a lending protocol.
 
     Attributes:
@@ -445,7 +446,7 @@ class WithdrawIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class DeleverageIntent(AlmanakImmutableModel):
+class DeleverageIntent(BaseIntent):
     """Intent to perform an emergency deleverage (forced repay with risk-event context).
 
     Structurally identical to a RepayIntent at the protocol level — the on-chain

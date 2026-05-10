@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     OptionalSafeDecimal,
     default_intent_id,
     default_timestamp,
@@ -21,6 +21,7 @@ from almanak.framework.models.base import (
 )
 from almanak.framework.services.prediction_monitor import PredictionExitConditions
 
+from .base import BaseIntent
 from .vocabulary import IntentType
 
 # Type aliases for prediction markets
@@ -31,7 +32,7 @@ PredictionTimeInForce = Literal["GTC", "IOC", "FOK"]
 PredictionShareAmount = PydanticChainedAmount
 
 
-class PredictionBuyIntent(AlmanakImmutableModel):
+class PredictionBuyIntent(BaseIntent):
     """Intent to buy shares in a prediction market.
 
     This intent is used to buy outcome tokens (YES or NO) on Polymarket or
@@ -158,7 +159,7 @@ class PredictionBuyIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class PredictionSellIntent(AlmanakImmutableModel):
+class PredictionSellIntent(BaseIntent):
     """Intent to sell shares in a prediction market.
 
     This intent is used to sell outcome tokens (YES or NO) on Polymarket or
@@ -258,7 +259,7 @@ class PredictionSellIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class PredictionRedeemIntent(AlmanakImmutableModel):
+class PredictionRedeemIntent(BaseIntent):
     """Intent to redeem winning prediction market positions.
 
     This intent is used to redeem outcome tokens after a market has resolved.

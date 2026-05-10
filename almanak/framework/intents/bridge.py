@@ -32,11 +32,13 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import Field, field_validator, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     SafeDecimal,
     default_intent_id,
     default_timestamp,
 )
+
+from .base import BaseIntent
 
 if TYPE_CHECKING:
     from .vocabulary import IntentType
@@ -121,7 +123,7 @@ class BridgeIntentType(Enum):
 BridgeAmount = Decimal | Literal["all"]
 
 
-class BridgeIntent(AlmanakImmutableModel):
+class BridgeIntent(BaseIntent):
     """Intent to bridge tokens from one chain to another.
 
     BridgeIntent represents a cross-chain asset transfer. It can be used

@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     OptionalSafeDecimal,
     SafeDecimal,
     default_intent_id,
@@ -21,6 +21,7 @@ from almanak.framework.models.base import (
     ChainedAmount as PydanticChainedAmount,
 )
 
+from .base import BaseIntent
 from .intent_errors import InvalidProtocolParameterError
 from .vocabulary import (
     PROTOCOL_CAPABILITIES,
@@ -28,7 +29,7 @@ from .vocabulary import (
 )
 
 
-class PerpOpenIntent(AlmanakImmutableModel):
+class PerpOpenIntent(BaseIntent):
     """Intent to open a perpetual futures position.
 
     Attributes:
@@ -135,7 +136,7 @@ class PerpOpenIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class PerpCloseIntent(AlmanakImmutableModel):
+class PerpCloseIntent(BaseIntent):
     """Intent to close a perpetual futures position.
 
     Attributes:

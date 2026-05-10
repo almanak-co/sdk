@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     SafeDecimal,
     default_intent_id,
     default_timestamp,
@@ -21,6 +21,7 @@ from almanak.framework.models.base import (
     ChainedAmount as PydanticChainedAmount,
 )
 
+from .base import BaseIntent
 from .lending_intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from .perp_intents import PerpCloseIntent, PerpOpenIntent
 from .vocabulary import (
@@ -60,7 +61,7 @@ def _validate_vault_protocol(protocol: str) -> None:
         raise ValueError(f"Invalid vault protocol: {protocol!r}. Supported: {sorted(supported)}")
 
 
-class FlashLoanIntent(AlmanakImmutableModel):
+class FlashLoanIntent(BaseIntent):
     """Intent to execute a flash loan with nested callback operations.
 
     A flash loan allows borrowing assets without collateral, provided the
@@ -129,7 +130,16 @@ class FlashLoanIntent(AlmanakImmutableModel):
         return IntentType.FLASH_LOAN
 
     def serialize(self) -> dict[str, Any]:
-        """Serialize the intent to a dictionary."""
+        """Serialize the intent to a dictionary.
+
+        FlashLoanIntent ships a hand-rolled dict literal here (rather than
+        delegating to ``model_dump``) because the nested ``callback_intents``
+        list needs each element's per-class ``serialize()`` to dispatch
+        correctly. The reserved ``registry_handle`` field (VIB-4192) is
+        emitted unconditionally (with value ``None`` when unset) for schema
+        stability — see UAT card §D1.S2 / D2.M1 for the per-class
+        defaulted-None round-trip contract.
+        """
         return {
             "type": self.intent_type.value,
             "intent_id": self.intent_id,
@@ -139,6 +149,7 @@ class FlashLoanIntent(AlmanakImmutableModel):
             "amount": str(self.amount),
             "callback_intents": [intent.serialize() for intent in self.callback_intents],
             "chain": self.chain,
+            "registry_handle": self.registry_handle,
         }
 
     @classmethod
@@ -156,6 +167,9 @@ class FlashLoanIntent(AlmanakImmutableModel):
             "chain": data.get("chain"),
             "intent_id": data.get("intent_id", str(uuid.uuid4())),
             "created_at": datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(UTC),
+            # registry_handle (VIB-4192) is reserved on BaseIntent; surface
+            # the deserialized value when present so round-trip preserves it.
+            "registry_handle": data.get("registry_handle"),
         }
         return cls.model_validate(clean_data)
 
@@ -181,7 +195,7 @@ class FlashLoanIntent(AlmanakImmutableModel):
         return deserializer.deserialize(data)
 
 
-class StakeIntent(AlmanakImmutableModel):
+class StakeIntent(BaseIntent):
     """Intent to stake tokens with a liquid staking protocol.
 
     StakeIntent represents staking tokens (like ETH) with a liquid staking protocol
@@ -277,7 +291,7 @@ class StakeIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class UnstakeIntent(AlmanakImmutableModel):
+class UnstakeIntent(BaseIntent):
     """Intent to unstake/withdraw tokens from a liquid staking protocol.
 
     UnstakeIntent represents withdrawing staked tokens from a liquid staking protocol
@@ -369,7 +383,7 @@ class UnstakeIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class VaultDepositIntent(AlmanakImmutableModel):
+class VaultDepositIntent(BaseIntent):
     """Intent to deposit assets into an ERC-4626 vault.
 
     Supports any vault protocol registered with
@@ -440,7 +454,7 @@ class VaultDepositIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class VaultRedeemIntent(AlmanakImmutableModel):
+class VaultRedeemIntent(BaseIntent):
     """Intent to redeem shares from an ERC-4626 vault.
 
     Supports any vault protocol registered with
@@ -519,7 +533,7 @@ class VaultRedeemIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class WrapNativeIntent(AlmanakImmutableModel):
+class WrapNativeIntent(BaseIntent):
     """Intent to wrap native tokens (e.g. ETH -> WETH, MATIC -> WMATIC).
 
     Calls the wrapped token's ``deposit()`` function with ``msg.value`` to convert
@@ -579,7 +593,7 @@ class WrapNativeIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class UnwrapNativeIntent(AlmanakImmutableModel):
+class UnwrapNativeIntent(BaseIntent):
     """Intent to unwrap a wrapped native token (e.g. WETH -> ETH).
 
     Calls the wrapped token's ``withdraw(uint256)`` function to convert

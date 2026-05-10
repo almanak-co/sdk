@@ -29,7 +29,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     OptionalChainedAmount,
     OptionalSafeDecimal,
     SafeDecimal,
@@ -45,6 +45,13 @@ from almanak.framework.models.base import (
 # in services modules, that cycle is broken at the api layer and this import
 # is cheap (~50 MB resident, no pandas / connectors / strategies pulled).
 from almanak.framework.services.prediction_monitor import PredictionExitConditions
+
+# BaseIntent (VIB-4192 / T06) — every concrete intent dataclass below
+# inherits from this rather than `AlmanakImmutableModel` directly so that
+# the reserved `registry_handle` field + strict TAXONOMY validator land on
+# every intent class via single-point inheritance (AC #3 forbids
+# per-primitive redeclaration).
+from .base import BaseIntent, assert_registry_handle_known  # noqa: E402
 
 # =============================================================================
 # Exceptions (re-exported from intent_errors for backward compatibility)
@@ -263,7 +270,7 @@ class IntentType(Enum):
 # =============================================================================
 
 
-class SwapIntent(AlmanakImmutableModel):
+class SwapIntent(BaseIntent):
     """Intent to swap one token for another.
 
     Attributes:
@@ -395,7 +402,7 @@ class SwapIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class LPOpenIntent(AlmanakImmutableModel):
+class LPOpenIntent(BaseIntent):
     """Intent to open a liquidity position.
 
     Attributes:
@@ -472,7 +479,7 @@ class LPOpenIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class LPCloseIntent(AlmanakImmutableModel):
+class LPCloseIntent(BaseIntent):
     """Intent to close a liquidity position.
 
     Attributes:
@@ -517,7 +524,7 @@ class LPCloseIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class CollectFeesIntent(AlmanakImmutableModel):
+class CollectFeesIntent(BaseIntent):
     """Intent to collect accumulated fees from an LP position without closing it.
 
     This is useful for fee harvesting and auto-compounding strategies that want
@@ -586,7 +593,7 @@ class CollectFeesIntent(AlmanakImmutableModel):
         return cls.model_validate(clean_data)
 
 
-class HoldIntent(AlmanakImmutableModel):
+class HoldIntent(BaseIntent):
     """Intent to take no action (wait).
 
     This is useful when a strategy explicitly decides not to act,
@@ -2374,6 +2381,55 @@ class Intent:
         return total
 
     @staticmethod
+    def _validate_registry_handles_for_emission(result: DecideResult) -> None:
+        """Walk every intent in ``result`` and re-validate ``registry_handle``.
+
+        VIB-4192 / T06 — defense-in-depth check at the documented decide-result
+        emission chokepoint. The construction-side ``model_validator`` on
+        :class:`BaseIntent` rejects bad handles when an intent is built
+        normally, but Pydantic v2 exposes ``model_construct`` and
+        ``model_copy(update=..., validate=False)`` as documented bypass
+        paths that skip validators. Re-running :func:`record_for` on every
+        emitted intent closes those paths at the framework boundary.
+
+        Walks the entire result tree — ``None``, single intent,
+        ``IntentSequence``, list of intents/sequences, list containing a
+        nested ``IntentSequence`` — AND recurses into the
+        ``callback_intents`` list carried by ``FlashLoanIntent``. A
+        bypassed callback intent built via ``model_construct`` would
+        otherwise reach the wire unchecked through
+        ``FlashLoanIntent.serialize`` (CodeRabbit PR #2205 review surfaced
+        this hole). The recursion is intentionally exhaustive across all
+        nested-intent fields the framework is aware of.
+
+        Raises:
+            UnknownIntentTypeError: when any intent in the tree carries a
+                non-None ``registry_handle`` and its resolved
+                ``intent_type`` is missing from TAXONOMY (or is ``None``).
+            ValueError / TypeError: when any handle violates the shape
+                contract (empty, whitespace-only, non-string).
+        """
+        if result is None:
+            return
+        if isinstance(result, IntentSequence):
+            for inner in result.intents:
+                Intent._validate_registry_handles_for_emission(inner)
+            return
+        if isinstance(result, list):
+            for item in result:
+                Intent._validate_registry_handles_for_emission(item)
+            return
+        # Leaf intent — validate this intent's handle.
+        assert_registry_handle_known(result)
+        # FlashLoanIntent ships nested intents in `callback_intents`. Recurse
+        # so a bypassed callback can't sneak past serialize_result via its
+        # parent.
+        callback_intents = getattr(result, "callback_intents", None)
+        if callback_intents is not None:
+            for callback in callback_intents:
+                Intent._validate_registry_handles_for_emission(callback)
+
+    @staticmethod
     def serialize_result(result: DecideResult) -> dict[str, Any] | None:
         """Serialize a decide() result to a dictionary.
 
@@ -2382,9 +2438,24 @@ class Intent:
 
         Returns:
             Serialized result, or None if result was None
+
+        Raises:
+            UnknownIntentTypeError: VIB-4192 — when any intent in the tree
+                carries a ``registry_handle`` whose intent type is not in
+                TAXONOMY. This is the emission-side strict guard
+                complementing the construction-side ``model_validator`` on
+                :class:`BaseIntent`. Together they close Pydantic v2's
+                documented ``model_construct`` / ``model_copy(validate=False)``
+                bypass paths at the framework boundary.
         """
         if result is None:
             return None
+
+        # VIB-4192: emission-side strict re-validation of registry_handle
+        # before producing the dict. This catches handles bypassed via
+        # `model_construct` / `model_copy(update=..., validate=False)`.
+        # Walks single / list / sequence / nested-list result shapes.
+        Intent._validate_registry_handles_for_emission(result)
 
         if isinstance(result, IntentSequence):
             return result.serialize()

@@ -30,11 +30,13 @@ from typing import TYPE_CHECKING, Any, Union
 from pydantic import Field, field_validator, model_validator
 
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,
+    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     SafeDecimal,
     default_intent_id,
     default_timestamp,
 )
+
+from .base import BaseIntent
 
 if TYPE_CHECKING:
     from .bridge import BridgeIntent
@@ -107,7 +109,7 @@ class EnsureBalanceIntentType(Enum):
 # =============================================================================
 
 
-class EnsureBalanceIntent(AlmanakImmutableModel):
+class EnsureBalanceIntent(BaseIntent):
     """Intent to ensure a minimum token balance on a target chain.
 
     EnsureBalanceIntent is a high-level intent that expresses the goal of having
