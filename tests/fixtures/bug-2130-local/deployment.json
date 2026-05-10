@@ -1,0 +1,13 @@
+{
+  "_provenance": "GitHub issue #2130 (almanak-co/almanak-sdk-private), opened 2026-05-05. Strategy: S035UniV3ArbWethUsdcUltraTightStrategy. Agent: 2cfd2a2c-09ab-428d-99ad-b8e6fd40a88d. Time window: ~2026-05-05 03:16 UTC. Tx that landed: 0x01a16e7838288d1c0cc5c143390c106dafab1a32651267794deba9ce3cc6f370.",
+  "deployment_id": "S035UniV3ArbWethUsdcUltraTightStrategy:bug2130",
+  "chain": "arbitrum",
+  "primitive": "lp",
+  "accounting_category": "lp",
+  "grouping_policy_version": "univ3_lp@v1",
+  "matching_policy_version": 1,
+  "nft_position_manager": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+  "pool_address": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
+  "semantic_grouping_key": "arbitrum:0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+  "_note_on_semantic_key": "Auto-mode partial unique index uses (deployment_id, chain, accounting_category, semantic_grouping_key) WHERE status='open' AND handle IS NULL. Two opens against the same pool_address without a handle therefore collide."
+}

@@ -1,0 +1,19 @@
+{
+  "_provenance": "Synthetic close-side payload for the same UniV3 NFT (token_id=5468420). Same physical_identity_hash as lp_open.json — the upsert keys on (deployment_id, chain, primitive, physical_identity_hash) per blueprints/28-position-registry.md §4.2.",
+  "intent_type": "LP_CLOSE",
+  "tx_hash": "0xclosebug2130",
+  "block_number": 218000123,
+  "physical_identity_hash": "univ3:5468420:0xc36442b4a4522e871399cd717abdd847ab11fe88:arbitrum",
+  "registry_payload": {
+    "token_id": 5468420,
+    "pool_address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "fee_tier": 500,
+    "tick_lower": -100,
+    "tick_upper": 100,
+    "token0": "USDC",
+    "token1": "WETH",
+    "amount0_collected": "100.5",
+    "amount1_collected": "0.0405",
+    "fees_collected": {"token0": "0.5", "token1": "0.0005"}
+  }
+}
