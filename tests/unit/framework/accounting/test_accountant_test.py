@@ -248,8 +248,12 @@ def test_accountant_test_runs_for_each_primitive(primitive):
     db_path = _make_db_with_minimal_lp_run()
     try:
         report = run_against_sqlite(db_path, primitive=primitive)
-        # 15 generic + 6 primitive = 21 cells per primitive
-        assert report.total_cells == 21
+        # 15 generic + 6 primitive + 1 cell #22 (VIB-4201/T15) = 22 cells per primitive.
+        # Cell #22 (registry coherence) is informational; gating still measured on the
+        # 21 non-L5_22 cells per the format_markdown contract.
+        assert report.total_cells == 22
+        cell_ids = {c.cell_id for c in report.cells}
+        assert "L5_22" in cell_ids
         # Markdown serialization works
         md = report.format_markdown()
         assert "# Accountant Test —" in md

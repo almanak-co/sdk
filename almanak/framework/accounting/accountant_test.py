@@ -39,11 +39,22 @@ from almanak.framework.accounting.payload_schemas import (
     validate_payload,
 )
 from almanak.framework.primitives.taxonomy import (
-    Primitive as _TaxonomyPrimitive,
-)
-from almanak.framework.primitives.taxonomy import (
+    TAXONOMY,
     UnknownIntentTypeError,
     record_for,
+)
+from almanak.framework.primitives.taxonomy import (
+    Primitive as _TaxonomyPrimitive,
+)
+from almanak.framework.primitives.types import EventKind
+
+# VIB-4201 (T15): close-event allow-list for cell #22.
+# Materialized once at module import from the canonical taxonomy.
+# A unit test (`test_cell22_sql_close_list_equals_taxonomy`) asserts
+# this tuple stays in lock-step with the SQL CTE in cell #22's predicate
+# so a future taxonomy addition is loud, not silently under-counting.
+CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
+    sorted(intent for intent, rec in TAXONOMY.items() if rec.event_kind == EventKind.CLOSE)
 )
 
 Primitive = Literal["lp", "looping", "perp"]
@@ -180,6 +191,21 @@ class AccountantReport:
         lines.append(f"- Generic 15: {_score(generic)}")
         lines.append(f"- Primitive {len(prim)}: {_score(prim)}")
         lines.append(f"- Total: {self.passed}/{self.total_cells} PASS, {self.failed} FAIL, {self.xfailed} XFAIL")
+        # VIB-4201 (T15): cell L5_22 is informational only — not in the
+        # ≥16/21 gating sum. The gating line below partitions the original
+        # 21 cells from cell #22 explicitly so a FAIL on #22 stays visible
+        # but does not degrade gating arithmetic. If L5_22 is absent for
+        # any reason (legacy back-compat caller, primitive that does not
+        # produce a 22nd cell), the gating line still renders against the
+        # 21 cells with status="absent".
+        gated_cells = [c for c in self.cells if c.cell_id != "L5_22"]
+        cell22 = next((c for c in self.cells if c.cell_id == "L5_22"), None)
+        gated_pass = sum(1 for c in gated_cells if c.status == "PASS")
+        cell22_status = cell22.status if cell22 is not None else "absent"
+        lines.append(
+            f"- Gating: {gated_pass}/{len(gated_cells)} PASS (≥16/21 required); "
+            f"cell L5_22 informational only this cycle (status: {cell22_status})"
+        )
         lines.append("")
         lines.append("## Cells")
         # MD058: blank line between heading and table.
@@ -237,6 +263,11 @@ _ALLOWED_READ_TABLES: frozenset[str] = frozenset(
         "portfolio_snapshots",
         "portfolio_metrics",
         "position_state_snapshots",
+        # VIB-4201 (T15): cell #22 reads position_registry.
+        # The table may be absent on pre-T11 fixtures; ``_table_rows`` returns
+        # ``[]`` on a missing table (sqlite3.OperationalError caught), which
+        # routes the cell to its "registry-absent" branch.
+        "position_registry",
     }
 )
 
@@ -1523,6 +1554,237 @@ def _cell_g15_multi_period_self_consistency(
     )
 
 
+# ─── VIB-4201 (T15): cell #22 — registry coherence ───────────────────────
+
+
+def _cell22_position_reference_phid(payload_str: Any) -> str | None:
+    """Extract ``physical_identity_hash`` from an ``accounting_events.position_reference`` JSON.
+
+    Returns ``None`` for any of: NULL column, malformed JSON,
+    non-dict root, or missing key. The cell's preflight separately
+    fails on malformed JSON before this helper is consulted, so reaching
+    here for a malformed payload would be an implementation bug — the
+    helper is defensive in case a future caller skips the preflight.
+    """
+    if payload_str is None or payload_str == "":
+        return None
+    try:
+        decoded = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    phid = decoded.get("physical_identity_hash")
+    return phid if isinstance(phid, str) and phid else None
+
+
+def _cell22_registry_coherence(  # noqa: C901
+    acct_events: list[dict[str, Any]],
+    registry_rows: list[dict[str, Any]],
+    *,
+    position_reference_column_present: bool,
+    position_registry_table_present: bool,
+    malformed_position_reference_row_ids: list[Any],
+) -> CellResult:
+    """L5 cell #22 — bidirectional ``accounting_events`` ↔ ``position_registry`` close coherence.
+
+    The cell's contract (UAT card VIB-4201, ratified by codex SPEC_OK):
+
+    1. Forward direction — every ``accounting_events`` row whose
+       ``event_type`` is in :data:`CLOSE_EVENT_TYPES` AND whose
+       ``position_reference.physical_identity_hash`` is non-null MUST
+       have a matching ``position_registry`` row at ``status='closed'``
+       with the same hash.
+    2. Inverse direction — every ``position_registry`` row at
+       ``status='closed'`` MUST have at least one matching CLOSE
+       accounting event whose ``position_reference.physical_identity_hash``
+       equals the registry row's hash.
+
+    Verdicts (per the card's "Verdict mapping" table):
+
+    - **XFAIL (F9)** if ``accounting_events.position_reference`` column
+      is absent — pre-T10 schemas cannot be evaluated.
+    - **FAIL (F10)** if any ``position_reference`` row carries malformed
+      JSON. The corrupt payload contaminates the audit trail; surfacing
+      it as a row-level skip would silently hide a persistence regression.
+    - **FAIL (F6)** if the registry table is absent / empty BUT at least
+      one CLOSE event has a non-null hash — the events claim hashes the
+      registry never witnessed.
+    - **XFAIL (F7)** if the registry is absent / empty AND every CLOSE
+      event has a null hash (Day-1 legacy ``source="legacy"`` per
+      :mod:`position_reference`).
+    - **XFAIL (F8)** if no CLOSE events exist AND no closed registry
+      rows exist — the lifecycle wasn't exercised in this run.
+    - **FAIL** when forward orphans, inverse orphans, or both exist.
+    - **PASS** when both directions agree AND at least one side has data.
+
+    Cell #22 is INFORMATIONAL — it is rendered alongside the original 21
+    cells but does NOT contribute to the ≥16/21 gating sum. See
+    :func:`AccountantReport.format_markdown` for the gating-line rendering
+    contract.
+    """
+    cell_id = "L5_22"
+    description = "Registry coherence (accounting_events ↔ position_registry, bidirectional)"
+
+    # Preflight P1: column exists?
+    if not position_reference_column_present:
+        return CellResult(
+            cell_id,
+            description,
+            "XFAIL",
+            "accounting_events.position_reference column missing (pre-T10 DB); cell cannot evaluate",
+        )
+
+    # Preflight P3: malformed JSON?
+    if malformed_position_reference_row_ids:
+        sample = malformed_position_reference_row_ids[:5]
+        return CellResult(
+            cell_id,
+            description,
+            "FAIL",
+            f"{len(malformed_position_reference_row_ids)} accounting_events row(s) carry malformed "
+            f"position_reference JSON (e.g. ids={sample!r}); corrupt payloads contaminate the audit trail",
+        )
+
+    # CLOSE event census (independent of registry presence — the F6/F7
+    # boundary needs this number whether the registry is there or not).
+    # Hoist `set(CLOSE_EVENT_TYPES)` out of the comprehension so the lookup
+    # cost stays O(1) per row instead of rebuilding the set every iteration
+    # (gemini-code-assist 2026-05-10).
+    _close_event_types = set(CLOSE_EVENT_TYPES)
+    close_events = [r for r in acct_events if r.get("event_type") in _close_event_types]
+    close_event_phids: set[str] = set()
+    close_events_with_hash = 0
+    close_events_legacy_null_hash = 0
+    for r in close_events:
+        phid = _cell22_position_reference_phid(r.get("position_reference"))
+        if phid is None:
+            close_events_legacy_null_hash += 1
+        else:
+            close_events_with_hash += 1
+            close_event_phids.add(phid)
+
+    # Preflight P2: registry table present?
+    # Note: the registry-row sort + set construction below is gated on
+    # ``position_registry_table_present`` so pre-T11 fixtures don't pay
+    # for work that the registry-absent branches never read
+    # (gemini-code-assist 2026-05-10).
+    if not position_registry_table_present:
+        if close_events_with_hash > 0:
+            return CellResult(
+                cell_id,
+                description,
+                "FAIL",
+                f"position_registry table absent but {close_events_with_hash} CLOSE accounting "
+                f"event(s) carry non-null physical_identity_hash — events claim hashes the "
+                f"registry never witnessed",
+            )
+        if not close_events:
+            return CellResult(
+                cell_id,
+                description,
+                "XFAIL",
+                "no CLOSE accounting events and no position_registry table — lifecycle not exercised in this run",
+            )
+        # Registry absent + every CLOSE event has null hash → legacy.
+        return CellResult(
+            cell_id,
+            description,
+            "XFAIL",
+            f"position_registry table absent and {close_events_legacy_null_hash} CLOSE event(s) "
+            f"carry only legacy position_reference (physical_identity_hash=null); registry mode "
+            f"not yet on for any primitive in this run",
+        )
+
+    # Registry table present — compute closed-row census now (deferred from
+    # before the P2 gate so the sort doesn't fire on pre-T11 fixtures).
+    # Sort by physical_identity_hash so the FAIL diagnostic sample is
+    # deterministic across SQLite versions / file orderings — the cell's
+    # idempotency contract (UAT card §D3 F5) requires identical
+    # ``(status, diagnostic)`` tuples on repeat runs.
+    closed_registry_rows = sorted(
+        (r for r in registry_rows if r.get("status") == "closed"),
+        key=lambda r: r.get("physical_identity_hash") or "",
+    )
+    closed_registry_phids: set[str] = {
+        r["physical_identity_hash"] for r in closed_registry_rows if r.get("physical_identity_hash")
+    }
+
+    # Compute the bidirectional orphan sets. Carry the extracted hash on
+    # each forward-orphan tuple so the diagnostic sample doesn't re-parse
+    # ``position_reference`` JSON (gemini-code-assist 2026-05-10).
+    forward_orphans: list[tuple[dict[str, Any], str]] = [
+        (r, phid)
+        for r in close_events
+        if (phid := _cell22_position_reference_phid(r.get("position_reference"))) is not None
+        and phid not in closed_registry_phids
+    ]
+    inverse_orphans = [r for r in closed_registry_rows if r.get("physical_identity_hash") not in close_event_phids]
+
+    if forward_orphans or inverse_orphans:
+        diag_parts: list[str] = []
+        if forward_orphans:
+            sample_fwd = [
+                {
+                    "acct_event_id": r.get("id"),
+                    "event_type": r.get("event_type"),
+                    "phid": phid,
+                }
+                for r, phid in forward_orphans[:3]
+            ]
+            diag_parts.append(
+                f"{len(forward_orphans)} forward orphan(s) — CLOSE event with hash but no closed "
+                f"registry row (e.g. {sample_fwd!r})"
+            )
+        if inverse_orphans:
+            sample_inv = [
+                {
+                    "phid": r.get("physical_identity_hash"),
+                    "primitive": r.get("primitive"),
+                    "closed_tx": r.get("closed_tx"),
+                }
+                for r in inverse_orphans[:3]
+            ]
+            diag_parts.append(
+                f"{len(inverse_orphans)} inverse orphan(s) — closed registry row with no matching "
+                f"CLOSE event (e.g. {sample_inv!r})"
+            )
+        return CellResult(
+            cell_id,
+            description,
+            "FAIL",
+            "; ".join(diag_parts),
+        )
+
+    # No orphans on either side. Determine if work was actually exercised.
+    if close_events_with_hash == 0 and not closed_registry_phids:
+        # Registry table is present but empty AND no CLOSE events with
+        # hashes were emitted. Either pre-cutover for every primitive in
+        # this run, or no close lifecycle exercised. Either way, the
+        # cell did not have the inputs to make a meaningful claim.
+        if not close_events:
+            return CellResult(
+                cell_id,
+                description,
+                "XFAIL",
+                "no CLOSE accounting events and no closed position_registry rows — lifecycle not exercised in this run",
+            )
+        return CellResult(
+            cell_id,
+            description,
+            "XFAIL",
+            f"position_registry present but empty (0 closed rows) and {close_events_legacy_null_hash} CLOSE "
+            f"event(s) carry only legacy position_reference (null hash); registry mode not yet on",
+        )
+    return CellResult(
+        cell_id,
+        description,
+        "PASS",
+        f"bidirectional coherence holds: {close_events_with_hash} CLOSE event(s) with hash, "
+        f"{len(closed_registry_phids)} closed registry row(s); zero orphans on either side",
+    )
+
+
 # ─── Primitive-specific cells ────────────────────────────────────────────
 
 
@@ -2068,6 +2330,14 @@ def evaluate_cells(
     position_state_rows: list[dict[str, Any]],
     primitive: Primitive,
     db_dump_path: str | None = None,
+    # VIB-4201 (T15): cell #22 inputs. Defaults preserve back-compat for
+    # callers that pre-date cell #22 — they get an XFAIL on cell #22 with
+    # a "preflight not run" diagnostic rather than a crash. Production
+    # callers (run_against_sqlite, accountant_query) supply real values.
+    position_registry_rows: list[dict[str, Any]] | None = None,
+    position_reference_column_present: bool | None = None,
+    position_registry_table_present: bool | None = None,
+    malformed_position_reference_row_ids: list[Any] | None = None,
 ) -> AccountantReport:
     """Evaluate the cell matrix against pre-fetched rows.
 
@@ -2140,6 +2410,33 @@ def evaluate_cells(
         )
     elif primitive == "perp":
         cells.extend(_cells_perp(acct_events, pos_events, acct_payloads, payload_errors))
+
+    # VIB-4201 (T15): cell #22 — registry coherence. Appended after the
+    # 15 generic + 6 primitive-specific cells. NOT in the ≥16/21 gating
+    # sum (see ``format_markdown``); informational on every primitive.
+    if position_reference_column_present is None:
+        # Caller did not run preflight (pre-T15 caller, or back-compat
+        # path). Mark as XFAIL with an explicit "preflight not run"
+        # diagnostic rather than crashing. New production callers
+        # (``run_against_sqlite``) always provide the flags.
+        cells.append(
+            CellResult(
+                "L5_22",
+                "Registry coherence (accounting_events ↔ position_registry, bidirectional)",
+                "XFAIL",
+                "cell #22 preflight not run (caller supplied no registry inputs); cell cannot evaluate",
+            )
+        )
+    else:
+        cells.append(
+            _cell22_registry_coherence(
+                acct_events,
+                position_registry_rows or [],
+                position_reference_column_present=position_reference_column_present,
+                position_registry_table_present=bool(position_registry_table_present),
+                malformed_position_reference_row_ids=list(malformed_position_reference_row_ids or []),
+            )
+        )
 
     # Track which cells flipped to FAIL specifically because of payload
     # validation drift. Lets reviewers diff cell-status changes between
@@ -2215,6 +2512,13 @@ def run_against_sqlite(
         # wired (current state on this branch). Both G14 and G15 stay
         # XFAIL in that case by design.
         position_state_rows = _table_rows(conn, "position_state_snapshots")
+        # VIB-4201 (T15): cell #22 preflight + reads.
+        position_registry_rows = _table_rows(conn, "position_registry")
+        (
+            position_reference_column_present,
+            position_registry_table_present,
+            malformed_position_reference_row_ids,
+        ) = _cell22_preflight(conn)
     finally:
         conn.close()
     return evaluate_cells(
@@ -2226,7 +2530,62 @@ def run_against_sqlite(
         position_state_rows=position_state_rows,
         primitive=primitive,
         db_dump_path=str(db_path),
+        position_registry_rows=position_registry_rows,
+        position_reference_column_present=position_reference_column_present,
+        position_registry_table_present=position_registry_table_present,
+        malformed_position_reference_row_ids=malformed_position_reference_row_ids,
     )
+
+
+def _cell22_preflight(conn: sqlite3.Connection) -> tuple[bool, bool, list[Any]]:
+    """Run the cell #22 preflight checks against an open SQLite connection.
+
+    Returns ``(position_reference_column_present, position_registry_table_present,
+    malformed_position_reference_row_ids)`` — see the UAT card §4 D1
+    Preflight for the contract. Each query is wrapped in its own
+    ``try/except`` so a missing table / column fails to ``False`` / ``[]``
+    rather than raising into the caller; the cell predicate's branches
+    interpret the flags into PASS / FAIL / XFAIL verdicts.
+    """
+    # P1: position_reference column exists?
+    try:
+        cur = conn.execute(
+            "SELECT count(*) FROM pragma_table_info('accounting_events') WHERE name = 'position_reference'"
+        )
+        position_reference_column_present = (cur.fetchone()[0] or 0) > 0
+    except sqlite3.OperationalError:
+        position_reference_column_present = False
+
+    # P2: position_registry table exists?
+    try:
+        cur = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='position_registry'")
+        position_registry_table_present = (cur.fetchone()[0] or 0) > 0
+    except sqlite3.OperationalError:
+        position_registry_table_present = False
+
+    # P3: malformed position_reference JSON? Skip if column missing.
+    malformed_ids: list[Any] = []
+    if position_reference_column_present:
+        try:
+            cur = conn.execute(
+                "SELECT id FROM accounting_events "
+                "WHERE position_reference IS NOT NULL AND json_valid(position_reference) = 0"
+            )
+            malformed_ids = [row[0] for row in cur.fetchall()]
+        except sqlite3.OperationalError:
+            # ``json_valid`` is missing on ancient SQLite builds (<3.38;
+            # Python 3.10+ bundles 3.40+, so this branch only fires on
+            # exotic system-SQLite installs). The Python-side orphan
+            # walker (``_cell22_position_reference_phid``) handles
+            # malformed JSON safely by returning ``None``, so a corrupt
+            # row collapses into the "legacy null hash" census bucket.
+            # That's a degraded F10 surface — corrupt payloads no longer
+            # produce a loud FAIL — but the cell remains crash-free.
+            # Track in VIB-4201 follow-up if the Python target ever
+            # regresses to <3.10.
+            malformed_ids = []
+
+    return position_reference_column_present, position_registry_table_present, malformed_ids
 
 
 __all__ = [
