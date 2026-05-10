@@ -72,6 +72,133 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _extract_position_reference_column(payload_json: str) -> str | None:
+    """Extract the ``position_reference`` JSON sub-document from an augmented payload.
+
+    Helper for the SQLite + gateway state-manager INSERT paths. Returns:
+
+    * ``None`` if the augment chokepoint did not emit the key (non-OPEN/CLOSE
+      event_kind, unknown event_type fallback, or malformed JSON in non-live
+      mode — same path that returns the original payload unchanged).
+    * The JSON-serialized sub-document (``json.dumps(d['position_reference'],
+      sort_keys=True)``) otherwise — byte-identical between two equal
+      references so deduplication / parity tests can compare strings.
+
+    Per `CLAUDE.md` "Empty ≠ zero": a missing key returns ``None``, NOT an
+    empty string. The DB column stays NULL, signalling "no position pointer
+    for this row" — distinct from "the position pointer is the empty dict".
+    """
+    import json as _json
+
+    try:
+        d = _json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    pr = d.get("position_reference")
+    if pr is None:
+        return None
+    return _json.dumps(pr, sort_keys=True)
+
+
+def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
+    """Backfill ``accounting_events.position_reference`` for legacy OPEN/CLOSE rows.
+
+    Called once at migration time when the column is freshly added. For every
+    pre-existing row whose ``event_type`` resolves through the canonical
+    taxonomy to an OPEN or CLOSE event_kind, we stamp:
+
+    .. code-block:: json
+
+        {
+          "source": "legacy",
+          "primitive": "...",
+          "accounting_category": "...",
+          "physical_identity_hash": null,
+          "semantic_grouping_key": null,
+          "registry_handle": null,
+          "grouping_policy_version": null,
+          "matching_policy_version": null
+        }
+
+    Rows whose ``event_type`` is unknown or whose event_kind is not OPEN/CLOSE
+    stay NULL — same contract as the runtime augment chokepoint, so a single
+    auditor cannot tell migrated rows from natively-written rows on the bridge
+    column.
+
+    Per `CLAUDE.md` "Database schema ownership": this function only mutates
+    the LOCAL SQLite DB. Hosted Postgres backfill is deferred to T19 / VIB-4205.
+    """
+    # Lazy import — keeps the migration function callable from a fresh boot
+    # before the accounting package is fully imported, and avoids a circular
+    # import via ``almanak.framework.accounting.writer`` re-importing this
+    # module's exceptions at top-level.
+    import json as _json
+
+    from almanak.framework.accounting.position_reference import (
+        build_legacy_position_reference,
+    )
+    from almanak.framework.primitives.taxonomy import (
+        UnknownIntentTypeError,
+        record_for,
+    )
+
+    # Stream the read cursor instead of `.fetchall()` — `accounting_events`
+    # can accumulate tens of thousands of rows on long-running strategies, and
+    # this is one-shot boot-time code where streaming is strictly better.
+    # Flush UPDATEs in batches via `executemany` so we don't hold the full
+    # rendered list in memory either.
+    _BATCH_SIZE = 1000
+    try:
+        cursor = conn.execute("SELECT id, event_type FROM accounting_events WHERE position_reference IS NULL")
+    except sqlite3.OperationalError:
+        # Table missing the column or absent entirely — nothing to backfill.
+        return
+
+    batch: list[tuple[str, str]] = []
+    total = 0
+
+    def _flush(batch: list[tuple[str, str]]) -> int:
+        if not batch:
+            return 0
+        conn.executemany(
+            "UPDATE accounting_events SET position_reference = ? WHERE id = ?",
+            batch,
+        )
+        return len(batch)
+
+    for row in cursor:
+        event_type = row["event_type"] if hasattr(row, "keys") else row[1]
+        row_id = row["id"] if hasattr(row, "keys") else row[0]
+        if not isinstance(event_type, str) or not event_type:
+            continue
+        try:
+            record = record_for(event_type)
+        except UnknownIntentTypeError:
+            continue
+        try:
+            ref = build_legacy_position_reference(record)
+        except ValueError:
+            # Non-OPEN/CLOSE event_kind — column stays NULL.
+            continue
+        batch.append((_json.dumps(ref.to_dict(), sort_keys=True), row_id))
+        if len(batch) >= _BATCH_SIZE:
+            total += _flush(batch)
+            batch = []
+
+    total += _flush(batch)
+
+    if total == 0:
+        logger.info("Migration: position_reference backfill — no OPEN/CLOSE rows to populate")
+        return
+
+    logger.info(
+        "Migration: position_reference backfill — populated %d legacy OPEN/CLOSE rows",
+        total,
+    )
+
+
 # =============================================================================
 # EXCEPTIONS
 # =============================================================================
@@ -360,7 +487,14 @@ CREATE TABLE IF NOT EXISTS accounting_events (
     tx_hash TEXT,
     confidence TEXT NOT NULL,
     payload_json TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 1
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    -- VIB-4196 / T10: position_reference JSON pointer for OPEN/CLOSE rows.
+    -- NULL for non-OPEN/CLOSE rows (ADJUST, COLLECT, TRANSFER, NONE) and for
+    -- the augment-fallback path (unknown event_type in paper mode). The
+    -- accounting writer (`augment_accounting_payload`) is the only code
+    -- permitted to construct the JSON; persisted here as a denormalized
+    -- query-convenience copy of the payload's `position_reference` key.
+    position_reference TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_ae_deployment_ts
@@ -828,6 +962,32 @@ class SQLiteStore:
             _add_column_if_missing("accounting_outbox", "wallet_address", "TEXT NOT NULL DEFAULT ''")
             _add_column_if_missing("accounting_outbox", "position_key", "TEXT NOT NULL DEFAULT ''")
             _add_column_if_missing("accounting_outbox", "market_id", "TEXT NOT NULL DEFAULT ''")
+
+        # VIB-4196 / T10: position_reference JSON pointer on accounting_events.
+        # Forward-compat shape between accounting_events and the (T11-shipped)
+        # position_registry; cutover tickets (T12 / T16 / T23 / T28) flip per
+        # primitive without rebasing the accounting schema. Backfill OPEN/CLOSE
+        # rows with `source="legacy"` derived from the canonical taxonomy
+        # `record_for(event_type)` so historical rows are byte-comparable to
+        # rows written under T10's writer chokepoint. Non-OPEN/CLOSE rows
+        # (event_kind in {ADJUST, COLLECT, TRANSFER, NONE}) and rows whose
+        # event_type has no taxonomy row stay NULL — same contract as the
+        # writer's runtime path.
+        #
+        # Atomicity contract: ALTER TABLE + backfill UPDATE wrapped in
+        # BEGIN IMMEDIATE / COMMIT — same pattern as the VIB-3614 migration
+        # at line ~909 above. Without this, a crash between the column-add
+        # and the backfill leaves rows permanently NULL because the next boot
+        # sees the column already present and skips the backfill branch.
+        if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounting_events'").fetchone():
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if _add_column_if_missing("accounting_events", "position_reference", "TEXT"):
+                    _backfill_position_reference_legacy(conn)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def backfill_deployment_id(self, old_strategy_id: str, new_deployment_id: str) -> int:
         """Migrate data from a bare strategy name to the canonical deployment_id.
@@ -3053,6 +3213,14 @@ class SQLiteStore:
         is_live = getattr(identity, "execution_mode", "") == "live"
         payload_json = augment_accounting_payload(event.to_payload_json(), is_live=is_live)
 
+        # VIB-4196 / T10: extract `position_reference` (when present) out of
+        # the augmented payload and persist it to the dedicated column. The
+        # column is a denormalized query-convenience copy — payload_json
+        # remains the canonical source. The augment chokepoint only emits
+        # the key for OPEN/CLOSE rows with a known event_type; non-OPEN/CLOSE
+        # rows + unknown-event-type fallback rows leave it NULL.
+        position_reference = _extract_position_reference_column(payload_json)
+
         def _sync_save() -> bool:
             with self._db_lock:
                 self._conn.execute(  # type: ignore[union-attr]
@@ -3060,8 +3228,9 @@ class SQLiteStore:
                     INSERT OR REPLACE INTO accounting_events
                     (id, deployment_id, strategy_id, cycle_id, execution_mode,
                      timestamp, chain, protocol, wallet_address, event_type, position_key,
-                     ledger_entry_id, tx_hash, confidence, payload_json, schema_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ledger_entry_id, tx_hash, confidence, payload_json, schema_version,
+                     position_reference)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identity.id,
@@ -3080,6 +3249,7 @@ class SQLiteStore:
                         str(event.confidence),
                         payload_json,
                         event.schema_version,
+                        position_reference,
                     ),
                 )
                 self._conn.commit()  # type: ignore[union-attr]

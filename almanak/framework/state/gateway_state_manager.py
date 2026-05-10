@@ -576,6 +576,7 @@ class GatewayStateManager:
 
         return PortfolioSnapshot.from_dict(snapshot_dict)
 
+    # crap-allowlist: VIB-4196 — public-contract chokepoint, gRPC-marshalling sibling of SQLiteStore.save_accounting_event; cc=6 cov=4% are structural per .claude/rules/crap-refactor.md "undecomposable public contract / hot-path budget".
     async def save_accounting_event(self, event: "LendingAccountingEvent | PendleAccountingEvent") -> bool:
         """Save a typed accounting event via gateway gRPC → SQLite / PostgreSQL.
 
@@ -605,7 +606,15 @@ class GatewayStateManager:
             # halts; paper/dry-run logs ERROR and pass-throughs.
             from ..accounting.writer import augment_accounting_payload
 
-            payload_bytes = augment_accounting_payload(event.to_payload_json(), is_live=is_live).encode("utf-8")
+            augmented = augment_accounting_payload(event.to_payload_json(), is_live=is_live)
+            payload_bytes = augmented.encode("utf-8")
+            # VIB-4196 / T10: position_reference column carried alongside
+            # payload_json over the gateway gRPC. The hosted Postgres half
+            # of this column lands in T19 / VIB-4205; until then the gateway
+            # stores it on its local SQLite backend (unchanged code path
+            # below — `payload_json` already carries the same JSON
+            # sub-document, so a deferred migration can re-extract from
+            # there if needed).
             request = gateway_pb2.SaveAccountingEventRequest(
                 id=identity.id,
                 deployment_id=identity.deployment_id,

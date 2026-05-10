@@ -35,12 +35,15 @@ from almanak.framework.accounting.payload_schemas import (
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
 from almanak.framework.accounting.policy import MatchingPolicy, PrimitiveVersion
+from almanak.framework.accounting.position_reference import (
+    build_legacy_position_reference,
+)
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
     record_for,
 )
-from almanak.framework.primitives.types import Primitive
+from almanak.framework.primitives.types import EventKind, Primitive, PrimitiveRecord
 from almanak.framework.state.exceptions import (
     AccountingPersistenceError,
     AccountingWriteKind,
@@ -127,6 +130,15 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
     # impossible. In live mode an unknown OR missing event_type raises
     # (preserves VIB-3863's mode-aware contract); in non-live the writer
     # logs ERROR and falls back to Primitive.UTILITY for both versions.
+    #
+    # VIB-4196 (T10): we ALSO need the full PrimitiveRecord on the success
+    # path (not just the primitive) so we can stamp `position_reference` on
+    # OPEN/CLOSE rows. The fallback path stamps version pairs against
+    # Primitive.UTILITY (preserving F5.4) but does NOT emit a
+    # `position_reference` — UTILITY has no event_kind, and inventing an
+    # OPEN/CLOSE shape on an unknown event_type would silently land
+    # malformed pointers in the DB.
+    record: PrimitiveRecord | None = None
     event_type = d.get("event_type")
     if not isinstance(event_type, str) or not event_type:
         msg = "augment_accounting_payload: missing or invalid event_type; cannot resolve per-primitive version stamps"
@@ -142,7 +154,8 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
         primitive = Primitive.UTILITY
     else:
         try:
-            primitive = record_for(event_type).primitive
+            record = record_for(event_type)
+            primitive = record.primitive
         except UnknownIntentTypeError as exc:
             msg = (
                 f"augment_accounting_payload: event_type {event_type!r} has no "
@@ -159,6 +172,7 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
                 msg,
             )
             primitive = Primitive.UTILITY
+            record = None
 
     d["schema_version"] = SCHEMA_VERSION
     d["formula_version"] = FORMULA_VERSION
@@ -169,8 +183,36 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
     # asserts these two assignments cannot drift apart on a future code path.
     d["matching_policy_version"] = MatchingPolicy.for_primitive(primitive)
     d["primitive_version"] = PrimitiveVersion.for_primitive(primitive)
+
+    # VIB-4196 (T10): stamp `position_reference` on every OPEN/CLOSE row.
+    # Day-1 source = "legacy" for ALL primitives. Cutover tickets (T12 /
+    # T16 / T23 / T28) flip per-primitive to "receipt" / "registry" gated
+    # by their respective parser audits (T02). Non-OPEN/CLOSE event_kinds
+    # (ADJUST, COLLECT, TRANSFER, NONE) leave the column NULL — there is
+    # no position lifecycle to point at. The fallback path (record is None)
+    # also leaves it NULL: an unknown event_type cannot derive an
+    # event_kind, so we cannot guarantee OPEN/CLOSE semantics for it.
+    #
+    # Anti-smuggling: ALWAYS strip any pre-existing `position_reference` key
+    # before deciding whether to emit one ourselves. A connector / category
+    # handler that fabricates `{"position_reference": ...}` in
+    # `to_payload_json()` would otherwise have its smuggled value survive
+    # the augment chokepoint on the non-OPEN/CLOSE / unknown-event_type
+    # branches (CodeRabbit on PR #2211 — the writer chokepoint MUST be the
+    # only construction site). The `pop` makes the chokepoint exclusive
+    # regardless of which branch we take below.
+    d.pop("position_reference", None)
+    if record is not None and record.event_kind in (EventKind.OPEN, EventKind.CLOSE):
+        d["position_reference"] = build_legacy_position_reference(record).to_dict()
+
     _project_lending_aliases(d)
-    return json.dumps(d)
+    # ``sort_keys=True``: the augmented payload is the canonical bytes that
+    # land in ``payload_json`` (Postgres) and feed the SQLite ``position_reference``
+    # column extractor. Two equal augmentations must serialize byte-identical
+    # so downstream auditors can dedup on payload-checksum equality. The
+    # `_extract_position_reference_column` helper and `PositionReference.to_dict`
+    # docstring both depend on this invariant — see VIB-4196 / T10.
+    return json.dumps(d, sort_keys=True)
 
 
 def _project_lending_aliases(d: dict[str, Any]) -> None:

@@ -134,6 +134,11 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
             "confidence",
             "payload_json",
             "schema_version",
+            # VIB-4196 / T10: forward-compat JSON pointer between
+            # accounting_events and the position_registry (T11). Local
+            # SQLite only — Postgres is deferred to T19 (VIB-4205) via
+            # _POSTGRES_DEFERRED_COLUMNS below.
+            "position_reference",
         }
     ),
     "accounting_outbox": frozenset(
@@ -237,8 +242,37 @@ _POSTGRES_DEFERRED_TABLES: frozenset[str] = frozenset(
     }
 )
 
+# Per-table column-level Postgres deferrals. Mirrors
+# ``_POSTGRES_DEFERRED_TABLES`` for additions that introduce a new column
+# on an EXISTING table — the SDK can land the column on local SQLite and
+# require it via the SQLite contract while the corresponding metrics-database
+# migration is still in flight. The Postgres contract construction below
+# subtracts these per-table columns from the SQLite contract before swapping
+# ``strategy_id`` → ``agent_id``.
+#
+# VIB-4196 / T10: ``accounting_events.position_reference`` lands on local
+# SQLite first; the Postgres half is owned by T19 / VIB-4205 + the
+# metrics-database migration. Removing the entry happens atomically with the
+# T19 PR — until then, including the column in the Postgres contract would
+# brick hosted gateway boot.
+_POSTGRES_DEFERRED_COLUMNS: dict[str, frozenset[str]] = {
+    "accounting_events": frozenset({"position_reference"}),
+}
+
+
+def _postgres_columns_for(table: str, sqlite_cols: frozenset[str]) -> frozenset[str]:
+    """Derive the Postgres column set for ``table`` from its SQLite columns.
+
+    Applies (1) per-table column deferrals from ``_POSTGRES_DEFERRED_COLUMNS``
+    so columns the metrics-database migration has not landed yet are NOT
+    required at hosted boot, and (2) the ``strategy_id`` → ``agent_id`` rename.
+    """
+    deferred = _POSTGRES_DEFERRED_COLUMNS.get(table, frozenset())
+    return _swap_strategy_for_agent(sqlite_cols - deferred)
+
+
 ACCOUNTING_SCHEMA_CONTRACT_POSTGRES: dict[str, frozenset[str]] = {
-    table: _swap_strategy_for_agent(cols)
+    table: _postgres_columns_for(table, cols)
     for table, cols in ACCOUNTING_SCHEMA_CONTRACT_SQLITE.items()
     if table not in _POSTGRES_DEFERRED_TABLES
 }

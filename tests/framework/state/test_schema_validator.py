@@ -95,8 +95,17 @@ def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
     equality assertion below is therefore scoped to the table set the PG
     contract DOES cover; the deferred set is asserted separately so a
     future PR cannot silently add hosted boot requirements.
+
+    VIB-4196 / T10 extended the deferral mechanism to per-column granularity
+    via ``_POSTGRES_DEFERRED_COLUMNS`` (``accounting_events.position_reference``
+    is local-only until T19). The column-level diff below subtracts the
+    deferred columns before comparing — same intent as the table-level
+    deferral, applied at column scope.
     """
-    from almanak.framework.state.schema_contract import _POSTGRES_DEFERRED_TABLES
+    from almanak.framework.state.schema_contract import (
+        _POSTGRES_DEFERRED_COLUMNS,
+        _POSTGRES_DEFERRED_TABLES,
+    )
 
     sqlite = ACCOUNTING_SCHEMA_CONTRACT  # alias to SQLite variant
     pg_tables = set(ACCOUNTING_SCHEMA_CONTRACT_POSTGRES)
@@ -120,14 +129,106 @@ def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
         # must be in the PG contract for the same table.
         if "strategy_id" in sqlite_cols:
             assert "agent_id" in pg_cols, f"{table}: SQLite has strategy_id but PG is missing agent_id"
-        # Every other column must be identical.
-        sqlite_other = sqlite_cols - {"strategy_id"}
+        # Every other column must be identical, modulo the per-column
+        # Postgres deferrals (T10's mechanism for landing a column on
+        # local SQLite while the metrics-database migration is in flight).
+        deferred_cols = _POSTGRES_DEFERRED_COLUMNS.get(table, frozenset())
+        sqlite_other = sqlite_cols - {"strategy_id"} - deferred_cols
         pg_other = pg_cols - {"agent_id"}
         assert sqlite_other == pg_other, (
             f"{table}: PG contract diverges from SQLite outside the "
-            f"strategy_id↔agent_id rename: "
+            f"strategy_id↔agent_id rename and the deferred columns "
+            f"{sorted(deferred_cols)}: "
             f"{(sqlite_other - pg_other) | (pg_other - sqlite_other)}"
         )
+        # Deferred columns MUST appear in SQLite and MUST NOT appear in PG.
+        for col in deferred_cols:
+            assert col in sqlite_cols, (
+                f"{table}: deferred column {col!r} is in "
+                f"_POSTGRES_DEFERRED_COLUMNS but missing from SQLite contract"
+            )
+            assert col not in pg_cols, (
+                f"{table}: deferred column {col!r} leaked into the PG "
+                "contract before T19 / metrics-database migration"
+            )
+
+
+# ---------------------------------------------------------------------------
+# VIB-4196 / T10: position_reference column is in the SQLite contract,
+# defers from Postgres, and triggers the boot-guard when missing.
+# ---------------------------------------------------------------------------
+def test_vib_4196_position_reference_is_local_sqlite_only() -> None:
+    """T10: position_reference must be SQLite-required and Postgres-deferred."""
+    from almanak.framework.state.schema_contract import (
+        _POSTGRES_DEFERRED_COLUMNS,
+        ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
+        ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
+    )
+
+    assert (
+        "position_reference"
+        in ACCOUNTING_SCHEMA_CONTRACT_SQLITE["accounting_events"]
+    ), "T10 column missing from SQLite contract"
+    assert (
+        "position_reference"
+        not in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES["accounting_events"]
+    ), "T10 column leaked into Postgres contract before T19"
+    deferred_for_ae = _POSTGRES_DEFERRED_COLUMNS.get("accounting_events", frozenset())
+    assert "position_reference" in deferred_for_ae, (
+        f"T10 column must be in _POSTGRES_DEFERRED_COLUMNS['accounting_events']; "
+        f"got {deferred_for_ae}"
+    )
+
+
+def test_vib_4196_validator_refuses_when_position_reference_missing(tmp_path) -> None:
+    """T10: drop position_reference from a real DB; validator must refuse to start."""
+    db_path = str(tmp_path / "no-position-reference.db")
+
+    # Build a fully-shaped DB, then drop the column.
+    store = SQLiteStore(SQLiteConfig(db_path=db_path))
+    asyncio.get_event_loop().run_until_complete(store.initialize())
+    asyncio.get_event_loop().run_until_complete(store.close())
+
+    # SQLite supports DROP COLUMN since 3.35; if the runtime is older,
+    # fall back to a rebuild that omits the column.
+    with sqlite3.connect(db_path) as conn:
+        try:
+            conn.execute("ALTER TABLE accounting_events DROP COLUMN position_reference")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Older SQLite — recreate the table without the column.
+            conn.executescript(
+                """
+                ALTER TABLE accounting_events RENAME TO _ae_old;
+                CREATE TABLE accounting_events (
+                    id TEXT PRIMARY KEY,
+                    deployment_id TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
+                    cycle_id TEXT NOT NULL,
+                    execution_mode TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    chain TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    position_key TEXT NOT NULL,
+                    ledger_entry_id TEXT,
+                    tx_hash TEXT,
+                    confidence TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL DEFAULT 1
+                );
+                DROP TABLE _ae_old;
+                """
+            )
+            conn.commit()
+
+    with pytest.raises(SchemaContractViolation) as excinfo:
+        validate_sqlite_schema_or_raise(db_path)
+    msg = str(excinfo.value)
+    assert "position_reference" in msg, (
+        f"validator must name the missing column; got: {msg}"
+    )
 
 
 # ---------------------------------------------------------------------------
