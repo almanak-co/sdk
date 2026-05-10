@@ -1403,3 +1403,387 @@ class TestHandleVault:
         assert result.shares_amount is None
         assert result.share_price is None
         assert result.yield_usd is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VIB-4262 — LP wallet-basis hooks (regression guard)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandleLpWalletBasisHooks:
+    """LP_OPEN drains and LP_CLOSE / LP_COLLECT_FEES record on the chain+wallet
+    FIFO pool used by SWAP / lending realized-PnL math.
+
+    Pre-VIB-4262, the LP handler ignored `basis_store` entirely. A no-op LP
+    round-trip (open → immediately close on a frozen Anvil fork) left the
+    wallet's pre-LP token-out lots intact, so a follow-up SWAP that disposed
+    the LP-returned tokens couldn't compute realized_pnl_usd. This class is the
+    regression guard — every test here MUST fail on a build that drops the
+    wallet-basis hooks.
+    """
+
+    def _wallet_lot_count(
+        self, basis: FIFOBasisStore, deployment_id: str, chain: str, wallet: str, token: str
+    ) -> int:
+        """Return the number of basis lots for the chain+wallet pool / token."""
+        swap_wallet_key = f"swap:{chain.lower()}:{wallet.lower()}"
+        key = basis._key(deployment_id, swap_wallet_key, token)
+        return len(basis._lots.get(key, []))
+
+    def _wallet_lot_remaining(
+        self, basis: FIFOBasisStore, deployment_id: str, chain: str, wallet: str, token: str
+    ) -> Decimal:
+        swap_wallet_key = f"swap:{chain.lower()}:{wallet.lower()}"
+        key = basis._key(deployment_id, swap_wallet_key, token)
+        return sum(
+            (lot.get("remaining", Decimal("0")) for lot in basis._lots.get(key, [])),
+            start=Decimal("0"),
+        )
+
+    def test_lp_open_drains_wallet_basis_for_both_tokens(self) -> None:
+        """LP_OPEN must call match_swap_disposal for token0 + token1.
+
+        Set-up: pre-mint USDC + WETH lots in the wallet basis pool (mirrors the
+        post-SWAP state for an LP fixture round-trip). Then run handle_lp on an
+        LP_OPEN row with amount0=USDC, amount1=WETH. Assert the lots are
+        drained (remaining < initial).
+        """
+        led_id = str(uuid.uuid4())
+        basis = FIFOBasisStore()
+        # Pre-mint wallet inventory: 100 USDC + 0.04 WETH from a prior SWAP.
+        basis.record_swap_acquisition(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="USDC",
+            amount=Decimal("100"),
+            cost_usd=Decimal("100"),
+            timestamp=datetime.now(UTC),
+            lot_id="USDC_INITIAL_LOT",
+        )
+        basis.record_swap_acquisition(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="WETH",
+            amount=Decimal("0.04"),
+            cost_usd=Decimal("100"),
+            timestamp=datetime.now(UTC),
+            lot_id="WETH_INITIAL_LOT",
+        )
+
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+            market_id="0xpool",
+        )
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="50",
+            amount_out="0.02",
+        )
+
+        before_usdc = self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
+        before_weth = self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
+        result = handle_lp(outbox, ledger, basis_store=basis)
+        after_usdc = self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
+        after_weth = self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
+
+        assert result is not None
+        # V3 position key tail is "USDC/WETH/500" (descriptor, not address) —
+        # pool_address must come from outbox.market_id, not the position-key
+        # tail. Locks in the _resolve_lp_pool_address fix (CodeRabbit 2026-05-11).
+        assert result.pool_address == "0xpool"
+        # Both token legs were drained from the wallet-basis pool.
+        assert after_usdc == before_usdc - Decimal("50"), (
+            f"USDC remaining: {before_usdc} → {after_usdc}; expected −50"
+        )
+        assert after_weth == before_weth - Decimal("0.02"), (
+            f"WETH remaining: {before_weth} → {after_weth}; expected −0.02"
+        )
+
+    def test_lp_close_records_wallet_basis_for_both_tokens_with_fees(self) -> None:
+        """LP_CLOSE must call record_swap_acquisition for token0 + token1 + fees.
+
+        Set-up: empty basis pool. Run handle_lp on an LP_CLOSE row with
+        amount0/amount1 from the close payload. Assert lots are minted with
+        amount + fees combined.
+        """
+        led_id = str(uuid.uuid4())
+        basis = FIFOBasisStore()
+        # Need a prior_open_payload so the close has a cost basis to anchor.
+        prior_open = {
+            "cost_basis_usd": "100",
+            "tick_lower": -1000,
+            "tick_upper": 1000,
+            "liquidity": "1000000",
+            "current_tick": 0,
+            "in_range": True,
+        }
+
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+            market_id="0xpool",
+        )
+        # LP_CLOSE has no token_in/token_out (returns BOTH tokens) — handler
+        # falls back to position-key descriptor.
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="",
+            token_out="",
+            amount_in="50",
+            amount_out="0.02",
+        )
+
+        before_usdc = self._wallet_lot_count(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
+        before_weth = self._wallet_lot_count(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open, basis_store=basis)
+        after_usdc = self._wallet_lot_count(basis, "dep-1", "arbitrum", "0xwallet", "USDC")
+        after_weth = self._wallet_lot_count(basis, "dep-1", "arbitrum", "0xwallet", "WETH")
+
+        assert result is not None
+        # Both token legs minted exactly one new acquisition lot.
+        assert after_usdc == before_usdc + 1
+        assert after_weth == before_weth + 1
+        # Lot remainings reflect the LP_CLOSE amounts (fees0/fees1 are None
+        # in the fallback path so amount alone is recorded).
+        assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "USDC") == Decimal("50")
+        assert self._wallet_lot_remaining(basis, "dep-1", "arbitrum", "0xwallet", "WETH") == Decimal("0.02")
+
+    def test_full_round_trip_cancels_open_close_for_swap_match(self) -> None:
+        """Open + close on the same amounts → swap-key inventory returns to start.
+
+        End-to-end property: a no-op LP cycle leaves the pool with the
+        LP_CLOSE-minted acquisition lot available to match a follow-up SWAP.
+        Verify a follow-up ``match_swap_disposal`` of the WETH portion returns
+        the LP_CLOSE-stamped cost basis.
+
+        WETH pre-mint is intentionally LESS than the LP_OPEN consumption
+        (0.01 < 0.02) so the original lot is fully drained by LP_OPEN and the
+        follow-up disposal MUST consume the LP_CLOSE-created lot — preventing
+        the test from passing with a broken LP_CLOSE record.
+        """
+        basis = FIFOBasisStore()
+        # Pre-mint 100 USDC + 0.01 WETH (post-SWAP state). WETH is intentionally
+        # less than the LP_OPEN draw (0.02) so the original lot fully drains.
+        basis.record_swap_acquisition(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="USDC",
+            amount=Decimal("100"),
+            cost_usd=Decimal("100"),
+            timestamp=datetime.now(UTC),
+            lot_id="USDC_INITIAL_LOT",
+        )
+        basis.record_swap_acquisition(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="WETH",
+            amount=Decimal("0.01"),
+            cost_usd=Decimal("25"),
+            timestamp=datetime.now(UTC),
+            lot_id="WETH_INITIAL_LOT",
+        )
+
+        # Frozen-Anvil pricing: USDC=$1, WETH=$2500 (so 0.02 WETH = $50,
+        # 50 USDC = $50, total cost basis = $100, per-leg = $50).
+        prices_json = json.dumps({"USDC": "1.00", "WETH": "2500.00"})
+
+        # LP_OPEN consumes 50 USDC + 0.02 WETH.
+        open_id = str(uuid.uuid4())
+        handle_lp(
+            _make_outbox_row(
+                open_id,
+                intent_type="LP_OPEN",
+                position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+                market_id="0xpool",
+            ),
+            _make_ledger_row(
+                open_id,
+                intent_type="LP_OPEN",
+                protocol="uniswap_v3",
+                chain="arbitrum",
+                token_in="USDC",
+                token_out="WETH",
+                amount_in="50",
+                amount_out="0.02",
+                price_inputs_json=prices_json,
+            ),
+            basis_store=basis,
+        )
+
+        # LP_CLOSE returns 50 USDC + 0.02 WETH (Anvil frozen, no fees).
+        close_id = str(uuid.uuid4())
+        prior_open = {"cost_basis_usd": "100", "tick_lower": -1000, "tick_upper": 1000}
+        handle_lp(
+            _make_outbox_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+                market_id="0xpool",
+            ),
+            _make_ledger_row(
+                close_id,
+                intent_type="LP_CLOSE",
+                protocol="uniswap_v3",
+                chain="arbitrum",
+                token_in="",
+                token_out="",
+                amount_in="50",
+                amount_out="0.02",
+                price_inputs_json=prices_json,
+            ),
+            prior_open_payload=prior_open,
+            basis_store=basis,
+        )
+
+        # Follow-up SWAP WETH→USDC of the LP-returned 0.02 WETH must FIFO-match
+        # the LP_CLOSE-minted lot (the pre-mint lot was fully drained by LP_OPEN
+        # because pre-mint=0.01 < LP_OPEN draw=0.02).
+        cost_basis_consumed, unmatched = basis.match_swap_disposal(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xwallet",
+            token="WETH",
+            amount=Decimal("0.02"),
+        )
+        assert unmatched == Decimal("0"), (
+            f"Follow-up SWAP could not match LP-returned WETH; unmatched={unmatched}"
+        )
+        # LP_CLOSE wrote a 0.02 WETH lot at per-leg-basis = $50 (cost_basis_usd
+        # $100 / 2 active legs). The disposal of the full 0.02 must consume
+        # exactly that lot at exactly that basis — proves the LP_CLOSE record
+        # actually fired and stamped the right cost.
+        assert cost_basis_consumed == Decimal("50"), (
+            f"LP_CLOSE-minted lot basis was {cost_basis_consumed}; expected $50"
+        )
+
+    def test_basis_store_none_is_a_no_op(self) -> None:
+        """`basis_store=None` (paper / dry-run) MUST NOT raise — fallthrough."""
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+            market_id="0xpool",
+        )
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="50",
+            amount_out="0.02",
+        )
+        # No basis_store argument → explicit None default.
+        result = handle_lp(outbox, ledger, basis_store=None)
+        assert result is not None  # event still emits; only basis hook is skipped
+
+    def test_lp_collect_fees_records_basis_when_principal_zero(self) -> None:
+        """LP_COLLECT_FEES has amount0/amount1 == 0 by design (fees-only event).
+
+        Pre-fix bug (gemini-code-assist 2026-05-11): the hook used
+        `if amount0 > 0` which skipped fee-only collections entirely, leaving
+        the basis pool empty for those tokens. After fix: per-leg total =
+        principal + fees, so a fees-only LP_COLLECT_FEES still mints a basis
+        lot equal to the fees.
+        """
+        led_id = str(uuid.uuid4())
+        basis = FIFOBasisStore()
+
+        # Fee-only event: lp_close_data.amount0_collected = amount1_collected = 0,
+        # fees0/fees1 > 0 (typical post-VIB-3494 LP_COLLECT_FEES shape).
+        class _LpCloseData:
+            amount0_collected = 0
+            amount1_collected = 0
+            fees0 = 1_000_000  # raw, 6 decimals → 1.0 USDC
+            fees1 = 5_000_000_000_000_000  # raw, 18 decimals → 0.005 WETH
+
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_COLLECT_FEES",
+            position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+            market_id="0xpool",
+        )
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_COLLECT_FEES",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            token_in="",
+            token_out="",
+            amount_in="",
+            amount_out="",
+            extracted_data_json="{}",
+        )
+        from unittest.mock import MagicMock as _MM
+        from unittest.mock import patch as _patch
+
+        usdc_info = _MM()
+        usdc_info.decimals = 6
+        weth_info = _MM()
+        weth_info.decimals = 18
+
+        def _resolve(sym, chain=None):
+            return {"USDC": usdc_info, "WETH": weth_info}.get(sym.upper())
+
+        resolver = _MM()
+        resolver.resolve = _resolve
+
+        with (
+            _patch(
+                "almanak.framework.observability.ledger.deserialize_extracted_data",
+                return_value={"lp_close_data": _LpCloseData()},
+            ),
+            _patch(
+                "almanak.framework.data.tokens.resolver.get_token_resolver",
+                return_value=resolver,
+            ),
+        ):
+            result = handle_lp(outbox, ledger, basis_store=basis)
+
+        assert result is not None
+        # Both fee legs minted a basis lot — pre-fix, neither did because
+        # amount0==0 and amount1==0 short-circuited the per-leg branches.
+        usdc_lots = basis._lots.get(basis._key("dep-1", "swap:arbitrum:0xwallet", "USDC"), [])
+        weth_lots = basis._lots.get(basis._key("dep-1", "swap:arbitrum:0xwallet", "WETH"), [])
+        assert len(usdc_lots) == 1, "USDC fee lot must be minted on LP_COLLECT_FEES"
+        assert len(weth_lots) == 1, "WETH fee lot must be minted on LP_COLLECT_FEES"
+        # Lot amount = principal (0) + fees (resolved to human decimal).
+        assert usdc_lots[0]["amount"] == Decimal("1.0")
+        assert weth_lots[0]["amount"] == Decimal("0.005")
+
+    def test_missing_chain_or_wallet_skips_hook_silently(self) -> None:
+        """Empty chain or wallet → swap_wallet_key cannot resolve → hook skipped, no fabrication."""
+        led_id = str(uuid.uuid4())
+        basis = FIFOBasisStore()
+        outbox = _make_outbox_row(led_id, intent_type="LP_OPEN", wallet_address="")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="uniswap_v3",
+            chain="",  # also empty
+            token_in="USDC",
+            token_out="WETH",
+            amount_in="50",
+            amount_out="0.02",
+        )
+        # Force pool resolution to succeed via market_id.
+        outbox["market_id"] = "0xpool"
+        outbox["position_key"] = "lp:uniswap_v3::0xwallet:0xpool"
+
+        result = handle_lp(outbox, ledger, basis_store=basis)
+
+        assert result is not None
+        # No lots minted because swap_wallet_key couldn't resolve.
+        assert len(basis._lots) == 0

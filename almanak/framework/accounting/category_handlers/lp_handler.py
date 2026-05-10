@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.framework.accounting.category_handlers._price_helpers import (
     load_raw_price_inputs,
@@ -21,6 +21,9 @@ from almanak.framework.accounting.category_handlers._price_helpers import (
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.lp_accounting import LPAccountingEvent, compute_lp_cost_basis
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
+
+if TYPE_CHECKING:
+    from almanak.framework.accounting.basis import FIFOBasisStore
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +193,18 @@ def _parse_lp_timestamp(raw_ts: Any) -> datetime:
 
 
 def _resolve_lp_pool_address(outbox_row: dict[str, Any], position_key: str) -> str | None:
-    """Resolve the pool address from the position_key tail or fall back to market_id."""
-    pool_address = _pool_address_from_position_key(position_key) or outbox_row.get("market_id") or ""
+    """Resolve the pool address from the position_key tail or fall back to market_id.
+
+    V3-style position keys carry a token-pair-fee descriptor tail (e.g.
+    ``"USDC/WETH/500"``) instead of a pool address. Detect that shape (presence
+    of ``"/"``) and prefer ``outbox_row["market_id"]`` when present. Non-V3 keys
+    (Aerodrome, SushiSwap V2, …) end in a real address and are used directly.
+    """
+    tail = _pool_address_from_position_key(position_key)
+    if tail and "/" in tail:
+        pool_address = outbox_row.get("market_id") or ""
+    else:
+        pool_address = tail or outbox_row.get("market_id") or ""
     if not pool_address:
         logger.warning(
             "LP handler: cannot resolve pool address from position_key=%r or market_id=%r; dropping event",
@@ -453,10 +466,156 @@ def _compute_lp_realized_pnl_and_fees(
     return realized_pnl_usd, fees_total_usd
 
 
+# crap-allowlist: VIB-4262 — _apply_lp_wallet_basis_hooks branches per
+# (intent_type × token leg × skip-condition) which is the irreducible shape
+# of LP semantics: LP_OPEN drains both tokens, LP_CLOSE / LP_COLLECT_FEES
+# record an active_legs loop with per-leg amount=principal+fees and
+# per-leg cost_basis split (gemini-code-assist 2026-05-11). cc=31 is per-
+# leg-branch cost; decomposing into 4-5 micro-helpers would add naming
+# overhead without architectural value (no shared abstraction emerges from
+# the per-leg branches). Anti-regression coverage: 6 tests in
+# tests/unit/framework/accounting/test_lp_perp_vault_handlers.py
+# (TestHandleLpWalletBasisHooks; 100% line coverage).
+def _apply_lp_wallet_basis_hooks(
+    *,
+    basis_store: FIFOBasisStore | None,
+    intent_type_str: str,
+    deployment_id: str,
+    cycle_id: str,
+    chain: str,
+    wallet_address: str,
+    token0: str,
+    token1: str,
+    amount0: Decimal | None,
+    amount1: Decimal | None,
+    fees0: Decimal | None,
+    fees1: Decimal | None,
+    cost_basis_usd: Decimal | None,
+    fees_total_usd: Decimal | None,
+    timestamp: datetime,
+    tx_hash: str,
+    ledger_entry_id: str,
+) -> None:
+    """Mirror LP token flow into the chain+wallet basis pool (VIB-4262).
+
+    LP_OPEN deposits token0 + token1 into the pool — drains wallet inventory.
+    LP_CLOSE / LP_COLLECT_FEES return token0 + token1 (+ accumulated fees) —
+    credits wallet inventory.
+
+    This is the LP analogue of the lending handler's VIB-3964 hooks
+    (BORROW credits, REPAY drains, SUPPLY drains, WITHDRAW credits). Without
+    these, an LP_OPEN/LP_CLOSE round-trip leaves the wallet's pre-LP token-out
+    lots intact, and a follow-up SWAP that disposes the LP-returned tokens
+    can't compute ``realized_pnl_usd`` against fresh LP-CLOSE basis.
+
+    Skip silently if any of the following hold (Empty ≠ zero per CLAUDE.md):
+      - basis_store is None (paper / dry-run mode);
+      - chain or wallet_address are empty (swap_wallet_key cannot resolve);
+      - both token0 and token1 are empty (no leg can be hooked);
+      - on LP_OPEN: both amounts are None (nothing to dispose);
+      - on LP_CLOSE: both amounts are None AND no fees (nothing to record).
+
+    Per-leg granularity: each (token, amount) pair is independently hooked, so
+    a partial pricing failure on one leg does not silently drop the other.
+    """
+    if basis_store is None:
+        return
+    chain_norm = (chain or "").lower().strip()
+    wallet_norm = (wallet_address or "").lower().strip()
+    if not chain_norm or not wallet_norm:
+        return
+    swap_wallet_key = f"swap:{chain_norm}:{wallet_norm}"
+    _seed = tx_hash or ledger_entry_id
+
+    if intent_type_str == "LP_OPEN":
+        # LP_OPEN moves token0 + token1 OUT of the wallet into the LP NFT.
+        # Mirror as a wallet-basis disposal so the lots minted by prior SWAP /
+        # BORROW / WITHDRAW are drained correctly.
+        if token0 and amount0 is not None and amount0 > 0:
+            basis_store.match_swap_disposal(
+                deployment_id=deployment_id,
+                position_key=swap_wallet_key,
+                token=token0,
+                amount=amount0,
+            )
+        if token1 and amount1 is not None and amount1 > 0:
+            basis_store.match_swap_disposal(
+                deployment_id=deployment_id,
+                position_key=swap_wallet_key,
+                token=token1,
+                amount=amount1,
+            )
+        return
+
+    # LP_CLOSE / LP_COLLECT_FEES return amount + accumulated fees per token.
+    # Mirror as wallet-basis acquisition so a follow-up SWAP that disposes
+    # the returned tokens has a basis lot to match against.
+    #
+    # Cost-basis distribution (gemini-code-assist 2026-05-11):
+    #
+    # 1. Per-leg amount = principal + accumulated fees. LP_COLLECT_FEES has
+    #    amount0/amount1 == 0 by design; without summing fees the hook would
+    #    skip fee-only events entirely.
+    # 2. Total returned-USD = cost_basis_usd (principal MTM) + fees_total_usd.
+    #    Fees collected to the wallet have economic value and SHOULD anchor
+    #    the cost lot — without them, a follow-up SWAP that disposes the
+    #    fee portion mis-computes realized PnL.
+    # 3. Active legs only. Single-sided exits (one token amount==0) get the
+    #    full per-leg basis; otherwise it's split equally. A 50/50 fixed
+    #    split would silently drop half the basis on single-sided returns.
+    if intent_type_str in {"LP_CLOSE", "LP_COLLECT_FEES"}:
+        t0_total = (amount0 if amount0 is not None else Decimal("0")) + (fees0 if fees0 is not None else Decimal("0"))
+        t1_total = (amount1 if amount1 is not None else Decimal("0")) + (fees1 if fees1 is not None else Decimal("0"))
+        active_legs: list[tuple[str, Decimal]] = []
+        if token0 and t0_total > 0:
+            active_legs.append((token0, t0_total))
+        if token1 and t1_total > 0:
+            active_legs.append((token1, t1_total))
+        if not active_legs:
+            return
+
+        # Empty ≠ zero (CLAUDE.md): only seed `cost_usd` when ALL economic
+        # components contributing to the lots are measured. If principal
+        # amounts are present but `cost_basis_usd is None`, OR fee amounts
+        # are present but `fees_total_usd is None`, leave `per_leg_basis = None`
+        # rather than substitute zeros and fabricate basis for the unmeasured
+        # component. CodeRabbit 2026-05-11 catch — without this guard, a
+        # close/collect with one fee leg unpriced would assign a concrete
+        # `per_leg_basis` to lots that include the fee amount and skew the
+        # next SWAP's `realized_pnl_usd`.
+        principal_present = any(a is not None and a > 0 for a in (amount0, amount1))
+        fees_present = any(f is not None and f > 0 for f in (fees0, fees1))
+        total_val_usd: Decimal | None = None
+        if (not principal_present or cost_basis_usd is not None) and (not fees_present or fees_total_usd is not None):
+            total_val_usd = Decimal("0")
+            if cost_basis_usd is not None:
+                total_val_usd += cost_basis_usd
+            if fees_total_usd is not None:
+                total_val_usd += fees_total_usd
+        per_leg_basis = total_val_usd / Decimal(len(active_legs)) if total_val_usd is not None else None
+
+        for leg_token, leg_amount in active_legs:
+            basis_store.record_swap_acquisition(
+                deployment_id=deployment_id,
+                position_key=swap_wallet_key,
+                token=leg_token,
+                amount=leg_amount,
+                cost_usd=per_leg_basis,
+                timestamp=timestamp,
+                lot_id=(
+                    make_accounting_event_id(deployment_id, cycle_id, "LP_CLOSE_WALLET_LOT", _seed, leg_token)
+                    if _seed
+                    else ""
+                ),
+                source=intent_type_str,
+            )
+
+
 def handle_lp(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
     prior_open_payload: dict[str, Any] | None = None,
+    basis_store: FIFOBasisStore | None = None,
 ) -> LPAccountingEvent | None:
     """Build an LPAccountingEvent from an outbox + ledger row pair.
 
@@ -466,6 +625,10 @@ def handle_lp(
     - Intents where both position_key and market_id are absent (cannot identify pool)
 
     All inputs come from the dicts — no live chain calls.
+
+    VIB-4262 (basis_store): when provided, LP_OPEN/LP_CLOSE/LP_COLLECT_FEES
+    mirror their on-chain wallet flow into the chain+wallet FIFO pool used by
+    SWAP / lending realized-PnL math. See :func:`_apply_lp_wallet_basis_hooks`.
     """
     from almanak.framework.observability.ledger import deserialize_extracted_data
 
@@ -555,6 +718,29 @@ def handle_lp(
         cost_basis_usd=cost_basis_usd,
     )
 
+    # VIB-4262: mirror LP token flow into the chain+wallet basis pool so a
+    # follow-up SWAP that disposes the LP-returned tokens can compute
+    # realized_pnl_usd. LP_OPEN drains, LP_CLOSE / LP_COLLECT_FEES record.
+    _apply_lp_wallet_basis_hooks(
+        basis_store=basis_store,
+        intent_type_str=intent_type_str,
+        deployment_id=deployment_id,
+        cycle_id=cycle_id,
+        chain=chain,
+        wallet_address=wallet_address,
+        token0=token0,
+        token1=token1,
+        amount0=amount0,
+        amount1=amount1,
+        fees0=fees0,
+        fees1=fees1,
+        cost_basis_usd=cost_basis_usd,
+        fees_total_usd=fees_total_usd,
+        timestamp=timestamp,
+        tx_hash=tx_hash,
+        ledger_entry_id=ledger_entry_id,
+    )
+
     return LPAccountingEvent(
         identity=identity,
         event_type=event_type,
@@ -595,9 +781,18 @@ def _dispatch_lp(ctx: HandlerContext) -> LPAccountingEvent | None:
     The legacy ladder did this resolution inside ``AccountingProcessor._dispatch``;
     pulling it here keeps the LP-specific pre-work co-located with the handler
     and lets the dispatcher stay generic over every registered category.
+
+    VIB-4262: forwards ``ctx.basis_store`` so LP_OPEN / LP_CLOSE /
+    LP_COLLECT_FEES can mirror their on-chain wallet flow into the chain+wallet
+    FIFO pool. See :func:`_apply_lp_wallet_basis_hooks`.
     """
     intent_type = (ctx.ledger_row.get("intent_type") or "").upper()
     prior_open: dict[str, Any] | None = None
     if intent_type in {"LP_CLOSE", "LP_COLLECT_FEES"}:
         prior_open = ctx.prior_open_lookup(ctx.outbox_row.get("position_key") or "")
-    return handle_lp(ctx.outbox_row, ctx.ledger_row, prior_open_payload=prior_open)
+    return handle_lp(
+        ctx.outbox_row,
+        ctx.ledger_row,
+        prior_open_payload=prior_open,
+        basis_store=ctx.basis_store,
+    )
