@@ -1,0 +1,29 @@
+{
+  "_comment": "Typed accounting event for SWAP. Per PRD §Position Reference Shape, position_reference is OPTIONAL — SWAP has no position to reference, so the field is omitted. Category and primitive come from record_for('SWAP'). Payload field names match SwapEventPayload in almanak/framework/accounting/payload_schemas.py (validate_payload contract). pool_address is intentionally NOT in the canonical SwapEventPayload — keeping the payload aligned with the production Pydantic model is the load-bearing property; pool data lives on the ledger row's protocol context.",
+  "deployment_id": "FluidSwapStrategy:eb3fdf7cf762",
+  "cycle_id": "vib-4194-swap-cycle",
+  "execution_mode": "live",
+  "tx_hash": "0x9481aa999495ed7ca79edcfc2b7ef1a1a0008e8cdd4e72df5068cc38a9de0bc6",
+  "block_number": 459393901,
+  "timestamp": "2026-05-04T19:32:39.000000+00:00",
+  "category": "swap",
+  "primitive": "swap",
+  "event_type": "SWAP",
+  "matching_policy_version": 3,
+  "schema_version": 1,
+  "formula_version": 1,
+  "primitive_version": 1,
+  "payload": {
+    "protocol": "uniswap_v3",
+    "token_in": "USDC",
+    "token_out": "USDT",
+    "amount_in": "3.0",
+    "amount_out": "2.999766",
+    "amount_in_usd": "3.000000",
+    "amount_out_usd": "2.999526",
+    "effective_price": "0.999922",
+    "slippage_bps": "0.78",
+    "gas_usd": "0.0312",
+    "confidence": "HIGH"
+  }
+}

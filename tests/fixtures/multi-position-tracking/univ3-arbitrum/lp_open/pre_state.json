@@ -1,0 +1,43 @@
+{
+  "_source": "Pre-execution wallet/pool state immediately before the LP_OPEN tx. Captured from the Anvil-fork run referenced in receipt.json _source.",
+  "wallet": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+  "chain": "arbitrum",
+  "block_number": 332169999,
+  "balances": {
+    "WETH": {
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "decimals": 18,
+      "amount": "0.500000",
+      "raw": "500000000000000000"
+    },
+    "USDC": {
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "decimals": 6,
+      "amount": "100.000000",
+      "raw": "100000000"
+    }
+  },
+  "pool_state": {
+    "address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "fee_tier": 500,
+    "token0": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+    "token1": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+    "_token0_label": "USDC",
+    "_token1_label": "WETH",
+    "tick_spacing": 10,
+    "current_tick": -198740,
+    "sqrt_price_x96": "3475634231782840462131"
+  },
+  "approvals": {
+    "WETH->0xc36442b4a4522e871399cd717abdd847ab11fe88": {
+      "spender": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+      "_spender_label": "Uniswap V3 NonfungiblePositionManager",
+      "amount_raw": "1000000000000000"
+    },
+    "USDC->0xc36442b4a4522e871399cd717abdd847ab11fe88": {
+      "spender": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+      "_spender_label": "Uniswap V3 NonfungiblePositionManager",
+      "amount_raw": "3000000"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "_no_registry_row": true,
+  "reason": "SWAP is not a position-establishing intent; record_for('SWAP').position_type is None. Per PRD §Forbidden Patterns (line 261): 'Seeding registry rows for intents where record_for(it).position_type is None (SWAP, PT_BUY/SELL/REDEEM, CLOSE, LIQUIDATION_RISK_UPDATE, PREDICTION_*).' This sentinel is required for symmetry with LP_OPEN/LP_CLOSE so consumers can iterate the three sets uniformly without conditional shape branching."
+}

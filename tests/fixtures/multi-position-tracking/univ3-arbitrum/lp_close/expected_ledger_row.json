@@ -1,0 +1,23 @@
+{
+  "_comment": "Expected `transaction_ledger` row for the LP_CLOSE. Same deployment_id and strategy_id as LP_OPEN — same strategy. Different cycle_id (close happens on the teardown cycle).",
+  "id": "00000000-0000-0000-0000-000000004195",
+  "cycle_id": "vib-4194-lp-close-cycle",
+  "strategy_id": "UniswapLPStrategy:12c53b4b6c31",
+  "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
+  "execution_mode": "live",
+  "timestamp": "2026-05-04T20:21:23.968000+00:00",
+  "intent_type": "LP_CLOSE",
+  "token_in": "WETH/USDC/500",
+  "amount_in": "",
+  "token_out": "",
+  "amount_out": "",
+  "effective_price": "",
+  "slippage_bps": null,
+  "gas_used": 146649,
+  "gas_usd": "0.0649",
+  "tx_hash": "0xea2bc0637faf4b987a5df37069ea2bb02b7305a6f533f58ace3597c7173830a2",
+  "chain": "arbitrum",
+  "protocol": "uniswap_v3",
+  "success": true,
+  "error": ""
+}

@@ -1,0 +1,13 @@
+{
+  "_source": "Token prices at close-time block 459405353.",
+  "block_number": 459405353,
+  "chain": "arbitrum",
+  "prices_usd": {
+    "WETH": "2347.18",
+    "USDC": "1.0000"
+  },
+  "_token_address_to_symbol": {
+    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": "WETH",
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": "USDC"
+  }
+}

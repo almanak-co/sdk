@@ -1,0 +1,37 @@
+{
+  "_source": "Pre-execution wallet/pool/position state immediately before the LP_CLOSE tx. Position 5467895 was minted by the LP_OPEN fixture's tx; this snapshot records its state at the close-time block.",
+  "wallet": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+  "chain": "arbitrum",
+  "block_number": 332170099,
+  "balances": {
+    "WETH": {
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "decimals": 18,
+      "amount": "0.499000",
+      "raw": "499000000000000000"
+    },
+    "USDC": {
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "decimals": 6,
+      "amount": "97.000000",
+      "raw": "97000000"
+    }
+  },
+  "position_state": {
+    "token_id": "5467895",
+    "owner": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+    "pool_address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "tick_lower": -199740,
+    "tick_upper": -197740,
+    "liquidity": "1042017676194",
+    "fee_growth_inside_0_last_x128": "0",
+    "fee_growth_inside_1_last_x128": "0",
+    "tokens_owed_0": "0",
+    "tokens_owed_1": "0"
+  },
+  "pool_state": {
+    "address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "current_tick": -198840,
+    "sqrt_price_x96": "3473934231782840462131"
+  }
+}

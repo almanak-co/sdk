@@ -1,0 +1,70 @@
+{
+  "_source": "Anvil-fork-of-Arbitrum tx 0x7620d5ed03d0d655247f357d207c9b7fd25af88513c6393495c454cab3efc0df — UniV3 LP_OPEN on WETH/USDC/500 pool, NFT tokenId 5467895, ticks [-199740, -197740]. UniswapLPStrategy run 2026-05-04, see tests/reports/anvil-sweep-2026-05-05/uniswap_lp/stdout.log.",
+  "_pool_address_label": "WETH/USDC 0.05% pool on Arbitrum: 0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443 (canonical UniV3 V3Factory deployment)",
+  "transactionHash": "0x7620d5ed03d0d655247f357d207c9b7fd25af88513c6393495c454cab3efc0df",
+  "blockNumber": 459405352,
+  "from": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+  "to": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+  "status": 1,
+  "gasUsed": 417905,
+  "logs": [
+    {
+      "_comment": "WETH Transfer (wallet -> pool): 0.001 WETH (10^15 wei). Token at 0x82af49447d8a07e3bd95bd0d56f35241523fbab1.",
+      "logIndex": 0,
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        "0x000000000000000000000000c31e54c7a869b9fcbecc14363cf510d1c41fa443",
+        null
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000038d7ea4c68000"
+    },
+    {
+      "_comment": "USDC Transfer (wallet -> pool): 3.0 USDC. Token at 0xaf88d065e77c8cc2239327c5edb3a432268e5831 (native USDC arbitrum).",
+      "logIndex": 1,
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        "0x000000000000000000000000c31e54c7a869b9fcbecc14363cf510d1c41fa443",
+        null
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000002dc6c0"
+    },
+    {
+      "_comment": "UniV3 pool Mint event (emitter = pool 0xC31E54c7...). Signature: Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1). topics[0] = canonical Mint hash. tickLower=-199740, tickUpper=-197740 (int24 two's complement, sign-extended to 32 bytes for topics).",
+      "logIndex": 2,
+      "address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+      "topics": [
+        "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
+        "0x000000000000000000000000c36442b4a4522e871399cd717abdd847ab11fe88",
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcf3c4",
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb94"
+      ],
+      "data": "0x000000000000000000000000c36442b4a4522e871399cd717abdd847ab11fe88000000000000000000000000000000000000000000000000000000f29d17eba200000000000000000000000000000000000000000000000000038d7ea4c6800000000000000000000000000000000000000000000000000000000000002dc6c0"
+    },
+    {
+      "_comment": "ERC-721 Transfer (mint) on the NonfungiblePositionManager 0xc36442b4...: from = address(0), to = wallet, tokenId=5467895. All three params indexed (ERC-721 spec). This is the parser's receipt-derivable identity source: tokenId from topics[3].",
+      "logIndex": 3,
+      "address": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        "0x0000000000000000000000000000000000000000000000000000000000536ef7"
+      ],
+      "data": "0x"
+    },
+    {
+      "_comment": "NonfungiblePositionManager IncreaseLiquidity event (emitter = NFT manager). Signature: IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1). topics[0] = 0x3067048..., topics[1] = tokenId 5467895 (THE identity-tuple anchor for UniV3). Per PRD Hard Gates Gate 1: physical_identity_hash inputs come exclusively from this event + parser's chain-keyed manager address.",
+      "logIndex": 4,
+      "address": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+      "topics": [
+        "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
+        "0x0000000000000000000000000000000000000000000000000000000000536ef7"
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000f29d17eba200000000000000000000000000000000000000000000000000038d7ea4c6800000000000000000000000000000000000000000000000000000000000002dc6c0"
+    }
+  ]
+}

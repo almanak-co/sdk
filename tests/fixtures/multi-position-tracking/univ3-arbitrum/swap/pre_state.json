@@ -1,0 +1,27 @@
+{
+  "_source": "Pre-execution wallet state immediately before tx 0x9481aa9994... USDC->USDT swap on Arbitrum. Decimals: USDC=6, USDT=6.",
+  "wallet": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+  "chain": "arbitrum",
+  "block_number": 332167999,
+  "balances": {
+    "USDC": {
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "decimals": 6,
+      "amount": "10.000000",
+      "raw": "10000000"
+    },
+    "USDT": {
+      "address": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "decimals": 6,
+      "amount": "0.000000",
+      "raw": "0"
+    }
+  },
+  "approvals": {
+    "USDC->0xe592427a0aece92de3edee1f18e0157c05861564": {
+      "spender": "0xe592427a0aece92de3edee1f18e0157c05861564",
+      "_spender_label": "Uniswap V3 SwapRouter",
+      "amount_raw": "3000000"
+    }
+  }
+}

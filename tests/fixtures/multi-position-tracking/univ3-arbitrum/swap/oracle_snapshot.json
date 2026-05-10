@@ -1,0 +1,13 @@
+{
+  "_source": "Token prices at block 459393901 from gateway price oracle, captured at the time of the captured swap. USDC and USDT both ~$1.0 stable.",
+  "block_number": 459393901,
+  "chain": "arbitrum",
+  "prices_usd": {
+    "USDC": "1.0000",
+    "USDT": "0.99992"
+  },
+  "_token_address_to_symbol": {
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": "USDC",
+    "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": "USDT"
+  }
+}

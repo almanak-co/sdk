@@ -1,0 +1,39 @@
+{
+  "_comment": "Typed accounting event for LP_CLOSE. position_reference's physical_identity_hash MUST be byte-identical to the LP_OPEN event's value — same NFT means same identity, T11/T12 lifecycle matching depends on this. Payload field names match LPCloseEventPayload in almanak/framework/accounting/payload_schemas.py. amount0/amount1 represent principal returned (per schema). fees0_collected/fees1_collected are the fee components. fees_total_usd is canonical (not 'fees_collected_usd').",
+  "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
+  "cycle_id": "vib-4194-lp-close-cycle",
+  "execution_mode": "live",
+  "tx_hash": "0xea2bc0637faf4b987a5df37069ea2bb02b7305a6f533f58ace3597c7173830a2",
+  "block_number": 459405353,
+  "timestamp": "2026-05-04T20:21:23.968000+00:00",
+  "category": "lp",
+  "primitive": "lp",
+  "event_type": "LP_CLOSE",
+  "matching_policy_version": 3,
+  "schema_version": 1,
+  "formula_version": 1,
+  "primitive_version": 1,
+  "position_reference": {
+    "source": "receipt",
+    "primitive": "lp",
+    "accounting_category": "lp",
+    "physical_identity_hash": "0xda72d378847658d82ed95d197220ec689e4f5708b6d71463a930a0aa943a745d",
+    "semantic_grouping_key": "arbitrum:0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "registry_handle": null
+  },
+  "payload": {
+    "protocol": "uniswap_v3",
+    "position_key": "lp:arbitrum:uniswap_v3:0xc31e54c7a869b9fcbecc14363cf510d1c41fa443:5467895",
+    "pool_address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "token0": "USDC",
+    "token1": "WETH",
+    "amount0": "2.294636",
+    "amount1": "0.000979989999988069",
+    "amount0_usd": "2.294636",
+    "amount1_usd": "2.30019",
+    "fees0_collected": "0.000704",
+    "fees1_collected": "0",
+    "fees_total_usd": "0.000704",
+    "confidence": "HIGH"
+  }
+}

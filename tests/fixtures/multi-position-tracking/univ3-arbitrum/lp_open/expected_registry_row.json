@@ -1,0 +1,31 @@
+{
+  "_comment": "16-column position_registry row per PRD §Registry Data Shape (multi-position-tracking.md line 119). Constructed from receipt facts only: physical_identity_hash from (chain, nft_manager_addr, token_id); semantic_grouping_key from (chain, pool_address). Canonical taxonomy values from record_for('LP_OPEN').primitive.value and .accounting_category.value. matching_policy_version from MATCHING_POLICY_VERSIONS[Primitive.LP] == 3.",
+  "deployment_id": "UniswapLPStrategy:12c53b4b6c31",
+  "chain": "arbitrum",
+  "primitive": "lp",
+  "accounting_category": "lp",
+  "physical_identity_hash": "0xda72d378847658d82ed95d197220ec689e4f5708b6d71463a930a0aa943a745d",
+  "semantic_grouping_key": "arbitrum:0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+  "grouping_policy_version": "univ3_lp@v1",
+  "handle": null,
+  "status": "open",
+  "payload": {
+    "token_id": "5467895",
+    "pool_address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+    "tick_lower": -199740,
+    "tick_upper": -197740,
+    "liquidity": "1042017676194",
+    "amount0": "3000000",
+    "amount1": "1000000000000000",
+    "_token0_label": "USDC",
+    "_token1_label": "WETH",
+    "fee_tier": 500,
+    "nft_manager_addr": "0xc36442b4a4522e871399cd717abdd847ab11fe88"
+  },
+  "opened_at_block": 459405352,
+  "opened_tx": "0x7620d5ed03d0d655247f357d207c9b7fd25af88513c6393495c454cab3efc0df",
+  "closed_at_block": null,
+  "closed_tx": null,
+  "last_reconciled_at_block": null,
+  "matching_policy_version": 3
+}

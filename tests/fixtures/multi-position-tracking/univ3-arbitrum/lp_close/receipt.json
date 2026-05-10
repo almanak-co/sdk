@@ -1,0 +1,69 @@
+{
+  "_source": "Anvil-fork-of-Arbitrum tx 0xea2bc0637faf4b987a5df37069ea2bb02b7305a6f533f58ace3597c7173830a2 — UniV3 LP_CLOSE for tokenId 5467895 (the SAME NFT as lp_open/receipt.json — by design, so physical_identity_hash is byte-identical across the two registry rows). Teardown lane of UniswapLPStrategy run 2026-05-04, see tests/reports/anvil-sweep-2026-05-05/uniswap_lp/stdout.log line 'Intent 1/1 executed successfully. TX: 0xea2bc063...'.",
+  "transactionHash": "0xea2bc0637faf4b987a5df37069ea2bb02b7305a6f533f58ace3597c7173830a2",
+  "blockNumber": 459405353,
+  "from": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+  "to": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+  "status": 1,
+  "gasUsed": 146649,
+  "logs": [
+    {
+      "_comment": "UniV3 pool Burn event (emitter = pool 0xC31E54c7...). Signature: Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1). Burn is emitted on decreaseLiquidity. tickLower=-199740, tickUpper=-197740 (matches LP_OPEN's Mint event ticks — same NFT, same range).",
+      "logIndex": 0,
+      "address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+      "topics": [
+        "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c",
+        "0x000000000000000000000000c36442b4a4522e871399cd717abdd847ab11fe88",
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcf3c4",
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb94"
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000f29d17eba2000000000000000000000000000000000000000000000000000000000022ce0c00000000000000000000000000000000000000000000000000037d59d76aae65"
+    },
+    {
+      "_comment": "UniV3 pool Collect event (emitter = pool). Signature: Collect(address indexed owner, address recipient, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount0, uint128 amount1). Carries principal + accrued fees. amount0=2294636 (USDC), amount1=979989999988069 (WETH).",
+      "logIndex": 1,
+      "address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+      "topics": [
+        "0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0",
+        "0x000000000000000000000000c36442b4a4522e871399cd717abdd847ab11fe88",
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcf3c4",
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfb94"
+      ],
+      "data": "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf000000000000000000000000000000000000000000000000000000000023062c00000000000000000000000000000000000000000000000000037ad65bbcc1a5"
+    },
+    {
+      "_comment": "UniV3 NFT manager DecreaseLiquidity event (emitter = NPM 0xC36442b4...). Signature: DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1). topics[1] is tokenId 5467895 (0x536ef7) — this is the close-side analogue of LP_OPEN's IncreaseLiquidity log. Having this log on the LP_CLOSE receipt lets the close-side recompute its physical_identity_hash from receipt facts alone (mirror of D1.S5 for LP_OPEN).",
+      "logIndex": 2,
+      "address": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+      "topics": [
+        "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4",
+        "0x0000000000000000000000000000000000000000000000000000000000536ef7"
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000f29d17eba2000000000000000000000000000000000000000000000000000000000022ce0c00000000000000000000000000000000000000000000000000037d59d76aae65"
+    },
+    {
+      "_comment": "USDC Transfer (pool -> wallet): 2.294636 USDC withdrawn (amount0 from Collect).",
+      "logIndex": 3,
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x000000000000000000000000c31e54c7a869b9fcbecc14363cf510d1c41fa443",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        null
+      ],
+      "data": "0x000000000000000000000000000000000000000000000000000000000023062c"
+    },
+    {
+      "_comment": "WETH Transfer (pool -> wallet): 0.000979986... WETH withdrawn (amount1 from Collect).",
+      "logIndex": 4,
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x000000000000000000000000c31e54c7a869b9fcbecc14363cf510d1c41fa443",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        null
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000037ad65bbcc1a5"
+    }
+  ]
+}

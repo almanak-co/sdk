@@ -1,0 +1,46 @@
+{
+  "_source": "Anvil-fork-of-Arbitrum tx 0x9481aa999495ed7ca79edcfc2b7ef1a1a0008e8cdd4e72df5068cc38a9de0bc6 — UniV3 USDC->USDT swap, FluidSwapStrategy run 2026-05-04, see tests/reports/anvil-sweep-2026-05-05/fluid_swap_arb/stdout.log",
+  "transactionHash": "0x9481aa999495ed7ca79edcfc2b7ef1a1a0008e8cdd4e72df5068cc38a9de0bc6",
+  "blockNumber": 459393901,
+  "from": "0x54776446aa29fc49d152b4850bd410ea1e4d24bf",
+  "to": "0xe592427a0aece92de3edee1f18e0157c05861564",
+  "status": 1,
+  "gasUsed": 132673,
+  "logs": [
+    {
+      "_comment": "USDC Transfer (sender to pool): 3.0 USDC -> WETH/USDC pool address — placeholder amounts kept human-readable for reviewers; binary equivalent of 3000000 (6 decimals)",
+      "logIndex": 0,
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        "0x000000000000000000000000bE3aD6a5669Dc0B8b12FeBC03608860C31E2eef6",
+        null
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000002dc6c0"
+    },
+    {
+      "_comment": "USDT Transfer (pool to recipient): 2.999766 USDT — value 2999766 (6 decimals) = 0x2dc566 (note: non-indexed value lives in data, not topics)",
+      "logIndex": 1,
+      "address": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "topics": [
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+        "0x000000000000000000000000bE3aD6a5669Dc0B8b12FeBC03608860C31E2eef6",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf",
+        null
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000002dc566"
+    },
+    {
+      "_comment": "UniV3 Swap event from the USDC/USDT 0.01% pool (placeholder pool address 0xbE3aD6a5669Dc0B8b12FeBC03608860C31E2eef6). Topic[0] is the canonical UniV3 Swap event hash. amount0=+3000000 (USDC in), amount1=-2999766 (USDT out). sqrt_price_x96 + liquidity + tick are non-indexed in data per UniV3 ABI: (int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick).",
+      "logIndex": 2,
+      "address": "0xbe3ad6a5669dc0b8b12febc03608860c31e2eef6",
+      "topics": [
+        "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+        "0x000000000000000000000000e592427a0aece92de3edee1f18e0157c05861564",
+        "0x00000000000000000000000054776446aa29fc49d152b4850bd410ea1e4d24bf"
+      ],
+      "data": "0x00000000000000000000000000000000000000000000000000000000002dc6c0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd23a9a000000000000000000000000000000000001000fa66e23a8042d8d4eed8ce58a0000000000000000000000000000000000000000000000000003a04dd1f5cdd60000000000000000000000000000000000000000000000000000000000000001"
+    }
+  ]
+}
