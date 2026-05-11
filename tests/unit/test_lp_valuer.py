@@ -599,7 +599,14 @@ class TestPortfolioValuerLPRepricing:
                     details={
                         "token0": "WETH",
                         "token1": "USDC",
-                        "pool": "0xPoolAddress",
+                        # VIB-4274 — must be a 42-char hex address so the
+                        # valuer's hex-shape guard lets the slot0 fast path
+                        # run. Pre-VIB-4274 this fixture passed
+                        # ``"0xPoolAddress"`` (13 chars), which the guard now
+                        # rejects → falls through to the price-ratio-tick
+                        # approximation and produces a different value than
+                        # the test asserts.
+                        "pool_address": "0x" + "ab" * 20,
                     },
                 )
             ],

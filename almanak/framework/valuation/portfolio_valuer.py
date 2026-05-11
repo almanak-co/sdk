@@ -37,11 +37,60 @@ from almanak.framework.valuation.vault_position_reader import VaultPositionReade
 
 if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownPositionSummary
+    from almanak.framework.valuation.lp_position_reader import LPPositionOnChain
 
 logger = logging.getLogger(__name__)
 
 FRAMEWORK_EXTERNAL_AGREEMENT_THRESHOLD = Decimal("0.10")
 FRAMEWORK_EXTERNAL_DIVERGENCE_THRESHOLD = Decimal("0.20")
+
+
+def _looks_like_evm_address(value: object) -> bool:
+    """Return True iff ``value`` is the 42-char ``0x``-prefixed hex shape.
+
+    VIB-4274 — ``position.details["pool"]`` is type-overloaded across the
+    codebase: some producers stash an actual pool contract address
+    (``"0x..."``), others stash a human descriptor (``"WETH/USDC/500"``).
+    The descriptor shape silently slipped into ``eth_call`` for slot0 reads
+    and triggered ``-32602 odd number of digits`` warnings every snapshot
+    (hidden by the price-ratio-tick fallback so the 21-cell Accountant Test
+    still passed, but the ``in_range`` flag would silently lie on mainnet).
+
+    Mirrors the VIB-3943 guard at
+    ``almanak/framework/teardown/post_conditions.py:209`` so the two consumer
+    sites stay aligned. Any drift here should be paired with a drift there.
+    """
+    return (
+        isinstance(value, str)
+        and value.startswith("0x")
+        and len(value) == 42
+        and all(c in "0123456789abcdefABCDEF" for c in value[2:])
+    )
+
+
+def _resolve_lp_pool_address_from_details(position: Any) -> str | None:
+    """Resolve a usable pool address from ``position.details`` for an LP repricing path.
+
+    VIB-4274 — `position.details["pool"]` is type-overloaded (descriptor vs hex
+    address); `pool_address` is the canonical key for the actual contract.
+    Read order matches the post-VIB-3943 defensive convention in
+    ``teardown/post_conditions.py:189`` — ``pool_address`` first, ``pool``
+    as a legacy fallback. Non-hex values (descriptor strings like
+    ``"WETH/USDC/500"``) are rejected and the caller should fall through
+    to the price-ratio-tick approximation.
+
+    Extracted to a single helper so the two LP repricing paths
+    (``_reprice_lp_on_chain_enriched`` and ``_reprice_lp_on_chain``) stay
+    aligned automatically — gemini-code-assist flagged the duplicated
+    guard at PR #2231 review.
+
+    Returns the validated 42-char ``0x``-prefixed hex address, or ``None``
+    when no usable address is available.
+    """
+    pool_address = position.details.get("pool_address") or position.details.get("pool")
+    if pool_address and not _looks_like_evm_address(pool_address):
+        return None
+    return pool_address or None
 
 
 @runtime_checkable
@@ -1076,7 +1125,13 @@ class PortfolioValuer:
             if token0_decimals is None or token1_decimals is None:
                 return None
 
-            pool_address = position.details.get("pool") or position.details.get("pool_address")
+            # VIB-4274 — see ``_resolve_lp_pool_address_from_details`` for
+            # the prefer-pool_address + hex-shape guard. Descriptor-shaped
+            # values would slip into ``eth_call`` and trip
+            # ``-32602 odd number of digits``; the price-ratio fallback
+            # below masks the warning but the ``in_range`` flag would
+            # silently lie on mainnet.
+            pool_address = _resolve_lp_pool_address_from_details(position)
             current_tick: int | None = None
             sqrt_price_x96: int | None = None
             if pool_address:
@@ -1338,12 +1393,10 @@ class PortfolioValuer:
             USD value if successful, None to signal fallback needed.
         """
         try:
-            # Need a numeric token ID for on-chain query
             token_id = self._extract_token_id(position)
             if token_id is None:
                 return None
 
-            # Query on-chain position details
             on_chain = self._lp_reader.read_position(
                 chain=chain,
                 token_id=token_id,
@@ -1352,50 +1405,23 @@ class PortfolioValuer:
             if on_chain is None:
                 return None
 
-            # Position with zero liquidity AND zero fees = truly empty
             if on_chain.liquidity == 0 and on_chain.tokens_owed0 == 0 and on_chain.tokens_owed1 == 0:
                 return Decimal("0")
 
-            # Resolve token symbols for pricing
-            token0_symbol = self._resolve_token_symbol(on_chain.token0, position, "token0")
-            token1_symbol = self._resolve_token_symbol(on_chain.token1, position, "token1")
-            if not token0_symbol or not token1_symbol:
+            pricing = self._get_lp_token_pricing(on_chain, position, chain, market)
+            if pricing is None:
                 return None
+            token0_price, token1_price, token0_decimals, token1_decimals = pricing
 
-            # Get live prices
-            try:
-                token0_price = Decimal(str(market.price(token0_symbol)))
-                token1_price = Decimal(str(market.price(token1_symbol)))
-            except Exception:
-                logger.debug("Could not get prices for LP tokens %s/%s", token0_symbol, token1_symbol)
-                return None
+            current_tick, sqrt_price_x96 = self._resolve_lp_current_tick(
+                position,
+                chain,
+                token0_price,
+                token1_price,
+                token0_decimals,
+                token1_decimals,
+            )
 
-            if token0_price <= 0 or token1_price <= 0:
-                return None
-
-            # Get token decimals -- abort if unknown (never guess)
-            token0_decimals = self._get_token_decimals(token0_symbol, chain)
-            token1_decimals = self._get_token_decimals(token1_symbol, chain)
-            if token0_decimals is None or token1_decimals is None:
-                logger.debug("Unknown decimals for LP tokens %s/%s, falling back", token0_symbol, token1_symbol)
-                return None
-
-            # Query pool slot0 for exact price and current tick
-            pool_address = position.details.get("pool") or position.details.get("pool_address")
-            current_tick: int | None = None
-            sqrt_price_x96: int | None = None
-            if pool_address:
-                slot0 = self._lp_reader.read_pool_slot0(chain, pool_address)
-                if slot0:
-                    current_tick = slot0.tick
-                    sqrt_price_x96 = slot0.sqrt_price_x96
-
-            if current_tick is None:
-                # Derive approximate tick from price ratio
-                current_tick = self._price_ratio_to_tick(token0_price, token1_price, token0_decimals, token1_decimals)
-
-            # Calculate position value using V3 math
-            # Prefer exact sqrtPriceX96 for mid-tick precision in narrow ranges
             lp_value = value_lp_position(
                 liquidity=on_chain.liquidity,
                 tick_lower=on_chain.tick_lower,
@@ -1408,12 +1434,13 @@ class PortfolioValuer:
                 sqrt_price_x96=sqrt_price_x96,
             )
 
-            # Add uncollected fees
-            fees_usd = Decimal("0")
-            if on_chain.tokens_owed0 > 0:
-                fees_usd += Decimal(on_chain.tokens_owed0) / Decimal(10**token0_decimals) * token0_price
-            if on_chain.tokens_owed1 > 0:
-                fees_usd += Decimal(on_chain.tokens_owed1) / Decimal(10**token1_decimals) * token1_price
+            fees_usd = self._compute_lp_uncollected_fees_usd(
+                on_chain,
+                token0_price,
+                token1_price,
+                token0_decimals,
+                token1_decimals,
+            )
 
             total = lp_value.value_usd + fees_usd
 
@@ -1431,6 +1458,87 @@ class PortfolioValuer:
         except Exception:
             logger.debug("LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
             return None
+
+    def _get_lp_token_pricing(
+        self,
+        on_chain: "LPPositionOnChain",
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, Decimal, int, int] | None:
+        """Resolve LP token symbols, live prices, and decimals.
+
+        Returns ``(token0_price, token1_price, token0_decimals, token1_decimals)``
+        or ``None`` when any sub-step degrades (matches §7.5 ValueConfidence —
+        downgrade rather than fabricate).
+        """
+        token0_symbol = self._resolve_token_symbol(on_chain.token0, position, "token0")
+        token1_symbol = self._resolve_token_symbol(on_chain.token1, position, "token1")
+        if not token0_symbol or not token1_symbol:
+            return None
+
+        try:
+            token0_price = Decimal(str(market.price(token0_symbol)))
+            token1_price = Decimal(str(market.price(token1_symbol)))
+        except Exception:
+            logger.debug("Could not get prices for LP tokens %s/%s", token0_symbol, token1_symbol)
+            return None
+
+        if token0_price <= 0 or token1_price <= 0:
+            return None
+
+        token0_decimals = self._get_token_decimals(token0_symbol, chain)
+        token1_decimals = self._get_token_decimals(token1_symbol, chain)
+        if token0_decimals is None or token1_decimals is None:
+            logger.debug("Unknown decimals for LP tokens %s/%s, falling back", token0_symbol, token1_symbol)
+            return None
+
+        return token0_price, token1_price, token0_decimals, token1_decimals
+
+    def _resolve_lp_current_tick(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        token0_price: Decimal,
+        token1_price: Decimal,
+        token0_decimals: int,
+        token1_decimals: int,
+    ) -> tuple[int, int | None]:
+        """Resolve ``(current_tick, sqrt_price_x96)`` for V3 valuation.
+
+        Prefers exact ``slot0`` (mid-tick precision in narrow ranges); falls
+        back to price-ratio derivation when ``pool_address`` is missing OR the
+        slot0 read fails. ``sqrt_price_x96`` stays ``None`` on the fallback
+        path so ``value_lp_position`` uses tick math.
+        """
+        pool_address = _resolve_lp_pool_address_from_details(position)
+        if pool_address:
+            slot0 = self._lp_reader.read_pool_slot0(chain, pool_address)
+            if slot0:
+                return slot0.tick, slot0.sqrt_price_x96
+
+        derived_tick = self._price_ratio_to_tick(
+            token0_price,
+            token1_price,
+            token0_decimals,
+            token1_decimals,
+        )
+        return derived_tick, None
+
+    @staticmethod
+    def _compute_lp_uncollected_fees_usd(
+        on_chain: "LPPositionOnChain",
+        token0_price: Decimal,
+        token1_price: Decimal,
+        token0_decimals: int,
+        token1_decimals: int,
+    ) -> Decimal:
+        fees_usd = Decimal("0")
+        if on_chain.tokens_owed0 > 0:
+            fees_usd += Decimal(on_chain.tokens_owed0) / Decimal(10**token0_decimals) * token0_price
+        if on_chain.tokens_owed1 > 0:
+            fees_usd += Decimal(on_chain.tokens_owed1) / Decimal(10**token1_decimals) * token1_price
+        return fees_usd
 
     def _reprice_lending_on_chain(
         self,

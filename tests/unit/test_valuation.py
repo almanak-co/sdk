@@ -1418,3 +1418,164 @@ class TestLpPerpVaultPositionEnrichment:
         )
         key = PortfolioValuer._try_derive_vault_position_key(pos_info, "arbitrum")
         assert key is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-4274 — pool-descriptor guard at the LP repricing entry points.
+# ---------------------------------------------------------------------------
+
+
+class TestLooksLikeEvmAddress:
+    """Module-level helper that gates slot0 calls in the LP repricing path."""
+
+    def test_accepts_42_char_hex(self):
+        from almanak.framework.valuation.portfolio_valuer import _looks_like_evm_address
+
+        assert _looks_like_evm_address("0x1F98431c8aD98523631AE4a59f267346ea31F984")
+        # Lower- and mixed-case both pass (EIP-55 checksums are mixed-case).
+        assert _looks_like_evm_address("0x" + "a" * 40)
+        assert _looks_like_evm_address("0x" + "A" * 40)
+
+    def test_rejects_descriptor(self):
+        from almanak.framework.valuation.portfolio_valuer import _looks_like_evm_address
+
+        # The actual VIB-4274 trigger.
+        assert not _looks_like_evm_address("WETH/USDC/500")
+        assert not _looks_like_evm_address("WAVAX/USDC/20")
+        assert not _looks_like_evm_address("USDC/DAI")
+
+    def test_rejects_wrong_length(self):
+        from almanak.framework.valuation.portfolio_valuer import _looks_like_evm_address
+
+        assert not _looks_like_evm_address("0x" + "a" * 39)  # 41 chars total
+        assert not _looks_like_evm_address("0x" + "a" * 41)  # 43 chars total
+        assert not _looks_like_evm_address("0x")  # only prefix
+
+    def test_rejects_non_hex_body(self):
+        from almanak.framework.valuation.portfolio_valuer import _looks_like_evm_address
+
+        # 42 chars and 0x-prefixed but body contains 'Z'.
+        assert not _looks_like_evm_address("0xZ" + "a" * 39)
+
+    def test_rejects_missing_prefix(self):
+        from almanak.framework.valuation.portfolio_valuer import _looks_like_evm_address
+
+        # 42 chars of hex but no 0x prefix.
+        assert not _looks_like_evm_address("a" * 42)
+
+    def test_rejects_non_string(self):
+        from almanak.framework.valuation.portfolio_valuer import _looks_like_evm_address
+
+        assert not _looks_like_evm_address(None)
+        assert not _looks_like_evm_address(42)
+        assert not _looks_like_evm_address(b"0x" + b"a" * 40)
+        assert not _looks_like_evm_address({"address": "0x" + "a" * 40})
+
+
+def _build_repriced_lp_inputs(pool_value):
+    """Construct PortfolioValuer + position + market mocks for the LP repricing path.
+
+    ``pool_value`` is what the producer stashed under ``position.details["pool"]``:
+      - a 42-char hex address (valid),
+      - a descriptor like ``"WETH/USDC/500"`` (the VIB-4274 trigger),
+      - or any other shape we want the guard to reject.
+
+    Returns ``(valuer, position, market)``.
+    """
+    from almanak.framework.valuation.lp_position_reader import LPPositionOnChain, PoolSlot0
+    from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+    valuer = PortfolioValuer()
+
+    # Mock LP reader: return a real-looking position so the repricing path
+    # reaches the slot0 call. Active liquidity, no uncollected fees.
+    valuer._lp_reader = MagicMock()
+    valuer._lp_reader.read_position.return_value = LPPositionOnChain(
+        token_id=12345,
+        token0="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",  # WETH (Arbitrum)
+        token1="0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # USDC (Arbitrum)
+        fee=500,
+        tick_lower=-100,
+        tick_upper=100,
+        liquidity=10_000_000_000,
+        tokens_owed0=0,
+        tokens_owed1=0,
+    )
+    # If the guard works, this MUST NOT be called with a descriptor.
+    valuer._lp_reader.read_pool_slot0.return_value = PoolSlot0(
+        sqrt_price_x96=2**96,
+        tick=0,
+    )
+
+    position = PositionInfo(
+        position_type=PositionType.LP,
+        position_id="12345",
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        value_usd=Decimal("0"),
+        details={
+            "pool": pool_value,
+            "token0": "WETH",
+            "token1": "USDC",
+        },
+    )
+    market = _make_market(
+        prices={"WETH": Decimal("3500"), "USDC": Decimal("1")},
+    )
+    return valuer, position, market
+
+
+class TestLPRepricingPoolDescriptorGuard:
+    """VIB-4274 — the LP repricing path must NEVER feed a non-hex value to
+    ``read_pool_slot0``. Two sites in the valuer share the guard
+    (``_reprice_lp_on_chain_enriched`` for snapshot persistence and
+    ``_reprice_lp_on_chain`` for the legacy single-value path); test both."""
+
+    def test_enriched_path_rejects_descriptor_under_pool_key(self):
+        """``details["pool"] = "WETH/USDC/500"`` must NOT trip ``read_pool_slot0``.
+
+        Pre-fix this was the production bug: every snapshot emitted
+        ``-32602 odd number of digits`` and the resulting ``in_range`` flag was
+        derived from the price-ratio fallback instead of the actual pool tick.
+        """
+        valuer, position, market = _build_repriced_lp_inputs("WETH/USDC/500")
+
+        result = valuer._reprice_lp_on_chain_enriched(position, "arbitrum", market)
+
+        # The repricing should still succeed (price-ratio fallback fills tick).
+        assert result is not None
+        # The guard's only job: slot0 must NEVER see the descriptor.
+        valuer._lp_reader.read_pool_slot0.assert_not_called()
+
+    def test_legacy_path_rejects_descriptor_under_pool_key(self):
+        """Same guard, second call site (`_reprice_lp_on_chain`)."""
+        valuer, position, market = _build_repriced_lp_inputs("WETH/USDC/500")
+
+        result = valuer._reprice_lp_on_chain(position, "arbitrum", market)
+
+        assert result is not None
+        valuer._lp_reader.read_pool_slot0.assert_not_called()
+
+    def test_enriched_path_accepts_pool_address_when_hex(self):
+        """A real address under ``pool_address`` (or ``pool``) reaches slot0."""
+        valid_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"  # WETH/USDC 500 Arbitrum
+        valuer, position, market = _build_repriced_lp_inputs(valid_pool)
+
+        result = valuer._reprice_lp_on_chain_enriched(position, "arbitrum", market)
+
+        assert result is not None
+        # slot0 IS reached with the valid hex address.
+        valuer._lp_reader.read_pool_slot0.assert_called_once_with("arbitrum", valid_pool)
+
+    def test_pool_address_key_preferred_over_pool(self):
+        """When both keys are present, ``pool_address`` wins (matches VIB-3943 convention)."""
+        valuer, position, market = _build_repriced_lp_inputs("WETH/USDC/500")
+        valid_pool = "0xc6962004f452be9203591991d15f6b388e09e8d0"
+        position.details["pool_address"] = valid_pool
+
+        result = valuer._reprice_lp_on_chain_enriched(position, "arbitrum", market)
+
+        assert result is not None
+        # Address from ``pool_address`` reached slot0; descriptor under ``pool``
+        # was ignored.
+        valuer._lp_reader.read_pool_slot0.assert_called_once_with("arbitrum", valid_pool)

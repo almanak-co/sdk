@@ -513,6 +513,65 @@ class TestHandleLpOpen:
         assert result is not None
         assert result.pool_address == "0xstablepool"
 
+    @pytest.mark.parametrize(
+        ("position_key", "market_id", "expected_pool_address"),
+        [
+            pytest.param(
+                # Aerodrome / V2-family — position-key tail IS the pool address.
+                "lp:aerodrome:base:0xwallet:0xpool",
+                "",
+                "0xpool",
+                id="aerodrome_v2_address_in_position_key",
+            ),
+            pytest.param(
+                # Uniswap V3-style — position-key tail is a token-fee descriptor
+                # ("weth/usdc/500"). Pre-VIB-4274 the descriptor was written
+                # verbatim into ``accounting_events.pool_address`` (no fallback,
+                # silent data corruption). Now the handler detects the ``/`` and
+                # falls back to ``outbox_row.market_id``.
+                "lp:uniswap_v3:arbitrum:0xwallet:weth/usdc/500",
+                "0xc6962004f452be9203591991d15f6b388e09e8d0",
+                "0xc6962004f452be9203591991d15f6b388e09e8d0",
+                id="uniswap_v3_descriptor_falls_back_to_market_id",
+            ),
+        ],
+    )
+    def test_vib4274_resolve_lp_pool_address_descriptor_vs_address(
+        self, position_key: str, market_id: str, expected_pool_address: str
+    ) -> None:
+        """VIB-4274 — descriptor-shaped position-key tails (``weth/usdc/500``)
+        MUST NOT be written verbatim into ``accounting_events.pool_address``.
+
+        Aerodrome / V2-family keys end in a real address — used directly.
+        Uniswap V3-family keys end in a slash-separated token-fee descriptor —
+        the handler falls back to ``outbox_row.market_id`` (which the runner
+        populates with the real pool address for these venues).
+
+        Without this guard, ``pool_address`` columns end up with values like
+        ``"weth/usdc/500"`` and a downstream join on ``pool_address`` never
+        matches the canonical hex address rows in adjacent tables.
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key=position_key,
+            market_id=market_id,
+        )
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome" if "aerodrome" in position_key else "uniswap_v3",
+            chain="base" if "aerodrome" in position_key else "arbitrum",
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.pool_address == expected_pool_address
+        # Hard invariant: never the descriptor.
+        assert "/" not in result.pool_address
+
     def test_vib3893_lp_open_propagates_tick_metadata_and_in_range(self) -> None:
         """VIB-3893 — tick_lower/upper/liquidity/current_tick from
         ``lp_open_data`` and derived ``in_range`` end up on the
