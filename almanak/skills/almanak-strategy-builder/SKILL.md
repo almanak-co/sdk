@@ -243,6 +243,35 @@ All intents are created via `Intent` factory methods. Import:
 from almanak.framework.intents import Intent
 ```
 
+### Reserved fields on every intent
+
+`Intent.registry_handle` (added on `BaseIntent` by VIB-4192 / T06b) is a reserved opaque
+field that the runner uses to thread the open position's handle through ADJUST / CLOSE
+intents. **Strategy authors should not set it manually** — the runner extracts it from
+the prior open's result and passes it through. Synthesising a handle by hand bypasses
+the position-registry dedup invariant and will fail at `save_ledger_and_registry`. See
+`../../../blueprints/28-position-registry.md` for the contract.
+
+### Not-yet-implemented IntentType values (fail-fast at compile time)
+
+The following IntentType strings are **placeholders** in the canonical taxonomy. They
+exist to reserve the name and primitive classification but have **no compiler / executor
+behind them**. Emitting one of these from strategy code raises `PlaceholderIntentError`
+at intent-compile time (before any on-chain action) and is also refused at the
+PolicyEngine boundary for LLM-mediated surfaces:
+
+| IntentType | Future primitive |
+|---|---|
+| `LIQUIDATE` | LIQUIDATION |
+| `OPEN_CDP` | CDP |
+| `MINT_STABLE` | CDP |
+| `REPAY_STABLE` | CDP |
+| `CLOSE_CDP` | CDP |
+
+Do not emit these. When the corresponding primitive ships, the placeholder rows will be
+swapped for real handlers atomically (taxonomy + compiler + handler in one PR) — your
+strategy code does not change.
+
 ### Trading
 
 **Intent.swap** - Exchange tokens on a DEX
@@ -287,12 +316,18 @@ Intent.lp_open(
 
 ```python
 Intent.lp_close(
-    position_id="12345",     # NFT token ID from lp_open result
+    position_id="12345",     # NFT token ID returned by lp_open; ALSO the registry handle
     pool="WETH/USDC",        # Optional pool identifier
     collect_fees=True,       # Collect accumulated fees
     protocol="uniswap_v3",
 )
 ```
+
+> `position_id` from `lp_open`'s result is the registry handle (VIB-4192 / T06b).
+> **Persist it in strategy state** (`self.state["lp_position_id"] = result.position_id`)
+> and pass it back to `lp_close` at teardown. The framework uses it to look up the open
+> row in `position_registry`; a mismatch (handle present but no live row) raises
+> `RegistryAutoCollisionError` before any on-chain call.
 
 **Intent.collect_fees** - Harvest LP fees without closing
 
