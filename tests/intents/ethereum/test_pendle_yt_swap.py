@@ -62,11 +62,17 @@ SUSDE_DECIMALS = 18
 # and stakes it for sUSDe rather than seeding sUSDe directly.
 SUSDE_BALANCE_SLOT = 4
 
-# YT-sUSDe-7MAY2026 — the YT token that the original deploy report flagged
-# the inflated $56,196.22 valuation for. From
+# Currently active sUSDe YT market on Ethereum (Pendle market 0x177768...,
+# expires 2026-08-13). The prior sUSDe YT (expired 2026-05-07) broke this
+# test on 2026-05-11 when the weekly fork-block rollover bootstrapped a
+# post-expiry pin and the Pendle Router started reverting
+# `swapExactTokenForYt`. Rotate this address when the new market gets
+# within 30 days of expiry — scripts/ci/check_pendle_expiry.py will flag
+# it. The VIB-3751 bug this test guards is decimals + swap-type
+# classification; it does not depend on the specific YT identity. From
 # almanak/framework/connectors/pendle/sdk.py YT_TOKEN_INFO["ethereum"].
-YT_SUSDE_7MAY2026_ADDRESS = "0x30775B422b9c7415349855346352FAA61fD97E41"
-YT_SUSDE_7MAY2026_DECIMALS = 18
+YT_SUSDE_ADDRESS = "0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2"
+YT_SUSDE_DECIMALS = 18
 
 
 def _enrich_oracle_with_susde(price_oracle: dict[str, Decimal]) -> dict[str, Decimal]:
@@ -118,7 +124,7 @@ class TestPendleYTSwapIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ):
-        """SwapIntent(50 sUSDe -> YT-sUSDe-7MAY2026) must report amount_in ≈ 50,
+        """SwapIntent(50 sUSDe -> YT-sUSDe-13AUG2026) must report amount_in ≈ 50,
         NOT ≈ 60_898 (internal PT flash-mint), AND the wallet's sUSDe balance
         delta must match it. Guards the full Compile -> Execute -> Receipt
         -> Enrich pipeline.
@@ -137,22 +143,22 @@ class TestPendleYTSwapIntent:
         )
 
         susde_before = get_token_balance(web3, SUSDE_ADDRESS, funded_wallet)
-        yt_before = get_token_balance(web3, YT_SUSDE_7MAY2026_ADDRESS, funded_wallet)
+        yt_before = get_token_balance(web3, YT_SUSDE_ADDRESS, funded_wallet)
         assert susde_before >= fund_amount, (
             f"sUSDe seeding failed: have {susde_before}, expected >= {fund_amount}. "
             f"Check SUSDE_BALANCE_SLOT={SUSDE_BALANCE_SLOT} (StakedUSDeV2 _balances slot)."
         )
 
         print(f"\n{'='*80}")
-        print("VIB-3751 regression: 50 sUSDe -> YT-sUSDe-7MAY2026 via Pendle")
+        print("VIB-3751 regression: 50 sUSDe -> YT-sUSDe-13AUG2026 via Pendle")
         print(f"{'='*80}")
         print(f"sUSDe before: {susde_before / 10**SUSDE_DECIMALS:.4f}")
-        print(f"YT before:    {yt_before / 10**YT_SUSDE_7MAY2026_DECIMALS:.4f}")
+        print(f"YT before:    {yt_before / 10**YT_SUSDE_DECIMALS:.4f}")
 
         # --- Build & compile intent ---
         intent = SwapIntent(
             from_token="sUSDe",
-            to_token="YT-sUSDe-7MAY2026",
+            to_token="YT-sUSDe-13AUG2026",
             amount=susde_amount_human,
             max_slippage=Decimal("0.20"),
             protocol="pendle",
@@ -177,8 +183,8 @@ class TestPendleYTSwapIntent:
         meta = bundle.metadata
         assert meta.get("protocol") == "pendle"
         assert meta.get("swap_type") == "token_to_yt"
-        assert meta.get("to_token_address", "").lower() == YT_SUSDE_7MAY2026_ADDRESS.lower()
-        assert int(meta.get("to_token_decimals") or 0) == YT_SUSDE_7MAY2026_DECIMALS
+        assert meta.get("to_token_address", "").lower() == YT_SUSDE_ADDRESS.lower()
+        assert int(meta.get("to_token_decimals") or 0) == YT_SUSDE_DECIMALS
         assert meta.get("wallet_address", "").lower() == funded_wallet.lower()
         from_meta = meta.get("from_token") or {}
         assert from_meta.get("address", "").lower() == SUSDE_ADDRESS.lower()
@@ -208,16 +214,16 @@ class TestPendleYTSwapIntent:
         parser = PendleReceiptParser(
             chain=CHAIN_NAME,
             token_in_decimals=SUSDE_DECIMALS,
-            token_out_decimals=YT_SUSDE_7MAY2026_DECIMALS,
+            token_out_decimals=YT_SUSDE_DECIMALS,
         )
         receipt_dict = swap_tx.receipt.to_dict()
         parse_result = parser.parse_receipt(
             receipt_dict,
             intent_swap_type="token_to_yt",
             token_in_address=SUSDE_ADDRESS,
-            token_out_address=YT_SUSDE_7MAY2026_ADDRESS,
+            token_out_address=YT_SUSDE_ADDRESS,
             token_in_decimals=SUSDE_DECIMALS,
-            token_out_decimals=YT_SUSDE_7MAY2026_DECIMALS,
+            token_out_decimals=YT_SUSDE_DECIMALS,
             wallet_address=funded_wallet,
         )
         assert parse_result.success, f"Receipt parse failed: {parse_result.error}"
@@ -254,7 +260,7 @@ class TestPendleYTSwapIntent:
 
         # --- Bilateral on-chain conservation check ---
         susde_after = get_token_balance(web3, SUSDE_ADDRESS, funded_wallet)
-        yt_after = get_token_balance(web3, YT_SUSDE_7MAY2026_ADDRESS, funded_wallet)
+        yt_after = get_token_balance(web3, YT_SUSDE_ADDRESS, funded_wallet)
         susde_spent_wei = susde_before - susde_after
         yt_received_wei = yt_after - yt_before
 
@@ -288,7 +294,7 @@ class TestPendleYTSwapIntent:
         print(f"  effective_price:    {sr.effective_price}")
         print("\n--- On-chain wallet deltas ---")
         print(f"  sUSDe: -{susde_spent_wei / 10**SUSDE_DECIMALS}")
-        print(f"  YT:    +{yt_received_wei / 10**YT_SUSDE_7MAY2026_DECIMALS}")
+        print(f"  YT:    +{yt_received_wei / 10**YT_SUSDE_DECIMALS}")
         print("\nVIB-3751 INVARIANTS HOLD: amount_in matches user intent (~50, not ~60_898).")
 
     @pytest.mark.asyncio
@@ -324,7 +330,7 @@ class TestPendleYTSwapIntent:
 
         intent = SwapIntent(
             from_token="sUSDe",
-            to_token="YT-sUSDe-7MAY2026",
+            to_token="YT-sUSDe-13AUG2026",
             amount=susde_amount_human,
             max_slippage=Decimal("0.20"),
             protocol="pendle",
@@ -350,7 +356,7 @@ class TestPendleYTSwapIntent:
         # — Gemini's PR #1973 high-priority concern was that the enricher
         # might silently drop these for non-18-decimal markets.
         assert kwargs.get("intent_swap_type") == "token_to_yt"
-        assert kwargs.get("token_out_address", "").lower() == YT_SUSDE_7MAY2026_ADDRESS.lower()
+        assert kwargs.get("token_out_address", "").lower() == YT_SUSDE_ADDRESS.lower()
         assert kwargs.get("wallet_address", "").lower() == funded_wallet.lower()
         assert kwargs.get("token_in_address", "").lower() == SUSDE_ADDRESS.lower()
 
@@ -363,7 +369,7 @@ class TestPendleYTSwapIntent:
             "If None or missing, non-18-decimal Pendle markets (e.g. Plasma "
             "fUSDT0=6) would be off by 10^12 in production."
         )
-        assert token_out_decimals == YT_SUSDE_7MAY2026_DECIMALS, (
+        assert token_out_decimals == YT_SUSDE_DECIMALS, (
             f"token_out_decimals={token_out_decimals!r} not threaded from compiler."
         )
         assert isinstance(token_in_decimals, int)
