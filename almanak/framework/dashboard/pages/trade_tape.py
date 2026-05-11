@@ -145,29 +145,20 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
 
     st.markdown(f"**{len(response.rows)} intent(s)** · newest first · click any row for the receipt-parsed expander.")
 
-    # Top-level filters
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+    # Top-level filters. Operators told us Status / Confidence selectors
+    # added clutter without changing the read of the tape (success ✓/✗
+    # and the confidence chip are already on every row), so only the
+    # Action multiselect and the Show-approvals toggle stay.
+    col1, col2 = st.columns([4, 1])
     with col1:
         intent_types = sorted({row.intent_type for row in response.rows if row.intent_type})
         selected_intents = st.multiselect(
-            "Intent types",
+            "Action",
             intent_types,
             default=intent_types,
             key=f"tape_intents_{strategy_id}",
         )
     with col2:
-        success_filter = st.selectbox(
-            "Status",
-            ["All", "Success only", "Failures only"],
-            key=f"tape_status_{strategy_id}",
-        )
-    with col3:
-        confidence_filter = st.selectbox(
-            "Confidence",
-            ["All", "HIGH only", "Include ESTIMATED/STALE", "UNAVAILABLE only"],
-            key=f"tape_confidence_{strategy_id}",
-        )
-    with col4:
         # VIB-4046 — approvals are noise for the operator-facing read of
         # the tape. Default off; flip on when auditing a bundle end-to-end.
         # Only affects the sub-tx expander; CSV export is always full
@@ -184,16 +175,6 @@ def render_trade_tape(strategy_id: str, *, limit: int = 50) -> None:
         )
 
     rows = [r for r in response.rows if r.intent_type in selected_intents]
-    if success_filter == "Success only":
-        rows = [r for r in rows if r.success]
-    elif success_filter == "Failures only":
-        rows = [r for r in rows if not r.success]
-    if confidence_filter == "HIGH only":
-        rows = [r for r in rows if r.confidence == "HIGH"]
-    elif confidence_filter == "Include ESTIMATED/STALE":
-        rows = [r for r in rows if r.confidence in ("HIGH", "ESTIMATED", "STALE")]
-    elif confidence_filter == "UNAVAILABLE only":
-        rows = [r for r in rows if r.confidence == "UNAVAILABLE"]
 
     if not rows:
         st.info("No rows match the current filters.")
@@ -617,45 +598,42 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"<span style='font-family:inherit;'>⛔</span> {_e(short)}</div>"
         )
 
-    # icon and confidence_label/color are looked up from constant maps;
-    # row.intent_type / row.protocol / time_str / chain_badge come from
-    # the gateway and must be escaped before HTML interpolation.
-    st.markdown(
-        f"""
-        <div style="background:#161616;border:1px solid #2a2a2a;
-                    border-left:3px solid {intent_color};
-                    border-radius:4px;padding:0.6rem 0.9rem;
-                    margin-bottom:0.4rem;">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;
-                      flex-wrap:wrap;gap:0.5rem;">
-            <div style="font-size:1.0rem;">
-              <span style="margin-right:0.4rem;">{success_marker}</span>
-              <span style="margin-right:0.4rem;">{_e(icon)}</span>
-              <strong style="font-size:1.05rem;">{_e(row.intent_type)}</strong>
-              {chain_badge}
-              <span style="color:#888;margin-left:0.5rem;font-size:0.82rem;">
-                {_e(row.protocol)}
-              </span>
-              {confidence_chip}
-              {count_badge}
-            </div>
-            <div style="color:#888;font-size:0.82rem;">{_e(time_str)}</div>
-          </div>
-          <div style="margin-top:0.25rem;color:#ccc;font-size:0.92rem;">
-            {direction}
-          </div>
-          {lp_fee_line}
-          <div style="margin-top:0.2rem;color:#888;font-size:0.82rem;
-                      display:flex;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;">
-            <span>{cost_line}</span>
-            <span>{tx_link}</span>
-          </div>
-          {error_chip}
-          {unavailable_chip}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # Build the headline card as a single concatenated HTML string. We
+    # used to emit an indented multi-line f-string here, but Streamlit's
+    # CommonMark parser treats whitespace-only lines as blank lines that
+    # terminate an HTML block — and any empty interpolation
+    # (``count_badge``, ``lp_fee_line``, ``error_chip`` …) collapses its
+    # line to pure whitespace, which then re-opened the *following*
+    # indented HTML as a 4-space code block ("</div>" rendered as
+    # literal text below the BORROW/SUPPLY headlines).
+    parts = [
+        f'<div style="background:#161616;border:1px solid #2a2a2a;'
+        f"border-left:3px solid {intent_color};border-radius:4px;"
+        f'padding:0.6rem 0.9rem;margin-bottom:0.4rem;">',
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:0.5rem;">',
+        '<div style="font-size:1.0rem;">',
+        f'<span style="margin-right:0.4rem;">{success_marker}</span>',
+        f'<span style="margin-right:0.4rem;">{_e(icon)}</span>',
+        f'<strong style="font-size:1.05rem;">{_e(row.intent_type)}</strong>',
+        chain_badge,
+        f'<span style="color:#888;margin-left:0.5rem;font-size:0.82rem;">{_e(row.protocol)}</span>',
+        confidence_chip,
+        count_badge,
+        "</div>",
+        f'<div style="color:#888;font-size:0.82rem;">{_e(time_str)}</div>',
+        "</div>",
+        f'<div style="margin-top:0.25rem;color:#ccc;font-size:0.92rem;">{direction}</div>',
+        lp_fee_line,
+        '<div style="margin-top:0.2rem;color:#888;font-size:0.82rem;'
+        'display:flex;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;">',
+        f"<span>{cost_line}</span>",
+        f"<span>{tx_link}</span>",
+        "</div>",
+        error_chip,
+        unavailable_chip,
+        "</div>",
+    ]
+    st.markdown("".join(p for p in parts if p), unsafe_allow_html=True)
 
     # Expander with the four data blocks. ``st.expander`` renders its label
     # as Markdown, not raw HTML — use backticks for inline code formatting

@@ -476,6 +476,8 @@ def get_explorer_url(chain: str, tx_hash: str) -> str:
 
 def render_timeline_events(strategy: Strategy, limit: int = 10) -> None:
     """Render recent timeline events grouped by intent with expandable TX details."""
+    from almanak.framework.dashboard.models import TimelineEventType
+
     events = strategy.timeline_events
 
     if not events:
@@ -483,6 +485,52 @@ def render_timeline_events(strategy: Strategy, limit: int = 10) -> None:
         return
 
     st.markdown("### Recent Activity")
+
+    # The runner emits two classes of low-signal *successful* events that
+    # an operator rarely cares about and which trivially saturate the
+    # limited window:
+    #
+    #   * STATE_CHANGE — one per ``decide()`` call (``started`` +
+    #     ``returned HoldIntent`` pairs during long HOLD phases).
+    #   * TRANSACTION_SUBMITTED / TRANSACTION_CONFIRMED — one per on-chain
+    #     TX, duplicating the higher-level intent rows
+    #     (``SWAP executed``, ``Opened LP position …``) that already
+    #     convey the outcome.
+    #
+    # Hide both classes by default; the toggle flips them back on for
+    # low-level debugging.
+    #
+    # TRANSACTION_FAILED / TRANSACTION_REVERTED are deliberately NOT in
+    # this set — failure events are exactly what an operator needs to
+    # see by default, and the orchestrator maps
+    # ``ExecutionStatus.EXECUTION_FAILED`` onto TRANSACTION_FAILED as the
+    # final completion event for a failed intent.
+    _LOW_LEVEL = {
+        TimelineEventType.STATE_CHANGE,
+        TimelineEventType.TRANSACTION_SUBMITTED,
+        TimelineEventType.TRANSACTION_CONFIRMED,
+    }
+    show_low_level = st.toggle(
+        "Show low-level events (state machine + per-TX confirmations)",
+        value=False,
+        key=f"activity_show_low_level_{strategy.id}",
+        help=(
+            "When off, STATE_CHANGE rows (decide() started, returned "
+            "HoldIntent) and successful per-TX TRANSACTION_* rows are "
+            "hidden so the window fills with meaningful intent landings. "
+            "Failures (TRANSACTION_FAILED / TRANSACTION_REVERTED) remain "
+            "visible regardless. Flip on for low-level debugging."
+        ),
+    )
+    if not show_low_level:
+        events = [e for e in events if e.event_type not in _LOW_LEVEL]
+        if not events:
+            st.info(
+                "No high-level events in the current window. "
+                "Toggle on **Show low-level events** to see the underlying "
+                "state-machine and per-TX rows."
+            )
+            return
 
     # Pure grouping + status-derivation logic lives in ``_detail_render`` so
     # this function only owns the Streamlit HTML emission.

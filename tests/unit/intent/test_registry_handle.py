@@ -886,20 +886,43 @@ def test_factory_builders_dict_in_sync_with_intent_class() -> None:
 
 
 @pytest.mark.parametrize("name", sorted(_FACTORY_BUILDERS))
-def test_factory_helpers_do_not_accept_registry_handle(name: str) -> None:
-    """D3.F11 — every Intent.* factory helper rejects the registry_handle
-    kwarg with TypeError. T06 reserves the field on the dataclass; the
-    factory layer extension is deliberately deferred (Feature contract
-    §"Out of scope for T06").
+def test_factory_helpers_accept_registry_handle(name: str) -> None:
+    """D3.F11 — every Intent.* factory helper accepts the registry_handle
+    kwarg and threads it through to the returned intent's
+    ``registry_handle`` attribute (VIB-4285 / VIB-4185 factory UX
+    completion).
+
+    The inversion of the previous negative claim
+    (``test_factory_helpers_do_not_accept_registry_handle``) — T06
+    deferred this surface; the multi-position fixtures in
+    ``strategies/accounting/`` made the deferred ergonomics painful in
+    practice (model_copy workaround or direct dataclass construction),
+    so the factory layer now plumbs the kwarg through to every
+    dataclass constructor while ``BaseIntent``'s construction-time
+    validator continues to enforce the empty/whitespace and TAXONOMY
+    checks.
     """
     factory = getattr(Intent, name)
     base_kwargs = _FACTORY_BUILDERS[name]
-    with pytest.raises(TypeError) as exc_info:
-        factory(**base_kwargs, registry_handle="should_not_be_accepted_by_factory")
-    assert "registry_handle" in str(exc_info.value), (
-        f"Intent.{name}: TypeError raised but message does not mention "
-        f"'registry_handle' — investigate."
+    intent = factory(**base_kwargs, registry_handle="leg_alpha")
+    assert getattr(intent, "registry_handle", None) == "leg_alpha", (
+        f"Intent.{name}: factory accepted registry_handle kwarg but the "
+        f"returned intent's .registry_handle is not 'leg_alpha'. Confirm "
+        f"the factory passes the kwarg through to the dataclass constructor."
     )
+
+
+@pytest.mark.parametrize("name", sorted(_FACTORY_BUILDERS))
+def test_factory_helpers_reject_empty_registry_handle(name: str) -> None:
+    """Construction-side validator still fires when the kwarg is reached
+    through the factory layer: empty / whitespace-only handles raise.
+    Guards against a future refactor that quietly swallows the value
+    instead of plumbing it through.
+    """
+    factory = getattr(Intent, name)
+    base_kwargs = _FACTORY_BUILDERS[name]
+    with pytest.raises((ValueError, pydantic.ValidationError)):
+        factory(**base_kwargs, registry_handle="   ")
 
 
 # ---------------------------------------------------------------------------

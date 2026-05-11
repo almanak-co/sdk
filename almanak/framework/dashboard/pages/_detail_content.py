@@ -162,7 +162,7 @@ def render_bridge_and_lifecycle(strategy: Strategy) -> None:
         )
     with activity_tab:
         _safe_render(
-            lambda s: render_timeline_events(s, limit=10),
+            lambda s: render_timeline_events(s, limit=100),
             strategy,
             "timeline events",
         )

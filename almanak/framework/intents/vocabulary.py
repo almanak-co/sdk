@@ -841,6 +841,7 @@ class Intent:
         protocol: str | None = None,
         chain: str | None = None,
         destination_chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> SwapIntent:
         """Create a swap intent.
 
@@ -884,6 +885,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             destination_chain=destination_chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -896,6 +898,7 @@ class Intent:
         protocol: str = "uniswap_v3",
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
+        registry_handle: str | None = None,
     ) -> LPOpenIntent:
         """Create an LP open intent.
 
@@ -931,6 +934,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             protocol_params=protocol_params,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -941,6 +945,7 @@ class Intent:
         protocol: str = "uniswap_v3",
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
+        registry_handle: str | None = None,
     ) -> LPCloseIntent:
         """Create an LP close intent.
 
@@ -970,6 +975,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             protocol_params=protocol_params,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -978,6 +984,7 @@ class Intent:
         protocol: str = "traderjoe_v2",
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
+        registry_handle: str | None = None,
     ) -> CollectFeesIntent:
         """Create a collect fees intent to harvest LP fees without closing the position.
 
@@ -1024,6 +1031,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             protocol_params=protocol_params,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1036,6 +1044,7 @@ class Intent:
         interest_rate_mode: InterestRateMode | None = None,
         market_id: str | None = None,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> BorrowIntent:
         """Create a borrow intent.
 
@@ -1087,6 +1096,7 @@ class Intent:
             interest_rate_mode=interest_rate_mode,
             market_id=market_id,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1098,6 +1108,7 @@ class Intent:
         interest_rate_mode: InterestRateMode | None = None,
         market_id: str | None = None,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> RepayIntent:
         """Create a repay intent.
 
@@ -1156,6 +1167,7 @@ class Intent:
             interest_rate_mode=interest_rate_mode,
             market_id=market_id,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1170,6 +1182,7 @@ class Intent:
         trigger_reason: str = "",
         observed_hf: Decimal | None = None,
         target_hf: Decimal | None = None,
+        registry_handle: str | None = None,
     ) -> "DeleverageIntent":
         """Create an emergency deleverage intent.
 
@@ -1226,6 +1239,7 @@ class Intent:
             trigger_reason=trigger_reason,
             observed_hf=observed_hf,
             target_hf=target_hf,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1236,6 +1250,7 @@ class Intent:
         use_as_collateral: bool = True,
         market_id: str | None = None,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> SupplyIntent:
         """Create a supply intent.
 
@@ -1276,6 +1291,7 @@ class Intent:
             use_as_collateral=use_as_collateral,
             market_id=market_id,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1288,6 +1304,7 @@ class Intent:
         chain: str | None = None,
         *,
         is_collateral: bool = True,
+        registry_handle: str | None = None,
     ) -> WithdrawIntent:
         """Create a withdraw intent.
 
@@ -1331,6 +1348,7 @@ class Intent:
             is_collateral=is_collateral,
             market_id=market_id,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1344,6 +1362,7 @@ class Intent:
         max_slippage: Decimal = Decimal("0.01"),
         protocol: str = "gmx_v2",
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> PerpOpenIntent:
         """Create a perpetual position open intent.
 
@@ -1393,6 +1412,7 @@ class Intent:
             max_slippage=max_slippage,
             protocol=protocol,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1405,6 +1425,7 @@ class Intent:
         protocol: str = "gmx_v2",
         chain: str | None = None,
         position_id: str | None = None,
+        registry_handle: str | None = None,
     ) -> PerpCloseIntent:
         """Create a perpetual position close intent.
 
@@ -1450,6 +1471,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             position_id=position_id,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1461,6 +1483,7 @@ class Intent:
         max_slippage: Decimal = Decimal("0.005"),
         preferred_bridge: str | None = None,
         destination_address: str | None = None,
+        registry_handle: str | None = None,
     ) -> Any:
         """Create a bridge intent for cross-chain asset transfer.
 
@@ -1526,6 +1549,7 @@ class Intent:
             max_slippage=max_slippage,
             preferred_bridge=preferred_bridge,
             destination_address=destination_address,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1535,6 +1559,7 @@ class Intent:
         amount: Decimal,
         callback_intents: list[FlashLoanCallbackIntent],
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> FlashLoanIntent:
         """Create a flash loan intent with callback operations.
 
@@ -1574,6 +1599,7 @@ class Intent:
             amount=amount,
             callback_intents=callback_intents,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1582,6 +1608,7 @@ class Intent:
         chain: str | None = None,
         reason_code: str | None = None,
         reason_details: dict[str, Any] | None = None,
+        registry_handle: str | None = None,
     ) -> HoldIntent:
         """Create a hold intent (no action).
 
@@ -1609,7 +1636,13 @@ class Intent:
                 reason_details={"rsi": 52.3, "oversold": 30, "overbought": 70},
             )
         """
-        return HoldIntent(reason=reason, chain=chain, reason_code=reason_code, reason_details=reason_details)
+        return HoldIntent(
+            reason=reason,
+            chain=chain,
+            reason_code=reason_code,
+            reason_details=reason_details,
+            registry_handle=registry_handle,
+        )
 
     @staticmethod
     def stake(
@@ -1618,6 +1651,7 @@ class Intent:
         amount: ChainedAmount,
         receive_wrapped: bool = True,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> StakeIntent:
         """Create a stake intent for liquid staking protocols.
 
@@ -1665,6 +1699,7 @@ class Intent:
             amount=amount,
             receive_wrapped=receive_wrapped,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1674,6 +1709,7 @@ class Intent:
         amount: ChainedAmount,
         chain: str | None = None,
         protocol_params: "dict[str, Any] | None" = None,
+        registry_handle: str | None = None,
     ) -> UnstakeIntent:
         """Create an unstake intent for withdrawing from liquid staking protocols.
 
@@ -1718,6 +1754,7 @@ class Intent:
             amount=amount,
             chain=chain,
             protocol_params=protocol_params,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1725,6 +1762,7 @@ class Intent:
         token: str,
         amount: ChainedAmount,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> WrapNativeIntent:
         """Create a wrap native token intent (e.g. ETH -> WETH).
 
@@ -1742,13 +1780,14 @@ class Intent:
         Example:
             intent = Intent.wrap(token="WETH", amount=Decimal("0.01"), chain="arbitrum")
         """
-        return WrapNativeIntent(token=token, amount=amount, chain=chain)
+        return WrapNativeIntent(token=token, amount=amount, chain=chain, registry_handle=registry_handle)
 
     @staticmethod
     def unwrap(
         token: str,
         amount: ChainedAmount,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> UnwrapNativeIntent:
         """Create an unwrap native token intent (e.g. WETH -> ETH).
 
@@ -1770,7 +1809,7 @@ class Intent:
             # Unwrap all WETH from previous step in a sequence
             intent = Intent.unwrap(token="WETH", amount="all", chain="arbitrum")
         """
-        return UnwrapNativeIntent(token=token, amount=amount, chain=chain)
+        return UnwrapNativeIntent(token=token, amount=amount, chain=chain, registry_handle=registry_handle)
 
     @staticmethod
     def ensure_balance(
@@ -1779,6 +1818,7 @@ class Intent:
         target_chain: str,
         max_slippage: Decimal = Decimal("0.005"),
         preferred_bridge: str | None = None,
+        registry_handle: str | None = None,
     ) -> Any:
         """Create an ensure_balance intent for automatic cross-chain balance management.
 
@@ -1851,6 +1891,7 @@ class Intent:
             target_chain=target_chain,
             max_slippage=max_slippage,
             preferred_bridge=preferred_bridge,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1866,6 +1907,7 @@ class Intent:
         protocol: str = "polymarket",
         chain: str | None = None,
         exit_conditions: PredictionExitConditions | None = None,
+        registry_handle: str | None = None,
     ) -> PredictionBuyIntent:
         """Create a prediction buy intent for purchasing outcome shares.
 
@@ -1926,6 +1968,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             exit_conditions=exit_conditions,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1938,6 +1981,7 @@ class Intent:
         time_in_force: Literal["GTC", "IOC", "FOK"] = "GTC",
         protocol: str = "polymarket",
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> PredictionSellIntent:
         """Create a prediction sell intent for selling outcome shares.
 
@@ -1983,6 +2027,7 @@ class Intent:
             time_in_force=time_in_force,
             protocol=protocol,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -1992,6 +2037,7 @@ class Intent:
         shares: Decimal | Literal["all"] = "all",
         protocol: str = "polymarket",
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> PredictionRedeemIntent:
         """Create a prediction redeem intent for redeeming winning positions.
 
@@ -2037,6 +2083,7 @@ class Intent:
             shares=shares,
             protocol=protocol,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -2046,6 +2093,7 @@ class Intent:
         amount: ChainedAmount,
         deposit_token: str | None = None,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> VaultDepositIntent:
         """Create a vault deposit intent for MetaMorpho ERC-4626 vaults.
 
@@ -2078,6 +2126,7 @@ class Intent:
             amount=amount,
             deposit_token=deposit_token,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
@@ -2087,6 +2136,7 @@ class Intent:
         shares: ChainedAmount,
         deposit_token: str | None = None,
         chain: str | None = None,
+        registry_handle: str | None = None,
     ) -> VaultRedeemIntent:
         """Create a vault redeem intent for MetaMorpho ERC-4626 vaults.
 
@@ -2119,6 +2169,7 @@ class Intent:
             shares=shares,
             deposit_token=deposit_token,
             chain=chain,
+            registry_handle=registry_handle,
         )
 
     @staticmethod
