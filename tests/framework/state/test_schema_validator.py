@@ -56,9 +56,9 @@ def test_t_3763_1_contract_lists_all_accounting_tables() -> None:
 
     VIB-4197 / T11 added ``position_registry`` (the atomic-commit primitive
     target) and ``migration_state`` (cutover-progress tracking) to the
-    SQLite contract. The Postgres contract excludes both until VIB-4205 /
-    T19 ships the hosted writer + ``metrics-database`` migration; that
-    asymmetry is asserted in T-3763-2b (below).
+    SQLite contract. T19 (VIB-4205) lifts the Postgres deferral on both
+    tables now that the hosted writer paths ship; both contracts cover
+    every table.
     """
     expected_tables = {
         "portfolio_snapshots",
@@ -89,18 +89,18 @@ def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
     will fail this test loudly rather than silently bricking the hosted
     validator.
 
-    VIB-4197 / T11: the PG contract now legitimately excludes
-    ``position_registry`` and ``migration_state`` (deferred until VIB-4205
-    / T19 lands the hosted writer + ``metrics-database`` migration). The
-    equality assertion below is therefore scoped to the table set the PG
-    contract DOES cover; the deferred set is asserted separately so a
-    future PR cannot silently add hosted boot requirements.
+    VIB-4205 / T19 lifts the table-level deferral on ``position_registry``
+    and ``migration_state`` (and the per-column deferral on
+    ``accounting_events.position_reference``) so both contracts cover the
+    full hosted shape. ``_POSTGRES_DEFERRED_TABLES`` and
+    ``_POSTGRES_DEFERRED_COLUMNS`` are both empty by design; if a future
+    PR re-adds an entry (a new local-only table or column landing ahead
+    of its metrics-database migration), the equality assertion below
+    will fire loud.
 
-    VIB-4196 / T10 extended the deferral mechanism to per-column granularity
-    via ``_POSTGRES_DEFERRED_COLUMNS`` (``accounting_events.position_reference``
-    is local-only until T19). The column-level diff below subtracts the
-    deferred columns before comparing — same intent as the table-level
-    deferral, applied at column scope.
+    The column-level diff still subtracts ``_POSTGRES_DEFERRED_COLUMNS``
+    before comparing so the mechanism continues to support future column
+    additions that land on SQLite ahead of the metrics-database migration.
     """
     from almanak.framework.state.schema_contract import (
         _POSTGRES_DEFERRED_COLUMNS,
@@ -154,11 +154,19 @@ def test_t_3763_2b_pg_contract_swaps_strategy_id_for_agent_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# VIB-4196 / T10: position_reference column is in the SQLite contract,
-# defers from Postgres, and triggers the boot-guard when missing.
+# VIB-4196 / T10 + VIB-4205 / T19: position_reference is required on BOTH
+# backends as of T19 (deferral lifted). The fail-loud boot guard now covers
+# the column on hosted Postgres too.
 # ---------------------------------------------------------------------------
-def test_vib_4196_position_reference_is_local_sqlite_only() -> None:
-    """T10: position_reference must be SQLite-required and Postgres-deferred."""
+def test_vib_4205_position_reference_required_on_both_backends() -> None:
+    """T19 (VIB-4205): position_reference MUST be required on BOTH backends.
+
+    T10 (VIB-4196) introduced the column local-only with a per-column
+    Postgres deferral. T19 lifts that deferral now that the hosted writer
+    paths ship (and the metrics-database migration in VIB-4191 lands the
+    column on production Postgres). Re-introducing the deferral would
+    silently re-disable the fail-loud boot guard.
+    """
     from almanak.framework.state.schema_contract import (
         _POSTGRES_DEFERRED_COLUMNS,
         ACCOUNTING_SCHEMA_CONTRACT_SQLITE,
@@ -171,12 +179,16 @@ def test_vib_4196_position_reference_is_local_sqlite_only() -> None:
     ), "T10 column missing from SQLite contract"
     assert (
         "position_reference"
-        not in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES["accounting_events"]
-    ), "T10 column leaked into Postgres contract before T19"
+        in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES["accounting_events"]
+    ), (
+        "T19 (VIB-4205) lifts the T10 Postgres deferral; "
+        "accounting_events.position_reference MUST appear in the Postgres "
+        "contract so VIB-4191 column drift is caught at boot."
+    )
     deferred_for_ae = _POSTGRES_DEFERRED_COLUMNS.get("accounting_events", frozenset())
-    assert "position_reference" in deferred_for_ae, (
-        f"T10 column must be in _POSTGRES_DEFERRED_COLUMNS['accounting_events']; "
-        f"got {deferred_for_ae}"
+    assert "position_reference" not in deferred_for_ae, (
+        f"T19 lifts the deferral; _POSTGRES_DEFERRED_COLUMNS['accounting_events'] "
+        f"must not carry 'position_reference'; got {deferred_for_ae}"
     )
 
 

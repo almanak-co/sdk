@@ -147,5 +147,9 @@ async def validate_postgres_schema_or_raise(database_url: str) -> None:
         "The metrics-database schema is out of date. Apply the latest "
         "Prisma migration in the metrics-database repo and redeploy "
         "before starting this gateway. The SDK does NOT mutate hosted "
-        "Postgres at runtime."
+        "Postgres at runtime.\n"
+        "Schema dependency: VIB-4191 "
+        "(https://linear.app/almanak/issue/VIB-4191) tracks the metrics-database "
+        "Prisma migration that lands the T19 (VIB-4205) tables and columns "
+        "(position_registry, migration_state, accounting_events.position_reference)."
     )

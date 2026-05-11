@@ -240,14 +240,45 @@ async def test_subsequent_boot_short_circuits_outcome_a(gsm_runner):
 
 
 @pytest.mark.asyncio
-async def test_postgres_backend_degrades_via_unimplemented(tmp_path):
-    """D3.F1 — A GSM pointed at a Postgres-shaped servicer raises
-    CutoverStorageNotSupported (translated from gRPC UNIMPLEMENTED).
-    The boot guard catches it and degrades cleanly (cache stays empty,
-    is_cutover_active returns False, runner does NOT crash)."""
+async def test_postgres_backend_no_longer_degrades_silently_after_t19(tmp_path):
+    """D3.F1 (inverted by T19 / VIB-4205) — Postgres backend is now
+    supported; cutover RPCs no longer return UNIMPLEMENTED.
+
+    Pre-T19 contract: a GSM pointed at a Postgres-shaped servicer raised
+    ``CutoverStorageNotSupported`` (translated from gRPC UNIMPLEMENTED).
+    The boot guard caught it and silently degraded so the runner did
+    NOT crash. This was the "Postgres half not landed yet" controlled
+    degrade per cutover spec §2.4.
+
+    Post-T19 contract: the Postgres handlers no longer return
+    UNIMPLEMENTED — they execute real asyncpg writes against the
+    snapshot pool. When the pool is unreachable / mis-configured, the
+    handlers return gRPC INTERNAL (not UNIMPLEMENTED), which is the
+    correct loud-failure signal for production.
+
+    This test pins the inverted contract: with a Postgres-flagged
+    servicer backed by a *broken* pool sentinel (``object()`` lacks
+    ``.acquire()`` — simulates a pool that exists but cannot serve
+    queries), the boot guard MUST NOT silently degrade. ``RpcError``
+    with a non-UNIMPLEMENTED code propagates so the operator sees the
+    real infrastructure failure rather than a runner that quietly runs
+    in legacy-mode against a broken hosted DB.
+
+    Re-adding silent-degrade for non-UNIMPLEMENTED errors is the
+    regression this test catches — that would mask production
+    metrics-db outages as "registry mode off" runs.
+
+    Cross-reference: ``GatewayStateManager._translate_unimplemented``
+    (only UNIMPLEMENTED is translated to the controlled-degrade
+    exception class; every other gRPC code propagates unchanged).
+    """
     settings = GatewaySettings()
     svc = StateServiceServicer(settings)
-    svc._snapshot_pool = object()  # Postgres flag — every handler returns UNIMPLEMENTED
+    # ``object()`` is non-None so handlers take the Postgres branch,
+    # but lacks ``.acquire()`` so ``_snapshot_execute`` raises
+    # AttributeError inside the handler's broad ``except Exception``,
+    # which maps to gRPC INTERNAL (NOT UNIMPLEMENTED).
+    svc._snapshot_pool = object()
     svc._initialized = True
 
     fake_gateway_client = MagicMock()
@@ -255,16 +286,26 @@ async def test_postgres_backend_degrades_via_unimplemented(tmp_path):
     gsm = GatewayStateManager(fake_gateway_client)
     runner = SimpleNamespace(state_manager=gsm)
 
-    await enforce_or_run_cutover(
-        runner=runner,
-        deployment_id="PgDep:vib4208",
-        primitive=Primitive.LP,
-        cutover_key="lp",
-    )
-    # Degrade contract: cache stays empty (proves the boot guard caught
-    # CutoverStorageNotSupported BEFORE populating cache); is_cutover_active
-    # therefore False. Asserting both sides ensures a regression that
-    # populates the cache despite the degrade still fails this test
-    # (CodeRabbit PR #2230).
+    # Boot guard now sees a non-UNIMPLEMENTED RpcError; ``_translate_
+    # unimplemented`` only rewrites UNIMPLEMENTED to
+    # CutoverStorageNotSupported, so the INTERNAL error propagates.
+    # The guard catches only (CutoverStorageNotSupported, AttributeError)
+    # in cutover.py — gRPC.RpcError(INTERNAL) is therefore loud.
+    with pytest.raises(grpc.RpcError) as exc_info:
+        await enforce_or_run_cutover(
+            runner=runner,
+            deployment_id="PgDep:vib4208",
+            primitive=Primitive.LP,
+            cutover_key="lp",
+        )
+    # Confirm the propagated error code is NOT UNIMPLEMENTED — that's
+    # the inversion vs the pre-T19 silent-degrade path. If a future
+    # refactor reintroduces UNIMPLEMENTED on a Postgres-handled RPC,
+    # the boot guard would silently degrade against a working Postgres
+    # backend — the bug this test now exists to prevent.
+    assert exc_info.value.code() != grpc.StatusCode.UNIMPLEMENTED
+    # Cache MUST stay empty — the boot guard never reached the
+    # populate-cache step, so ``is_cutover_active`` stays False (the
+    # one consumer-side invariant that survives the inversion).
     assert getattr(runner, "_cutover_complete_cache", set()) == set()
     assert is_cutover_active(runner, Primitive.LP, "lp") is False

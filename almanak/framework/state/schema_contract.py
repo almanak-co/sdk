@@ -135,9 +135,9 @@ ACCOUNTING_SCHEMA_CONTRACT_SQLITE: dict[str, frozenset[str]] = {
             "payload_json",
             "schema_version",
             # VIB-4196 / T10: forward-compat JSON pointer between
-            # accounting_events and the position_registry (T11). Local
-            # SQLite only — Postgres is deferred to T19 (VIB-4205) via
-            # _POSTGRES_DEFERRED_COLUMNS below.
+            # accounting_events and the position_registry (T11). Required
+            # on BOTH backends as of T19 (VIB-4205) — the metrics-database
+            # migration (VIB-4191) lands the column on hosted Postgres.
             "position_reference",
         }
     ),
@@ -228,19 +228,17 @@ def _swap_strategy_for_agent(cols: frozenset[str]) -> frozenset[str]:
 
 
 # Tables introduced by VIB-4197 / T11 (``position_registry``) and the cutover
-# infrastructure (``migration_state``). The hosted Postgres writer + corresponding
-# ``metrics-database`` migration land in T19 (VIB-4205). Including these in the
-# Postgres contract before T19 would block hosted gateway boot for tables the
-# hosted runtime cannot use (CLAUDE.md "Database schema ownership" — Postgres
-# DDL is owned outside this repo). Auto-flow from ``_SQLITE`` to ``_POSTGRES``
-# is suppressed for these tables until T19 lands; the local SQLite contract
-# still covers them.
-_POSTGRES_DEFERRED_TABLES: frozenset[str] = frozenset(
-    {
-        "position_registry",
-        "migration_state",
-    }
-)
+# infrastructure (``migration_state``). T19 (VIB-4205) shipped the Postgres
+# writer paths in ``almanak/gateway/services/state_service.py``; the deployed
+# metrics-database schema is owned outside this repo (VIB-4191). Once VIB-4191
+# lands on production metrics-database, hosted gateway boot will validate-only
+# both tables here — adding either name to this set would re-disable that
+# fail-loud guard for new column drift.
+#
+# Empty by design as of T19. Future additions belong here ONLY when a new
+# table lands on SQLite ahead of a still-pending metrics-database migration
+# (the same forward-compat pattern this set has always served).
+_POSTGRES_DEFERRED_TABLES: frozenset[str] = frozenset()
 
 # Per-table column-level Postgres deferrals. Mirrors
 # ``_POSTGRES_DEFERRED_TABLES`` for additions that introduce a new column
@@ -250,14 +248,10 @@ _POSTGRES_DEFERRED_TABLES: frozenset[str] = frozenset(
 # subtracts these per-table columns from the SQLite contract before swapping
 # ``strategy_id`` → ``agent_id``.
 #
-# VIB-4196 / T10: ``accounting_events.position_reference`` lands on local
-# SQLite first; the Postgres half is owned by T19 / VIB-4205 + the
-# metrics-database migration. Removing the entry happens atomically with the
-# T19 PR — until then, including the column in the Postgres contract would
-# brick hosted gateway boot.
-_POSTGRES_DEFERRED_COLUMNS: dict[str, frozenset[str]] = {
-    "accounting_events": frozenset({"position_reference"}),
-}
+# Empty by design as of T19 (VIB-4205): ``accounting_events.position_reference``
+# (VIB-4196 / T10) is now required on hosted Postgres too. Re-adding an entry
+# here would silently re-disable the fail-loud boot guard for that column.
+_POSTGRES_DEFERRED_COLUMNS: dict[str, frozenset[str]] = {}
 
 
 def _postgres_columns_for(table: str, sqlite_cols: frozenset[str]) -> frozenset[str]:

@@ -68,6 +68,21 @@ _ALLOWLIST_WRITERS_QUALNAMED: frozenset[tuple[str, str]] = frozenset({
         "almanak/framework/state/backends/sqlite.py",
         "SQLiteStore.insert_position_registry_row_if_absent",
     ),
+    # VIB-4205 / T19 — Postgres half of the atomic ledger+registry+handle
+    # commit primitive. Mirrors `SQLiteStore.save_ledger_and_registry_atomic`
+    # line-for-line but uses asyncpg with an explicit
+    # `async with conn.transaction():` block so the three writes commit
+    # as one Postgres transaction. The handler's INSERT + same-status
+    # retry UPDATE on `position_registry` are BOTH part of this primitive
+    # (the UPDATE backfills `handle` on a same-status retry per
+    # sqlite.py:3065). Adding an additional `position_registry` writer
+    # qualname here without a matching documented carve-out is the
+    # split-commit failure mode this guard exists to catch (blueprint
+    # 28 §4, §6).
+    (
+        "almanak/gateway/services/state_service.py",
+        "StateServiceServicer._save_ledger_and_registry_pg",
+    ),
 })
 
 
@@ -685,20 +700,29 @@ def test_layer_b_forbidden_regex_catches_bare_tokens() -> None:
 
 
 # =============================================================================
-# REGRESSION — Postgres contract excludes T11-deferred tables
-# (CodeRabbit PR #2207 finding)
+# REGRESSION — Postgres contract INCLUDES T11 tables after T19 (VIB-4205)
+# (CodeRabbit PR #2207 finding, inverted by VIB-4205 / T19 landing)
 # =============================================================================
 
 
-def test_postgres_contract_excludes_t11_deferred_tables() -> None:
-    """``position_registry`` and ``migration_state`` MUST NOT appear in the
-    Postgres contract until T19 (VIB-4205) lands.
+def test_postgres_contract_includes_t11_tables_after_t19_vib_4205() -> None:
+    """``position_registry`` and ``migration_state`` MUST appear in the
+    Postgres contract now that T19 (VIB-4205) has shipped the hosted
+    writers.
 
-    Including them earlier would block hosted gateway boot for tables the
-    hosted runtime cannot use, in violation of CLAUDE.md "Database schema
-    ownership" — Postgres DDL is owned by the separate ``metrics-database``
-    repo. Auto-flow from ``_SQLITE`` to ``_POSTGRES`` is suppressed for
-    these tables until T19's coordinated migration.
+    Inverted form of the pre-T19 deferral guard: before VIB-4205 these
+    tables were intentionally absent from the Postgres contract so hosted
+    gateway boot didn't fail-loud on tables the hosted runtime could not
+    yet use. T19 shipped the Postgres writer paths in
+    ``almanak/gateway/services/state_service.py`` and emptied
+    ``_POSTGRES_DEFERRED_TABLES`` so the schema validator now fail-louds
+    when the metrics-database migration (VIB-4191) hasn't landed these
+    tables.
+
+    Re-introducing either table to ``_POSTGRES_DEFERRED_TABLES`` without
+    a corresponding metrics-database rollback is the regression this
+    inverted test catches — it would silently re-disable the fail-loud
+    boot guard for these tables.
     """
     from almanak.framework.state.schema_contract import (
         ACCOUNTING_SCHEMA_CONTRACT_POSTGRES,
@@ -706,14 +730,21 @@ def test_postgres_contract_excludes_t11_deferred_tables() -> None:
     )
     assert "position_registry" in ACCOUNTING_SCHEMA_CONTRACT_SQLITE
     assert "migration_state" in ACCOUNTING_SCHEMA_CONTRACT_SQLITE
-    # The hosted contract MUST exclude both — until VIB-4205 lands the
-    # Postgres writer + corresponding metrics-database migration. Removing
-    # this assertion without that coordinated landing is the bug.
-    assert "position_registry" not in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES, (
-        "position_registry leaked into the Postgres contract — would block "
-        "hosted gateway boot. Remove it (or coordinate VIB-4205 landing)."
+    # T19 (VIB-4205) landed — both tables MUST now appear in the hosted
+    # Postgres contract. Re-introducing either to
+    # ``_POSTGRES_DEFERRED_TABLES`` silently re-disables the fail-loud
+    # boot guard for new column drift on these tables.
+    assert "position_registry" in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES, (
+        "position_registry missing from the Postgres contract — T19 "
+        "(VIB-4205) landed the hosted writer, so the schema validator "
+        "must now require this table. If you re-added it to "
+        "_POSTGRES_DEFERRED_TABLES, also revert the writer and update "
+        "this test."
     )
-    assert "migration_state" not in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES, (
-        "migration_state leaked into the Postgres contract — would block "
-        "hosted gateway boot. Remove it (or coordinate VIB-4205 landing)."
+    assert "migration_state" in ACCOUNTING_SCHEMA_CONTRACT_POSTGRES, (
+        "migration_state missing from the Postgres contract — T19 "
+        "(VIB-4205) landed the hosted cutover RPCs, so the schema "
+        "validator must now require this table. If you re-added it to "
+        "_POSTGRES_DEFERRED_TABLES, also revert the writer and update "
+        "this test."
     )

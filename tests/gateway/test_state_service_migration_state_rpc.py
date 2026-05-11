@@ -1,23 +1,33 @@
-"""Unit tests for the cutover storage RPCs added in VIB-4208 / T22.
+"""Unit tests for the cutover storage RPCs.
+
+History:
+  - VIB-4208 / T22 shipped the SQLite half of these RPCs and the
+    request-validation / handler-orchestration scaffolding.
+  - VIB-4205 / T19 ships the hosted Postgres half by wiring each RPC's
+    ``_snapshot_pool is not None`` branch to the asyncpg helpers
+    (``_snapshot_execute`` / ``_snapshot_fetchrow`` / ``_snapshot_fetch``)
+    and — for ``SaveLedgerAndRegistry`` — a single ``conn.transaction()``
+    for atomic ledger + registry + handle commit.
 
 Covers:
-  - UpsertMigrationState: validation, SQLite happy path, Postgres-UNIMPLEMENTED, idempotency.
-  - GetMigrationState: found/not_found, Postgres-UNIMPLEMENTED, error propagation.
-  - UpdateMigrationState: partial-update plumbing through to SQLite kwargs.
+  - UpsertMigrationState: validation, SQLite happy path, idempotency,
+    Postgres path now wired (no more UNIMPLEMENTED).
+  - GetMigrationState: found/not_found on both backends.
+  - UpdateMigrationState: partial-update plumbing through to SQLite kwargs;
+    Postgres path now wired.
   - MarkBackfillComplete: terminal flip, validation.
   - GetPositionEventsFiltered: empty / populated, error propagation.
   - GetPositionRegistryOpenRows: empty / populated, payload roundtrip.
   - SaveLedgerAndRegistry: happy path, RegistryAutoCollisionError discrimination,
-    AccountingPersistenceError, Postgres UNIMPLEMENTED.
+    AccountingPersistenceError. Postgres path now wired (atomic primitive).
   - GatewayStateManager client-adapter round-trips through a real (in-process)
     StateServiceServicer + SQLite WARM backend — proves the proto + handler +
     adapter triangle is wired correctly.
   - Hard-coding guard (D3.F7): non-LP (primitive, cutover_key) tuple round-trips
     faithfully and a sibling lookup against (lp, lp) returns found=false.
 
-The SQLite path (``_snapshot_pool = None``) is the only one exercised in
-unit tests; Postgres branch is covered by mocking ``_snapshot_pool`` and
-asserting gRPC UNIMPLEMENTED.
+Detailed PG-branch SQL-shape and error-classification tests live in
+``test_state_service_postgres_registry_rpcs.py`` (T19).
 """
 
 from __future__ import annotations
@@ -32,7 +42,6 @@ import pytest
 import pytest_asyncio
 
 from almanak.framework.accounting.commit import RegistryRow
-from almanak.framework.migration import CutoverStorageNotSupported
 from almanak.framework.migration.backfill import MigrationStateRow
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
@@ -232,26 +241,24 @@ class TestUpsertMigrationState:
         )
 
     @pytest.mark.asyncio
-    async def test_postgres_unimplemented(self, state_service, mock_context):
-        """D3.F1 — Postgres backend returns gRPC UNIMPLEMENTED."""
-        state_service._snapshot_pool = object()  # truthy → Postgres path
-        req = gateway_pb2.UpsertMigrationStateRequest(
-            deployment_id=_DEPLOYMENT_ID, primitive=_PRIMITIVE, cutover_key=_CUTOVER_KEY
-        )
-        resp = await state_service.UpsertMigrationState(req, mock_context)
-        assert not resp.success
-        assert "T19" in resp.error
-        mock_context.set_code.assert_called_with(grpc.StatusCode.UNIMPLEMENTED)
+    async def test_postgres_now_wired(self, state_service, mock_context):
+        """T19 (VIB-4205): the Postgres branch is now implemented.
 
-    @pytest.mark.asyncio
-    async def test_postgres_unimplemented_postgres_keyword(self, state_service, mock_context):
-        """D3.F1 — Postgres path test keyword for filter."""
-        state_service._snapshot_pool = object()
+        The handler calls ``_snapshot_execute`` with an ``INSERT … ON
+        CONFLICT DO NOTHING`` keyed on the composite triple. Detailed
+        SQL-shape assertions live in
+        ``test_state_service_postgres_registry_rpcs.py``; this guard only
+        proves the UNIMPLEMENTED stub is gone.
+        """
+        state_service._snapshot_pool = object()  # truthy → Postgres path
+        state_service._snapshot_execute = AsyncMock(return_value="INSERT 0 1")
         req = gateway_pb2.UpsertMigrationStateRequest(
             deployment_id=_DEPLOYMENT_ID, primitive=_PRIMITIVE, cutover_key=_CUTOVER_KEY
         )
         resp = await state_service.UpsertMigrationState(req, mock_context)
-        assert not resp.success
+        assert resp.success
+        mock_context.set_code.assert_not_called()
+        state_service._snapshot_execute.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_upsert_idempotent_via_real_sqlite(self, gsm_client):
@@ -330,14 +337,19 @@ class TestGetMigrationState:
         assert json.loads(resp.data.notes.decode("utf-8")) == {"audit": []}
 
     @pytest.mark.asyncio
-    async def test_get_postgres_unimplemented(self, state_service, mock_context):
+    async def test_get_postgres_now_wired_not_found(self, state_service, mock_context):
+        """T19 (VIB-4205): Postgres branch wired; fetchrow → None → found=False."""
         state_service._snapshot_pool = object()
+        state_service._snapshot_fetchrow = AsyncMock(return_value=None)
         req = gateway_pb2.GetMigrationStateRequest(
             deployment_id=_DEPLOYMENT_ID, primitive=_PRIMITIVE, cutover_key=_CUTOVER_KEY
         )
         resp = await state_service.GetMigrationState(req, mock_context)
         assert not resp.found
-        mock_context.set_code.assert_called_with(grpc.StatusCode.UNIMPLEMENTED)
+        # UNIMPLEMENTED gone — no error code, no error_class.
+        mock_context.set_code.assert_not_called()
+        assert not resp.error
+        state_service._snapshot_fetchrow.assert_awaited_once()
 
 
 # =============================================================================
@@ -458,14 +470,21 @@ class TestUpdateMigrationState:
         assert kwargs["rows_skipped_already_present"] is None
 
     @pytest.mark.asyncio
-    async def test_postgres_unimplemented(self, state_service, mock_context):
+    async def test_postgres_now_wired_empty_request_is_noop(
+        self, state_service, mock_context
+    ):
+        """T19 (VIB-4205): empty Update on Postgres is a no-op (mirrors SQLite)."""
         state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 0")
+        # No counters / timestamp supplied — no UPDATE should be issued.
         req = gateway_pb2.UpdateMigrationStateRequest(
             deployment_id=_DEPLOYMENT_ID, primitive=_PRIMITIVE, cutover_key=_CUTOVER_KEY
         )
         resp = await state_service.UpdateMigrationState(req, mock_context)
-        assert not resp.success
-        mock_context.set_code.assert_called_with(grpc.StatusCode.UNIMPLEMENTED)
+        assert resp.success
+        mock_context.set_code.assert_not_called()
+        # Empty request path returns without calling _snapshot_execute.
+        state_service._snapshot_execute.assert_not_called()
 
 
 class TestMarkBackfillComplete:
@@ -561,12 +580,19 @@ class TestGetPositionEventsFiltered:
         assert ev.protocol == "uniswap_v3"
 
     @pytest.mark.asyncio
-    async def test_postgres_unimplemented(self, state_service, mock_context):
+    async def test_postgres_now_wired_empty_position_types_returns_empty(
+        self, state_service, mock_context
+    ):
+        """T19 (VIB-4205): empty position_types returns empty list without hitting DB."""
         state_service._snapshot_pool = object()
+        state_service._snapshot_fetch = AsyncMock(return_value=[])
         req = gateway_pb2.GetPositionEventsFilteredRequest(deployment_id=_DEPLOYMENT_ID)
         resp = await state_service.GetPositionEventsFiltered(req, mock_context)
-        assert resp.error
-        mock_context.set_code.assert_called_with(grpc.StatusCode.UNIMPLEMENTED)
+        assert not resp.error
+        assert len(resp.events) == 0
+        mock_context.set_code.assert_not_called()
+        # Fast-path: no DB call.
+        state_service._snapshot_fetch.assert_not_called()
 
 
 # =============================================================================
@@ -733,12 +759,32 @@ class TestSaveLedgerAndRegistry:
         assert resp.error_class == "RegistryAutoCollisionError"
 
     @pytest.mark.asyncio
-    async def test_postgres_unimplemented(self, state_service, mock_context):
+    async def test_postgres_now_wired(self, state_service, mock_context):
+        """T19 (VIB-4205): Postgres SaveLedgerAndRegistry is now wired.
+
+        Detailed SQL-shape, atomicity, and error-classification tests live
+        in ``test_state_service_postgres_registry_rpcs.py``; this guard
+        only proves the UNIMPLEMENTED stub is gone by patching the
+        internal PG branch helper with an AsyncMock so the handler can
+        reach the success path without a real asyncpg pool.
+        """
         state_service._snapshot_pool = object()
+        # Replace the private PG branch with an AsyncMock that returns a
+        # success response — this short-circuits the asyncpg work while
+        # still proving the dispatcher routes to the new T19 branch.
+        success_resp = gateway_pb2.SaveLedgerAndRegistryResponse(success=True)
+        state_service._save_ledger_and_registry_pg = AsyncMock(return_value=success_resp)
+
         req = gateway_pb2.SaveLedgerAndRegistryRequest(
             id="33333333-3333-3333-3333-333333333333",
+            cycle_id="cyc-3",
+            strategy_id="TestStrategy:vib4208",
             deployment_id=_DEPLOYMENT_ID,
+            execution_mode="paper",
             timestamp=int(datetime(2026, 5, 11, tzinfo=UTC).timestamp()),
+            intent_type="LP_OPEN",
+            chain="arbitrum",
+            protocol="uniswap_v3",
             registry_chain="arbitrum",
             registry_primitive="lp",
             registry_accounting_category="lp",
@@ -747,24 +793,40 @@ class TestSaveLedgerAndRegistry:
             registry_grouping_policy_version="univ3_lp@v1",
             registry_status="open",
             registry_payload_json=b"{}",
+            registry_matching_policy_version=1,
         )
         resp = await state_service.SaveLedgerAndRegistry(req, mock_context)
-        assert not resp.success
-        assert resp.error_class == "UNIMPLEMENTED"
-        mock_context.set_code.assert_called_with(grpc.StatusCode.UNIMPLEMENTED)
+        assert resp.success
+        mock_context.set_code.assert_not_called()
+        state_service._save_ledger_and_registry_pg.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_client_adapter_translates_unimplemented(self, gsm_client):
-        """Patch the in-process servicer to look like Postgres → adapter raises CutoverStorageNotSupported."""
-        # Swap the underlying servicer's snapshot_pool flag so the next call
-        # exercises the Postgres branch.
-        gsm_client._client.state._svc._snapshot_pool = object()  # type: ignore[attr-defined]
+    async def test_client_adapter_no_longer_translates_unimplemented(self, gsm_client):
+        """T19 (VIB-4205): the Postgres branch is wired, so the adapter no
+        longer raises ``CutoverStorageNotSupported``.
+
+        We can't easily exercise the real asyncpg pool from a unit test, so
+        we patch the in-process servicer's PG branch helper to return a
+        canned success response. This proves the client adapter no longer
+        sees gRPC UNIMPLEMENTED for the Postgres path.
+        """
+        svc = gsm_client._client.state._svc  # type: ignore[attr-defined]
+        svc._snapshot_pool = object()
+        svc._save_ledger_and_registry_pg = AsyncMock(
+            return_value=gateway_pb2.SaveLedgerAndRegistryResponse(success=True)
+        )
         try:
-            with pytest.raises(CutoverStorageNotSupported):
-                await gsm_client.save_ledger_and_registry(
-                    ledger=_make_ledger(),
-                    registry=_make_registry_row(),
-                    handle=None,
-                )
+            # Should NOT raise CutoverStorageNotSupported any more.
+            await gsm_client.save_ledger_and_registry(
+                ledger=_make_ledger(),
+                registry=_make_registry_row(),
+                handle=None,
+            )
         finally:
-            gsm_client._client.state._svc._snapshot_pool = None  # type: ignore[attr-defined]
+            svc._snapshot_pool = None
+            # Restore the bound method by deletion (the AsyncMock attr override
+            # was set on the instance and will be cleared on next servicer init).
+            try:
+                del svc._save_ledger_and_registry_pg
+            except AttributeError:
+                pass
