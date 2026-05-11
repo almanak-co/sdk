@@ -936,6 +936,23 @@ message SaveLedgerAndRegistryRequest {
   string handle_mapping_handle = 80;                // "" => no HandleMapping
   string handle_mapping_deployment_id = 81;
   string handle_mapping_accounting_category = 82;
+  // Commit mode (T24 / VIB-4210 / VIB-4221 ADR §8.1 — ratified Option (c)).
+  // ``""`` (proto3 default) and ``"commit"`` (explicit) are SEMANTICALLY
+  // IDENTICAL — both run the T11/T19 atomic three-write contract:
+  //   1) INSERT into transaction_ledger
+  //   2) UPSERT into position_registry
+  //   3) Handle backfill UPDATE
+  // ``"registry_reconciliation"`` flips the writer into reconciliation
+  // mode and SKIPS step (1) — only the registry UPSERT + handle backfill
+  // run, atomically. Used exclusively by ``PositionService.Reconcile``
+  // when ``apply=true``. Reconciliation discovers chain-only positions
+  // (the GH #2131 phantom-missing case) — there is no corresponding
+  // strategy intent, so writing a synthesized ledger row would pollute
+  // the immutable intent history. The ledger MUST NOT be touched on
+  // this path (ADR §2.3 #1+#2). Backward compatibility: existing callers
+  // do not set this field; proto3 default ("") routes to the original
+  // three-write path bit-identically.
+  string mode = 100;
 }
 
 message SaveLedgerAndRegistryResponse {
@@ -2910,4 +2927,300 @@ message GeckoTerminalOHLCVCandle {
 
 message GeckoTerminalOHLCVResponse {
   repeated GeckoTerminalOHLCVCandle candles = 1;
+}
+
+// =============================================================================
+// PositionService — on-chain reconciliation of position_registry (T24 / VIB-4210).
+// =============================================================================
+//
+// Design philosophy (PRD §Philosophy, ratified across three external reviews):
+//
+//   "Registry is the source of truth. Chain is the recovery oracle.
+//    On-chain reconciliation is a recovery path, not a normal path —
+//    gateway-owned, invoked only when registry rows are missing or stale."
+//
+// PositionService is DELIBERATELY a separate service from StateService:
+//
+//   * StateService is a row-grained CRUD surface. Fast, narrow, hot-path.
+//   * PositionService is a control-plane reconciliation surface — a single
+//     call may fan out to dozens of on-chain RPCs (UniV3 NPM.balanceOf +
+//     tokenOfOwnerByIndex + positions() per fork), spanning seconds.
+//     Different cost profile, different auth posture (operator-initiated
+//     or hosted-boot only — never strategy-code-initiated), different
+//     rate-limit class.
+//
+// Full design contract: docs/internal/adr/VIB-4221-position-service-reconcile.md
+// User-facing bug closed: GH #2131
+// Companion proto draft: docs/internal/proto-drafts/VIB-4221-position-service.proto
+// =============================================================================
+service PositionService {
+  // Reconcile a deployment's position_registry against on-chain truth.
+  //
+  // Behaviour:
+  //   1. Enumerate positions held by `wallet_address` on `chain` for each
+  //      requested `primitive` (v1: UniV3 LP only). Bounded by
+  //      _MAX_POSITIONS_PER_NPM (256) per V3-fork NPM — matches the
+  //      teardown discovery cap.
+  //   2. Read `position_registry` rows scoped to `deployment_id` + filters.
+  //   3. Compute four-bucket diff:
+  //        matched         — on-chain ↔ registry agree.
+  //        phantom_missing — on-chain has, registry doesn't (GH #2131).
+  //        stranded        — registry status='open', chain doesn't.
+  //        rebuilt         — when apply=true, the phantom_missing entries
+  //                          inserted into registry.
+  //   4. If apply=false (default, dry-run), return diff WITHOUT writing.
+  //   5. If apply=true, insert phantom_missing rows with
+  //      payload.source='reconciliation_discovery' via
+  //      save_ledger_and_registry(mode='registry_reconciliation') —
+  //      ledger is NOT written on this path (ADR §2.3 #1+#2).
+  //
+  // What Reconcile MUST NOT do (ADR §2.3, copied for emphasis):
+  //   * MUST NOT read or write transaction_ledger.
+  //   * MUST NOT mutate accounting_events / position_events.
+  //   * MUST NOT flip an already-terminal registry row (priority guard).
+  //   * MUST NOT be invoked from strategy code — control-plane only.
+  //
+  // Idempotency: running Reconcile twice back-to-back with no on-chain
+  // change is a no-op (ADR §4.1 formal proof).
+  //
+  // Auth: same gateway-auth posture as StateService RPCs (resolve_agent_id
+  // on deployment_id). v1 accepts the existing strategy-bound auth token;
+  // a future hardened posture may require an additional "operator" role
+  // claim — out of scope for T24 (ADR §6 + §8.2).
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+
+  // Reserved for future. NOT implemented in T24. Adding here so proto
+  // evolution doesn't require a service-replacement on the wire.
+  // rpc ReconcileBatch(ReconcileBatchRequest) returns (ReconcileBatchResponse);
+}
+
+message ReconcileRequest {
+  // Required: deployment that owns the registry rows. Resolved to agent_id
+  // at the gateway via resolve_agent_id (matches StateService pattern).
+  // Empty string => INVALID_ARGUMENT.
+  string deployment_id = 1;
+
+  // Required: chain to reconcile on. One chain per call. Empty =>
+  // INVALID_ARGUMENT. Cross-chain reconciliation is deliberately not
+  // supported on this RPC — operators run N calls for N chains.
+  string chain = 2;
+
+  // Required: EVM wallet address that holds (or held) the on-chain
+  // positions. Must match the deployment's wallet (gateway-side
+  // validation per the 1:1 strategy:gateway rule from blueprint 06).
+  // Empty => INVALID_ARGUMENT.
+  string wallet_address = 3;
+
+  // Optional primitive filter. Empty repeated field = reconcile every
+  // primitive supported by v1 (currently only "lp"). Allowed values are
+  // canonical Primitive enum strings from
+  // almanak/framework/primitives/types.py. Unknown primitives are
+  // rejected with INVALID_ARGUMENT (strict per blueprint 28 §6 #11).
+  repeated string primitives = 4;
+
+  // Optional registry-row filter: reconcile only rows matching one of
+  // these physical_identity_hash values. Used by dashboard/CLI to drill
+  // into a specific position. Empty = no filter.
+  repeated string physical_identity_hashes = 5;
+
+  // Default false (dry-run): compute diff WITHOUT writing to registry.
+  // Set true to insert phantom_missing rows with provenance fields via
+  // save_ledger_and_registry(mode='registry_reconciliation'). Stranded
+  // rows are NEVER auto-closed by Reconcile (ADR §5.4).
+  bool apply = 6;
+
+  // Optional freshness ceiling. Reconciliation rejects a chain head
+  // more than max_age_blocks behind the gateway's reference head.
+  // 0 = no ceiling. Recommended hosted value: 32 blocks on L1, 128 on L2.
+  //
+  // **v1 (T24 / PR #2240) semantics**: only enforced when ``page_cursor``
+  // is supplied — the gateway compares the cursor's encoded block
+  // against the freshly sampled head and rejects with
+  // FAILED_PRECONDITION ("stale cursor") if the gap exceeds the
+  // ceiling. On first-page requests (no cursor) v1 has no independent
+  // reference head to compare against, so a non-zero value is
+  // explicitly rejected with INVALID_ARGUMENT rather than silently
+  // ignored (which would falsely suggest the guardrail is active).
+  // Reference-RPC freshness checks for first-page requests are
+  // reserved for T24+1.
+  int64 max_age_blocks = 7;
+
+  // Opaque pagination cursor from a previous response's
+  // next_page_cursor. Empty = first page. Stale cursor (chain head
+  // moved past the encoded block by more than max_age_blocks) is
+  // rejected with FAILED_PRECONDITION (details "stale cursor").
+  //
+  // **v1 (T24 / PR #2240): SINGLE-PAGE ONLY** — the gateway always
+  // returns the entire diff in one response and always emits
+  // ``next_page_cursor=""`` on success. The cursor field is honored
+  // ONLY for staleness validation (FAILED_PRECONDITION on stale
+  // cursors) so a future multi-page client retrying a stale cursor
+  // gets a clean error today instead of a silent inconsistent diff.
+  // Multi-page paging is reserved for T24+1.
+  bytes page_cursor = 8;
+
+  // Max rows per page. 0 = gateway default (64). Capped by the gateway at
+  // MAX_RECONCILIATION_PAGE_SIZE (256, matching the teardown discovery cap).
+  //
+  // **v1 (T24 / PR #2240): single-page contract** — the value is
+  // validated + clamped at the boundary for forward compat but does
+  // NOT slice the response. A wallet whose NPM holds > 256 positions
+  // surfaces ``ReconcileResponse.oversize=true`` with a typed
+  // ``PrimitiveError(code='RECONCILIATION_OVERSIZE', recoverable=false)``;
+  // operators triage from there.
+  int32 page_size = 9;
+
+  // Free-form operator note recorded in the reconciliation_id audit log
+  // (e.g. "post-restart recovery", "investigating GH #2131 repro"). Empty
+  // allowed. Capped at 256 bytes server-side.
+  string operator_note = 10;
+
+  // Triggering surface. Used for telemetry labelling. Allowed values:
+  //   "operator_cli"  — `ax positions reconcile` (default for human-run)
+  //   "hosted_boot"   — runner startup auto-trigger (T24+1 follow-up)
+  //   "dashboard"     — operator dashboard
+  //   "ci"            — test/CI invocation
+  // Empty = "unspecified" (gateway warns; do not rely on this).
+  string trigger = 11;
+}
+
+message ReconcileResponse {
+  // Unique audit id for this reconciliation invocation. UUID. Pairs CLI
+  // output ↔ gateway audit log. Forensic correlation across CLI / dashboard /
+  // hosted-boot triggers.
+  string reconciliation_id = 1;
+
+  // Chain block at which on-chain truth was sampled. Every diff bucket
+  // below is consistent against this block.
+  int64 source_block_number = 2;
+
+  // Diff buckets. Each bucket carries a typed message rather than a
+  // bare list so future fields (e.g. confidence scores) can be added
+  // without a wire break.
+  repeated MatchedPosition matched = 3;
+  repeated PhantomMissingPosition phantom_missing = 4;
+  repeated StrandedRow stranded = 5;
+  repeated RebuiltRow rebuilt = 6;  // Empty when apply=false.
+
+  // Pagination. Empty bytes = this was the last page. Pass back as
+  // ReconcileRequest.page_cursor to continue.
+  bytes next_page_cursor = 7;
+
+  // True if the gateway truncated per-NPM enumeration at
+  // _MAX_POSITIONS_PER_NPM (256) or the page_size cap. Operators MUST
+  // re-run with a tighter primitive/hash filter or escalate the cap.
+  bool oversize = 8;
+
+  // Human-readable explanation of WHICH cap was hit and WHICH primitive/NPM
+  // tripped it. Empty when oversize=false.
+  string oversize_detail = 9;
+
+  // Aggregate counts for telemetry / CLI output convenience. Equal to
+  // len(matched), len(phantom_missing), etc. — the lists are still the
+  // source of truth; these are pre-computed for low-bandwidth callers.
+  int32 matched_count = 10;
+  int32 phantom_missing_count = 11;
+  int32 stranded_count = 12;
+  int32 rebuilt_count = 13;
+
+  // Wall-clock duration of the reconciliation pass, in seconds. Mirrors
+  // the gateway-side metric position_registry.reconciliation_duration_seconds.
+  double duration_seconds = 14;
+
+  // Per-primitive partial-failure surface. Empty = all primitives
+  // reconciled cleanly. Non-empty means some primitives failed — operator
+  // decides whether to re-run or proceed. NEVER causes the whole call to
+  // fail (FAILED status code) — partial diffs are useful signal.
+  repeated PrimitiveError primitive_errors = 15;
+}
+
+// =============================================================================
+// Diff bucket messages
+// =============================================================================
+
+// On-chain ↔ registry agree. Reconcile refreshes last_reconciled_at_block
+// on these rows on apply=true; on apply=false the matched_count is
+// reported but no write happens (ADR §"Idempotency proof").
+message MatchedPosition {
+  string physical_identity_hash = 1;
+  string primitive = 2;
+  string accounting_category = 3;
+  // On-chain confirmation block. Same as source_block_number unless a
+  // future primitive needs per-position confirmation depth tracking.
+  int64 confirmed_at_block = 4;
+}
+
+// On-chain has a position; registry doesn't. The GH #2131 case.
+// When apply=true, Reconcile inserts a corresponding registry row and
+// reports it back in the `rebuilt` bucket. When apply=false, the entry
+// is reported here so the operator can inspect before applying.
+message PhantomMissingPosition {
+  string physical_identity_hash = 1;
+  string primitive = 2;
+  string accounting_category = 3;
+  // Best-effort semantic_grouping_key derived from on-chain data. May
+  // be empty if back-derivation is unsupported for the primitive.
+  string semantic_grouping_key = 4;
+  // On-chain payload that would be written if apply=true. JSON-encoded.
+  bytes payload_json = 5;
+  // Best-effort opened_at_block back-derivation. 0 = unknown; rebuilt
+  // row will carry NULL opened_at_block.
+  int64 opened_at_block = 6;
+  // Tx hash of the opening event. Empty when unknown.
+  string opened_tx = 7;
+}
+
+// Registry has status='open', chain doesn't have the position anymore.
+// Reconcile DOES NOT auto-close stranded rows (ADR §5.4): operator
+// inspects, optionally runs `ax lp-info` / teardown.
+message StrandedRow {
+  string physical_identity_hash = 1;
+  string primitive = 2;
+  string accounting_category = 3;
+  string handle = 4;                  // May be empty for auto-mode rows.
+  // The full registry row, JSON-encoded, for operator inspection.
+  bytes registry_row_json = 5;
+  // Block at which we confirmed the position was NOT on-chain.
+  int64 confirmed_absent_at_block = 6;
+  // Brief reason string for CLI output.
+  string absent_reason = 7;
+}
+
+// A registry row this call inserted because phantom-missing fired AND
+// apply=true. Carries provenance fields flagging it as chain-derived.
+message RebuiltRow {
+  string physical_identity_hash = 1;
+  string primitive = 2;
+  string accounting_category = 3;
+  // Always "reconciliation_discovery" for rows written by this RPC.
+  string source = 4;
+  int64 last_reconciled_at_block = 5;
+  // The reconciliation_id that wrote this row. Joins back to
+  // ReconcileResponse.reconciliation_id for forensic correlation.
+  string reconciliation_id = 6;
+  // Full registry row written, JSON-encoded.
+  bytes registry_row_json = 7;
+}
+
+// Per-primitive partial failure. NEVER causes the whole RPC to fail —
+// reported alongside successful diffs in ReconcileResponse.primitive_errors.
+//
+// Typed error codes (gateway-enforced enumeration):
+//   "RPC_FANOUT_FAILED"        — on-chain reads timed out / errored.
+//   "PARSER_UNSUPPORTED"       — primitive not yet supported in v1.
+//   "BACKEND_TIMEOUT"          — registry-side read/write timed out.
+//   "RECONCILIATION_OVERSIZE"  — wallet has more positions than the cap.
+//   "STALE_HEAD"               — chain head freshness check failed.
+//   "REGISTRY_AUTO_COLLISION"  — handle-less existing open row collides
+//                                with phantom-missing insert (VIB-4200);
+//                                recoverable=false (programming bug).
+//   "UNKNOWN"                  — fallback for unclassified failures.
+message PrimitiveError {
+  string primitive = 1;
+  string chain = 2;
+  string code = 3;
+  string message = 4;
+  // True if the operator should retry (transient — RPC timeout, stale head).
+  // False if the failure is structural (parser unsupported, auto-collision).
+  bool recoverable = 5;
 }

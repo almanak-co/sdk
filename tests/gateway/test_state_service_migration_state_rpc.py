@@ -830,3 +830,39 @@ class TestSaveLedgerAndRegistry:
                 del svc._save_ledger_and_registry_pg
             except AttributeError:
                 pass
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_mode(self, state_service, mock_context):
+        """T24 / VIB-4210 (PR #2240 CodeRabbit MAJOR): the ``mode`` field
+        on ``SaveLedgerAndRegistryRequest`` accepts only two values —
+        ``""`` / ``"commit"`` (the legacy three-write contract) and
+        ``"registry_reconciliation"`` (PositionService.Reconcile's
+        skip-ledger path). Anything else MUST return INVALID_ARGUMENT;
+        silently routing an unknown mode through the legacy path would
+        defeat the purpose of the field.
+        """
+        req = gateway_pb2.SaveLedgerAndRegistryRequest(
+            id="55555555-5555-5555-5555-555555555555",
+            cycle_id="cyc-5",
+            strategy_id="s",
+            deployment_id=_DEPLOYMENT_ID,
+            execution_mode="paper",
+            timestamp=int(datetime(2026, 5, 12, tzinfo=UTC).timestamp()),
+            intent_type="LP_OPEN",
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            registry_chain="arbitrum",
+            registry_primitive="lp",
+            registry_accounting_category="lp",
+            registry_physical_identity_hash="0xpih_mode_test",
+            registry_semantic_grouping_key="arbitrum:pool",
+            registry_grouping_policy_version="univ3_lp@v1",
+            registry_status="open",
+            registry_payload_json=b"{}",
+            registry_matching_policy_version=1,
+            mode="invalid_mode",
+        )
+        resp = await state_service.SaveLedgerAndRegistry(req, mock_context)
+        assert not resp.success
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert "invalid mode" in resp.error

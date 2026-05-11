@@ -184,7 +184,7 @@ class HandleMapping:
 # =============================================================================
 
 
-CommitMode = Literal["accounting_only", "registry"]
+CommitMode = Literal["accounting_only", "registry", "registry_reconciliation"]
 
 
 async def save_ledger_and_registry(
@@ -236,16 +236,26 @@ async def save_ledger_and_registry(
         await state_manager.save_ledger_entry(ledger)
         return
 
-    # mode == 'registry'. _validate_inputs guaranteed registry is non-None
-    # for this branch; the assert narrows the type for the typechecker
-    # (the runtime cost is one isinstance check, dwarfed by the upcoming
-    # SQLite transaction).
+    # mode in ('registry', 'registry_reconciliation'). _validate_inputs
+    # guaranteed registry is non-None for both branches; the assert narrows
+    # the type for the typechecker.
     assert registry is not None  # noqa: S101 — type narrowing post-validation
-    await state_manager.save_ledger_and_registry(
-        ledger=ledger,
-        registry=registry,
-        handle=handle,
-    )
+    # T24 / VIB-4210: function-level mode 'registry_reconciliation' routes
+    # through the storage layer's same-named mode (which SKIPS the ledger
+    # write atomically). Function-level mode 'registry' uses the storage
+    # layer's default three-write path; we build the kwargs dict so the
+    # final call site stays a SINGLE state_manager.save_ledger_and_registry
+    # invocation (preserves the single-delegation invariant enforced by
+    # tests/unit/state/test_position_registry_no_writers.py::test_layer_b_
+    # commit_py_delegation_shape — bug #2130 split-commit guard).
+    storage_kwargs: dict[str, Any] = {
+        "ledger": ledger,
+        "registry": registry,
+        "handle": handle,
+    }
+    if mode == "registry_reconciliation":
+        storage_kwargs["mode"] = mode
+    await state_manager.save_ledger_and_registry(**storage_kwargs)
 
 
 def _validate_inputs(
@@ -268,8 +278,8 @@ def _validate_inputs(
     Raises:
         ValueError: On any inconsistency. Message names the offending arg.
     """
-    if mode not in ("accounting_only", "registry"):
-        raise ValueError(f"mode must be 'accounting_only' or 'registry', got {mode!r}")
+    if mode not in ("accounting_only", "registry", "registry_reconciliation"):
+        raise ValueError(f"mode must be 'accounting_only', 'registry', or 'registry_reconciliation', got {mode!r}")
 
     if mode == "accounting_only":
         if registry is not None:
@@ -287,9 +297,9 @@ def _validate_inputs(
             )
         return
 
-    # mode == 'registry'
+    # mode in ('registry', 'registry_reconciliation')
     if registry is None:
-        raise ValueError("save_ledger_and_registry(mode='registry') requires the 'registry' argument.")
+        raise ValueError(f"save_ledger_and_registry(mode={mode!r}) requires the 'registry' argument.")
     pih = registry.physical_identity_hash or ""
     if not pih.strip():
         raise ValueError(

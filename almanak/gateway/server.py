@@ -44,6 +44,7 @@ from almanak.gateway.services import (
     MarketServiceServicer,
     ObserveServiceServicer,
     PolymarketServiceServicer,
+    PositionServiceServicer,
     RpcServiceServicer,
     SimulationServiceServicer,
     StateServiceServicer,
@@ -214,6 +215,11 @@ class GatewayServer:
         self._enso_servicer: EnsoServiceServicer | None = None
         self._token_servicer: TokenServiceServicer | None = None
         self._lifecycle_servicer: LifecycleServiceServicer | None = None
+        # T24 / VIB-4210: PositionService for reconciliation control-plane RPC.
+        # Holds in-process references to state_servicer + rpc_servicer for
+        # registry reads + chain enumeration (ADR §4 algorithm steps 3–4).
+        self._position_servicer: PositionServiceServicer | None = None
+        self._state_servicer: StateServiceServicer | None = None
 
         # VIB-1280: background heartbeat TTL enforcer task
         self._heartbeat_ttl_task: asyncio.Task | None = None
@@ -368,6 +374,7 @@ class GatewayServer:
         # Phase 2 state/observe
         state_servicer = StateServiceServicer(self.settings)
         gateway_pb2_grpc.add_StateServiceServicer_to_server(state_servicer, self.server)
+        self._state_servicer = state_servicer
 
         self._observe_servicer = ObserveServiceServicer(self.settings)
         gateway_pb2_grpc.add_ObserveServiceServicer_to_server(self._observe_servicer, self.server)
@@ -404,9 +411,22 @@ class GatewayServer:
         self._lifecycle_servicer = LifecycleServiceServicer(store=lifecycle_store)
         gateway_pb2_grpc.add_LifecycleServiceServicer_to_server(self._lifecycle_servicer, self.server)
 
+        # T24 / VIB-4210: PositionService — control-plane reconciliation RPC.
+        # Holds cross-servicer references for in-process chain enumeration
+        # (RpcServiceServicer) + registry reads/writes (StateServiceServicer).
+        # The gateway IS the egress layer (CLAUDE.md gateway-boundary rule);
+        # in-process invocation of sibling servicers is the correct path,
+        # NOT a TCP loopback hop. Wired after rpc_servicer + state_servicer
+        # exist so neither attribute can be None at first call.
+        self._position_servicer = PositionServiceServicer(self.settings)
+        self._position_servicer.rpc_servicer = self._rpc_servicer
+        self._position_servicer.state_servicer = self._state_servicer
+        self._position_servicer.wallet_registry = wallet_registry
+        gateway_pb2_grpc.add_PositionServiceServicer_to_server(self._position_servicer, self.server)
+
         logger.debug("Registered Phase 2 services: Market, State, Execution, Observe")
         logger.debug("Registered Phase 3 services: Rpc, Integration, FundingRate, Simulation, Polymarket, Enso")
-        logger.debug("Registered Dashboard, Token, and Lifecycle services")
+        logger.debug("Registered Dashboard, Token, Lifecycle, and Position services")
 
     # ------------------------------------------------------------------
     # Phase 11 helper: market service warmup

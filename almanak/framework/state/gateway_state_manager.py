@@ -1239,6 +1239,7 @@ class GatewayStateManager:
         ledger: "LedgerEntry",
         registry: Any,
         handle: Any,
+        mode: str = "commit",
     ) -> gateway_pb2.SaveLedgerAndRegistryRequest:
         """Marshal LedgerEntry + RegistryRow + optional HandleMapping → proto.
 
@@ -1307,6 +1308,10 @@ class GatewayStateManager:
             handle_mapping_handle=handle_handle,
             handle_mapping_deployment_id=handle_deployment_id,
             handle_mapping_accounting_category=handle_accounting_category,
+            # T24 / VIB-4210: proto3 default "" + server-side normalization
+            # to "commit" means existing callers (who don't pass mode) keep
+            # bit-identical wire behaviour.
+            mode=mode if mode != "commit" else "",
         )
         if ledger.slippage_bps is not None:
             request.slippage_bps = float(ledger.slippage_bps)
@@ -1359,6 +1364,7 @@ class GatewayStateManager:
         ledger: "LedgerEntry",
         registry: Any,  # RegistryRow — lazy import to avoid module-load cycle
         handle: Any = None,  # HandleMapping | None
+        mode: str = "commit",
     ) -> None:
         """Atomic ledger + position_registry + handle commit (T11 / VIB-4197).
 
@@ -1377,7 +1383,7 @@ class GatewayStateManager:
         and :meth:`_raise_for_save_ledger_and_registry_response`.
         """
         strategy_id = ledger.strategy_id or ""
-        request = self._build_save_ledger_and_registry_request(ledger, registry, handle)
+        request = self._build_save_ledger_and_registry_request(ledger, registry, handle, mode)
 
         try:
             response = self._client.state.SaveLedgerAndRegistry(request, timeout=self._timeout)

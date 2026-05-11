@@ -2317,6 +2317,7 @@ class StateManager:
         ledger: "LedgerEntry",
         registry: "RegistryRow",
         handle: "HandleMapping | None" = None,
+        mode: str = "commit",
     ) -> None:
         """Atomic single-transaction commit of ledger + registry + handle.
 
@@ -2382,11 +2383,23 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            await self._warm.save_ledger_and_registry_atomic(  # type: ignore[attr-defined]
-                ledger,
-                registry,
-                handle,
-            )
+            # T24 / VIB-4210: pass mode as keyword so existing 3-arg spies
+            # (handle defaults to None in the wrapper) keep working without
+            # update — the kwarg path is what test_d3_f4_atomic_primitive_
+            # is_actually_invoked_test_bug_guard depends on.
+            if mode == "commit":
+                await self._warm.save_ledger_and_registry_atomic(  # type: ignore[attr-defined]
+                    ledger,
+                    registry,
+                    handle,
+                )
+            else:
+                await self._warm.save_ledger_and_registry_atomic(  # type: ignore[attr-defined]
+                    ledger,
+                    registry,
+                    handle,
+                    mode=mode,
+                )
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "save_ledger_and_registry", latency, True)
         except RegistryAutoCollisionError:

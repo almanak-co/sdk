@@ -2610,6 +2610,7 @@ class SaveLedgerAndRegistryRequest(_message.Message):
     HANDLE_MAPPING_HANDLE_FIELD_NUMBER: _builtins.int
     HANDLE_MAPPING_DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     HANDLE_MAPPING_ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    MODE_FIELD_NUMBER: _builtins.int
     id: _builtins.str
     """---- LedgerEntry (mirrors SaveLedgerEntryRequest) ----"""
     cycle_id: _builtins.str
@@ -2664,6 +2665,24 @@ class SaveLedgerAndRegistryRequest(_message.Message):
     """
     handle_mapping_deployment_id: _builtins.str
     handle_mapping_accounting_category: _builtins.str
+    mode: _builtins.str
+    """Commit mode (T24 / VIB-4210 / VIB-4221 ADR §8.1 — ratified Option (c)).
+    ``""`` (proto3 default) and ``"commit"`` (explicit) are SEMANTICALLY
+    IDENTICAL — both run the T11/T19 atomic three-write contract:
+      1) INSERT into transaction_ledger
+      2) UPSERT into position_registry
+      3) Handle backfill UPDATE
+    ``"registry_reconciliation"`` flips the writer into reconciliation
+    mode and SKIPS step (1) — only the registry UPSERT + handle backfill
+    run, atomically. Used exclusively by ``PositionService.Reconcile``
+    when ``apply=true``. Reconciliation discovers chain-only positions
+    (the GH #2131 phantom-missing case) — there is no corresponding
+    strategy intent, so writing a synthesized ledger row would pollute
+    the immutable intent history. The ledger MUST NOT be touched on
+    this path (ADR §2.3 #1+#2). Backward compatibility: existing callers
+    do not set this field; proto3 default ("") routes to the original
+    three-write path bit-identically.
+    """
     def __init__(
         self,
         *,
@@ -2709,10 +2728,11 @@ class SaveLedgerAndRegistryRequest(_message.Message):
         handle_mapping_handle: _builtins.str = ...,
         handle_mapping_deployment_id: _builtins.str = ...,
         handle_mapping_accounting_category: _builtins.str = ...,
+        mode: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "registry_closed_at_block", b"registry_closed_at_block", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_opened_at_block", b"registry_opened_at_block", "slippage_bps", b"slippage_bps"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "handle_mapping_accounting_category", b"handle_mapping_accounting_category", "handle_mapping_deployment_id", b"handle_mapping_deployment_id", "handle_mapping_handle", b"handle_mapping_handle", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "registry_accounting_category", b"registry_accounting_category", "registry_chain", b"registry_chain", "registry_closed_at_block", b"registry_closed_at_block", "registry_closed_tx", b"registry_closed_tx", "registry_grouping_policy_version", b"registry_grouping_policy_version", "registry_handle", b"registry_handle", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_matching_policy_version", b"registry_matching_policy_version", "registry_opened_at_block", b"registry_opened_at_block", "registry_opened_tx", b"registry_opened_tx", "registry_payload_json", b"registry_payload_json", "registry_physical_identity_hash", b"registry_physical_identity_hash", "registry_primitive", b"registry_primitive", "registry_semantic_grouping_key", b"registry_semantic_grouping_key", "registry_status", b"registry_status", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "handle_mapping_accounting_category", b"handle_mapping_accounting_category", "handle_mapping_deployment_id", b"handle_mapping_deployment_id", "handle_mapping_handle", b"handle_mapping_handle", "id", b"id", "intent_type", b"intent_type", "mode", b"mode", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "registry_accounting_category", b"registry_accounting_category", "registry_chain", b"registry_chain", "registry_closed_at_block", b"registry_closed_at_block", "registry_closed_tx", b"registry_closed_tx", "registry_grouping_policy_version", b"registry_grouping_policy_version", "registry_handle", b"registry_handle", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_matching_policy_version", b"registry_matching_policy_version", "registry_opened_at_block", b"registry_opened_at_block", "registry_opened_tx", b"registry_opened_tx", "registry_payload_json", b"registry_payload_json", "registry_physical_identity_hash", b"registry_physical_identity_hash", "registry_primitive", b"registry_primitive", "registry_semantic_grouping_key", b"registry_semantic_grouping_key", "registry_status", b"registry_status", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType__registry_closed_at_block: _TypeAlias = _typing.Literal["registry_closed_at_block"]  # noqa: Y015
     _WhichOneofArgType__registry_closed_at_block: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block"]  # noqa: Y015
@@ -8701,3 +8721,447 @@ class GeckoTerminalOHLCVResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GeckoTerminalOHLCVResponse: _TypeAlias = GeckoTerminalOHLCVResponse  # noqa: Y015
+
+@_typing.final
+class ReconcileRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    PRIMITIVES_FIELD_NUMBER: _builtins.int
+    PHYSICAL_IDENTITY_HASHES_FIELD_NUMBER: _builtins.int
+    APPLY_FIELD_NUMBER: _builtins.int
+    MAX_AGE_BLOCKS_FIELD_NUMBER: _builtins.int
+    PAGE_CURSOR_FIELD_NUMBER: _builtins.int
+    PAGE_SIZE_FIELD_NUMBER: _builtins.int
+    OPERATOR_NOTE_FIELD_NUMBER: _builtins.int
+    TRIGGER_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    """Required: deployment that owns the registry rows. Resolved to agent_id
+    at the gateway via resolve_agent_id (matches StateService pattern).
+    Empty string => INVALID_ARGUMENT.
+    """
+    chain: _builtins.str
+    """Required: chain to reconcile on. One chain per call. Empty =>
+    INVALID_ARGUMENT. Cross-chain reconciliation is deliberately not
+    supported on this RPC — operators run N calls for N chains.
+    """
+    wallet_address: _builtins.str
+    """Required: EVM wallet address that holds (or held) the on-chain
+    positions. Must match the deployment's wallet (gateway-side
+    validation per the 1:1 strategy:gateway rule from blueprint 06).
+    Empty => INVALID_ARGUMENT.
+    """
+    apply: _builtins.bool
+    """Default false (dry-run): compute diff WITHOUT writing to registry.
+    Set true to insert phantom_missing rows with provenance fields via
+    save_ledger_and_registry(mode='registry_reconciliation'). Stranded
+    rows are NEVER auto-closed by Reconcile (ADR §5.4).
+    """
+    max_age_blocks: _builtins.int
+    """Optional freshness ceiling. Reconciliation rejects a chain head
+    more than max_age_blocks behind the gateway's reference head.
+    0 = no ceiling. Recommended hosted value: 32 blocks on L1, 128 on L2.
+
+    **v1 (T24 / PR #2240) semantics**: only enforced when ``page_cursor``
+    is supplied — the gateway compares the cursor's encoded block
+    against the freshly sampled head and rejects with
+    FAILED_PRECONDITION ("stale cursor") if the gap exceeds the
+    ceiling. On first-page requests (no cursor) v1 has no independent
+    reference head to compare against, so a non-zero value is
+    explicitly rejected with INVALID_ARGUMENT rather than silently
+    ignored (which would falsely suggest the guardrail is active).
+    Reference-RPC freshness checks for first-page requests are
+    reserved for T24+1.
+    """
+    page_cursor: _builtins.bytes
+    """Opaque pagination cursor from a previous response's
+    next_page_cursor. Empty = first page. Stale cursor (chain head
+    moved past the encoded block by more than max_age_blocks) is
+    rejected with FAILED_PRECONDITION (details "stale cursor").
+
+    **v1 (T24 / PR #2240): SINGLE-PAGE ONLY** — the gateway always
+    returns the entire diff in one response and always emits
+    ``next_page_cursor=""`` on success. The cursor field is honored
+    ONLY for staleness validation (FAILED_PRECONDITION on stale
+    cursors) so a future multi-page client retrying a stale cursor
+    gets a clean error today instead of a silent inconsistent diff.
+    Multi-page paging is reserved for T24+1.
+    """
+    page_size: _builtins.int
+    """Max rows per page. 0 = gateway default (64). Capped by the gateway at
+    MAX_RECONCILIATION_PAGE_SIZE (256, matching the teardown discovery cap).
+
+    **v1 (T24 / PR #2240): single-page contract** — the value is
+    validated + clamped at the boundary for forward compat but does
+    NOT slice the response. A wallet whose NPM holds > 256 positions
+    surfaces ``ReconcileResponse.oversize=true`` with a typed
+    ``PrimitiveError(code='RECONCILIATION_OVERSIZE', recoverable=false)``;
+    operators triage from there.
+    """
+    operator_note: _builtins.str
+    """Free-form operator note recorded in the reconciliation_id audit log
+    (e.g. "post-restart recovery", "investigating GH #2131 repro"). Empty
+    allowed. Capped at 256 bytes server-side.
+    """
+    trigger: _builtins.str
+    """Triggering surface. Used for telemetry labelling. Allowed values:
+      "operator_cli"  — `ax positions reconcile` (default for human-run)
+      "hosted_boot"   — runner startup auto-trigger (T24+1 follow-up)
+      "dashboard"     — operator dashboard
+      "ci"            — test/CI invocation
+    Empty = "unspecified" (gateway warns; do not rely on this).
+    """
+    @_builtins.property
+    def primitives(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """Optional primitive filter. Empty repeated field = reconcile every
+        primitive supported by v1 (currently only "lp"). Allowed values are
+        canonical Primitive enum strings from
+        almanak/framework/primitives/types.py. Unknown primitives are
+        rejected with INVALID_ARGUMENT (strict per blueprint 28 §6 #11).
+        """
+
+    @_builtins.property
+    def physical_identity_hashes(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """Optional registry-row filter: reconcile only rows matching one of
+        these physical_identity_hash values. Used by dashboard/CLI to drill
+        into a specific position. Empty = no filter.
+        """
+
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        primitives: _abc.Iterable[_builtins.str] | None = ...,
+        physical_identity_hashes: _abc.Iterable[_builtins.str] | None = ...,
+        apply: _builtins.bool = ...,
+        max_age_blocks: _builtins.int = ...,
+        page_cursor: _builtins.bytes = ...,
+        page_size: _builtins.int = ...,
+        operator_note: _builtins.str = ...,
+        trigger: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["apply", b"apply", "chain", b"chain", "deployment_id", b"deployment_id", "max_age_blocks", b"max_age_blocks", "operator_note", b"operator_note", "page_cursor", b"page_cursor", "page_size", b"page_size", "physical_identity_hashes", b"physical_identity_hashes", "primitives", b"primitives", "trigger", b"trigger", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReconcileRequest: _TypeAlias = ReconcileRequest  # noqa: Y015
+
+@_typing.final
+class ReconcileResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    RECONCILIATION_ID_FIELD_NUMBER: _builtins.int
+    SOURCE_BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    MATCHED_FIELD_NUMBER: _builtins.int
+    PHANTOM_MISSING_FIELD_NUMBER: _builtins.int
+    STRANDED_FIELD_NUMBER: _builtins.int
+    REBUILT_FIELD_NUMBER: _builtins.int
+    NEXT_PAGE_CURSOR_FIELD_NUMBER: _builtins.int
+    OVERSIZE_FIELD_NUMBER: _builtins.int
+    OVERSIZE_DETAIL_FIELD_NUMBER: _builtins.int
+    MATCHED_COUNT_FIELD_NUMBER: _builtins.int
+    PHANTOM_MISSING_COUNT_FIELD_NUMBER: _builtins.int
+    STRANDED_COUNT_FIELD_NUMBER: _builtins.int
+    REBUILT_COUNT_FIELD_NUMBER: _builtins.int
+    DURATION_SECONDS_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_ERRORS_FIELD_NUMBER: _builtins.int
+    reconciliation_id: _builtins.str
+    """Unique audit id for this reconciliation invocation. UUID. Pairs CLI
+    output ↔ gateway audit log. Forensic correlation across CLI / dashboard /
+    hosted-boot triggers.
+    """
+    source_block_number: _builtins.int
+    """Chain block at which on-chain truth was sampled. Every diff bucket
+    below is consistent against this block.
+    """
+    next_page_cursor: _builtins.bytes
+    """Pagination. Empty bytes = this was the last page. Pass back as
+    ReconcileRequest.page_cursor to continue.
+    """
+    oversize: _builtins.bool
+    """True if the gateway truncated per-NPM enumeration at
+    _MAX_POSITIONS_PER_NPM (256) or the page_size cap. Operators MUST
+    re-run with a tighter primitive/hash filter or escalate the cap.
+    """
+    oversize_detail: _builtins.str
+    """Human-readable explanation of WHICH cap was hit and WHICH primitive/NPM
+    tripped it. Empty when oversize=false.
+    """
+    matched_count: _builtins.int
+    """Aggregate counts for telemetry / CLI output convenience. Equal to
+    len(matched), len(phantom_missing), etc. — the lists are still the
+    source of truth; these are pre-computed for low-bandwidth callers.
+    """
+    phantom_missing_count: _builtins.int
+    stranded_count: _builtins.int
+    rebuilt_count: _builtins.int
+    duration_seconds: _builtins.float
+    """Wall-clock duration of the reconciliation pass, in seconds. Mirrors
+    the gateway-side metric position_registry.reconciliation_duration_seconds.
+    """
+    @_builtins.property
+    def matched(self) -> _containers.RepeatedCompositeFieldContainer[Global___MatchedPosition]:
+        """Diff buckets. Each bucket carries a typed message rather than a
+        bare list so future fields (e.g. confidence scores) can be added
+        without a wire break.
+        """
+
+    @_builtins.property
+    def phantom_missing(self) -> _containers.RepeatedCompositeFieldContainer[Global___PhantomMissingPosition]: ...
+    @_builtins.property
+    def stranded(self) -> _containers.RepeatedCompositeFieldContainer[Global___StrandedRow]: ...
+    @_builtins.property
+    def rebuilt(self) -> _containers.RepeatedCompositeFieldContainer[Global___RebuiltRow]:
+        """Empty when apply=false."""
+
+    @_builtins.property
+    def primitive_errors(self) -> _containers.RepeatedCompositeFieldContainer[Global___PrimitiveError]:
+        """Per-primitive partial-failure surface. Empty = all primitives
+        reconciled cleanly. Non-empty means some primitives failed — operator
+        decides whether to re-run or proceed. NEVER causes the whole call to
+        fail (FAILED status code) — partial diffs are useful signal.
+        """
+
+    def __init__(
+        self,
+        *,
+        reconciliation_id: _builtins.str = ...,
+        source_block_number: _builtins.int = ...,
+        matched: _abc.Iterable[Global___MatchedPosition] | None = ...,
+        phantom_missing: _abc.Iterable[Global___PhantomMissingPosition] | None = ...,
+        stranded: _abc.Iterable[Global___StrandedRow] | None = ...,
+        rebuilt: _abc.Iterable[Global___RebuiltRow] | None = ...,
+        next_page_cursor: _builtins.bytes = ...,
+        oversize: _builtins.bool = ...,
+        oversize_detail: _builtins.str = ...,
+        matched_count: _builtins.int = ...,
+        phantom_missing_count: _builtins.int = ...,
+        stranded_count: _builtins.int = ...,
+        rebuilt_count: _builtins.int = ...,
+        duration_seconds: _builtins.float = ...,
+        primitive_errors: _abc.Iterable[Global___PrimitiveError] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["duration_seconds", b"duration_seconds", "matched", b"matched", "matched_count", b"matched_count", "next_page_cursor", b"next_page_cursor", "oversize", b"oversize", "oversize_detail", b"oversize_detail", "phantom_missing", b"phantom_missing", "phantom_missing_count", b"phantom_missing_count", "primitive_errors", b"primitive_errors", "rebuilt", b"rebuilt", "rebuilt_count", b"rebuilt_count", "reconciliation_id", b"reconciliation_id", "source_block_number", b"source_block_number", "stranded", b"stranded", "stranded_count", b"stranded_count"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReconcileResponse: _TypeAlias = ReconcileResponse  # noqa: Y015
+
+@_typing.final
+class MatchedPosition(_message.Message):
+    """=============================================================================
+    Diff bucket messages
+    =============================================================================
+
+    On-chain ↔ registry agree. Reconcile refreshes last_reconciled_at_block
+    on these rows on apply=true; on apply=false the matched_count is
+    reported but no write happens (ADR §"Idempotency proof").
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    CONFIRMED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    physical_identity_hash: _builtins.str
+    primitive: _builtins.str
+    accounting_category: _builtins.str
+    confirmed_at_block: _builtins.int
+    """On-chain confirmation block. Same as source_block_number unless a
+    future primitive needs per-position confirmation depth tracking.
+    """
+    def __init__(
+        self,
+        *,
+        physical_identity_hash: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        confirmed_at_block: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "confirmed_at_block", b"confirmed_at_block", "physical_identity_hash", b"physical_identity_hash", "primitive", b"primitive"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MatchedPosition: _TypeAlias = MatchedPosition  # noqa: Y015
+
+@_typing.final
+class PhantomMissingPosition(_message.Message):
+    """On-chain has a position; registry doesn't. The GH #2131 case.
+    When apply=true, Reconcile inserts a corresponding registry row and
+    reports it back in the `rebuilt` bucket. When apply=false, the entry
+    is reported here so the operator can inspect before applying.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    SEMANTIC_GROUPING_KEY_FIELD_NUMBER: _builtins.int
+    PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    OPENED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    OPENED_TX_FIELD_NUMBER: _builtins.int
+    physical_identity_hash: _builtins.str
+    primitive: _builtins.str
+    accounting_category: _builtins.str
+    semantic_grouping_key: _builtins.str
+    """Best-effort semantic_grouping_key derived from on-chain data. May
+    be empty if back-derivation is unsupported for the primitive.
+    """
+    payload_json: _builtins.bytes
+    """On-chain payload that would be written if apply=true. JSON-encoded."""
+    opened_at_block: _builtins.int
+    """Best-effort opened_at_block back-derivation. 0 = unknown; rebuilt
+    row will carry NULL opened_at_block.
+    """
+    opened_tx: _builtins.str
+    """Tx hash of the opening event. Empty when unknown."""
+    def __init__(
+        self,
+        *,
+        physical_identity_hash: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        semantic_grouping_key: _builtins.str = ...,
+        payload_json: _builtins.bytes = ...,
+        opened_at_block: _builtins.int = ...,
+        opened_tx: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "opened_at_block", b"opened_at_block", "opened_tx", b"opened_tx", "payload_json", b"payload_json", "physical_identity_hash", b"physical_identity_hash", "primitive", b"primitive", "semantic_grouping_key", b"semantic_grouping_key"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PhantomMissingPosition: _TypeAlias = PhantomMissingPosition  # noqa: Y015
+
+@_typing.final
+class StrandedRow(_message.Message):
+    """Registry has status='open', chain doesn't have the position anymore.
+    Reconcile DOES NOT auto-close stranded rows (ADR §5.4): operator
+    inspects, optionally runs `ax lp-info` / teardown.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    HANDLE_FIELD_NUMBER: _builtins.int
+    REGISTRY_ROW_JSON_FIELD_NUMBER: _builtins.int
+    CONFIRMED_ABSENT_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    ABSENT_REASON_FIELD_NUMBER: _builtins.int
+    physical_identity_hash: _builtins.str
+    primitive: _builtins.str
+    accounting_category: _builtins.str
+    handle: _builtins.str
+    """May be empty for auto-mode rows."""
+    registry_row_json: _builtins.bytes
+    """The full registry row, JSON-encoded, for operator inspection."""
+    confirmed_absent_at_block: _builtins.int
+    """Block at which we confirmed the position was NOT on-chain."""
+    absent_reason: _builtins.str
+    """Brief reason string for CLI output."""
+    def __init__(
+        self,
+        *,
+        physical_identity_hash: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        handle: _builtins.str = ...,
+        registry_row_json: _builtins.bytes = ...,
+        confirmed_absent_at_block: _builtins.int = ...,
+        absent_reason: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["absent_reason", b"absent_reason", "accounting_category", b"accounting_category", "confirmed_absent_at_block", b"confirmed_absent_at_block", "handle", b"handle", "physical_identity_hash", b"physical_identity_hash", "primitive", b"primitive", "registry_row_json", b"registry_row_json"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___StrandedRow: _TypeAlias = StrandedRow  # noqa: Y015
+
+@_typing.final
+class RebuiltRow(_message.Message):
+    """A registry row this call inserted because phantom-missing fired AND
+    apply=true. Carries provenance fields flagging it as chain-derived.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    LAST_RECONCILED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    RECONCILIATION_ID_FIELD_NUMBER: _builtins.int
+    REGISTRY_ROW_JSON_FIELD_NUMBER: _builtins.int
+    physical_identity_hash: _builtins.str
+    primitive: _builtins.str
+    accounting_category: _builtins.str
+    source: _builtins.str
+    """Always "reconciliation_discovery" for rows written by this RPC."""
+    last_reconciled_at_block: _builtins.int
+    reconciliation_id: _builtins.str
+    """The reconciliation_id that wrote this row. Joins back to
+    ReconcileResponse.reconciliation_id for forensic correlation.
+    """
+    registry_row_json: _builtins.bytes
+    """Full registry row written, JSON-encoded."""
+    def __init__(
+        self,
+        *,
+        physical_identity_hash: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        source: _builtins.str = ...,
+        last_reconciled_at_block: _builtins.int = ...,
+        reconciliation_id: _builtins.str = ...,
+        registry_row_json: _builtins.bytes = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "last_reconciled_at_block", b"last_reconciled_at_block", "physical_identity_hash", b"physical_identity_hash", "primitive", b"primitive", "reconciliation_id", b"reconciliation_id", "registry_row_json", b"registry_row_json", "source", b"source"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___RebuiltRow: _TypeAlias = RebuiltRow  # noqa: Y015
+
+@_typing.final
+class PrimitiveError(_message.Message):
+    """Per-primitive partial failure. NEVER causes the whole RPC to fail —
+    reported alongside successful diffs in ReconcileResponse.primitive_errors.
+
+    Typed error codes (gateway-enforced enumeration):
+      "RPC_FANOUT_FAILED"        — on-chain reads timed out / errored.
+      "PARSER_UNSUPPORTED"       — primitive not yet supported in v1.
+      "BACKEND_TIMEOUT"          — registry-side read/write timed out.
+      "RECONCILIATION_OVERSIZE"  — wallet has more positions than the cap.
+      "STALE_HEAD"               — chain head freshness check failed.
+      "REGISTRY_AUTO_COLLISION"  — handle-less existing open row collides
+                                   with phantom-missing insert (VIB-4200);
+                                   recoverable=false (programming bug).
+      "UNKNOWN"                  — fallback for unclassified failures.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    CODE_FIELD_NUMBER: _builtins.int
+    MESSAGE_FIELD_NUMBER: _builtins.int
+    RECOVERABLE_FIELD_NUMBER: _builtins.int
+    primitive: _builtins.str
+    chain: _builtins.str
+    code: _builtins.str
+    message: _builtins.str
+    recoverable: _builtins.bool
+    """True if the operator should retry (transient — RPC timeout, stale head).
+    False if the failure is structural (parser unsupported, auto-collision).
+    """
+    def __init__(
+        self,
+        *,
+        primitive: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        code: _builtins.str = ...,
+        message: _builtins.str = ...,
+        recoverable: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "code", b"code", "message", b"message", "primitive", b"primitive", "recoverable", b"recoverable"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PrimitiveError: _TypeAlias = PrimitiveError  # noqa: Y015

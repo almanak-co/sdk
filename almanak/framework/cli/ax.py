@@ -2500,3 +2500,273 @@ def run_tool(ctx, tool_name, args_json, sub_yes, sub_dry_run, sub_json_output):
     except Exception as e:
         render_error(str(e), json_output=json_output)
         sys.exit(1)
+
+
+# =============================================================================
+# `almanak ax positions` — control-plane reconciliation (T24 / VIB-4210)
+# =============================================================================
+#
+# Reconciliation is a CONTROL-PLANE operation, not a strategy tool. It dispatches
+# directly to ``PositionService.Reconcile`` via the gateway client (no ToolExecutor /
+# PolicyEngine wrap — those are for LLM-driven strategy surfaces per CLAUDE.md
+# "Agent-tools" rule; ``ax positions`` is invoked by an operator with full intent).
+#
+# v1 scope: UniV3 LP only (ADR §2.4). Per-primitive follow-ups land in T24+1.
+# Closes user-facing bug: GH #2131.
+
+
+@ax.group("positions")
+@click.pass_context
+def positions(ctx):
+    """Position reconciliation commands (T24 / VIB-4210).
+
+    \b
+    Subcommands:
+        reconcile   Reconcile position_registry against on-chain truth.
+    """
+    _ = ctx  # group is a thin namespace; subcommands carry the real logic
+
+
+@positions.command("reconcile")
+@click.option(
+    "--deployment-id",
+    required=True,
+    help="Deployment id (ClassName:hash) whose registry to reconcile.",
+)
+@click.option(
+    "--wallet-override",
+    default=None,
+    help="Override the wallet address (default: ax's configured wallet).",
+)
+@click.option(
+    "--primitives",
+    "primitives_csv",
+    default="lp",
+    help="Comma-separated primitive filter (default: 'lp'; v1 supports lp only).",
+)
+@click.option(
+    "--physical-identity-hash",
+    "physical_identity_hashes",
+    multiple=True,
+    help="Filter to specific registry rows by hash (repeatable).",
+)
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Write phantom-missing rows to position_registry (default: dry-run).",
+)
+@click.option(
+    "--max-age-blocks",
+    type=int,
+    default=0,
+    help="Reject chain-head lag exceeding this many blocks (0 = no check).",
+)
+@click.option(
+    "--operator-note",
+    default="",
+    help="Free-form audit note (capped at 256 bytes).",
+)
+@click.option(
+    "--trigger",
+    type=click.Choice(["operator_cli", "dashboard", "ci"]),
+    default="operator_cli",
+    help="Triggering surface for telemetry labelling.",
+)
+@click.pass_context
+def positions_reconcile(
+    ctx,
+    deployment_id: str,
+    wallet_override: str | None,
+    primitives_csv: str,
+    physical_identity_hashes: tuple[str, ...],
+    apply: bool,
+    max_age_blocks: int,
+    operator_note: str,
+    trigger: str,
+):
+    """Reconcile a deployment's position_registry against on-chain truth.
+
+    Detects:
+    \b
+      * matched          - on-chain and registry agree.
+      * phantom_missing  - on-chain has, registry doesn't (the GH #2131 case).
+      * stranded         - registry status='open', chain absent.
+      * rebuilt          - when --apply, the phantom_missing rows just written.
+
+    Default is dry-run (--apply not set): displays the diff WITHOUT writing.
+    Pass --apply to insert phantom_missing rows into position_registry
+    (transaction_ledger is NOT touched on this path -- reconciliation
+    re-derives registry from chain truth, never replays intent history).
+
+    Stranded rows are NEVER auto-closed. After review, run a teardown for
+    the specific position to close cleanly.
+
+    \b
+    Examples:
+        almanak ax positions reconcile --deployment-id MyStrat:abc
+        almanak ax --chain base positions reconcile --deployment-id MyStrat:abc --apply
+        almanak ax positions reconcile --deployment-id MyStrat:abc --max-age-blocks 32
+    """
+    from almanak.framework.cli.ax_render import render_error
+    from almanak.gateway.proto import gateway_pb2
+
+    json_output = ctx.obj["json_output"]
+    chain = ctx.obj["chain"]
+    wallet = wallet_override or ctx.obj.get("wallet") or ""
+    primitives_list = [p.strip() for p in primitives_csv.split(",") if p.strip()]
+
+    try:
+        _executor, client = _get_executor(ctx)
+        request = gateway_pb2.ReconcileRequest(
+            deployment_id=deployment_id,
+            chain=chain,
+            wallet_address=wallet,
+            primitives=primitives_list,
+            physical_identity_hashes=list(physical_identity_hashes),
+            apply=apply,
+            max_age_blocks=int(max_age_blocks),
+            operator_note=operator_note,
+            trigger=trigger,
+        )
+        response = client.position.Reconcile(request, timeout=120.0)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        render_error(f"Reconcile RPC failed: {e}", json_output=json_output)
+        sys.exit(1)
+
+    _render_reconcile_response(response, json_output=json_output, apply=apply)
+
+
+def _render_reconcile_response(response, *, json_output: bool, apply: bool) -> None:
+    """Render a ReconcileResponse for the operator.
+
+    Two surfaces:
+    - ``--json``: full JSON dump of the response envelope. Forensic-grade,
+      for piping into ``jq`` or dashboards.
+    - default: human-readable summary line + per-bucket detail. The four
+      counts are always shown so a one-line scan tells the operator
+      immediately whether the registry is consistent.
+    """
+    import json as _json
+
+    if json_output:
+        envelope = {
+            "reconciliation_id": response.reconciliation_id,
+            "source_block_number": response.source_block_number,
+            "matched_count": response.matched_count,
+            "phantom_missing_count": response.phantom_missing_count,
+            "stranded_count": response.stranded_count,
+            "rebuilt_count": response.rebuilt_count,
+            "oversize": response.oversize,
+            "oversize_detail": response.oversize_detail,
+            "duration_seconds": response.duration_seconds,
+            "matched": [
+                {
+                    "physical_identity_hash": m.physical_identity_hash,
+                    "primitive": m.primitive,
+                    "accounting_category": m.accounting_category,
+                    "confirmed_at_block": m.confirmed_at_block,
+                }
+                for m in response.matched
+            ],
+            "phantom_missing": [
+                {
+                    "physical_identity_hash": p.physical_identity_hash,
+                    "primitive": p.primitive,
+                    "accounting_category": p.accounting_category,
+                    "semantic_grouping_key": p.semantic_grouping_key,
+                    "payload": _safe_decode_json(p.payload_json),
+                    "opened_at_block": p.opened_at_block,
+                    "opened_tx": p.opened_tx,
+                }
+                for p in response.phantom_missing
+            ],
+            "stranded": [
+                {
+                    "physical_identity_hash": s.physical_identity_hash,
+                    "primitive": s.primitive,
+                    "accounting_category": s.accounting_category,
+                    "handle": s.handle,
+                    "registry_row": _safe_decode_json(s.registry_row_json),
+                    "confirmed_absent_at_block": s.confirmed_absent_at_block,
+                    "absent_reason": s.absent_reason,
+                }
+                for s in response.stranded
+            ],
+            "rebuilt": [
+                {
+                    "physical_identity_hash": r.physical_identity_hash,
+                    "primitive": r.primitive,
+                    "accounting_category": r.accounting_category,
+                    "source": r.source,
+                    "last_reconciled_at_block": r.last_reconciled_at_block,
+                    "reconciliation_id": r.reconciliation_id,
+                    "registry_row": _safe_decode_json(r.registry_row_json),
+                }
+                for r in response.rebuilt
+            ],
+            "primitive_errors": [
+                {
+                    "primitive": e.primitive,
+                    "chain": e.chain,
+                    "code": e.code,
+                    "message": e.message,
+                    "recoverable": e.recoverable,
+                }
+                for e in response.primitive_errors
+            ],
+        }
+        click.echo(_json.dumps(envelope, indent=2))
+        return
+
+    apply_label = "apply=true (registry written)" if apply else "apply=false (dry-run)"
+    click.echo(f"reconciliation_id: {response.reconciliation_id}")
+    click.echo(f"source_block_number: {response.source_block_number}")
+    click.echo(f"mode: {apply_label}")
+    click.echo(f"duration: {response.duration_seconds:.3f}s")
+    click.echo(
+        f"matched: {response.matched_count} | "
+        f"phantom_missing: {response.phantom_missing_count} | "
+        f"stranded: {response.stranded_count} | "
+        f"rebuilt: {response.rebuilt_count}"
+    )
+    if response.oversize:
+        click.echo(click.style(f"OVERSIZE: {response.oversize_detail}", fg="yellow"))
+    if response.phantom_missing_count > 0:
+        click.echo("\nphantom_missing (on-chain has, registry doesn't):")
+        for p in response.phantom_missing:
+            click.echo(f"  - pih={p.physical_identity_hash[:16]}... primitive={p.primitive}")
+    if response.stranded_count > 0:
+        click.echo("\nstranded (registry open, chain absent -- NOT auto-closed):")
+        for s in response.stranded:
+            click.echo(f"  - pih={s.physical_identity_hash[:16]}... reason={s.absent_reason}")
+    if response.rebuilt_count > 0:
+        click.echo("\nrebuilt (registry rows written from chain truth):")
+        for r in response.rebuilt:
+            click.echo(
+                f"  - pih={r.physical_identity_hash[:16]}... last_reconciled_at_block={r.last_reconciled_at_block}"
+            )
+    if response.primitive_errors:
+        click.echo("\nprimitive_errors (partial failures, RPC still SUCCESS):")
+        for e in response.primitive_errors:
+            tag = "recoverable" if e.recoverable else "non-recoverable"
+            click.echo(
+                click.style(
+                    f"  - [{e.code}] ({tag}) primitive={e.primitive}: {e.message}",
+                    fg="red" if not e.recoverable else "yellow",
+                )
+            )
+
+
+def _safe_decode_json(raw: bytes) -> object:
+    """Decode a JSON-bytes proto field; return {} on any failure."""
+    import json as _json
+
+    if not raw:
+        return {}
+    try:
+        return _json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, _json.JSONDecodeError):
+        return {}

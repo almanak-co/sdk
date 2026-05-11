@@ -3782,6 +3782,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         registry: Any,
         effective_handle: str | None,
         ledger_id: str,
+        mode: str = "commit",
     ) -> gateway_pb2.SaveLedgerAndRegistryResponse:
         """Atomic Postgres commit of ledger + position_registry + handle (T19 / VIB-4205).
 
@@ -3792,6 +3793,21 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         ``_snapshot_execute`` three times here — that acquires a fresh
         connection per call and defeats atomicity. The anti-bypass test
         ``test_atomic_three_writes_one_tx`` verifies this contract.
+
+        Mode contract (T24 / VIB-4210 / VIB-4221 ADR §8.1 — ratified Option (c)):
+
+        - ``mode='commit'`` (default; backward-compatible): runs all three
+          writes (ledger INSERT → registry UPSERT → handle backfill).
+        - ``mode='registry_reconciliation'``: control-plane reconciliation
+          path. SKIPS the ledger INSERT (step 1) — runs only the registry
+          UPSERT + handle backfill atomically inside the same Postgres
+          transaction. Invoked exclusively by ``PositionService.Reconcile``
+          when ``apply=true`` (ADR §2.3 #1+#2: ledger MUST NOT be touched
+          on the reconciliation path). The ledger transaction is still
+          opened (so the registry + handle still commit atomically), but
+          the INSERT statement itself is skipped. Backward compatibility:
+          callers that omit the mode argument run the original T11/T19
+          three-write contract bit-identically.
 
         Idempotency:
         - Ledger: ``INSERT ... ON CONFLICT (id) DO UPDATE SET <all cols>``
@@ -3824,6 +3840,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         new_status_priority = 0 if registry.status == "open" else 1
         _ = new_status_priority  # documented in SQLite path; computed for parity / debugging
 
+        # T24 / VIB-4210: validate mode at the boundary. Same rule as the
+        # SQLite path (sqlite.py:save_ledger_and_registry_atomic) — only
+        # two values are accepted; anything else surfaces as ValueError
+        # rather than silently routing to a default branch.
+        if mode not in ("commit", "registry_reconciliation"):
+            raise ValueError(
+                f"_save_ledger_and_registry_pg: invalid mode={mode!r}; expected 'commit' or 'registry_reconciliation'."
+            )
+        _skip_ledger = mode == "registry_reconciliation"
+
         # VIB-4191-dep: JSONB / TIMESTAMPTZ assumptions match the
         # SaveLedgerEntry PG branch above; ``::jsonb`` casts on the four
         # replay columns and ``payload`` are required iff Infra deploys
@@ -3849,70 +3875,79 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                         )
                     # 1) Ledger row — upsert keyed on id (matches the
                     # existing SaveLedgerEntry PG branch line 1207).
-                    await conn.execute(
-                        """
-                        INSERT INTO transaction_ledger (
-                            id, cycle_id, agent_id, deployment_id, execution_mode,
-                            timestamp, intent_type,
-                            token_in, amount_in, token_out, amount_out,
-                            effective_price, slippage_bps, gas_used, gas_usd,
-                            tx_hash, chain, protocol, success, error,
-                            extracted_data_json, price_inputs_json,
-                            pre_state_json, post_state_json
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                            $21::jsonb, $22::jsonb, $23::jsonb, $24::jsonb
+                    #
+                    # T24 / VIB-4210: under mode='registry_reconciliation'
+                    # the ledger INSERT is SKIPPED. The transaction stays
+                    # open so the registry UPSERT + handle backfill below
+                    # still commit atomically — but no ledger row is
+                    # written (ADR §2.3 #1+#2; reconciliation re-derives
+                    # registry from chain truth, never replays / writes
+                    # the immutable intent history).
+                    if not _skip_ledger:
+                        await conn.execute(
+                            """
+                            INSERT INTO transaction_ledger (
+                                id, cycle_id, agent_id, deployment_id, execution_mode,
+                                timestamp, intent_type,
+                                token_in, amount_in, token_out, amount_out,
+                                effective_price, slippage_bps, gas_used, gas_usd,
+                                tx_hash, chain, protocol, success, error,
+                                extracted_data_json, price_inputs_json,
+                                pre_state_json, post_state_json
+                            ) VALUES (
+                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                                $21::jsonb, $22::jsonb, $23::jsonb, $24::jsonb
+                            )
+                            ON CONFLICT (id) DO UPDATE SET
+                                cycle_id = EXCLUDED.cycle_id,
+                                deployment_id = EXCLUDED.deployment_id,
+                                execution_mode = EXCLUDED.execution_mode,
+                                timestamp = EXCLUDED.timestamp,
+                                intent_type = EXCLUDED.intent_type,
+                                token_in = EXCLUDED.token_in,
+                                amount_in = EXCLUDED.amount_in,
+                                token_out = EXCLUDED.token_out,
+                                amount_out = EXCLUDED.amount_out,
+                                effective_price = EXCLUDED.effective_price,
+                                slippage_bps = EXCLUDED.slippage_bps,
+                                gas_used = EXCLUDED.gas_used,
+                                gas_usd = EXCLUDED.gas_usd,
+                                tx_hash = EXCLUDED.tx_hash,
+                                chain = EXCLUDED.chain,
+                                protocol = EXCLUDED.protocol,
+                                success = EXCLUDED.success,
+                                error = EXCLUDED.error,
+                                extracted_data_json = EXCLUDED.extracted_data_json,
+                                price_inputs_json = EXCLUDED.price_inputs_json,
+                                pre_state_json = EXCLUDED.pre_state_json,
+                                post_state_json = EXCLUDED.post_state_json
+                            """,
+                            ledger.id,
+                            ledger.cycle_id,
+                            ledger.strategy_id,
+                            getattr(ledger, "deployment_id", "") or "",
+                            getattr(ledger, "execution_mode", "") or "",
+                            ledger.timestamp,
+                            ledger.intent_type,
+                            ledger.token_in,
+                            ledger.amount_in,
+                            ledger.token_out,
+                            ledger.amount_out,
+                            ledger.effective_price,
+                            ledger.slippage_bps,
+                            ledger.gas_used,
+                            ledger.gas_usd,
+                            ledger.tx_hash,
+                            ledger.chain,
+                            ledger.protocol,
+                            ledger.success,
+                            ledger.error,
+                            ledger.extracted_data_json or None,
+                            ledger.price_inputs_json or None,
+                            ledger.pre_state_json or None,
+                            ledger.post_state_json or None,
                         )
-                        ON CONFLICT (id) DO UPDATE SET
-                            cycle_id = EXCLUDED.cycle_id,
-                            deployment_id = EXCLUDED.deployment_id,
-                            execution_mode = EXCLUDED.execution_mode,
-                            timestamp = EXCLUDED.timestamp,
-                            intent_type = EXCLUDED.intent_type,
-                            token_in = EXCLUDED.token_in,
-                            amount_in = EXCLUDED.amount_in,
-                            token_out = EXCLUDED.token_out,
-                            amount_out = EXCLUDED.amount_out,
-                            effective_price = EXCLUDED.effective_price,
-                            slippage_bps = EXCLUDED.slippage_bps,
-                            gas_used = EXCLUDED.gas_used,
-                            gas_usd = EXCLUDED.gas_usd,
-                            tx_hash = EXCLUDED.tx_hash,
-                            chain = EXCLUDED.chain,
-                            protocol = EXCLUDED.protocol,
-                            success = EXCLUDED.success,
-                            error = EXCLUDED.error,
-                            extracted_data_json = EXCLUDED.extracted_data_json,
-                            price_inputs_json = EXCLUDED.price_inputs_json,
-                            pre_state_json = EXCLUDED.pre_state_json,
-                            post_state_json = EXCLUDED.post_state_json
-                        """,
-                        ledger.id,
-                        ledger.cycle_id,
-                        ledger.strategy_id,
-                        getattr(ledger, "deployment_id", "") or "",
-                        getattr(ledger, "execution_mode", "") or "",
-                        ledger.timestamp,
-                        ledger.intent_type,
-                        ledger.token_in,
-                        ledger.amount_in,
-                        ledger.token_out,
-                        ledger.amount_out,
-                        ledger.effective_price,
-                        ledger.slippage_bps,
-                        ledger.gas_used,
-                        ledger.gas_usd,
-                        ledger.tx_hash,
-                        ledger.chain,
-                        ledger.protocol,
-                        ledger.success,
-                        ledger.error,
-                        ledger.extracted_data_json or None,
-                        ledger.price_inputs_json or None,
-                        ledger.pre_state_json or None,
-                        ledger.post_state_json or None,
-                    )
 
                     # 2) Registry row with priority-gated UPSERT. The
                     # CASE expression materializes the priority inline
@@ -4135,6 +4170,18 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         if isinstance(payload, gateway_pb2.SaveLedgerAndRegistryResponse):
             return payload
 
+        # T24 / VIB-4210: mode validation at the boundary. Proto3 default
+        # "" routes to the legacy ("commit") path bit-identically.
+        mode = request.mode or "commit"
+        if mode not in ("commit", "registry_reconciliation"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"invalid mode={mode!r}; expected 'commit' or 'registry_reconciliation'")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False,
+                error=f"invalid mode={mode!r}",
+                error_class="ValueError",
+            )
+
         try:
             ledger = self._build_ledger_entry_from_request(request, ledger_id, strategy_id, deployment_id, ts)
             registry = self._build_registry_row_from_request(request, deployment_id, payload, context)
@@ -4162,6 +4209,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     registry=registry,
                     effective_handle=effective_handle,
                     ledger_id=ledger_id,
+                    mode=mode,
                 )
 
             # SQLite mode (T22 / VIB-4208).
@@ -4172,6 +4220,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     ledger=ledger,
                     registry=registry,
                     handle=handle,
+                    mode=mode,
                 )
             except Exception as exc:
                 typed = self._classify_save_ledger_and_registry_error(exc, ledger_id)

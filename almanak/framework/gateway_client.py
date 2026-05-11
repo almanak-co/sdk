@@ -277,6 +277,8 @@ class GatewayClient:
         self._polymarket_stub: gateway_pb2_grpc.PolymarketServiceStub | None = None
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
         self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
+        # T24 / VIB-4210: PositionService stub for `ax positions reconcile`.
+        self._position_stub: gateway_pb2_grpc.PositionServiceStub | None = None
         self._gateway_health_stub: gateway_pb2_grpc.HealthStub | None = None
         self.registered_chains: list[str] | None = None
         self.registered_with_wallet_registry: bool = False
@@ -380,6 +382,20 @@ class GatewayClient:
             raise RuntimeError("Gateway client not connected")
         return self._lifecycle_stub
 
+    @property
+    def position(self) -> gateway_pb2_grpc.PositionServiceStub:
+        """Get PositionService stub (T24 / VIB-4210). Raises if not connected.
+
+        Reconcile = control-plane RPC. Used exclusively from operator surfaces
+        (the ``ax positions reconcile`` CLI in v1; dashboard / hosted-boot in
+        T24+1). Strategy code MUST NOT import this property — the static
+        guard in ``tests/unit/gateway/test_position_service_strategy_call_ban.py``
+        enforces the ban per ADR §6.
+        """
+        if self._position_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._position_stub
+
     def connect(self) -> None:
         """Establish connection to gateway.
 
@@ -431,6 +447,9 @@ class GatewayClient:
         # Initialize Lifecycle service stub
         self._lifecycle_stub = gateway_pb2_grpc.LifecycleServiceStub(self._channel)
 
+        # Initialize Position service stub (T24 / VIB-4210)
+        self._position_stub = gateway_pb2_grpc.PositionServiceStub(self._channel)
+
         logger.debug(f"Channel opened to gateway at {self.target}")
 
     def disconnect(self) -> None:
@@ -457,6 +476,7 @@ class GatewayClient:
             self._polymarket_stub = None
             self._enso_stub = None
             self._lifecycle_stub = None
+            self._position_stub = None
             logger.info("Disconnected from gateway")
 
     def health_check(self, service: str = "") -> bool:

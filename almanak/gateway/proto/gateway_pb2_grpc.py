@@ -5583,3 +5583,180 @@ class LifecycleService(object):
             timeout,
             metadata,
             _registered_method=True)
+
+
+class PositionServiceStub(object):
+    """=============================================================================
+    PositionService — on-chain reconciliation of position_registry (T24 / VIB-4210).
+    =============================================================================
+
+    Design philosophy (PRD §Philosophy, ratified across three external reviews):
+
+    "Registry is the source of truth. Chain is the recovery oracle.
+    On-chain reconciliation is a recovery path, not a normal path —
+    gateway-owned, invoked only when registry rows are missing or stale."
+
+    PositionService is DELIBERATELY a separate service from StateService:
+
+    * StateService is a row-grained CRUD surface. Fast, narrow, hot-path.
+    * PositionService is a control-plane reconciliation surface — a single
+    call may fan out to dozens of on-chain RPCs (UniV3 NPM.balanceOf +
+    tokenOfOwnerByIndex + positions() per fork), spanning seconds.
+    Different cost profile, different auth posture (operator-initiated
+    or hosted-boot only — never strategy-code-initiated), different
+    rate-limit class.
+
+    Full design contract: docs/internal/adr/VIB-4221-position-service-reconcile.md
+    User-facing bug closed: GH #2131
+    Companion proto draft: docs/internal/proto-drafts/VIB-4221-position-service.proto
+    =============================================================================
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Reconcile = channel.unary_unary(
+                '/almanak.gateway.proto.PositionService/Reconcile',
+                request_serializer=gateway__pb2.ReconcileRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ReconcileResponse.FromString,
+                _registered_method=True)
+
+
+class PositionServiceServicer(object):
+    """=============================================================================
+    PositionService — on-chain reconciliation of position_registry (T24 / VIB-4210).
+    =============================================================================
+
+    Design philosophy (PRD §Philosophy, ratified across three external reviews):
+
+    "Registry is the source of truth. Chain is the recovery oracle.
+    On-chain reconciliation is a recovery path, not a normal path —
+    gateway-owned, invoked only when registry rows are missing or stale."
+
+    PositionService is DELIBERATELY a separate service from StateService:
+
+    * StateService is a row-grained CRUD surface. Fast, narrow, hot-path.
+    * PositionService is a control-plane reconciliation surface — a single
+    call may fan out to dozens of on-chain RPCs (UniV3 NPM.balanceOf +
+    tokenOfOwnerByIndex + positions() per fork), spanning seconds.
+    Different cost profile, different auth posture (operator-initiated
+    or hosted-boot only — never strategy-code-initiated), different
+    rate-limit class.
+
+    Full design contract: docs/internal/adr/VIB-4221-position-service-reconcile.md
+    User-facing bug closed: GH #2131
+    Companion proto draft: docs/internal/proto-drafts/VIB-4221-position-service.proto
+    =============================================================================
+    """
+
+    def Reconcile(self, request, context):
+        """Reconcile a deployment's position_registry against on-chain truth.
+
+        Behaviour:
+        1. Enumerate positions held by `wallet_address` on `chain` for each
+        requested `primitive` (v1: UniV3 LP only). Bounded by
+        _MAX_POSITIONS_PER_NPM (256) per V3-fork NPM — matches the
+        teardown discovery cap.
+        2. Read `position_registry` rows scoped to `deployment_id` + filters.
+        3. Compute four-bucket diff:
+        matched         — on-chain ↔ registry agree.
+        phantom_missing — on-chain has, registry doesn't (GH #2131).
+        stranded        — registry status='open', chain doesn't.
+        rebuilt         — when apply=true, the phantom_missing entries
+        inserted into registry.
+        4. If apply=false (default, dry-run), return diff WITHOUT writing.
+        5. If apply=true, insert phantom_missing rows with
+        payload.source='reconciliation_discovery' via
+        save_ledger_and_registry(mode='registry_reconciliation') —
+        ledger is NOT written on this path (ADR §2.3 #1+#2).
+
+        What Reconcile MUST NOT do (ADR §2.3, copied for emphasis):
+        * MUST NOT read or write transaction_ledger.
+        * MUST NOT mutate accounting_events / position_events.
+        * MUST NOT flip an already-terminal registry row (priority guard).
+        * MUST NOT be invoked from strategy code — control-plane only.
+
+        Idempotency: running Reconcile twice back-to-back with no on-chain
+        change is a no-op (ADR §4.1 formal proof).
+
+        Auth: same gateway-auth posture as StateService RPCs (resolve_agent_id
+        on deployment_id). v1 accepts the existing strategy-bound auth token;
+        a future hardened posture may require an additional "operator" role
+        claim — out of scope for T24 (ADR §6 + §8.2).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PositionServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Reconcile': grpc.unary_unary_rpc_method_handler(
+                    servicer.Reconcile,
+                    request_deserializer=gateway__pb2.ReconcileRequest.FromString,
+                    response_serializer=gateway__pb2.ReconcileResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.PositionService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.PositionService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PositionService(object):
+    """=============================================================================
+    PositionService — on-chain reconciliation of position_registry (T24 / VIB-4210).
+    =============================================================================
+
+    Design philosophy (PRD §Philosophy, ratified across three external reviews):
+
+    "Registry is the source of truth. Chain is the recovery oracle.
+    On-chain reconciliation is a recovery path, not a normal path —
+    gateway-owned, invoked only when registry rows are missing or stale."
+
+    PositionService is DELIBERATELY a separate service from StateService:
+
+    * StateService is a row-grained CRUD surface. Fast, narrow, hot-path.
+    * PositionService is a control-plane reconciliation surface — a single
+    call may fan out to dozens of on-chain RPCs (UniV3 NPM.balanceOf +
+    tokenOfOwnerByIndex + positions() per fork), spanning seconds.
+    Different cost profile, different auth posture (operator-initiated
+    or hosted-boot only — never strategy-code-initiated), different
+    rate-limit class.
+
+    Full design contract: docs/internal/adr/VIB-4221-position-service-reconcile.md
+    User-facing bug closed: GH #2131
+    Companion proto draft: docs/internal/proto-drafts/VIB-4221-position-service.proto
+    =============================================================================
+    """
+
+    @staticmethod
+    def Reconcile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PositionService/Reconcile',
+            gateway__pb2.ReconcileRequest.SerializeToString,
+            gateway__pb2.ReconcileResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

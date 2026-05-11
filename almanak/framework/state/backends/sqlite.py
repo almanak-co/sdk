@@ -2882,12 +2882,36 @@ class SQLiteStore:
         entry: "LedgerEntry",
         registry: "RegistryRow",
         handle: "HandleMapping | None",
+        mode: str = "commit",
     ) -> None:
         """Single-transaction commit of ledger + position_registry + handle.
 
         Per blueprint 28 §4.1 (local-mode contract). All three writes execute
         inside a single ``BEGIN IMMEDIATE`` ... ``COMMIT``; failure of any
         write rolls the entire transaction back so neither row lands on disk.
+
+        Mode contract (T24 / VIB-4210 / VIB-4221 ADR §8.1 — ratified Option (c)):
+
+        - ``mode='commit'`` (default; backward-compatible): the original
+          three-write contract. Writes ``transaction_ledger`` row, then
+          UPSERTs ``position_registry``, then runs the handle-backfill UPDATE.
+        - ``mode='registry_reconciliation'``: control-plane reconciliation
+          path invoked by ``PositionService.Reconcile`` when ``apply=true``.
+          SKIPS the ledger write (step 1) but still runs the registry UPSERT
+          + handle backfill atomically inside the same SQLite transaction.
+          The ``entry`` argument is still required so the function signature
+          stays uniform — it just isn't written. Callers under this mode
+          MUST pass a registry row whose ``payload`` includes
+          ``source='reconciliation_discovery'`` so downstream readers can
+          distinguish chain-derived rows from intent-derived rows
+          (ADR §4 algorithm sketch step 6).
+
+        Why this design: the ratified single-registry-writer rule (VIB-3862
+        chokepoint lesson + ADR §8.1 Option (c)) keeps the ON CONFLICT clause,
+        the monotone-priority guard, and the ``RegistryAutoCollisionError``
+        classifier in ONE place. A parallel ``save_registry_only`` writer
+        would create drift risk. The ``mode`` parameter localizes the
+        "skip ledger" branch to one ``if`` inside the existing transaction.
 
         Idempotency:
         - The ledger row uses ``INSERT OR REPLACE`` keyed on ``id`` (UUID
@@ -2941,6 +2965,17 @@ class SQLiteStore:
         # open=0; closed=1; reorg_invalidated=1.
         new_status_priority = 0 if registry.status == "open" else 1
 
+        # T24 / VIB-4210: validate mode at the boundary so a typo lands
+        # as a typed ValueError, not a silent fall-through to the default
+        # branch. Only two values are valid; anything else is a bug.
+        if mode not in ("commit", "registry_reconciliation"):
+            raise ValueError(
+                f"save_ledger_and_registry_atomic: invalid mode={mode!r}; "
+                "expected 'commit' (default, write ledger+registry+handle) "
+                "or 'registry_reconciliation' (skip ledger, write registry+handle only)."
+            )
+        _skip_ledger = mode == "registry_reconciliation"
+
         def _sync_atomic_commit() -> None:
             with self._db_lock:
                 conn = self._conn
@@ -2953,44 +2988,57 @@ class SQLiteStore:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     # 1) Ledger row.
-                    conn.execute(
-                        """
-                        INSERT OR REPLACE INTO transaction_ledger
-                        (id, cycle_id, strategy_id, deployment_id, execution_mode,
-                         timestamp, intent_type,
-                         token_in, amount_in, token_out, amount_out,
-                         effective_price, slippage_bps, gas_used, gas_usd,
-                         tx_hash, chain, protocol, success, error,
-                         extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            entry.id,
-                            entry.cycle_id,
-                            entry.strategy_id,
-                            getattr(entry, "deployment_id", "") or "",
-                            getattr(entry, "execution_mode", "") or "",
-                            entry.timestamp.isoformat(),
-                            entry.intent_type,
-                            entry.token_in,
-                            entry.amount_in,
-                            entry.token_out,
-                            entry.amount_out,
-                            entry.effective_price,
-                            entry.slippage_bps,
-                            entry.gas_used,
-                            entry.gas_usd,
-                            entry.tx_hash,
-                            entry.chain,
-                            entry.protocol,
-                            entry.success,
-                            entry.error,
-                            entry.extracted_data_json,
-                            entry.price_inputs_json,
-                            entry.pre_state_json,
-                            entry.post_state_json,
-                        ),
-                    )
+                    #
+                    # T24 / VIB-4210: in mode='registry_reconciliation' the
+                    # ledger insert is SKIPPED entirely. ADR §2.3 #1+#2
+                    # forbids Reconcile from writing transaction_ledger —
+                    # ledger is the immutable intent history, reconciliation
+                    # is a recovery path that discovers chain-only positions
+                    # (no corresponding intent ever existed). Synthesising
+                    # a fake ledger row would pollute the audit trail and
+                    # defeat the whole point of having a separate registry
+                    # surface. The skip is localised to ONE branch inside
+                    # the existing transaction (ADR §8.1 Option (c)) so
+                    # there is still a single registry writer path.
+                    if not _skip_ledger:
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO transaction_ledger
+                            (id, cycle_id, strategy_id, deployment_id, execution_mode,
+                             timestamp, intent_type,
+                             token_in, amount_in, token_out, amount_out,
+                             effective_price, slippage_bps, gas_used, gas_usd,
+                             tx_hash, chain, protocol, success, error,
+                             extracted_data_json, price_inputs_json, pre_state_json, post_state_json)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                entry.id,
+                                entry.cycle_id,
+                                entry.strategy_id,
+                                getattr(entry, "deployment_id", "") or "",
+                                getattr(entry, "execution_mode", "") or "",
+                                entry.timestamp.isoformat(),
+                                entry.intent_type,
+                                entry.token_in,
+                                entry.amount_in,
+                                entry.token_out,
+                                entry.amount_out,
+                                entry.effective_price,
+                                entry.slippage_bps,
+                                entry.gas_used,
+                                entry.gas_usd,
+                                entry.tx_hash,
+                                entry.chain,
+                                entry.protocol,
+                                entry.success,
+                                entry.error,
+                                entry.extracted_data_json,
+                                entry.price_inputs_json,
+                                entry.pre_state_json,
+                                entry.post_state_json,
+                            ),
+                        )
                     # 2) Registry row + handle column atomically.
                     #
                     # The ON CONFLICT clause's WHERE predicate enforces:
