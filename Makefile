@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-coverage crap crap-fresh crap-diff test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary
+.PHONY: all clean test test-unit test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary
 
 # Load .env file if it exists
 -include .env
@@ -141,14 +141,35 @@ crap-fresh:
 # Requires a `.coverage` data file (produced by `make test-ci` or
 # `make test-coverage`) and at least one ancestor commit on the compare branch.
 # Override BASE for non-PR runs: `make crap-diff BASE=origin/feat/foo`.
+#
+# IMPORTANT — local vs CI parity: this target reads whatever `.coverage` happens
+# to exist on disk. If that file was produced by a focused / narrow run (e.g.
+# `pytest tests/unit/foo --cov=almanak`) coverage% will be inflated for files
+# outside the focus and a green local result will not match CI's red. For an
+# exact mirror of CI's `crap_gate` job, use `make crap-diff-fresh` (regenerates
+# from `make test-ci`, the same scope CI uses).
 BASE ?= origin/main
+# No positional path arg — diff-quality treats those as pre-generated input
+# reports (`Could not load report 'almanak/'`). Scope is enforced by
+# [tool.crap-diff].package_root in pyproject.toml.
 crap-diff:
-	@test -f .coverage || (echo "crap-diff: .coverage missing — run 'make test-ci' or 'make test-coverage' first" && exit 1)
-	# No positional path arg — diff-quality treats those as pre-generated input
-	# reports (`Could not load report 'almanak/'`). Scope is enforced by
-	# [tool.crap-diff].package_root in pyproject.toml.
+	@test -f .coverage || (echo "crap-diff: .coverage missing — run 'make test-ci' or 'make test-coverage' first (or use 'make crap-diff-fresh' for a full CI-parity run)" && exit 1)
 	uv run diff-quality --violations crap --fail-under 100 \
 		--compare-branch=$(BASE)
+
+# CI-parity diff-aware CRAP gate. Regenerates `.coverage` from the SAME scope
+# CI uses (`make test-ci` — unit + non-intent tests with `--cov=almanak`), then
+# runs the gate. Use this before pushing when the local `make crap-diff` says
+# clean but you want to verify CI will agree. ~9 min wall-clock (test-ci ~8 min
+# + crap-diff < 30s).
+#
+# Mirrors the `pr.yml` `crap_gate` job: that job reads `.coverage` produced by
+# the upstream `test_pytest` job (`make test-ci`) and runs `make crap-diff`.
+# The two-step recipe (sub-makes, not prerequisites) preserves ordering under
+# `make -j` so the CRAP analysis never reads a partial `.coverage` file.
+crap-diff-fresh:
+	$(MAKE) test-ci
+	$(MAKE) crap-diff
 
 # Cyclomatic-complexity / maintainability-index report on production code.
 # `make complexity`              → full almanak/ tree report.
