@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.accounting.lp_accounting import LPAccountingEvent
@@ -37,6 +38,7 @@ from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
 from almanak.framework.accounting.policy import MatchingPolicy, PrimitiveVersion
 from almanak.framework.accounting.position_reference import (
     build_legacy_position_reference,
+    build_registry_position_reference,
 )
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.primitives.taxonomy import (
@@ -50,7 +52,7 @@ from almanak.framework.state.exceptions import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from almanak.framework.accounting.position_reference import PositionReference
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +67,49 @@ AccountingEvent = (
     | TransferAccountingEvent
 )
 
+# VIB-4278: registry-lookup callable shape passed by the SQLite state backend
+# so the augment chokepoint can stamp ``source="registry"`` on the
+# ``position_reference`` shape when ``position_registry`` has a matching row.
+# The chokepoint itself never touches the DB; the callable lives in the state
+# backend that owns the connection (per VIB-3862's "writer must not mutate
+# event instance" rule and CLAUDE.md's database-schema-ownership rule).
+#
+# Contract:
+#
+# * Input args: ``(primitive, event_kind, accounting_category)`` where
+#   ``primitive`` is the canonical ``Primitive`` enum **value** (lowercase
+#   StrEnum, e.g. ``"lp"``), ``event_kind`` is the ``EventKind`` enum
+#   **value** (``"open"`` / ``"close"``), and ``accounting_category`` is
+#   the canonical ``AccountingCategory`` enum **value** (e.g. ``"lp"``,
+#   ``"pendle_lp"``). The chokepoint resolves all three through
+#   ``record_for(event_type)`` before calling. ``accounting_category``
+#   was added in PR #2236 round 2: multiple AccountingCategory values
+#   can share the same Primitive (UniV3 ``"lp"`` and Pendle ``"pendle_lp"``
+#   both have ``Primitive="lp"``), so a lookup keyed only on
+#   ``(deployment_id, chain, primitive, tx_hash)`` can legitimately
+#   return rows from a different category when a single tx opens
+#   positions across categories — threading ``accounting_category``
+#   disambiguates the join. All other lookup context (deployment_id,
+#   chain, tx_hash) is closed over by the state backend when it builds
+#   the callable — the chokepoint stays pure.
+# * Returns: ``dict`` row when a matching ``position_registry`` row is
+#   found, ``None`` otherwise. The row dict MUST carry at minimum
+#   ``physical_identity_hash`` / ``semantic_grouping_key`` /
+#   ``grouping_policy_version`` / ``handle`` /
+#   ``matching_policy_version``. The chokepoint never inspects extras.
+# * MUST NOT raise on "no match" (registry-mode is opt-in per blueprint 28
+#   §5; legacy primitives have no registry rows). It MAY raise on actual
+#   DB errors; the chokepoint then honors the mode-aware contract (live
+#   raises, paper logs ERROR + falls back to legacy).
+RegistryLookup = Callable[[str, str, str], dict | None]
 
-def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
+
+def augment_accounting_payload(
+    payload_json: str,
+    *,
+    is_live: bool,
+    registry_lookup: RegistryLookup | None = None,
+) -> str:
     """Augment an accounting-event payload with the G13/L1/L4 contract.
 
     Single-point augmentation called by both state backends
@@ -94,6 +137,29 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
     * **Non-live mode** (``is_live=False``): the same conditions log ERROR
       and return the original payload unchanged so paper / dry-run / backtest
       runs do not halt on schema bugs.
+
+    VIB-4278 — registry-lookup hook
+    -------------------------------
+
+    The optional ``registry_lookup`` callable lets the SQLite state backend
+    stamp ``source="registry"`` (with the registry row's
+    ``physical_identity_hash`` / ``semantic_grouping_key`` / ``handle`` /
+    ``grouping_policy_version`` / ``matching_policy_version``) instead of the
+    Day-1 legacy reference for OPEN/CLOSE events. The chokepoint stays a
+    pure function: it never touches the DB; the callable is constructed by
+    the state backend that owns the connection and closes over the lookup
+    context (deployment_id, chain, tx_hash). See ``RegistryLookup`` above for
+    the contract.
+
+    When ``registry_lookup`` is omitted (default ``None``), or returns
+    ``None`` (registry row not yet recorded for this event), the chokepoint
+    falls back to ``build_legacy_position_reference`` unchanged. This means
+    legacy primitives keep emitting ``source="legacy"`` and the
+    hosted-Postgres path (T19 / VIB-4205 not yet shipped) continues to emit
+    ``source="legacy"`` without behavioural drift. A registry-mode cutover
+    flips a primitive's events to ``source="registry"`` once the state
+    backend's lookup wiring is in place AND the primitive's atomic
+    save_ledger_and_registry path lands the row before the augment runs.
     """
     try:
         d = json.loads(payload_json)
@@ -203,7 +269,11 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
     # regardless of which branch we take below.
     d.pop("position_reference", None)
     if record is not None and record.event_kind in (EventKind.OPEN, EventKind.CLOSE):
-        d["position_reference"] = build_legacy_position_reference(record).to_dict()
+        d["position_reference"] = _resolve_position_reference(
+            record,
+            registry_lookup=registry_lookup,
+            is_live=is_live,
+        ).to_dict()
 
     _project_lending_aliases(d)
     # ``sort_keys=True``: the augmented payload is the canonical bytes that
@@ -213,6 +283,89 @@ def augment_accounting_payload(payload_json: str, *, is_live: bool) -> str:
     # `_extract_position_reference_column` helper and `PositionReference.to_dict`
     # docstring both depend on this invariant — see VIB-4196 / T10.
     return json.dumps(d, sort_keys=True)
+
+
+def _resolve_position_reference(
+    record: PrimitiveRecord,
+    *,
+    registry_lookup: RegistryLookup | None,
+    is_live: bool,
+) -> PositionReference:
+    """Resolve the ``position_reference`` for an OPEN/CLOSE event.
+
+    VIB-4278 — sits between the augment chokepoint and the two construction
+    sites (``build_legacy_position_reference`` and
+    ``build_registry_position_reference``) so the chokepoint body stays
+    flat and the failure-mode branches are localised:
+
+    * No ``registry_lookup`` supplied → legacy reference (default).
+    * Lookup returns ``None`` → legacy reference (no registry row yet for
+      this event; registry-mode is opt-in per blueprint 28 §5).
+    * Lookup raises → mode-aware (live raises
+      :class:`AccountingPersistenceError`; paper logs ERROR + falls back
+      to legacy).
+    * Lookup returns a row but its ``physical_identity_hash`` is missing /
+      empty / whitespace-only → mode-aware (live raises; paper logs ERROR
+      + falls back to legacy). Same rule applies if the row's identity
+      fields fail the ``Empty ≠ Zero`` shape check in
+      :class:`PositionReference.__post_init__`.
+    * Lookup returns a row with non-empty identity → registry reference.
+    """
+    if registry_lookup is None:
+        return build_legacy_position_reference(record)
+
+    try:
+        row = registry_lookup(
+            record.primitive.value,
+            record.event_kind.value,
+            record.accounting_category.value,
+        )
+    except Exception as exc:
+        msg = (
+            f"augment_accounting_payload: registry_lookup raised "
+            f"({type(exc).__name__}: {exc}); falling back to legacy reference"
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.ACCOUNTING,
+                message=msg,
+                cause=exc,
+            ) from exc
+        logger.error("%s — non-live mode", msg)
+        return build_legacy_position_reference(record)
+
+    if row is None:
+        return build_legacy_position_reference(record)
+
+    # Blueprint 28 §3 makes physical_identity_hash / semantic_grouping_key
+    # / grouping_policy_version NOT NULL in the registry schema. A row
+    # reaching here with any of those missing is a registry-write bug —
+    # ``build_registry_position_reference`` fails loud (ValueError) and
+    # we honor the mode-aware contract: live raises
+    # AccountingPersistenceError so the runner halts; paper / dry_run
+    # logs ERROR and falls back to legacy so the loop keeps moving.
+    # Previously the writer short-circuited on ``hash_value is None``
+    # with a warning + legacy fall-back even in live mode; CodeRabbit
+    # PR #2236 round 2 flagged that as too lenient — a None / empty
+    # identity field with ``source="registry"`` would lose the L5_22
+    # join key silently. The helper is now the single point of
+    # validation.
+    try:
+        return build_registry_position_reference(record, registry_row=row)
+    except ValueError as exc:
+        msg = (
+            f"augment_accounting_payload: registry row failed PositionReference "
+            f"shape check ({exc}); per CLAUDE.md 'Empty ≠ Zero' an empty / "
+            f"whitespace / None identity field is a parser-write bug, not a value"
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.ACCOUNTING,
+                message=msg,
+                cause=exc,
+            ) from exc
+        logger.error("%s — non-live mode, falling back to legacy reference", msg)
+        return build_legacy_position_reference(record)
 
 
 def _project_lending_aliases(d: dict[str, Any]) -> None:

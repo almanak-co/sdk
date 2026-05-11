@@ -640,7 +640,22 @@ class GatewayStateManager:
             # halts; paper/dry-run logs ERROR and pass-throughs.
             from ..accounting.writer import augment_accounting_payload
 
-            augmented = augment_accounting_payload(event.to_payload_json(), is_live=is_live)
+            # VIB-4278: the strategy-side gateway client cannot query
+            # ``position_registry`` directly — it has no DB connection (that
+            # lives on the gateway sidecar). The gateway-side registry
+            # lookup over gRPC lands with T19 / VIB-4205. Until then we pass
+            # ``registry_lookup=None`` and the chokepoint falls back to the
+            # legacy reference. In LOCAL mode the registry stamp still
+            # lands because the gateway sidecar's state_service re-augments
+            # via ``SQLiteStore.save_accounting_event`` which DOES wire the
+            # lookup (see ``SQLiteStore._build_registry_lookup_for_event``).
+            # In HOSTED Postgres mode every accounting event ships
+            # ``source="legacy"`` until T19 lands the gateway RPC + DDL.
+            augmented = augment_accounting_payload(
+                event.to_payload_json(),
+                is_live=is_live,
+                registry_lookup=None,
+            )
             payload_bytes = augmented.encode("utf-8")
             # VIB-4196 / T10: position_reference column carried alongside
             # payload_json over the gateway gRPC. The hosted Postgres half

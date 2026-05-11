@@ -184,6 +184,123 @@ class PositionReference:
         return asdict(self)
 
 
+def build_registry_position_reference(
+    record: PrimitiveRecord,
+    *,
+    registry_row: dict,
+) -> PositionReference:
+    """Construct a ``source="registry"`` reference from a ``position_registry`` row.
+
+    Used by the augment chokepoint (VIB-4278) when a registry lookup finds the
+    row corresponding to an OPEN/CLOSE event. The reference fields are pulled
+    directly from the registry row (the registry is the source of truth at
+    write time):
+
+    * ``physical_identity_hash`` ← ``registry_row["physical_identity_hash"]``
+    * ``semantic_grouping_key``  ← ``registry_row["semantic_grouping_key"]``
+    * ``registry_handle``        ← ``registry_row["handle"]`` (may be ``None``)
+    * ``grouping_policy_version``← ``registry_row["grouping_policy_version"]``
+    * ``matching_policy_version``← ``registry_row["matching_policy_version"]``
+
+    The ``primitive`` / ``accounting_category`` fields stay sourced from the
+    ``PrimitiveRecord`` so they're guaranteed to use canonical enum values
+    (matches the legacy helper's contract).
+
+    Per CLAUDE.md "Empty ≠ Zero", the registry row's ``physical_identity_hash``
+    MUST be a non-empty, non-whitespace string. An empty value here is a
+    parser bug masquerading as a value; the dataclass ``__post_init__``
+    raises ``ValueError`` and the caller (augment chokepoint) decides
+    fail-loud vs fall-through per its mode-aware contract.
+
+    Parameters
+    ----------
+    record
+        Canonical taxonomy row obtained via ``record_for(event_type)``.
+    registry_row
+        A ``position_registry`` row dict with at least the five identity
+        fields named above. The full schema is documented in
+        :file:`blueprints/28-position-registry.md` §3.
+
+    Returns
+    -------
+    PositionReference
+        Frozen reference with ``source="registry"`` and identity fields
+        populated from the row. ``registry_handle`` may be ``None`` when the
+        row was written in auto-mode without an explicit handle.
+
+    Raises
+    ------
+    ValueError
+        ``record.event_kind`` is not OPEN or CLOSE, OR the registry row's
+        identity fields fail the ``Empty ≠ zero`` shape check (empty string,
+        whitespace-only string, non-string non-None value), OR
+        ``matching_policy_version`` is present but is not an integer.
+    """
+    if record.event_kind not in _POSITION_BEARING_EVENT_KINDS:
+        raise ValueError(
+            f"build_registry_position_reference: event_kind "
+            f"{record.event_kind!r} (intent_type={record.intent_type!r}) is "
+            f"not OPEN or CLOSE; only OPEN/CLOSE rows carry a "
+            f"position_reference per blueprint 28 §3."
+        )
+    # Fail loud on missing / empty required registry-identity fields. The
+    # registry schema declares ``physical_identity_hash``,
+    # ``semantic_grouping_key``, and ``grouping_policy_version`` as
+    # ``TEXT NOT NULL``; a row reaching this helper with any of them
+    # missing / empty / whitespace-only / non-string is a corruption
+    # signal — emitting ``source="registry"`` with a ``None`` /
+    # ``""`` hash would violate the L5_22 invariant (the row must carry
+    # a non-null join key) and surface as broken accounting later. Per
+    # CLAUDE.md "Empty ≠ Zero", an empty value is a parser bug, not a
+    # value. The PositionReference ``__post_init__`` already enforces
+    # this for non-None strings, but it would let ``None`` through (None
+    # is legal on legacy rows); we tighten it here for the registry
+    # construction path specifically. CodeRabbit PR #2236 round 2.
+    required_registry_fields = {
+        "physical_identity_hash": registry_row.get("physical_identity_hash"),
+        "semantic_grouping_key": registry_row.get("semantic_grouping_key"),
+        "grouping_policy_version": registry_row.get("grouping_policy_version"),
+    }
+    for field_name, value in required_registry_fields.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"build_registry_position_reference: registry row missing "
+                f"required identity field {field_name!r} — got {value!r}. "
+                f"Per CLAUDE.md 'Empty ≠ Zero', None / empty string / "
+                f"non-string here is a registry-write bug; refusing to "
+                f"emit source='registry' with a null join key."
+            )
+    raw_matching_version = registry_row.get("matching_policy_version")
+    matching_policy_version: int | None
+    if raw_matching_version is None:
+        matching_policy_version = None
+    elif isinstance(raw_matching_version, int) and not isinstance(raw_matching_version, bool):
+        matching_policy_version = raw_matching_version
+    else:
+        # Reject bool (int subclass) and str / float / other — the
+        # registry schema column is INTEGER NOT NULL, so a non-int here
+        # is a corruption signal. ``type_name`` calls out the bool case
+        # explicitly because ``isinstance(True, int)`` would otherwise
+        # quietly pass the int branch above; surfacing the type in the
+        # error is what makes the silent-bool footgun visible to the
+        # operator.
+        type_name = "bool" if isinstance(raw_matching_version, bool) else type(raw_matching_version).__name__
+        raise ValueError(
+            f"build_registry_position_reference: matching_policy_version "
+            f"must be None or an int, got {type_name}: {raw_matching_version!r}"
+        )
+    return PositionReference(
+        source="registry",
+        primitive=record.primitive.value,
+        accounting_category=record.accounting_category.value,
+        physical_identity_hash=required_registry_fields["physical_identity_hash"],
+        semantic_grouping_key=required_registry_fields["semantic_grouping_key"],
+        registry_handle=registry_row.get("handle"),
+        grouping_policy_version=required_registry_fields["grouping_policy_version"],
+        matching_policy_version=matching_policy_version,
+    )
+
+
 def build_legacy_position_reference(record: PrimitiveRecord) -> PositionReference:
     """Construct a Day-1 ``source="legacy"`` reference from a canonical taxonomy row.
 
@@ -242,4 +359,5 @@ __all__ = [
     "POSITION_REFERENCE_SOURCES",
     "PositionReference",
     "build_legacy_position_reference",
+    "build_registry_position_reference",
 ]

@@ -38,6 +38,7 @@ import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -677,6 +678,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_registry_handle
 CREATE UNIQUE INDEX IF NOT EXISTS ix_registry_auto_mode
     ON position_registry (deployment_id, chain, accounting_category, semantic_grouping_key)
     WHERE status = 'open' AND handle IS NULL;
+
+-- VIB-4278: lookup-by-tx indexes for the augment chokepoint
+-- (``SQLiteStore._build_registry_lookup_for_event``). The chokepoint runs
+-- inside the ``_db_lock`` critical section on every OPEN/CLOSE accounting
+-- write; without these, the SELECT degrades to a sequential scan over all
+-- ``position_registry`` rows for the same ``(deployment_id, chain,
+-- primitive)`` and serializes accounting writes against history size.
+--
+-- The chokepoint queries case-insensitively (``LOWER(opened_tx) = ?``) so
+-- a runner-side mixed-case tx_hash still hits the row written by backfill.
+-- Indexes are therefore built on ``LOWER(...)`` to remain usable by the
+-- predicate. Partial-index WHERE eliminates NULL rows from the index —
+-- ``opened_tx`` / ``closed_tx`` are sparse (most rows have one set, not
+-- both).
+CREATE INDEX IF NOT EXISTS ix_registry_opened_tx_lookup
+    ON position_registry (deployment_id, chain, primitive, LOWER(opened_tx))
+    WHERE opened_tx IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_registry_closed_tx_lookup
+    ON position_registry (deployment_id, chain, primitive, LOWER(closed_tx))
+    WHERE closed_tx IS NOT NULL;
 
 -- Per-(deployment_id, primitive, cutover_key) cutover-progress tracking
 -- (VIB-4197 / T11 of multi-position-tracking epic VIB-4185).
@@ -3404,18 +3426,35 @@ class SQLiteStore:
         from ...accounting.writer import augment_accounting_payload
 
         is_live = getattr(identity, "execution_mode", "") == "live"
-        payload_json = augment_accounting_payload(event.to_payload_json(), is_live=is_live)
-
-        # VIB-4196 / T10: extract `position_reference` (when present) out of
-        # the augmented payload and persist it to the dedicated column. The
-        # column is a denormalized query-convenience copy — payload_json
-        # remains the canonical source. The augment chokepoint only emits
-        # the key for OPEN/CLOSE rows with a known event_type; non-OPEN/CLOSE
-        # rows + unknown-event-type fallback rows leave it NULL.
-        position_reference = _extract_position_reference_column(payload_json)
+        # VIB-4278: build a registry_lookup callable bound to this event's
+        # identity context so the augment chokepoint can stamp
+        # `source="registry"` on the position_reference shape when the
+        # position_registry has a matching row. The lookup runs inside the
+        # same _db_lock-held connection used for the INSERT below — see the
+        # design note in `_build_registry_lookup_for_event`.
+        raw_event_payload = event.to_payload_json()
 
         def _sync_save() -> bool:
             with self._db_lock:
+                registry_lookup = self._build_registry_lookup_for_event(
+                    deployment_id=identity.deployment_id,
+                    chain=identity.chain,
+                    tx_hash=identity.tx_hash,
+                )
+                payload_json = augment_accounting_payload(
+                    raw_event_payload,
+                    is_live=is_live,
+                    registry_lookup=registry_lookup,
+                )
+                # VIB-4196 / T10: extract `position_reference` (when present)
+                # out of the augmented payload and persist it to the
+                # dedicated column. The column is a denormalized
+                # query-convenience copy — payload_json remains the canonical
+                # source. The augment chokepoint only emits the key for
+                # OPEN/CLOSE rows with a known event_type; non-OPEN/CLOSE
+                # rows + unknown-event-type fallback rows leave it NULL.
+                position_reference = _extract_position_reference_column(payload_json)
+
                 self._conn.execute(  # type: ignore[union-attr]
                     """
                     INSERT OR REPLACE INTO accounting_events
@@ -3450,6 +3489,174 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)
+
+    def _build_registry_lookup_for_event(
+        self,
+        *,
+        deployment_id: str,
+        chain: str,
+        tx_hash: str,
+    ) -> "Callable[[str, str, str], dict | None] | None":
+        """Build a ``RegistryLookup`` callable for an accounting event (VIB-4278).
+
+        The augment chokepoint calls the returned callable with
+        ``(primitive, event_kind, accounting_category)`` and expects a
+        ``position_registry`` row dict back when a row matches the event by:
+
+        * ``deployment_id`` equals the event's deployment_id, AND
+        * ``primitive`` equals the canonical ``Primitive`` value resolved by
+          the chokepoint, AND
+        * ``accounting_category`` equals the canonical ``AccountingCategory``
+          value resolved by the chokepoint (multiple categories can share a
+          primitive — e.g. UniV3 ``"lp"`` and Pendle ``"pendle_lp"`` both
+          have ``Primitive="lp"`` — so the join key needs the category to
+          disambiguate batched transactions), AND
+        * for OPEN events: ``opened_tx`` equals the event's ``tx_hash``, OR
+        * for CLOSE events: ``closed_tx`` equals the event's ``tx_hash``.
+
+        The lookup is read-only — it never mutates ``position_registry``. It
+        returns ``None`` when no row matches (registry-mode is opt-in per
+        blueprint 28 §5; legacy primitives don't write to the registry and
+        their accounting events keep ``source="legacy"``).
+
+        Returns ``None`` (i.e. "do not pass a lookup callable") when the
+        event's tx_hash is empty / falsy — without a tx_hash there is nothing
+        to match on, and we should fall through to the legacy reference.
+
+        The returned callable assumes the caller already holds ``_db_lock``
+        (it does — both callers — the chokepoint and the INSERT — run inside
+        the ``with self._db_lock:`` block in :meth:`save_accounting_event`).
+        """
+        if not tx_hash:
+            # No tx_hash → no match possible. Legacy path keeps emitting
+            # ``source="legacy"`` and the event lands cleanly.
+            return None
+
+        # Normalize the event's tx_hash to lowercase once. The registry
+        # stores ``opened_tx`` / ``closed_tx`` as supplied by the runner /
+        # backfill (mixed-case is possible on EVM chains — checksum-cased
+        # addresses, mixed-case hashes from some RPCs), but accounting
+        # event ``tx_hash`` can arrive in either case. A case-sensitive
+        # ``= ?`` comparison silently misses the row and stamps
+        # ``source="legacy"`` — see CodeRabbit review on PR #2236. We
+        # normalise on BOTH sides: lowercase the bind param here and wrap
+        # the column in ``LOWER(...)`` in the WHERE predicate. The
+        # expression indexes ``ix_registry_opened_tx_lookup`` /
+        # ``ix_registry_closed_tx_lookup`` defined alongside the table
+        # are built on ``LOWER(opened_tx)`` / ``LOWER(closed_tx)``, so
+        # the WHERE remains indexable.
+        normalized_tx_hash = tx_hash.lower()
+        conn = self._conn
+        if conn is None:
+            return None
+
+        # Columns selected from position_registry. Pulled out so the
+        # SELECT list stays in lock-step with what callers expect when
+        # they read keys off the returned dict
+        # (``build_registry_position_reference`` in
+        # ``accounting/position_reference.py``).
+        _REGISTRY_LOOKUP_COLS = (
+            "physical_identity_hash",
+            "semantic_grouping_key",
+            "grouping_policy_version",
+            "handle",
+            "matching_policy_version",
+            "status",
+            "accounting_category",
+        )
+
+        def _lookup(primitive: str, event_kind: str, accounting_category: str) -> dict | None:
+            # OPEN events match opened_tx; CLOSE events match closed_tx.
+            # Filter by chain too so a tx_hash collision across forks
+            # (rare but possible with Anvil snapshots) cannot return the
+            # wrong row.
+            if event_kind == "open":
+                tx_col = "opened_tx"
+            elif event_kind == "close":
+                tx_col = "closed_tx"
+            else:
+                # _resolve_position_reference only calls us for OPEN/CLOSE;
+                # any other kind is a chokepoint bug. Fall through to
+                # legacy rather than raise (registry-mode is opt-in).
+                return None
+
+            # The ``{tx_col} IS NOT NULL`` predicate is technically
+            # redundant (``LOWER(NULL) = ?`` is false), but it lets
+            # SQLite's planner pick the partial index
+            # ``ix_registry_opened_tx_lookup`` /
+            # ``ix_registry_closed_tx_lookup`` (declared
+            # ``WHERE opened_tx IS NOT NULL``). Without the predicate the
+            # planner falls back to a table scan once the table is
+            # ANALYZE'd — verified locally on SQLite 3.49.
+            #
+            # ``accounting_category = ?`` was added in PR #2236 round 2
+            # (CodeRabbit). Multiple AccountingCategory values can share
+            # the same Primitive — UniV3 ``"lp"`` and Pendle
+            # ``"pendle_lp"`` both have ``Primitive="lp"`` — so a tx
+            # that touches positions in different categories would
+            # otherwise return multiple rows here, and stamping the
+            # wrong category's ``physical_identity_hash`` / ``handle``
+            # onto an accounting event loses the L5_22 join key
+            # silently.
+            sql = (
+                f"SELECT {', '.join(_REGISTRY_LOOKUP_COLS)} "
+                f"FROM position_registry "
+                f"WHERE deployment_id = ? AND chain = ? AND primitive = ? "
+                f"AND accounting_category = ? "
+                f"AND {tx_col} IS NOT NULL "
+                f"AND LOWER({tx_col}) = ? "
+                f"ORDER BY physical_identity_hash ASC"
+            )
+            cursor = conn.execute(
+                sql,
+                (
+                    deployment_id,
+                    chain,
+                    primitive,
+                    accounting_category,
+                    normalized_tx_hash,
+                ),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+            if len(rows) > 1:
+                # Ambiguity safeguard (CodeRabbit PR #2236 round 2): even
+                # with ``accounting_category`` in the join key, a single
+                # tx that opens multiple positions in the same
+                # (primitive, category) — e.g. a batched lp_open that
+                # mints two UniV3 NFTs in one transaction — would still
+                # land multiple rows here. Picking the first row by
+                # ``physical_identity_hash ASC`` would stamp ONE
+                # position's identity onto BOTH accounting events,
+                # silently losing the L5_22 join key. Return None
+                # instead: the augment chokepoint falls through to the
+                # legacy reference (null identity fields), which
+                # preserves the "Empty ≠ Zero" contract — better to
+                # admit "unmeasured" than to stamp a wrong hash.
+                #
+                # The durable fix is to thread ``registry_handle`` (when
+                # the strategy supplies one) into the lookup key so each
+                # leg of a multi-position tx joins to its own row; that
+                # is the follow-up tracked separately.
+                logger.warning(
+                    "registry_lookup: %d rows matched for "
+                    "(deployment_id=%s, chain=%s, primitive=%s, "
+                    "accounting_category=%s, %s=%s); falling back to "
+                    "legacy until the lookup is disambiguated by "
+                    "registry_handle (multi-position-in-one-tx).",
+                    len(rows),
+                    deployment_id,
+                    chain,
+                    primitive,
+                    accounting_category,
+                    tx_col,
+                    normalized_tx_hash,
+                )
+                return None
+            return dict(rows[0])
+
+        return _lookup
 
     async def get_accounting_events(
         self,

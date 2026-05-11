@@ -47,11 +47,14 @@ _ALLOWLISTED_RELS: frozenset[str] = frozenset(
 )
 
 # Forbidden constructor symbols. Any caller that imports OR references one
-# of these names outside the allowlist is a bypass attempt.
+# of these names outside the allowlist is a bypass attempt. VIB-4278 added
+# ``build_registry_position_reference`` for the registry-source path; same
+# rule applies — the writer chokepoint is the only construction site.
 _FORBIDDEN_SYMBOLS: frozenset[str] = frozenset(
     {
         "PositionReference",
         "build_legacy_position_reference",
+        "build_registry_position_reference",
     }
 )
 
@@ -178,6 +181,14 @@ def test_layer_a_canonical_writer_imports_symbols() -> None:
                     found.add(alias.name)
     assert "build_legacy_position_reference" in found, (
         f"{_WRITER_REL} must import build_legacy_position_reference; "
+        f"found imports: {found}"
+    )
+    # VIB-4278: the writer chokepoint MUST also import the registry helper.
+    # A refactor that drops the import would silently regress every accounting
+    # event to source="legacy" — closing the L5_22 invariant from the wrong
+    # side.
+    assert "build_registry_position_reference" in found, (
+        f"{_WRITER_REL} must import build_registry_position_reference (VIB-4278); "
         f"found imports: {found}"
     )
 
