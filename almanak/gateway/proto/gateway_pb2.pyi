@@ -12,10 +12,10 @@ import builtins as _builtins
 import sys
 import typing as _typing
 
-if sys.version_info >= (3, 11):
-    from typing import TypeAlias as _TypeAlias, Never as _Never
+if sys.version_info >= (3, 10):
+    from typing import TypeAlias as _TypeAlias
 else:
-    from typing_extensions import TypeAlias as _TypeAlias, Never as _Never
+    from typing_extensions import TypeAlias as _TypeAlias
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -31,11 +31,8 @@ class HealthCheckRequest(_message.Message):
         *,
         service: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["service", b"service"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___HealthCheckRequest: _TypeAlias = HealthCheckRequest  # noqa: Y015
 
@@ -69,11 +66,8 @@ class HealthCheckResponse(_message.Message):
         *,
         status: Global___HealthCheckResponse.ServingStatus.ValueType = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___HealthCheckResponse: _TypeAlias = HealthCheckResponse  # noqa: Y015
 
@@ -95,11 +89,8 @@ class RegisterChainsRequest(_message.Message):
         chains: _abc.Iterable[_builtins.str] | None = ...,
         wallet_address: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chains", b"chains", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RegisterChainsRequest: _TypeAlias = RegisterChainsRequest  # noqa: Y015
 
@@ -121,11 +112,8 @@ class RegisterChainsResponse(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     SUCCESS_FIELD_NUMBER: _builtins.int
     INITIALIZED_CHAINS_FIELD_NUMBER: _builtins.int
@@ -153,11 +141,8 @@ class RegisterChainsResponse(_message.Message):
         error: _builtins.str = ...,
         chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain_wallets", b"chain_wallets", "error", b"error", "initialized_chains", b"initialized_chains", "success", b"success", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RegisterChainsResponse: _TypeAlias = RegisterChainsResponse  # noqa: Y015
 
@@ -173,11 +158,6 @@ class Empty(_message.Message):
     def __init__(
         self,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___Empty: _TypeAlias = Empty  # noqa: Y015
 
@@ -204,11 +184,8 @@ class PriceRequest(_message.Message):
         quote: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "quote", b"quote", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PriceRequest: _TypeAlias = PriceRequest  # noqa: Y015
 
@@ -230,11 +207,8 @@ class PriceResponse(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     PRICE_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -269,11 +243,8 @@ class PriceResponse(_message.Message):
         sources_failed: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
         outliers: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["confidence", b"confidence", "outliers", b"outliers", "price", b"price", "source", b"source", "sources_failed", b"sources_failed", "sources_ok", b"sources_ok", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PriceResponse: _TypeAlias = PriceResponse  # noqa: Y015
 
@@ -294,11 +265,8 @@ class BalanceRequest(_message.Message):
         chain: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "token", b"token", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BalanceRequest: _TypeAlias = BalanceRequest  # noqa: Y015
 
@@ -337,11 +305,8 @@ class BalanceResponse(_message.Message):
         stale: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["address", b"address", "balance", b"balance", "balance_usd", b"balance_usd", "decimals", b"decimals", "error", b"error", "raw_balance", b"raw_balance", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BalanceResponse: _TypeAlias = BalanceResponse  # noqa: Y015
 
@@ -357,11 +322,8 @@ class BatchBalanceRequest(_message.Message):
         *,
         requests: _abc.Iterable[Global___BalanceRequest] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["requests", b"requests"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BatchBalanceRequest: _TypeAlias = BatchBalanceRequest  # noqa: Y015
 
@@ -377,11 +339,8 @@ class BatchBalanceResponse(_message.Message):
         *,
         responses: _abc.Iterable[Global___BalanceResponse] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["responses", b"responses"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BatchBalanceResponse: _TypeAlias = BatchBalanceResponse  # noqa: Y015
 
@@ -403,11 +362,8 @@ class IndicatorRequest(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     INDICATOR_TYPE_FIELD_NUMBER: _builtins.int
     TOKEN_FIELD_NUMBER: _builtins.int
@@ -429,11 +385,8 @@ class IndicatorRequest(_message.Message):
         quote: _builtins.str = ...,
         params: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["indicator_type", b"indicator_type", "params", b"params", "quote", b"quote", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___IndicatorRequest: _TypeAlias = IndicatorRequest  # noqa: Y015
 
@@ -455,11 +408,8 @@ class IndicatorResponse(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     VALUE_FIELD_NUMBER: _builtins.int
     METADATA_FIELD_NUMBER: _builtins.int
@@ -478,11 +428,8 @@ class IndicatorResponse(_message.Message):
         metadata: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
         timestamp: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["metadata", b"metadata", "timestamp", b"timestamp", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___IndicatorResponse: _TypeAlias = IndicatorResponse  # noqa: Y015
 
@@ -497,11 +444,8 @@ class LoadStateRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___LoadStateRequest: _TypeAlias = LoadStateRequest  # noqa: Y015
 
@@ -540,11 +484,8 @@ class StateData(_message.Message):
         updated_at: _builtins.int = ...,
         loaded_from: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["checksum", b"checksum", "created_at", b"created_at", "data", b"data", "loaded_from", b"loaded_from", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "version", b"version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___StateData: _TypeAlias = StateData  # noqa: Y015
 
@@ -570,11 +511,8 @@ class SaveStateRequest(_message.Message):
         data: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "expected_version", b"expected_version", "schema_version", b"schema_version", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveStateRequest: _TypeAlias = SaveStateRequest  # noqa: Y015
 
@@ -598,11 +536,8 @@ class SaveStateResponse(_message.Message):
         error: _builtins.str = ...,
         checksum: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["checksum", b"checksum", "error", b"error", "new_version", b"new_version", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveStateResponse: _TypeAlias = SaveStateResponse  # noqa: Y015
 
@@ -617,11 +552,8 @@ class DeleteStateRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___DeleteStateRequest: _TypeAlias = DeleteStateRequest  # noqa: Y015
 
@@ -639,11 +571,8 @@ class DeleteStateResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___DeleteStateResponse: _TypeAlias = DeleteStateResponse  # noqa: Y015
 
@@ -697,11 +626,8 @@ class SaveSnapshotRequest(_message.Message):
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveSnapshotRequest: _TypeAlias = SaveSnapshotRequest  # noqa: Y015
 
@@ -722,11 +648,8 @@ class SaveSnapshotResponse(_message.Message):
         snapshot_id: _builtins.int = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "snapshot_id", b"snapshot_id", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveSnapshotResponse: _TypeAlias = SaveSnapshotResponse  # noqa: Y015
 
@@ -741,11 +664,8 @@ class GetLatestSnapshotRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetLatestSnapshotRequest: _TypeAlias = GetLatestSnapshotRequest  # noqa: Y015
 
@@ -768,11 +688,8 @@ class GetSnapshotsSinceRequest(_message.Message):
         since: _builtins.int = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "since", b"since", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetSnapshotsSinceRequest: _TypeAlias = GetSnapshotsSinceRequest  # noqa: Y015
 
@@ -822,11 +739,8 @@ class SnapshotData(_message.Message):
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["available_cash_usd", b"available_cash_usd", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "execution_mode", b"execution_mode", "found", b"found", "iteration_number", b"iteration_number", "positions_json", b"positions_json", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SnapshotData: _TypeAlias = SnapshotData  # noqa: Y015
 
@@ -842,11 +756,8 @@ class SnapshotList(_message.Message):
         *,
         snapshots: _abc.Iterable[Global___SnapshotData] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["snapshots", b"snapshots"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SnapshotList: _TypeAlias = SnapshotList  # noqa: Y015
 
@@ -892,11 +803,8 @@ class SaveMetricsRequest(_message.Message):
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "strategy_id", b"strategy_id", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveMetricsRequest: _TypeAlias = SaveMetricsRequest  # noqa: Y015
 
@@ -914,11 +822,8 @@ class SaveMetricsResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveMetricsResponse: _TypeAlias = SaveMetricsResponse  # noqa: Y015
 
@@ -933,11 +838,8 @@ class GetMetricsRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetMetricsRequest: _TypeAlias = GetMetricsRequest  # noqa: Y015
 
@@ -986,11 +888,8 @@ class PortfolioMetricsData(_message.Message):
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "found", b"found", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015
 
@@ -1116,11 +1015,8 @@ class SaveLedgerEntryResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveLedgerEntryResponse: _TypeAlias = SaveLedgerEntryResponse  # noqa: Y015
 
@@ -1198,11 +1094,8 @@ class SaveAccountingEventRequest(_message.Message):
         payload_json: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveAccountingEventRequest: _TypeAlias = SaveAccountingEventRequest  # noqa: Y015
 
@@ -1220,11 +1113,8 @@ class SaveAccountingEventResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveAccountingEventResponse: _TypeAlias = SaveAccountingEventResponse  # noqa: Y015
 
@@ -1385,11 +1275,8 @@ class SavePositionEventResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SavePositionEventResponse: _TypeAlias = SavePositionEventResponse  # noqa: Y015
 
@@ -1420,11 +1307,8 @@ class GetPositionHistoryRequest(_message.Message):
         deployment_id: _builtins.str = ...,
         position_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "position_id", b"position_id", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetPositionHistoryRequest: _TypeAlias = GetPositionHistoryRequest  # noqa: Y015
 
@@ -1574,11 +1458,8 @@ class GetPositionHistoryResponse(_message.Message):
         *,
         events: _abc.Iterable[Global___PositionEventData] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["events", b"events"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetPositionHistoryResponse: _TypeAlias = GetPositionHistoryResponse  # noqa: Y015
 
@@ -1620,11 +1501,8 @@ class UpdatePositionAttributionRequest(_message.Message):
         attribution_version: _builtins.int = ...,
         deployment_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["attribution_json", b"attribution_json", "attribution_version", b"attribution_version", "deployment_id", b"deployment_id", "event_id", b"event_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___UpdatePositionAttributionRequest: _TypeAlias = UpdatePositionAttributionRequest  # noqa: Y015
 
@@ -1644,11 +1522,8 @@ class UpdatePositionAttributionResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___UpdatePositionAttributionResponse: _TypeAlias = UpdatePositionAttributionResponse  # noqa: Y015
 
@@ -1690,11 +1565,8 @@ class GetAccountingEventsRequest(_message.Message):
         since_timestamp: _builtins.int = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "event_type", b"event_type", "limit", b"limit", "position_key", b"position_key", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetAccountingEventsRequest: _TypeAlias = GetAccountingEventsRequest  # noqa: Y015
 
@@ -1758,11 +1630,8 @@ class AccountingEvent(_message.Message):
         payload_json: _builtins.bytes = ...,
         schema_version: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "event_type", b"event_type", "execution_mode", b"execution_mode", "id", b"id", "ledger_entry_id", b"ledger_entry_id", "payload_json", b"payload_json", "position_key", b"position_key", "protocol", b"protocol", "schema_version", b"schema_version", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AccountingEvent: _TypeAlias = AccountingEvent  # noqa: Y015
 
@@ -1778,11 +1647,8 @@ class GetAccountingEventsResponse(_message.Message):
         *,
         events: _abc.Iterable[Global___AccountingEvent] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["events", b"events"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetAccountingEventsResponse: _TypeAlias = GetAccountingEventsResponse  # noqa: Y015
 
@@ -1838,11 +1704,8 @@ class SaveOutboxEntryRequest(_message.Message):
         market_id: _builtins.str = ...,
         created_at: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "outbox_id", b"outbox_id", "position_key", b"position_key", "strategy_id", b"strategy_id", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveOutboxEntryRequest: _TypeAlias = SaveOutboxEntryRequest  # noqa: Y015
 
@@ -1860,11 +1723,8 @@ class SaveOutboxEntryResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SaveOutboxEntryResponse: _TypeAlias = SaveOutboxEntryResponse  # noqa: Y015
 
@@ -1922,11 +1782,8 @@ class OutboxEntry(_message.Message):
         created_at: _builtins.str = ...,
         updated_at: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["attempts", b"attempts", "created_at", b"created_at", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "error", b"error", "id", b"id", "intent_type", b"intent_type", "ledger_entry_id", b"ledger_entry_id", "market_id", b"market_id", "position_key", b"position_key", "status", b"status", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___OutboxEntry: _TypeAlias = OutboxEntry  # noqa: Y015
 
@@ -1941,11 +1798,8 @@ class GetOutboxEntryRequest(_message.Message):
         *,
         ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["ledger_entry_id", b"ledger_entry_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetOutboxEntryRequest: _TypeAlias = GetOutboxEntryRequest  # noqa: Y015
 
@@ -1968,7 +1822,6 @@ class GetOutboxEntryResponse(_message.Message):
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["entry", b"entry", "found", b"found"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetOutboxEntryResponse: _TypeAlias = GetOutboxEntryResponse  # noqa: Y015
 
@@ -1987,11 +1840,8 @@ class GetOutboxPendingRequest(_message.Message):
         deployment_id: _builtins.str = ...,
         max_retries: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "max_retries", b"max_retries"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetOutboxPendingRequest: _TypeAlias = GetOutboxPendingRequest  # noqa: Y015
 
@@ -2007,11 +1857,8 @@ class GetOutboxPendingResponse(_message.Message):
         *,
         entries: _abc.Iterable[Global___OutboxEntry] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["entries", b"entries"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetOutboxPendingResponse: _TypeAlias = GetOutboxPendingResponse  # noqa: Y015
 
@@ -2061,11 +1908,8 @@ class UpdateOutboxEntryResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___UpdateOutboxEntryResponse: _TypeAlias = UpdateOutboxEntryResponse  # noqa: Y015
 
@@ -2080,11 +1924,8 @@ class HasAccountingEventsForLedgerRequest(_message.Message):
         *,
         ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["ledger_entry_id", b"ledger_entry_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___HasAccountingEventsForLedgerRequest: _TypeAlias = HasAccountingEventsForLedgerRequest  # noqa: Y015
 
@@ -2099,11 +1940,8 @@ class HasAccountingEventsForLedgerResponse(_message.Message):
         *,
         has_events: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["has_events", b"has_events"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___HasAccountingEventsForLedgerResponse: _TypeAlias = HasAccountingEventsForLedgerResponse  # noqa: Y015
 
@@ -2118,11 +1956,8 @@ class GetLedgerEntryRequest(_message.Message):
         *,
         ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["ledger_entry_id", b"ledger_entry_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetLedgerEntryRequest: _TypeAlias = GetLedgerEntryRequest  # noqa: Y015
 
@@ -2241,9 +2076,693 @@ class GetLedgerEntryResponse(_message.Message):
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["entry", b"entry", "found", b"found"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetLedgerEntryResponse: _TypeAlias = GetLedgerEntryResponse  # noqa: Y015
+
+@_typing.final
+class UpsertMigrationStateRequest(_message.Message):
+    """=============================================================================
+    Cutover storage messages (VIB-4208 / T22) — mirrors the 13-column
+    migration_state SQLite schema in almanak/framework/state/backends/sqlite.py.
+    MigrationStateRow (the framework-side dataclass) parses the bytes notes
+    field back into a dict for boot-guard consumers.
+    =============================================================================
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CUTOVER_KEY_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    primitive: _builtins.str
+    """e.g. "lp", "perp", "lending" """
+    cutover_key: _builtins.str
+    """narrower scope (matches AccountingCategory.value)"""
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        cutover_key: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cutover_key", b"cutover_key", "deployment_id", b"deployment_id", "primitive", b"primitive"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpsertMigrationStateRequest: _TypeAlias = UpsertMigrationStateRequest  # noqa: Y015
+
+@_typing.final
+class UpsertMigrationStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpsertMigrationStateResponse: _TypeAlias = UpsertMigrationStateResponse  # noqa: Y015
+
+@_typing.final
+class GetMigrationStateRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CUTOVER_KEY_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    primitive: _builtins.str
+    cutover_key: _builtins.str
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        cutover_key: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cutover_key", b"cutover_key", "deployment_id", b"deployment_id", "primitive", b"primitive"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetMigrationStateRequest: _TypeAlias = GetMigrationStateRequest  # noqa: Y015
+
+@_typing.final
+class MigrationStateData(_message.Message):
+    """Mirrors the 13 columns of the SQLite migration_state table. The Postgres
+    branch raises gRPC UNIMPLEMENTED rather than returning a default-populated
+    MigrationStateData. ``found=true`` distinguishes "row present" from
+    "row absent, defaults zero" (same pattern as SnapshotData.found).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CUTOVER_KEY_FIELD_NUMBER: _builtins.int
+    POSITION_REGISTRY_BACKFILL_COMPLETE_FIELD_NUMBER: _builtins.int
+    BACKFILL_STARTED_AT_FIELD_NUMBER: _builtins.int
+    BACKFILL_COMPLETED_AT_FIELD_NUMBER: _builtins.int
+    BACKFILL_SOURCE_TABLE_FIELD_NUMBER: _builtins.int
+    BACKFILL_READER_VERSION_FIELD_NUMBER: _builtins.int
+    ROWS_SYNTHESIZED_FIELD_NUMBER: _builtins.int
+    ROWS_SKIPPED_ALREADY_PRESENT_FIELD_NUMBER: _builtins.int
+    NOTES_FIELD_NUMBER: _builtins.int
+    CREATED_AT_FIELD_NUMBER: _builtins.int
+    UPDATED_AT_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    primitive: _builtins.str
+    cutover_key: _builtins.str
+    position_registry_backfill_complete: _builtins.bool
+    backfill_started_at: _builtins.str
+    """ISO-8601 UTC, "" when null"""
+    backfill_completed_at: _builtins.str
+    """ISO-8601 UTC, "" when null"""
+    backfill_source_table: _builtins.str
+    backfill_reader_version: _builtins.int
+    rows_synthesized: _builtins.int
+    rows_skipped_already_present: _builtins.int
+    notes: _builtins.bytes
+    """JSON-encoded object"""
+    created_at: _builtins.str
+    updated_at: _builtins.str
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        cutover_key: _builtins.str = ...,
+        position_registry_backfill_complete: _builtins.bool = ...,
+        backfill_started_at: _builtins.str = ...,
+        backfill_completed_at: _builtins.str = ...,
+        backfill_source_table: _builtins.str = ...,
+        backfill_reader_version: _builtins.int = ...,
+        rows_synthesized: _builtins.int = ...,
+        rows_skipped_already_present: _builtins.int = ...,
+        notes: _builtins.bytes = ...,
+        created_at: _builtins.str = ...,
+        updated_at: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["backfill_completed_at", b"backfill_completed_at", "backfill_reader_version", b"backfill_reader_version", "backfill_source_table", b"backfill_source_table", "backfill_started_at", b"backfill_started_at", "created_at", b"created_at", "cutover_key", b"cutover_key", "deployment_id", b"deployment_id", "notes", b"notes", "position_registry_backfill_complete", b"position_registry_backfill_complete", "primitive", b"primitive", "rows_skipped_already_present", b"rows_skipped_already_present", "rows_synthesized", b"rows_synthesized", "updated_at", b"updated_at"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MigrationStateData: _TypeAlias = MigrationStateData  # noqa: Y015
+
+@_typing.final
+class GetMigrationStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FOUND_FIELD_NUMBER: _builtins.int
+    DATA_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    found: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def data(self) -> Global___MigrationStateData: ...
+    def __init__(
+        self,
+        *,
+        found: _builtins.bool = ...,
+        data: Global___MigrationStateData | None = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["data", b"data"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "error", b"error", "found", b"found"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetMigrationStateResponse: _TypeAlias = GetMigrationStateResponse  # noqa: Y015
+
+@_typing.final
+class UpdateMigrationStateRequest(_message.Message):
+    """Partial-update of migration_state in-flight progress columns. Only the
+    supplied columns are written. Used by `BackfillReader.run()` to stamp
+    `backfill_started_at` at the start and checkpoint
+    `rows_synthesized` / `rows_skipped_already_present` every batch.
+    `optional` fields preserve the "None means don't touch this column"
+    semantics — `0` is a legitimate value for the counters.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CUTOVER_KEY_FIELD_NUMBER: _builtins.int
+    BACKFILL_STARTED_AT_FIELD_NUMBER: _builtins.int
+    ROWS_SYNTHESIZED_FIELD_NUMBER: _builtins.int
+    ROWS_SKIPPED_ALREADY_PRESENT_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    primitive: _builtins.str
+    cutover_key: _builtins.str
+    backfill_started_at: _builtins.str
+    """ISO-8601 UTC; "" => don't update"""
+    rows_synthesized: _builtins.int
+    rows_skipped_already_present: _builtins.int
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        cutover_key: _builtins.str = ...,
+        backfill_started_at: _builtins.str = ...,
+        rows_synthesized: _builtins.int | None = ...,
+        rows_skipped_already_present: _builtins.int | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_rows_skipped_already_present", b"_rows_skipped_already_present", "_rows_synthesized", b"_rows_synthesized", "rows_skipped_already_present", b"rows_skipped_already_present", "rows_synthesized", b"rows_synthesized"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_rows_skipped_already_present", b"_rows_skipped_already_present", "_rows_synthesized", b"_rows_synthesized", "backfill_started_at", b"backfill_started_at", "cutover_key", b"cutover_key", "deployment_id", b"deployment_id", "primitive", b"primitive", "rows_skipped_already_present", b"rows_skipped_already_present", "rows_synthesized", b"rows_synthesized"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__rows_skipped_already_present: _TypeAlias = _typing.Literal["rows_skipped_already_present"]  # noqa: Y015
+    _WhichOneofArgType__rows_skipped_already_present: _TypeAlias = _typing.Literal["_rows_skipped_already_present", b"_rows_skipped_already_present"]  # noqa: Y015
+    _WhichOneofReturnType__rows_synthesized: _TypeAlias = _typing.Literal["rows_synthesized"]  # noqa: Y015
+    _WhichOneofArgType__rows_synthesized: _TypeAlias = _typing.Literal["_rows_synthesized", b"_rows_synthesized"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__rows_skipped_already_present) -> _WhichOneofReturnType__rows_skipped_already_present | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__rows_synthesized) -> _WhichOneofReturnType__rows_synthesized | None: ...
+
+Global___UpdateMigrationStateRequest: _TypeAlias = UpdateMigrationStateRequest  # noqa: Y015
+
+@_typing.final
+class UpdateMigrationStateResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpdateMigrationStateResponse: _TypeAlias = UpdateMigrationStateResponse  # noqa: Y015
+
+@_typing.final
+class MarkBackfillCompleteRequest(_message.Message):
+    """Terminal flip — set position_registry_backfill_complete=1 with final
+    counters + backfill_completed_at. Single statement so the flip is
+    atomic at the SQLite-page level (cutover spec §3.3 step 4).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    CUTOVER_KEY_FIELD_NUMBER: _builtins.int
+    ROWS_SYNTHESIZED_FIELD_NUMBER: _builtins.int
+    ROWS_SKIPPED_ALREADY_PRESENT_FIELD_NUMBER: _builtins.int
+    BACKFILL_COMPLETED_AT_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    primitive: _builtins.str
+    cutover_key: _builtins.str
+    rows_synthesized: _builtins.int
+    rows_skipped_already_present: _builtins.int
+    backfill_completed_at: _builtins.str
+    """ISO-8601 UTC"""
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        cutover_key: _builtins.str = ...,
+        rows_synthesized: _builtins.int = ...,
+        rows_skipped_already_present: _builtins.int = ...,
+        backfill_completed_at: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["backfill_completed_at", b"backfill_completed_at", "cutover_key", b"cutover_key", "deployment_id", b"deployment_id", "primitive", b"primitive", "rows_skipped_already_present", b"rows_skipped_already_present", "rows_synthesized", b"rows_synthesized"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MarkBackfillCompleteRequest: _TypeAlias = MarkBackfillCompleteRequest  # noqa: Y015
+
+@_typing.final
+class MarkBackfillCompleteResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___MarkBackfillCompleteResponse: _TypeAlias = MarkBackfillCompleteResponse  # noqa: Y015
+
+@_typing.final
+class GetPositionEventsFilteredRequest(_message.Message):
+    """Streamed position_events read for the backfill loop. Filters by
+    (deployment_id, position_type IN position_types) and returns rows
+    ordered by (position_id ASC, timestamp ASC, id ASC). Fresh
+    deployments return an empty list.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    POSITION_TYPES_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    @_builtins.property
+    def position_types(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """legacy position_type set (e.g. ["LP"])"""
+
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        position_types: _abc.Iterable[_builtins.str] | None = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "position_types", b"position_types"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionEventsFilteredRequest: _TypeAlias = GetPositionEventsFilteredRequest  # noqa: Y015
+
+@_typing.final
+class GetPositionEventsFilteredResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    EVENTS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    error: _builtins.str
+    @_builtins.property
+    def events(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionEventData]: ...
+    def __init__(
+        self,
+        *,
+        events: _abc.Iterable[Global___PositionEventData] | None = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "events", b"events"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionEventsFilteredResponse: _TypeAlias = GetPositionEventsFilteredResponse  # noqa: Y015
+
+@_typing.final
+class GetPositionRegistryOpenRowsRequest(_message.Message):
+    """Position-registry open-row read (used by the runner's
+    `_refresh_lp_registry_id_cache` and teardown's "what's still open?"
+    query for cutover-flipped primitives). Filters mirror the
+    `SQLiteStore.get_position_registry_open_rows` signature: every filter
+    is optional; status='open' is always applied.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    chain: _builtins.str
+    """"" = no filter"""
+    primitive: _builtins.str
+    """"" = no filter"""
+    accounting_category: _builtins.str
+    """"" = no filter"""
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "deployment_id", b"deployment_id", "primitive", b"primitive"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionRegistryOpenRowsRequest: _TypeAlias = GetPositionRegistryOpenRowsRequest  # noqa: Y015
+
+@_typing.final
+class PositionRegistryRow(_message.Message):
+    """One row of `position_registry`. Mirrors the 16-column schema in
+    almanak/framework/state/backends/sqlite.py SCHEMA_SQL. The `payload`
+    column is serialized as JSON bytes — the client adapter parses it
+    back to a dict. Block / tx anchors are optional, encoded as 0 / ""
+    when null. The framework adapter maps the wire shape back to the dict
+    shape returned by SQLiteStore.get_position_registry_open_rows (so
+    runner code is identical across local and gateway-backed runs).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PRIMITIVE_FIELD_NUMBER: _builtins.int
+    ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    SEMANTIC_GROUPING_KEY_FIELD_NUMBER: _builtins.int
+    GROUPING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
+    HANDLE_FIELD_NUMBER: _builtins.int
+    STATUS_FIELD_NUMBER: _builtins.int
+    PAYLOAD_FIELD_NUMBER: _builtins.int
+    OPENED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    OPENED_TX_FIELD_NUMBER: _builtins.int
+    CLOSED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    CLOSED_TX_FIELD_NUMBER: _builtins.int
+    LAST_RECONCILED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    MATCHING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
+    PAYLOAD_RAW_FIELD_NUMBER: _builtins.int
+    PAYLOAD_DECODE_ERROR_FIELD_NUMBER: _builtins.int
+    PAYLOAD_SHAPE_ERROR_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    chain: _builtins.str
+    primitive: _builtins.str
+    accounting_category: _builtins.str
+    physical_identity_hash: _builtins.str
+    semantic_grouping_key: _builtins.str
+    grouping_policy_version: _builtins.str
+    handle: _builtins.str
+    """"" when NULL"""
+    status: _builtins.str
+    """"open" | "closed" | "reorg_invalidated" """
+    payload: _builtins.bytes
+    """JSON-encoded dict"""
+    opened_at_block: _builtins.int
+    """0 when NULL"""
+    opened_tx: _builtins.str
+    """"" when NULL"""
+    closed_at_block: _builtins.int
+    """0 when NULL"""
+    closed_tx: _builtins.str
+    """"" when NULL"""
+    last_reconciled_at_block: _builtins.int
+    """0 when NULL"""
+    matching_policy_version: _builtins.int
+    payload_raw: _builtins.str
+    """Diagnostic carry-fields populated by SQLiteStore when payload JSON
+    is corrupt or non-object. Empty when payload decoded cleanly.
+    Preserves the same dict shape the local backend returns.
+    """
+    payload_decode_error: _builtins.str
+    payload_shape_error: _builtins.str
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        primitive: _builtins.str = ...,
+        accounting_category: _builtins.str = ...,
+        physical_identity_hash: _builtins.str = ...,
+        semantic_grouping_key: _builtins.str = ...,
+        grouping_policy_version: _builtins.str = ...,
+        handle: _builtins.str = ...,
+        status: _builtins.str = ...,
+        payload: _builtins.bytes = ...,
+        opened_at_block: _builtins.int = ...,
+        opened_tx: _builtins.str = ...,
+        closed_at_block: _builtins.int = ...,
+        closed_tx: _builtins.str = ...,
+        last_reconciled_at_block: _builtins.int = ...,
+        matching_policy_version: _builtins.int = ...,
+        payload_raw: _builtins.str = ...,
+        payload_decode_error: _builtins.str = ...,
+        payload_shape_error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_category", b"accounting_category", "chain", b"chain", "closed_at_block", b"closed_at_block", "closed_tx", b"closed_tx", "deployment_id", b"deployment_id", "grouping_policy_version", b"grouping_policy_version", "handle", b"handle", "last_reconciled_at_block", b"last_reconciled_at_block", "matching_policy_version", b"matching_policy_version", "opened_at_block", b"opened_at_block", "opened_tx", b"opened_tx", "payload", b"payload", "payload_decode_error", b"payload_decode_error", "payload_raw", b"payload_raw", "payload_shape_error", b"payload_shape_error", "physical_identity_hash", b"physical_identity_hash", "primitive", b"primitive", "semantic_grouping_key", b"semantic_grouping_key", "status", b"status"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PositionRegistryRow: _TypeAlias = PositionRegistryRow  # noqa: Y015
+
+@_typing.final
+class GetPositionRegistryOpenRowsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ROWS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    error: _builtins.str
+    @_builtins.property
+    def rows(self) -> _containers.RepeatedCompositeFieldContainer[Global___PositionRegistryRow]: ...
+    def __init__(
+        self,
+        *,
+        rows: _abc.Iterable[Global___PositionRegistryRow] | None = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "rows", b"rows"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPositionRegistryOpenRowsResponse: _TypeAlias = GetPositionRegistryOpenRowsResponse  # noqa: Y015
+
+@_typing.final
+class SaveLedgerAndRegistryRequest(_message.Message):
+    """Atomic ledger + position_registry + handle commit (T11 / VIB-4197).
+    The LedgerEntry fields mirror SaveLedgerEntryRequest exactly so the
+    SQLite-side reconstruction can reuse the same dataclass. The
+    RegistryRow + HandleMapping fields mirror the dataclasses in
+    almanak/framework/accounting/commit.py.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    CYCLE_ID_FIELD_NUMBER: _builtins.int
+    STRATEGY_ID_FIELD_NUMBER: _builtins.int
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    EXECUTION_MODE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FIELD_NUMBER: _builtins.int
+    TOKEN_IN_FIELD_NUMBER: _builtins.int
+    AMOUNT_IN_FIELD_NUMBER: _builtins.int
+    TOKEN_OUT_FIELD_NUMBER: _builtins.int
+    AMOUNT_OUT_FIELD_NUMBER: _builtins.int
+    EFFECTIVE_PRICE_FIELD_NUMBER: _builtins.int
+    SLIPPAGE_BPS_FIELD_NUMBER: _builtins.int
+    GAS_USED_FIELD_NUMBER: _builtins.int
+    GAS_USD_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    EXTRACTED_DATA_JSON_FIELD_NUMBER: _builtins.int
+    PRICE_INPUTS_JSON_FIELD_NUMBER: _builtins.int
+    PRE_STATE_JSON_FIELD_NUMBER: _builtins.int
+    POST_STATE_JSON_FIELD_NUMBER: _builtins.int
+    REGISTRY_CHAIN_FIELD_NUMBER: _builtins.int
+    REGISTRY_PRIMITIVE_FIELD_NUMBER: _builtins.int
+    REGISTRY_ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    REGISTRY_PHYSICAL_IDENTITY_HASH_FIELD_NUMBER: _builtins.int
+    REGISTRY_SEMANTIC_GROUPING_KEY_FIELD_NUMBER: _builtins.int
+    REGISTRY_GROUPING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
+    REGISTRY_HANDLE_FIELD_NUMBER: _builtins.int
+    REGISTRY_STATUS_FIELD_NUMBER: _builtins.int
+    REGISTRY_PAYLOAD_JSON_FIELD_NUMBER: _builtins.int
+    REGISTRY_MATCHING_POLICY_VERSION_FIELD_NUMBER: _builtins.int
+    REGISTRY_OPENED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    REGISTRY_OPENED_TX_FIELD_NUMBER: _builtins.int
+    REGISTRY_CLOSED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    REGISTRY_CLOSED_TX_FIELD_NUMBER: _builtins.int
+    REGISTRY_LAST_RECONCILED_AT_BLOCK_FIELD_NUMBER: _builtins.int
+    HANDLE_MAPPING_HANDLE_FIELD_NUMBER: _builtins.int
+    HANDLE_MAPPING_DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    HANDLE_MAPPING_ACCOUNTING_CATEGORY_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    """---- LedgerEntry (mirrors SaveLedgerEntryRequest) ----"""
+    cycle_id: _builtins.str
+    strategy_id: _builtins.str
+    deployment_id: _builtins.str
+    execution_mode: _builtins.str
+    timestamp: _builtins.int
+    intent_type: _builtins.str
+    token_in: _builtins.str
+    amount_in: _builtins.str
+    token_out: _builtins.str
+    amount_out: _builtins.str
+    effective_price: _builtins.str
+    slippage_bps: _builtins.float
+    gas_used: _builtins.int
+    gas_usd: _builtins.str
+    tx_hash: _builtins.str
+    chain: _builtins.str
+    protocol: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    extracted_data_json: _builtins.bytes
+    price_inputs_json: _builtins.bytes
+    pre_state_json: _builtins.bytes
+    post_state_json: _builtins.bytes
+    registry_chain: _builtins.str
+    """---- RegistryRow ----
+    intentional gap so adding ledger fields stays contiguous
+    """
+    registry_primitive: _builtins.str
+    registry_accounting_category: _builtins.str
+    registry_physical_identity_hash: _builtins.str
+    registry_semantic_grouping_key: _builtins.str
+    registry_grouping_policy_version: _builtins.str
+    registry_handle: _builtins.str
+    """"" when None"""
+    registry_status: _builtins.str
+    """"open" | "closed" | "reorg_invalidated" """
+    registry_payload_json: _builtins.bytes
+    """JSON-encoded dict"""
+    registry_matching_policy_version: _builtins.int
+    registry_opened_at_block: _builtins.int
+    registry_opened_tx: _builtins.str
+    """"" when None"""
+    registry_closed_at_block: _builtins.int
+    registry_closed_tx: _builtins.str
+    """"" when None"""
+    registry_last_reconciled_at_block: _builtins.int
+    handle_mapping_handle: _builtins.str
+    """---- HandleMapping (optional — populated when ``handle != ""``) ----
+    "" => no HandleMapping
+    """
+    handle_mapping_deployment_id: _builtins.str
+    handle_mapping_accounting_category: _builtins.str
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        cycle_id: _builtins.str = ...,
+        strategy_id: _builtins.str = ...,
+        deployment_id: _builtins.str = ...,
+        execution_mode: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        intent_type: _builtins.str = ...,
+        token_in: _builtins.str = ...,
+        amount_in: _builtins.str = ...,
+        token_out: _builtins.str = ...,
+        amount_out: _builtins.str = ...,
+        effective_price: _builtins.str = ...,
+        slippage_bps: _builtins.float | None = ...,
+        gas_used: _builtins.int = ...,
+        gas_usd: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        extracted_data_json: _builtins.bytes = ...,
+        price_inputs_json: _builtins.bytes = ...,
+        pre_state_json: _builtins.bytes = ...,
+        post_state_json: _builtins.bytes = ...,
+        registry_chain: _builtins.str = ...,
+        registry_primitive: _builtins.str = ...,
+        registry_accounting_category: _builtins.str = ...,
+        registry_physical_identity_hash: _builtins.str = ...,
+        registry_semantic_grouping_key: _builtins.str = ...,
+        registry_grouping_policy_version: _builtins.str = ...,
+        registry_handle: _builtins.str = ...,
+        registry_status: _builtins.str = ...,
+        registry_payload_json: _builtins.bytes = ...,
+        registry_matching_policy_version: _builtins.int = ...,
+        registry_opened_at_block: _builtins.int | None = ...,
+        registry_opened_tx: _builtins.str = ...,
+        registry_closed_at_block: _builtins.int | None = ...,
+        registry_closed_tx: _builtins.str = ...,
+        registry_last_reconciled_at_block: _builtins.int | None = ...,
+        handle_mapping_handle: _builtins.str = ...,
+        handle_mapping_deployment_id: _builtins.str = ...,
+        handle_mapping_accounting_category: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "registry_closed_at_block", b"registry_closed_at_block", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_opened_at_block", b"registry_opened_at_block", "slippage_bps", b"slippage_bps"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block", "_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block", "_registry_opened_at_block", b"_registry_opened_at_block", "_slippage_bps", b"_slippage_bps", "amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "execution_mode", b"execution_mode", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "handle_mapping_accounting_category", b"handle_mapping_accounting_category", "handle_mapping_deployment_id", b"handle_mapping_deployment_id", "handle_mapping_handle", b"handle_mapping_handle", "id", b"id", "intent_type", b"intent_type", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "registry_accounting_category", b"registry_accounting_category", "registry_chain", b"registry_chain", "registry_closed_at_block", b"registry_closed_at_block", "registry_closed_tx", b"registry_closed_tx", "registry_grouping_policy_version", b"registry_grouping_policy_version", "registry_handle", b"registry_handle", "registry_last_reconciled_at_block", b"registry_last_reconciled_at_block", "registry_matching_policy_version", b"registry_matching_policy_version", "registry_opened_at_block", b"registry_opened_at_block", "registry_opened_tx", b"registry_opened_tx", "registry_payload_json", b"registry_payload_json", "registry_physical_identity_hash", b"registry_physical_identity_hash", "registry_primitive", b"registry_primitive", "registry_semantic_grouping_key", b"registry_semantic_grouping_key", "registry_status", b"registry_status", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__registry_closed_at_block: _TypeAlias = _typing.Literal["registry_closed_at_block"]  # noqa: Y015
+    _WhichOneofArgType__registry_closed_at_block: _TypeAlias = _typing.Literal["_registry_closed_at_block", b"_registry_closed_at_block"]  # noqa: Y015
+    _WhichOneofReturnType__registry_last_reconciled_at_block: _TypeAlias = _typing.Literal["registry_last_reconciled_at_block"]  # noqa: Y015
+    _WhichOneofArgType__registry_last_reconciled_at_block: _TypeAlias = _typing.Literal["_registry_last_reconciled_at_block", b"_registry_last_reconciled_at_block"]  # noqa: Y015
+    _WhichOneofReturnType__registry_opened_at_block: _TypeAlias = _typing.Literal["registry_opened_at_block"]  # noqa: Y015
+    _WhichOneofArgType__registry_opened_at_block: _TypeAlias = _typing.Literal["_registry_opened_at_block", b"_registry_opened_at_block"]  # noqa: Y015
+    _WhichOneofReturnType__slippage_bps: _TypeAlias = _typing.Literal["slippage_bps"]  # noqa: Y015
+    _WhichOneofArgType__slippage_bps: _TypeAlias = _typing.Literal["_slippage_bps", b"_slippage_bps"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__registry_closed_at_block) -> _WhichOneofReturnType__registry_closed_at_block | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__registry_last_reconciled_at_block) -> _WhichOneofReturnType__registry_last_reconciled_at_block | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__registry_opened_at_block) -> _WhichOneofReturnType__registry_opened_at_block | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__slippage_bps) -> _WhichOneofReturnType__slippage_bps | None: ...
+
+Global___SaveLedgerAndRegistryRequest: _TypeAlias = SaveLedgerAndRegistryRequest  # noqa: Y015
+
+@_typing.final
+class SaveLedgerAndRegistryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    ERROR_CLASS_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    error_class: _builtins.str
+    """Error-discriminator: lets the client adapter distinguish a
+    RegistryAutoCollisionError (the strategy author forgot a
+    registry_handle on a multi-NFT-per-pool deployment — programming
+    bug, NOT an infrastructure failure) from a generic persistence
+    failure. VIB-4200 / PRD §"Loud Failure, Not Confusing Failure"
+    requires that collision class to propagate as a distinct exception
+    mode-uniformly. Empty string when ``success=true`` or on a generic
+    failure.
+    """
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        error_class: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_class", b"error_class", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SaveLedgerAndRegistryResponse: _TypeAlias = SaveLedgerAndRegistryResponse  # noqa: Y015
 
 @_typing.final
 class CompileIntentRequest(_message.Message):
@@ -2263,11 +2782,8 @@ class CompileIntentRequest(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     INTENT_TYPE_FIELD_NUMBER: _builtins.int
     INTENT_DATA_FIELD_NUMBER: _builtins.int
@@ -2293,11 +2809,8 @@ class CompileIntentRequest(_message.Message):
         wallet_address: _builtins.str = ...,
         price_map: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "intent_data", b"intent_data", "intent_type", b"intent_type", "price_map", b"price_map", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CompileIntentRequest: _TypeAlias = CompileIntentRequest  # noqa: Y015
 
@@ -2323,11 +2836,8 @@ class CompilationResult(_message.Message):
         error: _builtins.str = ...,
         error_code: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "error", b"error", "error_code", b"error_code", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CompilationResult: _TypeAlias = CompilationResult  # noqa: Y015
 
@@ -2367,11 +2877,8 @@ class ExecuteRequest(_message.Message):
         wallet_address: _builtins.str = ...,
         max_gas_price_gwei: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "chain", b"chain", "dry_run", b"dry_run", "intent_id", b"intent_id", "max_gas_price_gwei", b"max_gas_price_gwei", "simulation_enabled", b"simulation_enabled", "strategy_id", b"strategy_id", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ExecuteRequest: _TypeAlias = ExecuteRequest  # noqa: Y015
 
@@ -2406,11 +2913,8 @@ class ExecutionResult(_message.Message):
         error_code: _builtins.str = ...,
         execution_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_code", b"error_code", "execution_id", b"execution_id", "receipts", b"receipts", "success", b"success", "total_gas_used", b"total_gas_used", "tx_hashes", b"tx_hashes"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ExecutionResult: _TypeAlias = ExecutionResult  # noqa: Y015
 
@@ -2428,11 +2932,8 @@ class TxStatusRequest(_message.Message):
         tx_hash: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TxStatusRequest: _TypeAlias = TxStatusRequest  # noqa: Y015
 
@@ -2460,11 +2961,8 @@ class TxStatus(_message.Message):
         gas_used: _builtins.int = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "confirmations", b"confirmations", "error", b"error", "gas_used", b"gas_used", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TxStatus: _TypeAlias = TxStatus  # noqa: Y015
 
@@ -2486,11 +2984,8 @@ class LogEntry(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     LEVEL_FIELD_NUMBER: _builtins.int
     MESSAGE_FIELD_NUMBER: _builtins.int
@@ -2516,11 +3011,8 @@ class LogEntry(_message.Message):
         timestamp: _builtins.int = ...,
         logger_name: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "level", b"level", "logger_name", b"logger_name", "message", b"message", "strategy_id", b"strategy_id", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___LogEntry: _TypeAlias = LogEntry  # noqa: Y015
 
@@ -2542,11 +3034,8 @@ class AlertRequest(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     CHANNEL_FIELD_NUMBER: _builtins.int
     MESSAGE_FIELD_NUMBER: _builtins.int
@@ -2570,11 +3059,8 @@ class AlertRequest(_message.Message):
         strategy_id: _builtins.str = ...,
         metadata: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["channel", b"channel", "message", b"message", "metadata", b"metadata", "severity", b"severity", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AlertRequest: _TypeAlias = AlertRequest  # noqa: Y015
 
@@ -2595,11 +3081,8 @@ class AlertResponse(_message.Message):
         error: _builtins.str = ...,
         alert_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["alert_id", b"alert_id", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AlertResponse: _TypeAlias = AlertResponse  # noqa: Y015
 
@@ -2621,11 +3104,8 @@ class MetricEntry(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     NAME_FIELD_NUMBER: _builtins.int
     VALUE_FIELD_NUMBER: _builtins.int
@@ -2648,11 +3128,8 @@ class MetricEntry(_message.Message):
         timestamp: _builtins.int = ...,
         metric_type: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["labels", b"labels", "metric_type", b"metric_type", "name", b"name", "timestamp", b"timestamp", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___MetricEntry: _TypeAlias = MetricEntry  # noqa: Y015
 
@@ -2702,11 +3179,8 @@ class RecordTimelineEventRequest(_message.Message):
         phase: _builtins.str = ...,
         related_ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "related_ledger_entry_id", b"related_ledger_entry_id", "strategy_id", b"strategy_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RecordTimelineEventRequest: _TypeAlias = RecordTimelineEventRequest  # noqa: Y015
 
@@ -2728,11 +3202,8 @@ class RecordTimelineEventResponse(_message.Message):
         event_id: _builtins.str = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "event_id", b"event_id", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RecordTimelineEventResponse: _TypeAlias = RecordTimelineEventResponse  # noqa: Y015
 
@@ -2764,11 +3235,8 @@ class RpcRequest(_message.Message):
         id: _builtins.str = ...,
         network: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "id", b"id", "method", b"method", "network", b"network", "params", b"params"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RpcRequest: _TypeAlias = RpcRequest  # noqa: Y015
 
@@ -2795,11 +3263,8 @@ class RpcResponse(_message.Message):
         id: _builtins.str = ...,
         success: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "id", b"id", "result", b"result", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RpcResponse: _TypeAlias = RpcResponse  # noqa: Y015
 
@@ -2818,11 +3283,8 @@ class RpcBatchRequest(_message.Message):
         chain: _builtins.str = ...,
         requests: _abc.Iterable[Global___RpcRequest] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "requests", b"requests"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RpcBatchRequest: _TypeAlias = RpcBatchRequest  # noqa: Y015
 
@@ -2838,11 +3300,8 @@ class RpcBatchResponse(_message.Message):
         *,
         responses: _abc.Iterable[Global___RpcResponse] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["responses", b"responses"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RpcBatchResponse: _TypeAlias = RpcBatchResponse  # noqa: Y015
 
@@ -2872,11 +3331,8 @@ class AllowanceRequest(_message.Message):
         owner_address: _builtins.str = ...,
         spender_address: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "owner_address", b"owner_address", "spender_address", b"spender_address", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AllowanceRequest: _TypeAlias = AllowanceRequest  # noqa: Y015
 
@@ -2898,11 +3354,8 @@ class AllowanceResponse(_message.Message):
         allowance: _builtins.str = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["allowance", b"allowance", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AllowanceResponse: _TypeAlias = AllowanceResponse  # noqa: Y015
 
@@ -2926,11 +3379,8 @@ class BalanceQueryRequest(_message.Message):
         token_address: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "token_address", b"token_address", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BalanceQueryRequest: _TypeAlias = BalanceQueryRequest  # noqa: Y015
 
@@ -2952,11 +3402,8 @@ class BalanceQueryResponse(_message.Message):
         balance: _builtins.str = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["balance", b"balance", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BalanceQueryResponse: _TypeAlias = BalanceQueryResponse  # noqa: Y015
 
@@ -2980,11 +3427,8 @@ class PositionLiquidityRequest(_message.Message):
         position_manager: _builtins.str = ...,
         token_id: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "position_manager", b"position_manager", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PositionLiquidityRequest: _TypeAlias = PositionLiquidityRequest  # noqa: Y015
 
@@ -3006,11 +3450,8 @@ class PositionLiquidityResponse(_message.Message):
         liquidity: _builtins.str = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "liquidity", b"liquidity", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PositionLiquidityResponse: _TypeAlias = PositionLiquidityResponse  # noqa: Y015
 
@@ -3034,11 +3475,8 @@ class PositionTokensOwedRequest(_message.Message):
         position_manager: _builtins.str = ...,
         token_id: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "position_manager", b"position_manager", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PositionTokensOwedRequest: _TypeAlias = PositionTokensOwedRequest  # noqa: Y015
 
@@ -3064,11 +3502,8 @@ class PositionTokensOwedResponse(_message.Message):
         tokens_owed1: _builtins.str = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success", "tokens_owed0", b"tokens_owed0", "tokens_owed1", b"tokens_owed1"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PositionTokensOwedResponse: _TypeAlias = PositionTokensOwedResponse  # noqa: Y015
 
@@ -3089,11 +3524,8 @@ class BinanceTickerRequest(_message.Message):
         *,
         symbol: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["symbol", b"symbol"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceTickerRequest: _TypeAlias = BinanceTickerRequest  # noqa: Y015
 
@@ -3137,11 +3569,8 @@ class BinanceTickerResponse(_message.Message):
         quote_volume_24h: _builtins.str = ...,
         timestamp: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["high_24h", b"high_24h", "low_24h", b"low_24h", "price", b"price", "price_change", b"price_change", "price_change_percent", b"price_change_percent", "quote_volume_24h", b"quote_volume_24h", "symbol", b"symbol", "timestamp", b"timestamp", "volume_24h", b"volume_24h"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceTickerResponse: _TypeAlias = BinanceTickerResponse  # noqa: Y015
 
@@ -3173,11 +3602,8 @@ class BinanceKlinesRequest(_message.Message):
         start_time: _builtins.int = ...,
         end_time: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["end_time", b"end_time", "interval", b"interval", "limit", b"limit", "start_time", b"start_time", "symbol", b"symbol"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceKlinesRequest: _TypeAlias = BinanceKlinesRequest  # noqa: Y015
 
@@ -3216,11 +3642,8 @@ class BinanceKline(_message.Message):
         quote_volume: _builtins.str = ...,
         trades: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["close", b"close", "close_time", b"close_time", "high", b"high", "low", b"low", "open", b"open", "open_time", b"open_time", "quote_volume", b"quote_volume", "trades", b"trades", "volume", b"volume"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceKline: _TypeAlias = BinanceKline  # noqa: Y015
 
@@ -3236,11 +3659,8 @@ class BinanceKlinesResponse(_message.Message):
         *,
         klines: _abc.Iterable[Global___BinanceKline] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["klines", b"klines"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceKlinesResponse: _TypeAlias = BinanceKlinesResponse  # noqa: Y015
 
@@ -3259,11 +3679,8 @@ class BinanceOrderBookRequest(_message.Message):
         symbol: _builtins.str = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "symbol", b"symbol"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceOrderBookRequest: _TypeAlias = BinanceOrderBookRequest  # noqa: Y015
 
@@ -3281,11 +3698,8 @@ class BinanceOrderBookEntry(_message.Message):
         price: _builtins.str = ...,
         quantity: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["price", b"price", "quantity", b"quantity"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceOrderBookEntry: _TypeAlias = BinanceOrderBookEntry  # noqa: Y015
 
@@ -3308,11 +3722,8 @@ class BinanceOrderBookResponse(_message.Message):
         bids: _abc.Iterable[Global___BinanceOrderBookEntry] | None = ...,
         asks: _abc.Iterable[Global___BinanceOrderBookEntry] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asks", b"asks", "bids", b"bids", "last_update_id", b"last_update_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BinanceOrderBookResponse: _TypeAlias = BinanceOrderBookResponse  # noqa: Y015
 
@@ -3339,11 +3750,8 @@ class CoinGeckoGetPriceRequest(_message.Message):
         token_id: _builtins.str = ...,
         vs_currencies: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["token_id", b"token_id", "vs_currencies", b"vs_currencies"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoGetPriceRequest: _TypeAlias = CoinGeckoGetPriceRequest  # noqa: Y015
 
@@ -3365,11 +3773,8 @@ class CoinGeckoGetPriceResponse(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     PRICES_FIELD_NUMBER: _builtins.int
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -3384,11 +3789,8 @@ class CoinGeckoGetPriceResponse(_message.Message):
         prices: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
         timestamp: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["prices", b"prices", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoGetPriceResponse: _TypeAlias = CoinGeckoGetPriceResponse  # noqa: Y015
 
@@ -3408,11 +3810,8 @@ class CoinGeckoGetPricesRequest(_message.Message):
         token_ids: _abc.Iterable[_builtins.str] | None = ...,
         vs_currencies: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["token_ids", b"token_ids", "vs_currencies", b"vs_currencies"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoGetPricesRequest: _TypeAlias = CoinGeckoGetPricesRequest  # noqa: Y015
 
@@ -3434,11 +3833,8 @@ class CoinGeckoTokenPrice(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     TOKEN_ID_FIELD_NUMBER: _builtins.int
     PRICES_FIELD_NUMBER: _builtins.int
@@ -3451,11 +3847,8 @@ class CoinGeckoTokenPrice(_message.Message):
         token_id: _builtins.str = ...,
         prices: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["prices", b"prices", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoTokenPrice: _TypeAlias = CoinGeckoTokenPrice  # noqa: Y015
 
@@ -3474,11 +3867,8 @@ class CoinGeckoGetPricesResponse(_message.Message):
         tokens: _abc.Iterable[Global___CoinGeckoTokenPrice] | None = ...,
         timestamp: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["timestamp", b"timestamp", "tokens", b"tokens"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoGetPricesResponse: _TypeAlias = CoinGeckoGetPricesResponse  # noqa: Y015
 
@@ -3512,11 +3902,8 @@ class CoinGeckoGetMarketsRequest(_message.Message):
         per_page: _builtins.int = ...,
         page: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["ids", b"ids", "order", b"order", "page", b"page", "per_page", b"per_page", "vs_currency", b"vs_currency"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoGetMarketsRequest: _TypeAlias = CoinGeckoGetMarketsRequest  # noqa: Y015
 
@@ -3564,11 +3951,8 @@ class CoinGeckoMarket(_message.Message):
         price_change_percentage_24h: _builtins.str = ...,
         last_updated: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["current_price", b"current_price", "high_24h", b"high_24h", "id", b"id", "last_updated", b"last_updated", "low_24h", b"low_24h", "market_cap", b"market_cap", "market_cap_rank", b"market_cap_rank", "name", b"name", "price_change_24h", b"price_change_24h", "price_change_percentage_24h", b"price_change_percentage_24h", "symbol", b"symbol", "total_volume", b"total_volume"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoMarket: _TypeAlias = CoinGeckoMarket  # noqa: Y015
 
@@ -3584,11 +3968,8 @@ class CoinGeckoGetMarketsResponse(_message.Message):
         *,
         markets: _abc.Iterable[Global___CoinGeckoMarket] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["markets", b"markets"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoGetMarketsResponse: _TypeAlias = CoinGeckoGetMarketsResponse  # noqa: Y015
 
@@ -3608,11 +3989,8 @@ class CoinGeckoHistoricalPriceRequest(_message.Message):
         token_id: _builtins.str = ...,
         date: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["date", b"date", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoHistoricalPriceRequest: _TypeAlias = CoinGeckoHistoricalPriceRequest  # noqa: Y015
 
@@ -3645,11 +4023,8 @@ class CoinGeckoHistoricalPriceResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "market_cap_usd", b"market_cap_usd", "price_usd", b"price_usd", "success", b"success", "timestamp", b"timestamp", "volume_usd", b"volume_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoHistoricalPriceResponse: _TypeAlias = CoinGeckoHistoricalPriceResponse  # noqa: Y015
 
@@ -3677,11 +4052,8 @@ class CoinGeckoMarketChartRangeRequest(_message.Message):
         to_timestamp: _builtins.int = ...,
         vs_currency: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["from_timestamp", b"from_timestamp", "to_timestamp", b"to_timestamp", "token_id", b"token_id", "vs_currency", b"vs_currency"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoMarketChartRangeRequest: _TypeAlias = CoinGeckoMarketChartRangeRequest  # noqa: Y015
 
@@ -3701,11 +4073,8 @@ class CoinGeckoMarketChartDataPoint(_message.Message):
         timestamp: _builtins.int = ...,
         value: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["timestamp", b"timestamp", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoMarketChartDataPoint: _TypeAlias = CoinGeckoMarketChartDataPoint  # noqa: Y015
 
@@ -3735,11 +4104,8 @@ class CoinGeckoMarketChartRangeResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "market_caps", b"market_caps", "prices", b"prices", "success", b"success", "total_volumes", b"total_volumes"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CoinGeckoMarketChartRangeResponse: _TypeAlias = CoinGeckoMarketChartRangeResponse  # noqa: Y015
 
@@ -3768,11 +4134,8 @@ class TheGraphQueryRequest(_message.Message):
         query: _builtins.str = ...,
         variables: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["query", b"query", "subgraph_id", b"subgraph_id", "variables", b"variables"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TheGraphQueryRequest: _TypeAlias = TheGraphQueryRequest  # noqa: Y015
 
@@ -3795,11 +4158,8 @@ class TheGraphQueryResponse(_message.Message):
         errors: _builtins.str = ...,
         success: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "errors", b"errors", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TheGraphQueryResponse: _TypeAlias = TheGraphQueryResponse  # noqa: Y015
 
@@ -3828,11 +4188,8 @@ class WalletPortfolioRequest(_message.Message):
         chain: _builtins.str = ...,
         provider: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "provider", b"provider", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___WalletPortfolioRequest: _TypeAlias = WalletPortfolioRequest  # noqa: Y015
 
@@ -3878,11 +4235,8 @@ class WalletPortfolioPosition(_message.Message):
         token_symbols: _abc.Iterable[_builtins.str] | None = ...,
         raw_details_json: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["label", b"label", "pool_address", b"pool_address", "position_id", b"position_id", "position_type", b"position_type", "protocol", b"protocol", "raw_details_json", b"raw_details_json", "token_symbols", b"token_symbols", "value_usd", b"value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___WalletPortfolioPosition: _TypeAlias = WalletPortfolioPosition  # noqa: Y015
 
@@ -3922,11 +4276,8 @@ class WalletPortfolioResponse(_message.Message):
         error: _builtins.str = ...,
         positions: _abc.Iterable[Global___WalletPortfolioPosition] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["cache_hit", b"cache_hit", "chain", b"chain", "error", b"error", "positions", b"positions", "provider", b"provider", "success", b"success", "timestamp", b"timestamp", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___WalletPortfolioResponse: _TypeAlias = WalletPortfolioResponse  # noqa: Y015
 
@@ -3958,11 +4309,8 @@ class SimulateTransaction(_message.Message):
         value: _builtins.str = ...,
         gas_limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "from_address", b"from_address", "gas_limit", b"gas_limit", "to_address", b"to_address", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SimulateTransaction: _TypeAlias = SimulateTransaction  # noqa: Y015
 
@@ -3982,11 +4330,8 @@ class SimulateStateOverride(_message.Message):
         address: _builtins.str = ...,
         balance: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["address", b"address", "balance", b"balance"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SimulateStateOverride: _TypeAlias = SimulateStateOverride  # noqa: Y015
 
@@ -4018,11 +4363,8 @@ class SimulateBundleRequest(_message.Message):
         state_overrides: _abc.Iterable[Global___SimulateStateOverride] | None = ...,
         simulator: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "simulator", b"simulator", "state_overrides", b"state_overrides", "transactions", b"transactions"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SimulateBundleRequest: _TypeAlias = SimulateBundleRequest  # noqa: Y015
 
@@ -4070,11 +4412,8 @@ class SimulateBundleResponse(_message.Message):
         simulator_used: _builtins.str = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "gas_estimates", b"gas_estimates", "revert_reason", b"revert_reason", "simulated", b"simulated", "simulation_url", b"simulation_url", "simulator_used", b"simulator_used", "success", b"success", "warnings", b"warnings"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SimulateBundleResponse: _TypeAlias = SimulateBundleResponse  # noqa: Y015
 
@@ -4098,11 +4437,8 @@ class FundingRateRequest(_message.Message):
         market: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "venue", b"venue"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___FundingRateRequest: _TypeAlias = FundingRateRequest  # noqa: Y015
 
@@ -4162,11 +4498,8 @@ class FundingRateResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "index_price", b"index_price", "is_live_data", b"is_live_data", "mark_price", b"mark_price", "market", b"market", "next_funding_time", b"next_funding_time", "open_interest_long", b"open_interest_long", "open_interest_short", b"open_interest_short", "rate_8h", b"rate_8h", "rate_annualized", b"rate_annualized", "rate_hourly", b"rate_hourly", "success", b"success", "venue", b"venue"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___FundingRateResponse: _TypeAlias = FundingRateResponse  # noqa: Y015
 
@@ -4194,11 +4527,8 @@ class FundingRateSpreadRequest(_message.Message):
         venue_b: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "venue_a", b"venue_a", "venue_b", b"venue_b"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___FundingRateSpreadRequest: _TypeAlias = FundingRateSpreadRequest  # noqa: Y015
 
@@ -4236,7 +4566,6 @@ class FundingRateSpreadResponse(_message.Message):
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "spread_annualized", b"spread_annualized", "spread_hourly", b"spread_hourly", "success", b"success", "venue_a_rate", b"venue_a_rate", "venue_b_rate", b"venue_b_rate"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___FundingRateSpreadResponse: _TypeAlias = FundingRateSpreadResponse  # noqa: Y015
 
@@ -4268,11 +4597,8 @@ class ListStrategiesRequest(_message.Message):
         chain_filter: _builtins.str = ...,
         include_position: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain_filter", b"chain_filter", "include_position", b"include_position", "status_filter", b"status_filter"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ListStrategiesRequest: _TypeAlias = ListStrategiesRequest  # noqa: Y015
 
@@ -4291,11 +4617,8 @@ class ListStrategiesResponse(_message.Message):
         strategies: _abc.Iterable[Global___StrategySummary] | None = ...,
         total_count: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategies", b"strategies", "total_count", b"total_count"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ListStrategiesResponse: _TypeAlias = ListStrategiesResponse  # noqa: Y015
 
@@ -4317,11 +4640,8 @@ class StrategySummary(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
     NAME_FIELD_NUMBER: _builtins.int
@@ -4392,11 +4712,8 @@ class StrategySummary(_message.Message):
         execution_mode: _builtins.str = ...,
         paper_metrics_json: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["attention_reason", b"attention_reason", "attention_required", b"attention_required", "chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "consecutive_errors", b"consecutive_errors", "execution_mode", b"execution_mode", "is_multi_chain", b"is_multi_chain", "last_action_at", b"last_action_at", "last_iteration_at", b"last_iteration_at", "name", b"name", "paper_metrics_json", b"paper_metrics_json", "pnl_24h_usd", b"pnl_24h_usd", "pnl_since_deploy_usd", b"pnl_since_deploy_usd", "protocol", b"protocol", "status", b"status", "strategy_id", b"strategy_id", "total_value_usd", b"total_value_usd", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___StrategySummary: _TypeAlias = StrategySummary  # noqa: Y015
 
@@ -4423,11 +4740,8 @@ class GetStrategyDetailsRequest(_message.Message):
         include_pnl_history: _builtins.bool = ...,
         timeline_limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["include_pnl_history", b"include_pnl_history", "include_timeline", b"include_timeline", "strategy_id", b"strategy_id", "timeline_limit", b"timeline_limit"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetStrategyDetailsRequest: _TypeAlias = GetStrategyDetailsRequest  # noqa: Y015
 
@@ -4454,7 +4768,6 @@ class StrategyDetails(_message.Message):
         def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     SUMMARY_FIELD_NUMBER: _builtins.int
     POSITION_FIELD_NUMBER: _builtins.int
@@ -4488,7 +4801,6 @@ class StrategyDetails(_message.Message):
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain_health", b"chain_health", "operator_card", b"operator_card", "pnl_history", b"pnl_history", "position", b"position", "summary", b"summary", "timeline", b"timeline"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___StrategyDetails: _TypeAlias = StrategyDetails  # noqa: Y015
 
@@ -4523,11 +4835,8 @@ class PositionInfo(_message.Message):
         leverage: _builtins.str = ...,
         strategy_positions: _abc.Iterable[Global___StrategyPosition] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["health_factor", b"health_factor", "leverage", b"leverage", "lp_positions", b"lp_positions", "strategy_positions", b"strategy_positions", "token_balances", b"token_balances", "total_lp_value_usd", b"total_lp_value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PositionInfo: _TypeAlias = PositionInfo  # noqa: Y015
 
@@ -4553,11 +4862,8 @@ class StrategyPosition(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     POSITION_TYPE_FIELD_NUMBER: _builtins.int
     POSITION_ID_FIELD_NUMBER: _builtins.int
@@ -4615,11 +4921,8 @@ class StrategyPosition(_message.Message):
         collateral_usd: _builtins.str = ...,
         leverage: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "collateral_usd", b"collateral_usd", "current_price", b"current_price", "details", b"details", "direction", b"direction", "entry_price", b"entry_price", "health_factor", b"health_factor", "leverage", b"leverage", "liquidation_risk", b"liquidation_risk", "position_id", b"position_id", "position_type", b"position_type", "protocol", b"protocol", "size_usd", b"size_usd", "unrealized_pnl_pct", b"unrealized_pnl_pct", "unrealized_pnl_usd", b"unrealized_pnl_usd", "value_usd", b"value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___StrategyPosition: _TypeAlias = StrategyPosition  # noqa: Y015
 
@@ -4640,11 +4943,8 @@ class TokenBalanceInfo(_message.Message):
         balance: _builtins.str = ...,
         value_usd: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["balance", b"balance", "symbol", b"symbol", "value_usd", b"value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TokenBalanceInfo: _TypeAlias = TokenBalanceInfo  # noqa: Y015
 
@@ -4680,11 +4980,8 @@ class LPPositionInfo(_message.Message):
         current_price: _builtins.str = ...,
         in_range: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["current_price", b"current_price", "in_range", b"in_range", "liquidity_usd", b"liquidity_usd", "pool", b"pool", "range_lower", b"range_lower", "range_upper", b"range_upper", "token0", b"token0", "token1", b"token1"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___LPPositionInfo: _TypeAlias = LPPositionInfo  # noqa: Y015
 
@@ -4738,11 +5035,8 @@ class TimelineEventInfo(_message.Message):
         phase: _builtins.str = ...,
         related_ledger_entry_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cycle_id", b"cycle_id", "description", b"description", "details_json", b"details_json", "event_type", b"event_type", "phase", b"phase", "related_ledger_entry_id", b"related_ledger_entry_id", "timestamp", b"timestamp", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TimelineEventInfo: _TypeAlias = TimelineEventInfo  # noqa: Y015
 
@@ -4763,11 +5057,8 @@ class PnLDataPoint(_message.Message):
         value_usd: _builtins.str = ...,
         pnl_usd: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["pnl_usd", b"pnl_usd", "timestamp", b"timestamp", "value_usd", b"value_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PnLDataPoint: _TypeAlias = PnLDataPoint  # noqa: Y015
 
@@ -4810,11 +5101,8 @@ class OperatorCardInfo(_message.Message):
         suggested_actions: _abc.Iterable[_builtins.str] | None = ...,
         available_actions: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["available_actions", b"available_actions", "context_json", b"context_json", "position_at_risk_usd", b"position_at_risk_usd", "reason", b"reason", "risk_description", b"risk_description", "severity", b"severity", "strategy_id", b"strategy_id", "suggested_actions", b"suggested_actions", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___OperatorCardInfo: _TypeAlias = OperatorCardInfo  # noqa: Y015
 
@@ -4845,11 +5133,8 @@ class ChainHealthInfo(_message.Message):
         block_number: _builtins.int = ...,
         last_updated: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "chain", b"chain", "gas_price_gwei", b"gas_price_gwei", "last_updated", b"last_updated", "rpc_latency_ms", b"rpc_latency_ms", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ChainHealthInfo: _TypeAlias = ChainHealthInfo  # noqa: Y015
 
@@ -4876,11 +5161,8 @@ class GetTimelineRequest(_message.Message):
         event_type_filter: _builtins.str = ...,
         since_timestamp: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["event_type_filter", b"event_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTimelineRequest: _TypeAlias = GetTimelineRequest  # noqa: Y015
 
@@ -4899,11 +5181,8 @@ class GetTimelineResponse(_message.Message):
         events: _abc.Iterable[Global___TimelineEventInfo] | None = ...,
         has_more: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["events", b"events", "has_more", b"has_more"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTimelineResponse: _TypeAlias = GetTimelineResponse  # noqa: Y015
 
@@ -4918,11 +5197,8 @@ class GetStrategyConfigRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetStrategyConfigRequest: _TypeAlias = GetStrategyConfigRequest  # noqa: Y015
 
@@ -4947,11 +5223,8 @@ class StrategyConfigResponse(_message.Message):
         config_json: _builtins.str = ...,
         last_updated: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["config_json", b"config_json", "last_updated", b"last_updated", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___StrategyConfigResponse: _TypeAlias = StrategyConfigResponse  # noqa: Y015
 
@@ -4972,11 +5245,8 @@ class GetStrategyStateRequest(_message.Message):
         strategy_id: _builtins.str = ...,
         fields: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["fields", b"fields", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetStrategyStateRequest: _TypeAlias = GetStrategyStateRequest  # noqa: Y015
 
@@ -5001,11 +5271,8 @@ class StrategyStateResponse(_message.Message):
         version: _builtins.int = ...,
         updated_at: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["state_json", b"state_json", "strategy_id", b"strategy_id", "updated_at", b"updated_at", "version", b"version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___StrategyStateResponse: _TypeAlias = StrategyStateResponse  # noqa: Y015
 
@@ -5027,11 +5294,8 @@ class ExecuteActionRequest(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
     ACTION_FIELD_NUMBER: _builtins.int
@@ -5054,11 +5318,8 @@ class ExecuteActionRequest(_message.Message):
         reason: _builtins.str = ...,
         params: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["action", b"action", "params", b"params", "reason", b"reason", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ExecuteActionRequest: _TypeAlias = ExecuteActionRequest  # noqa: Y015
 
@@ -5080,11 +5341,8 @@ class ExecuteActionResponse(_message.Message):
         error: _builtins.str = ...,
         action_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["action_id", b"action_id", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ExecuteActionResponse: _TypeAlias = ExecuteActionResponse  # noqa: Y015
 
@@ -5108,11 +5366,8 @@ class RegisterInstanceRequest(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     STRATEGY_ID_FIELD_NUMBER: _builtins.int
     STRATEGY_NAME_FIELD_NUMBER: _builtins.int
@@ -5153,11 +5408,8 @@ class RegisterInstanceRequest(_message.Message):
         chains: _abc.Iterable[_builtins.str] | None = ...,
         chain_wallets: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "chain_wallets", b"chain_wallets", "chains", b"chains", "config_json", b"config_json", "protocol", b"protocol", "strategy_id", b"strategy_id", "strategy_name", b"strategy_name", "template_name", b"template_name", "version", b"version", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RegisterInstanceRequest: _TypeAlias = RegisterInstanceRequest  # noqa: Y015
 
@@ -5179,11 +5431,8 @@ class RegisterInstanceResponse(_message.Message):
         error: _builtins.str = ...,
         already_existed: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["already_existed", b"already_existed", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___RegisterInstanceResponse: _TypeAlias = RegisterInstanceResponse  # noqa: Y015
 
@@ -5215,11 +5464,8 @@ class UpdateInstanceStatusRequest(_message.Message):
         heartbeat_only: _builtins.bool = ...,
         positions: _abc.Iterable[Global___StrategyPosition] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["heartbeat_only", b"heartbeat_only", "positions", b"positions", "reason", b"reason", "status", b"status", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___UpdateInstanceStatusRequest: _TypeAlias = UpdateInstanceStatusRequest  # noqa: Y015
 
@@ -5237,11 +5483,8 @@ class UpdateInstanceStatusResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___UpdateInstanceStatusResponse: _TypeAlias = UpdateInstanceStatusResponse  # noqa: Y015
 
@@ -5259,11 +5502,8 @@ class ArchiveInstanceRequest(_message.Message):
         strategy_id: _builtins.str = ...,
         reason: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["reason", b"reason", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ArchiveInstanceRequest: _TypeAlias = ArchiveInstanceRequest  # noqa: Y015
 
@@ -5281,11 +5521,8 @@ class ArchiveInstanceResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ArchiveInstanceResponse: _TypeAlias = ArchiveInstanceResponse  # noqa: Y015
 
@@ -5304,11 +5541,8 @@ class PurgeInstanceRequest(_message.Message):
         strategy_id: _builtins.str = ...,
         reason: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["reason", b"reason", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PurgeInstanceRequest: _TypeAlias = PurgeInstanceRequest  # noqa: Y015
 
@@ -5326,11 +5560,8 @@ class PurgeInstanceResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PurgeInstanceResponse: _TypeAlias = PurgeInstanceResponse  # noqa: Y015
 
@@ -5359,11 +5590,8 @@ class GetTransactionLedgerRequest(_message.Message):
         intent_type_filter: _builtins.str = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["intent_type_filter", b"intent_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTransactionLedgerRequest: _TypeAlias = GetTransactionLedgerRequest  # noqa: Y015
 
@@ -5382,11 +5610,8 @@ class GetTransactionLedgerResponse(_message.Message):
         entries: _abc.Iterable[Global___LedgerEntryInfo] | None = ...,
         has_more: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["entries", b"entries", "has_more", b"has_more"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTransactionLedgerResponse: _TypeAlias = GetTransactionLedgerResponse  # noqa: Y015
 
@@ -5452,11 +5677,8 @@ class LedgerEntryInfo(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "effective_price", b"effective_price", "error", b"error", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "strategy_id", b"strategy_id", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
 
@@ -5549,11 +5771,8 @@ class PnLSummary(_message.Message):
         primary_risk_value: _builtins.str = ...,
         primary_risk_color: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PnLSummary: _TypeAlias = PnLSummary  # noqa: Y015
 
@@ -5602,11 +5821,8 @@ class CostStackInfo(_message.Message):
         realized_pnl_usd: _builtins.str = ...,
         il_usd: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CostStackInfo: _TypeAlias = CostStackInfo  # noqa: Y015
 
@@ -5708,11 +5924,8 @@ class AuditPosture(_message.Message):
         failing_cells: _abc.Iterable[_builtins.str] | None = ...,
         xfail_cells: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["cells_failed", b"cells_failed", "cells_passed", b"cells_passed", "cells_total", b"cells_total", "cells_xfail", b"cells_xfail", "events_total", b"events_total", "events_with_versions", b"events_with_versions", "failing_cells", b"failing_cells", "g6_component_pnl_usd", b"g6_component_pnl_usd", "g6_epsilon_usd", b"g6_epsilon_usd", "g6_gap_usd", b"g6_gap_usd", "g6_status", b"g6_status", "g6_sum_fees", b"g6_sum_fees", "g6_sum_funding", b"g6_sum_funding", "g6_sum_gas", b"g6_sum_gas", "g6_sum_interest", b"g6_sum_interest", "g6_sum_lp", b"g6_sum_lp", "g6_sum_perp", b"g6_sum_perp", "g6_sum_swap", b"g6_sum_swap", "g6_wallet_pnl_usd", b"g6_wallet_pnl_usd", "ledger_total", b"ledger_total", "ledger_with_gas_usd", b"ledger_with_gas_usd", "ledger_with_pre_post_state", b"ledger_with_pre_post_state", "ledger_with_price_inputs", b"ledger_with_price_inputs", "primitive", b"primitive", "xfail_cells", b"xfail_cells"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AuditPosture: _TypeAlias = AuditPosture  # noqa: Y015
 
@@ -5727,11 +5940,8 @@ class GetPnLSummaryRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetPnLSummaryRequest: _TypeAlias = GetPnLSummaryRequest  # noqa: Y015
 
@@ -5746,11 +5956,8 @@ class GetCostStackRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetCostStackRequest: _TypeAlias = GetCostStackRequest  # noqa: Y015
 
@@ -5765,11 +5972,8 @@ class GetAuditPostureRequest(_message.Message):
         *,
         strategy_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetAuditPostureRequest: _TypeAlias = GetAuditPostureRequest  # noqa: Y015
 
@@ -5793,11 +5997,8 @@ class GetTradeTapeRequest(_message.Message):
         limit: _builtins.int = ...,
         before_timestamp: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["before_timestamp", b"before_timestamp", "limit", b"limit", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTradeTapeRequest: _TypeAlias = GetTradeTapeRequest  # noqa: Y015
 
@@ -5816,11 +6017,8 @@ class GetTradeTapeResponse(_message.Message):
         rows: _abc.Iterable[Global___TradeTapeRow] | None = ...,
         has_more: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["has_more", b"has_more", "rows", b"rows"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTradeTapeResponse: _TypeAlias = GetTradeTapeResponse  # noqa: Y015
 
@@ -5954,11 +6152,8 @@ class TradeTapeRow(_message.Message):
         row_component_usd: _builtins.str = ...,
         row_residual_usd: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["accounting_event_type", b"accounting_event_type", "accounting_payload_json", b"accounting_payload_json", "amount_in", b"amount_in", "amount_in_usd", b"amount_in_usd", "amount_out", b"amount_out", "amount_out_usd", b"amount_out_usd", "chain", b"chain", "confidence", b"confidence", "cycle_id", b"cycle_id", "effective_price", b"effective_price", "error", b"error", "extracted_data_json", b"extracted_data_json", "formula_version", b"formula_version", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "matching_policy_version", b"matching_policy_version", "position_event_json", b"position_event_json", "position_event_type", b"position_event_type", "position_id", b"position_id", "position_key", b"position_key", "post_state_json", b"post_state_json", "pre_state_json", b"pre_state_json", "price_inputs_json", b"price_inputs_json", "protocol", b"protocol", "row_component_usd", b"row_component_usd", "row_residual_usd", b"row_residual_usd", "row_wallet_delta_usd", b"row_wallet_delta_usd", "schema_version", b"schema_version", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash", "unavailable_reason", b"unavailable_reason"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TradeTapeRow: _TypeAlias = TradeTapeRow  # noqa: Y015
 
@@ -6046,11 +6241,8 @@ class GetActivityFeedRequest(_message.Message):
         intent_type_filter: _builtins.str = ...,
         before_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["before_id", b"before_id", "before_timestamp", b"before_timestamp", "event_type_filter", b"event_type_filter", "intent_type_filter", b"intent_type_filter", "limit", b"limit", "strategy_id", b"strategy_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetActivityFeedRequest: _TypeAlias = GetActivityFeedRequest  # noqa: Y015
 
@@ -6094,11 +6286,8 @@ class GetActivityFeedResponse(_message.Message):
         next_before_id: _builtins.str = ...,
         backfill_truncated: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["backfill_truncated", b"backfill_truncated", "has_more", b"has_more", "items", b"items", "next_before_id", b"next_before_id", "next_before_timestamp", b"next_before_timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetActivityFeedResponse: _TypeAlias = GetActivityFeedResponse  # noqa: Y015
 
@@ -6185,11 +6374,8 @@ class PolymarketGetMarketRequest(_message.Message):
         condition_id: _builtins.str = ...,
         slug: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["condition_id", b"condition_id", "slug", b"slug"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetMarketRequest: _TypeAlias = PolymarketGetMarketRequest  # noqa: Y015
 
@@ -6314,11 +6500,8 @@ class PolymarketMarketResponse(_message.Message):
         tags: _abc.Iterable[_builtins.str] | None = ...,
         raw_json: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["accepting_order_timestamp", b"accepting_order_timestamp", "accepting_orders", b"accepting_orders", "active", b"active", "best_ask", b"best_ask", "best_bid", b"best_bid", "clob_token_ids", b"clob_token_ids", "closed", b"closed", "condition_id", b"condition_id", "enable_order_book", b"enable_order_book", "end_date", b"end_date", "error", b"error", "event_id", b"event_id", "event_slug", b"event_slug", "group_slug", b"group_slug", "last_trade_price", b"last_trade_price", "liquidity", b"liquidity", "maker_base_fee_bps", b"maker_base_fee_bps", "market_id", b"market_id", "minimum_order_size", b"minimum_order_size", "minimum_tick_size", b"minimum_tick_size", "outcome_prices", b"outcome_prices", "outcomes", b"outcomes", "question", b"question", "question_id", b"question_id", "raw_json", b"raw_json", "rewards_daily_rate", b"rewards_daily_rate", "rewards_max_spread", b"rewards_max_spread", "rewards_min_size", b"rewards_min_size", "slug", b"slug", "success", b"success", "tags", b"tags", "taker_base_fee_bps", b"taker_base_fee_bps", "tokens", b"tokens", "volume", b"volume", "volume_24hr", b"volume_24hr"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketMarketResponse: _TypeAlias = PolymarketMarketResponse  # noqa: Y015
 
@@ -6338,11 +6521,8 @@ class PolymarketGetMarketsRequest(_message.Message):
         next_cursor: _builtins.str = ...,
         filters_json: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["filters_json", b"filters_json", "next_cursor", b"next_cursor"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetMarketsRequest: _TypeAlias = PolymarketGetMarketsRequest  # noqa: Y015
 
@@ -6367,11 +6547,8 @@ class PolymarketMarketsResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "markets", b"markets", "next_cursor", b"next_cursor", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketMarketsResponse: _TypeAlias = PolymarketMarketsResponse  # noqa: Y015
 
@@ -6387,11 +6564,8 @@ class PolymarketGetSimplifiedMarketsRequest(_message.Message):
         *,
         next_cursor: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["next_cursor", b"next_cursor"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetSimplifiedMarketsRequest: _TypeAlias = PolymarketGetSimplifiedMarketsRequest  # noqa: Y015
 
@@ -6422,11 +6596,8 @@ class PolymarketSimplifiedMarket(_message.Message):
         active: _builtins.bool = ...,
         closed: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["active", b"active", "closed", b"closed", "condition_id", b"condition_id", "max_incentive_spread", b"max_incentive_spread", "min_incentive_size", b"min_incentive_size", "tokens", b"tokens"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketSimplifiedMarket: _TypeAlias = PolymarketSimplifiedMarket  # noqa: Y015
 
@@ -6451,11 +6622,8 @@ class PolymarketSimplifiedMarketsResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "markets", b"markets", "next_cursor", b"next_cursor", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketSimplifiedMarketsResponse: _TypeAlias = PolymarketSimplifiedMarketsResponse  # noqa: Y015
 
@@ -6476,11 +6644,8 @@ class PolymarketOrderBookRequest(_message.Message):
         *,
         token_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOrderBookRequest: _TypeAlias = PolymarketOrderBookRequest  # noqa: Y015
 
@@ -6500,11 +6665,8 @@ class PolymarketOrderBookLevel(_message.Message):
         price: _builtins.str = ...,
         size: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["price", b"price", "size", b"size"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOrderBookLevel: _TypeAlias = PolymarketOrderBookLevel  # noqa: Y015
 
@@ -6543,11 +6705,8 @@ class PolymarketOrderBookResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asks", b"asks", "asset_id", b"asset_id", "bids", b"bids", "error", b"error", "hash", b"hash", "market", b"market", "success", b"success", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOrderBookResponse: _TypeAlias = PolymarketOrderBookResponse  # noqa: Y015
 
@@ -6562,11 +6721,8 @@ class PolymarketMidpointRequest(_message.Message):
         *,
         token_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketMidpointRequest: _TypeAlias = PolymarketMidpointRequest  # noqa: Y015
 
@@ -6588,11 +6744,8 @@ class PolymarketMidpointResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "midpoint", b"midpoint", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketMidpointResponse: _TypeAlias = PolymarketMidpointResponse  # noqa: Y015
 
@@ -6611,11 +6764,8 @@ class PolymarketPriceRequest(_message.Message):
         token_id: _builtins.str = ...,
         side: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["side", b"side", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketPriceRequest: _TypeAlias = PolymarketPriceRequest  # noqa: Y015
 
@@ -6637,11 +6787,8 @@ class PolymarketPriceResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "price", b"price", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketPriceResponse: _TypeAlias = PolymarketPriceResponse  # noqa: Y015
 
@@ -6656,11 +6803,8 @@ class PolymarketSpreadRequest(_message.Message):
         *,
         token_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketSpreadRequest: _TypeAlias = PolymarketSpreadRequest  # noqa: Y015
 
@@ -6682,11 +6826,8 @@ class PolymarketSpreadResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "spread", b"spread", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketSpreadResponse: _TypeAlias = PolymarketSpreadResponse  # noqa: Y015
 
@@ -6701,11 +6842,8 @@ class PolymarketTickSizeRequest(_message.Message):
         *,
         token_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketTickSizeRequest: _TypeAlias = PolymarketTickSizeRequest  # noqa: Y015
 
@@ -6727,11 +6865,8 @@ class PolymarketTickSizeResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success", "tick_size", b"tick_size"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketTickSizeResponse: _TypeAlias = PolymarketTickSizeResponse  # noqa: Y015
 
@@ -6780,11 +6915,8 @@ class PolymarketCreateOrderRequest(_message.Message):
         nonce: _builtins.str = ...,
         time_in_force: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["expiration", b"expiration", "fee_rate_bps", b"fee_rate_bps", "nonce", b"nonce", "price", b"price", "side", b"side", "size", b"size", "time_in_force", b"time_in_force", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketCreateOrderRequest: _TypeAlias = PolymarketCreateOrderRequest  # noqa: Y015
 
@@ -6823,11 +6955,8 @@ class PolymarketMarketOrderRequest(_message.Message):
         nonce: _builtins.str = ...,
         worst_price: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount", b"amount", "expiration", b"expiration", "fee_rate_bps", b"fee_rate_bps", "nonce", b"nonce", "side", b"side", "token_id", b"token_id", "worst_price", b"worst_price"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketMarketOrderRequest: _TypeAlias = PolymarketMarketOrderRequest  # noqa: Y015
 
@@ -6894,11 +7023,8 @@ class PolymarketOrderResponse(_message.Message):
         setup_txs: _abc.Iterable[Global___PolymarketSetupTx] | None = ...,
         fee_pusd: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["avg_fill_price", b"avg_fill_price", "created_at", b"created_at", "error", b"error", "error_code", b"error_code", "fee_pusd", b"fee_pusd", "order_id", b"order_id", "price", b"price", "setup_txs", b"setup_txs", "size", b"size", "size_matched", b"size_matched", "status", b"status", "success", b"success", "transact_time", b"transact_time"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOrderResponse: _TypeAlias = PolymarketOrderResponse  # noqa: Y015
 
@@ -6934,11 +7060,8 @@ class PolymarketSetupTx(_message.Message):
         gas_price_wei: _builtins.str = ...,
         total_cost_wei: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["description", b"description", "gas_price_wei", b"gas_price_wei", "gas_used", b"gas_used", "total_cost_wei", b"total_cost_wei", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketSetupTx: _TypeAlias = PolymarketSetupTx  # noqa: Y015
 
@@ -6953,11 +7076,8 @@ class PolymarketCancelOrderRequest(_message.Message):
         *,
         order_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["order_id", b"order_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketCancelOrderRequest: _TypeAlias = PolymarketCancelOrderRequest  # noqa: Y015
 
@@ -6973,11 +7093,8 @@ class PolymarketCancelOrdersRequest(_message.Message):
         *,
         order_ids: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["order_ids", b"order_ids"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketCancelOrdersRequest: _TypeAlias = PolymarketCancelOrdersRequest  # noqa: Y015
 
@@ -6997,11 +7114,8 @@ class PolymarketCancelAllRequest(_message.Message):
         market_id: _builtins.str = ...,
         asset_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "market_id", b"market_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketCancelAllRequest: _TypeAlias = PolymarketCancelAllRequest  # noqa: Y015
 
@@ -7027,11 +7141,8 @@ class PolymarketCancelResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["canceled", b"canceled", "error", b"error", "not_canceled", b"not_canceled", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketCancelResponse: _TypeAlias = PolymarketCancelResponse  # noqa: Y015
 
@@ -7049,11 +7160,6 @@ class PolymarketGetPositionsRequest(_message.Message):
     def __init__(
         self,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetPositionsRequest: _TypeAlias = PolymarketGetPositionsRequest  # noqa: Y015
 
@@ -7096,11 +7202,8 @@ class PolymarketPosition(_message.Message):
         outcome: _builtins.str = ...,
         market_question: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset", b"asset", "avg_price", b"avg_price", "condition_id", b"condition_id", "cur_price", b"cur_price", "market_id", b"market_id", "market_question", b"market_question", "outcome", b"outcome", "realized_pnl", b"realized_pnl", "size", b"size", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketPosition: _TypeAlias = PolymarketPosition  # noqa: Y015
 
@@ -7122,11 +7225,8 @@ class PolymarketPositionsResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "positions", b"positions", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketPositionsResponse: _TypeAlias = PolymarketPositionsResponse  # noqa: Y015
 
@@ -7146,11 +7246,8 @@ class PolymarketGetOpenOrdersRequest(_message.Message):
         market_id: _builtins.str = ...,
         asset_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "market_id", b"market_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetOpenOrdersRequest: _TypeAlias = PolymarketGetOpenOrdersRequest  # noqa: Y015
 
@@ -7195,11 +7292,8 @@ class PolymarketOpenOrder(_message.Message):
         expiration: _builtins.str = ...,
         created_at: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "created_at", b"created_at", "expiration", b"expiration", "market", b"market", "order_id", b"order_id", "original_size", b"original_size", "outcome", b"outcome", "price", b"price", "side", b"side", "size_matched", b"size_matched", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOpenOrder: _TypeAlias = PolymarketOpenOrder  # noqa: Y015
 
@@ -7221,11 +7315,8 @@ class PolymarketOpenOrdersResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "orders", b"orders", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOpenOrdersResponse: _TypeAlias = PolymarketOpenOrdersResponse  # noqa: Y015
 
@@ -7257,11 +7348,8 @@ class PolymarketGetTradesRequest(_message.Message):
         before: _builtins.str = ...,
         after: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["after", b"after", "asset_id", b"asset_id", "before", b"before", "limit", b"limit", "market_id", b"market_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetTradesRequest: _TypeAlias = PolymarketGetTradesRequest  # noqa: Y015
 
@@ -7306,11 +7394,8 @@ class PolymarketTrade(_message.Message):
         transaction_hash: _builtins.str = ...,
         bucket_index: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "bucket_index", b"bucket_index", "fee_rate_bps", b"fee_rate_bps", "market", b"market", "match_time", b"match_time", "price", b"price", "side", b"side", "size", b"size", "status", b"status", "trade_id", b"trade_id", "transaction_hash", b"transaction_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketTrade: _TypeAlias = PolymarketTrade  # noqa: Y015
 
@@ -7335,11 +7420,8 @@ class PolymarketTradesResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "next_cursor", b"next_cursor", "success", b"success", "trades", b"trades"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketTradesResponse: _TypeAlias = PolymarketTradesResponse  # noqa: Y015
 
@@ -7354,11 +7436,8 @@ class PolymarketGetOrderRequest(_message.Message):
         *,
         order_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["order_id", b"order_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetOrderRequest: _TypeAlias = PolymarketGetOrderRequest  # noqa: Y015
 
@@ -7416,11 +7495,8 @@ class PolymarketOrderInfoResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "associate_trades_json", b"associate_trades_json", "created_at", b"created_at", "error", b"error", "expiration", b"expiration", "market", b"market", "order_id", b"order_id", "original_size", b"original_size", "outcome", b"outcome", "owner", b"owner", "price", b"price", "side", b"side", "size_matched", b"size_matched", "status", b"status", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketOrderInfoResponse: _TypeAlias = PolymarketOrderInfoResponse  # noqa: Y015
 
@@ -7445,11 +7521,8 @@ class PolymarketBalanceAllowanceRequest(_message.Message):
         asset_type: _builtins.str = ...,
         token_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_type", b"asset_type", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketBalanceAllowanceRequest: _TypeAlias = PolymarketBalanceAllowanceRequest  # noqa: Y015
 
@@ -7473,11 +7546,8 @@ class PolymarketBalanceAllowanceResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["allowance", b"allowance", "balance", b"balance", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketBalanceAllowanceResponse: _TypeAlias = PolymarketBalanceAllowanceResponse  # noqa: Y015
 
@@ -7520,11 +7590,8 @@ class PolymarketGetPriceHistoryRequest(_message.Message):
         end_ts: _builtins.int = ...,
         fidelity: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["end_ts", b"end_ts", "fidelity", b"fidelity", "interval", b"interval", "start_ts", b"start_ts", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetPriceHistoryRequest: _TypeAlias = PolymarketGetPriceHistoryRequest  # noqa: Y015
 
@@ -7548,11 +7615,8 @@ class PolymarketHistoricalPrice(_message.Message):
         timestamp: _builtins.int = ...,
         price: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["price", b"price", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketHistoricalPrice: _TypeAlias = PolymarketHistoricalPrice  # noqa: Y015
 
@@ -7589,11 +7653,8 @@ class PolymarketPriceHistoryResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["end_time", b"end_time", "error", b"error", "interval", b"interval", "prices", b"prices", "start_time", b"start_time", "success", b"success", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketPriceHistoryResponse: _TypeAlias = PolymarketPriceHistoryResponse  # noqa: Y015
 
@@ -7618,11 +7679,8 @@ class PolymarketGetTradeTapeRequest(_message.Message):
         token_id: _builtins.str = ...,
         limit: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["limit", b"limit", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketGetTradeTapeRequest: _TypeAlias = PolymarketGetTradeTapeRequest  # noqa: Y015
 
@@ -7683,11 +7741,8 @@ class PolymarketHistoricalTrade(_message.Message):
         asset_id: _builtins.str = ...,
         outcome: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_id", b"asset_id", "id", b"id", "maker", b"maker", "market_id", b"market_id", "outcome", b"outcome", "price", b"price", "side", b"side", "size", b"size", "taker", b"taker", "timestamp", b"timestamp", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketHistoricalTrade: _TypeAlias = PolymarketHistoricalTrade  # noqa: Y015
 
@@ -7709,11 +7764,8 @@ class PolymarketTradeTapeResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success", "trades", b"trades"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___PolymarketTradeTapeResponse: _TypeAlias = PolymarketTradeTapeResponse  # noqa: Y015
 
@@ -7774,11 +7826,8 @@ class EnsoRouteRequest(_message.Message):
         destination_chain_id: _builtins.int = ...,
         refund_receiver: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "chain", b"chain", "destination_chain_id", b"destination_chain_id", "from_address", b"from_address", "max_price_impact_bps", b"max_price_impact_bps", "receiver", b"receiver", "refund_receiver", b"refund_receiver", "routing_strategy", b"routing_strategy", "slippage_bps", b"slippage_bps", "token_in", b"token_in", "token_out", b"token_out"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoRouteRequest: _TypeAlias = EnsoRouteRequest  # noqa: Y015
 
@@ -7848,11 +7897,8 @@ class EnsoRouteResponse(_message.Message):
         is_cross_chain: _builtins.bool = ...,
         route_json: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_out", b"amount_out", "bridge_fee", b"bridge_fee", "data", b"data", "error", b"error", "estimated_time", b"estimated_time", "gas", b"gas", "gas_estimate", b"gas_estimate", "is_cross_chain", b"is_cross_chain", "price_impact", b"price_impact", "route_json", b"route_json", "success", b"success", "to", b"to", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoRouteResponse: _TypeAlias = EnsoRouteResponse  # noqa: Y015
 
@@ -7891,11 +7937,8 @@ class EnsoQuoteRequest(_message.Message):
         routing_strategy: _builtins.str = ...,
         destination_chain_id: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "chain", b"chain", "destination_chain_id", b"destination_chain_id", "from_address", b"from_address", "routing_strategy", b"routing_strategy", "token_in", b"token_in", "token_out", b"token_out"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoQuoteRequest: _TypeAlias = EnsoQuoteRequest  # noqa: Y015
 
@@ -7925,11 +7968,8 @@ class EnsoQuoteResponse(_message.Message):
         price_impact: _builtins.int = ...,
         gas_estimate: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_out", b"amount_out", "error", b"error", "gas_estimate", b"gas_estimate", "price_impact", b"price_impact", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoQuoteResponse: _TypeAlias = EnsoQuoteResponse  # noqa: Y015
 
@@ -7963,11 +8003,8 @@ class EnsoApprovalRequest(_message.Message):
         from_address: _builtins.str = ...,
         routing_strategy: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["amount", b"amount", "chain", b"chain", "from_address", b"from_address", "routing_strategy", b"routing_strategy", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoApprovalRequest: _TypeAlias = EnsoApprovalRequest  # noqa: Y015
 
@@ -7997,11 +8034,8 @@ class EnsoApprovalResponse(_message.Message):
         data: _builtins.str = ...,
         gas: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "error", b"error", "gas", b"gas", "success", b"success", "to", b"to"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoApprovalResponse: _TypeAlias = EnsoApprovalResponse  # noqa: Y015
 
@@ -8028,11 +8062,8 @@ class EnsoBundleAction(_message.Message):
             key: _builtins.str = ...,
             value: _builtins.str = ...,
         ) -> None: ...
-        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
         _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
         def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-        def WhichOneof(self, oneof_group: _Never) -> None: ...
 
     PROTOCOL_FIELD_NUMBER: _builtins.int
     ACTION_FIELD_NUMBER: _builtins.int
@@ -8052,11 +8083,8 @@ class EnsoBundleAction(_message.Message):
         action: _builtins.str = ...,
         args: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["action", b"action", "args", b"args", "protocol", b"protocol"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoBundleAction: _TypeAlias = EnsoBundleAction  # noqa: Y015
 
@@ -8084,11 +8112,8 @@ class EnsoBundleRequest(_message.Message):
         routing_strategy: _builtins.str = ...,
         skip_quote: _builtins.bool = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["actions", b"actions", "chain", b"chain", "from_address", b"from_address", "routing_strategy", b"routing_strategy", "skip_quote", b"skip_quote"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoBundleRequest: _TypeAlias = EnsoBundleRequest  # noqa: Y015
 
@@ -8126,11 +8151,8 @@ class EnsoBundleResponse(_message.Message):
         gas: _builtins.str = ...,
         bundle_json: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["bundle_json", b"bundle_json", "data", b"data", "error", b"error", "gas", b"gas", "success", b"success", "to", b"to", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___EnsoBundleResponse: _TypeAlias = EnsoBundleResponse  # noqa: Y015
 
@@ -8155,11 +8177,8 @@ class ResolveTokenRequest(_message.Message):
         token: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ResolveTokenRequest: _TypeAlias = ResolveTokenRequest  # noqa: Y015
 
@@ -8179,11 +8198,8 @@ class GetTokenMetadataRequest(_message.Message):
         address: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["address", b"address", "chain", b"chain"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTokenMetadataRequest: _TypeAlias = GetTokenMetadataRequest  # noqa: Y015
 
@@ -8203,11 +8219,8 @@ class GetTokenDecimalsRequest(_message.Message):
         token: _builtins.str = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTokenDecimalsRequest: _TypeAlias = GetTokenDecimalsRequest  # noqa: Y015
 
@@ -8230,11 +8243,8 @@ class GetTokenDecimalsResponse(_message.Message):
         decimals: _builtins.int = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["decimals", b"decimals", "error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GetTokenDecimalsResponse: _TypeAlias = GetTokenDecimalsResponse  # noqa: Y015
 
@@ -8256,11 +8266,8 @@ class BatchResolveTokensRequest(_message.Message):
         tokens: _abc.Iterable[_builtins.str] | None = ...,
         chain: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "tokens", b"tokens"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BatchResolveTokensRequest: _TypeAlias = BatchResolveTokensRequest  # noqa: Y015
 
@@ -8286,11 +8293,8 @@ class BatchResolveTokensResponse(_message.Message):
         tokens: _abc.Iterable[Global___TokenMetadataResponse] | None = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success", "tokens", b"tokens"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___BatchResolveTokensResponse: _TypeAlias = BatchResolveTokensResponse  # noqa: Y015
 
@@ -8335,11 +8339,8 @@ class TokenMetadataResponse(_message.Message):
         is_verified: _builtins.bool = ...,
         source: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["address", b"address", "decimals", b"decimals", "error", b"error", "is_verified", b"is_verified", "name", b"name", "source", b"source", "success", b"success", "symbol", b"symbol"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TokenMetadataResponse: _TypeAlias = TokenMetadataResponse  # noqa: Y015
 
@@ -8392,11 +8393,8 @@ class WriteAgentStateResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___WriteAgentStateResponse: _TypeAlias = WriteAgentStateResponse  # noqa: Y015
 
@@ -8411,11 +8409,8 @@ class ReadAgentStateRequest(_message.Message):
         *,
         agent_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ReadAgentStateRequest: _TypeAlias = ReadAgentStateRequest  # noqa: Y015
 
@@ -8450,11 +8445,8 @@ class ReadAgentStateResponse(_message.Message):
         error_message: _builtins.str = ...,
         iteration_count: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "error_message", b"error_message", "found", b"found", "iteration_count", b"iteration_count", "last_heartbeat_at", b"last_heartbeat_at", "state", b"state", "state_changed_at", b"state_changed_at"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ReadAgentStateResponse: _TypeAlias = ReadAgentStateResponse  # noqa: Y015
 
@@ -8469,11 +8461,8 @@ class HeartbeatRequest(_message.Message):
         *,
         agent_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___HeartbeatRequest: _TypeAlias = HeartbeatRequest  # noqa: Y015
 
@@ -8491,11 +8480,8 @@ class HeartbeatResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___HeartbeatResponse: _TypeAlias = HeartbeatResponse  # noqa: Y015
 
@@ -8510,11 +8496,8 @@ class ReadAgentCommandRequest(_message.Message):
         *,
         agent_id: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ReadAgentCommandRequest: _TypeAlias = ReadAgentCommandRequest  # noqa: Y015
 
@@ -8546,11 +8529,8 @@ class ReadAgentCommandResponse(_message.Message):
         issued_at: _builtins.str = ...,
         issued_by: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "command", b"command", "command_id", b"command_id", "found", b"found", "issued_at", b"issued_at", "issued_by", b"issued_by"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ReadAgentCommandResponse: _TypeAlias = ReadAgentCommandResponse  # noqa: Y015
 
@@ -8565,11 +8545,8 @@ class AckAgentCommandRequest(_message.Message):
         *,
         command_id: _builtins.int = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["command_id", b"command_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AckAgentCommandRequest: _TypeAlias = AckAgentCommandRequest  # noqa: Y015
 
@@ -8587,11 +8564,8 @@ class AckAgentCommandResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___AckAgentCommandResponse: _TypeAlias = AckAgentCommandResponse  # noqa: Y015
 
@@ -8613,11 +8587,8 @@ class WriteAgentCommandRequest(_message.Message):
         command: _builtins.str = ...,
         issued_by: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["agent_id", b"agent_id", "command", b"command", "issued_by", b"issued_by"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___WriteAgentCommandRequest: _TypeAlias = WriteAgentCommandRequest  # noqa: Y015
 
@@ -8635,11 +8606,8 @@ class WriteAgentCommandResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___WriteAgentCommandResponse: _TypeAlias = WriteAgentCommandResponse  # noqa: Y015
 
@@ -8680,11 +8648,8 @@ class GeckoTerminalOHLCVRequest(_message.Message):
         pool_address: _builtins.str = ...,
         quote: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GeckoTerminalOHLCVRequest: _TypeAlias = GeckoTerminalOHLCVRequest  # noqa: Y015
 
@@ -8715,11 +8680,8 @@ class GeckoTerminalOHLCVCandle(_message.Message):
         close: _builtins.str = ...,
         volume: _builtins.str = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["close", b"close", "high", b"high", "low", b"low", "open", b"open", "timestamp", b"timestamp", "volume", b"volume"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GeckoTerminalOHLCVCandle: _TypeAlias = GeckoTerminalOHLCVCandle  # noqa: Y015
 
@@ -8735,10 +8697,7 @@ class GeckoTerminalOHLCVResponse(_message.Message):
         *,
         candles: _abc.Iterable[Global___GeckoTerminalOHLCVCandle] | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["candles", b"candles"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___GeckoTerminalOHLCVResponse: _TypeAlias = GeckoTerminalOHLCVResponse  # noqa: Y015

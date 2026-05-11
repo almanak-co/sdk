@@ -2518,3 +2518,838 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("internal server error")
             return gateway_pb2.GetLedgerEntryResponse(found=False)
+
+    # =========================================================================
+    # Cutover storage RPCs (VIB-4208 / T22)
+    # =========================================================================
+    #
+    # SQLite-only server-side implementation. Hosted Postgres is OUT of scope:
+    # T19 / VIB-4205 + cross-repo metrics-database PR own the Postgres half.
+    # Until then, the Postgres branch returns gRPC UNIMPLEMENTED and the
+    # framework client adapter (GatewayStateManager) translates that into
+    # CutoverStorageNotSupported. The cutover boot guard catches that signal
+    # and degrades to the legacy save_ledger_entry path (cutover spec §2.4).
+    #
+    # AGENTS.md "Database schema ownership": local SQLite is SDK-owned; the
+    # gateway boots the migration_state table from sqlite.py SCHEMA_SQL.
+    # _POSTGRES_DEFERRED_TABLES in schema_contract.py keeps both
+    # migration_state and position_registry out of the hosted boot contract.
+
+    async def UpsertMigrationState(
+        self,
+        request: gateway_pb2.UpsertMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.UpsertMigrationStateResponse:
+        """Idempotent insert of a baseline migration_state row (cutover spec §2.1).
+
+        Routes to the WARM backend's ``upsert_migration_state`` on SQLite;
+        returns gRPC UNIMPLEMENTED on Postgres. The SQLite implementation
+        uses ``INSERT … ON CONFLICT DO NOTHING`` keyed by
+        ``(deployment_id, primitive, cutover_key)`` — re-Upsert with the
+        same triple is a true no-op (does NOT mutate `complete`, counters,
+        or completed_at).
+        """
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.UpsertMigrationStateResponse(success=False, error="deployment_id is required")
+        if not primitive:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("primitive is required")
+            return gateway_pb2.UpsertMigrationStateResponse(success=False, error="primitive is required")
+        if not cutover_key:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("cutover_key is required")
+            return gateway_pb2.UpsertMigrationStateResponse(success=False, error="cutover_key is required")
+
+        # Refuse on Postgres — T19 owns the hosted half.
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            error = "UpsertMigrationState: Postgres backend not supported (T19 / VIB-4205 owns the hosted half)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(error)
+            return gateway_pb2.UpsertMigrationStateResponse(success=False, error=error)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "upsert_migration_state"):
+                error = "warm backend does not support upsert_migration_state"
+                logger.error(
+                    "UpsertMigrationState unsupported (deployment=%s primitive=%s cutover_key=%s): %s",
+                    deployment_id,
+                    primitive,
+                    cutover_key,
+                    error,
+                )
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.UpsertMigrationStateResponse(success=False, error=error)
+            await warm.upsert_migration_state(
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+            )
+            return gateway_pb2.UpsertMigrationStateResponse(success=True)
+        except Exception as e:
+            logger.error(
+                "UpsertMigrationState SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.UpsertMigrationStateResponse(success=False, error="internal server error")
+
+    @staticmethod
+    def _optional_int_field(request, field_name: str) -> int | None:
+        """Unpack a proto3 ``optional int64`` field.
+
+        ``HasField`` distinguishes "not supplied" from "supplied with value 0"
+        — critical for migration counters where 0 is a measured value, not a
+        sentinel. Returns the field value when set, else ``None``. Used by
+        :meth:`UpdateMigrationState` for the in-flight progress counters.
+        """
+        return getattr(request, field_name) if request.HasField(field_name) else None
+
+    @staticmethod
+    def _strip_required_triple(request) -> tuple[str, str, str]:
+        """Strip the ``(deployment_id, primitive, cutover_key)`` migration_state key.
+
+        Every migration_state RPC (Upsert / Get / Update / MarkBackfillComplete)
+        keys its row by this triple and starts with the same three ``or ""`` /
+        ``strip()`` short-circuits. Callers still own the empty-string
+        validation because the per-method error-message granularity differs
+        (Upsert/Get report per-field; Update/MarkBackfillComplete report all
+        three together).
+        """
+        return (
+            (request.deployment_id or "").strip(),
+            (request.primitive or "").strip(),
+            (request.cutover_key or "").strip(),
+        )
+
+    @staticmethod
+    def _strip_optional(value: str) -> str | None:
+        """Normalize an optional proto3 string filter to ``None`` when empty.
+
+        Proto3 strings default to ``""``, but the SQLite accessors take
+        ``None`` to mean "no filter on this column". Used by
+        :meth:`GetPositionRegistryOpenRows` for ``chain`` / ``primitive`` /
+        ``accounting_category`` so each call site stays a single line.
+        """
+        return (value or "").strip() or None
+
+    @staticmethod
+    def _marshal_migration_state_row(row) -> gateway_pb2.MigrationStateData:
+        """Translate a ``MigrationStateRow`` dataclass to its proto twin.
+
+        Centralizes the ``or ""`` / ``or 0`` Optional-to-empty fallbacks and
+        the ``notes`` JSON encoding so :meth:`GetMigrationState` stays a thin
+        validation → dispatch → marshal handler. See
+        ``almanak/framework/migration/backfill.py`` for the ``MigrationStateRow``
+        dataclass definition.
+        """
+        notes_payload = row.notes if isinstance(row.notes, dict) else {}
+        try:
+            notes_bytes = json.dumps(notes_payload, sort_keys=True).encode("utf-8")
+        except (TypeError, ValueError):
+            notes_bytes = b"{}"
+        return gateway_pb2.MigrationStateData(
+            deployment_id=row.deployment_id or "",
+            primitive=row.primitive or "",
+            cutover_key=row.cutover_key or "",
+            position_registry_backfill_complete=bool(row.position_registry_backfill_complete),
+            backfill_started_at=row.backfill_started_at or "",
+            backfill_completed_at=row.backfill_completed_at or "",
+            backfill_source_table=row.backfill_source_table or "",
+            backfill_reader_version=int(row.backfill_reader_version or 0),
+            rows_synthesized=int(row.rows_synthesized or 0),
+            rows_skipped_already_present=int(row.rows_skipped_already_present or 0),
+            notes=notes_bytes,
+            created_at=row.created_at or "",
+            updated_at=row.updated_at or "",
+        )
+
+    async def GetMigrationState(
+        self,
+        request: gateway_pb2.GetMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetMigrationStateResponse:
+        """Read the migration_state row for ``(deployment_id, primitive, cutover_key)``.
+
+        Returns ``found=true`` with all 13 columns populated when the row
+        exists; ``found=false`` (empty data) when absent. The Postgres
+        branch returns gRPC UNIMPLEMENTED.
+
+        Notes is serialized as JSON bytes — the framework adapter parses
+        back to ``dict`` for ``MigrationStateRow``. This mirrors the
+        ``SnapshotData.found`` pattern: a default-populated proto would be
+        indistinguishable from "row absent" so the explicit boolean flag
+        is required.
+        """
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.GetMigrationStateResponse(found=False, error="deployment_id is required")
+        if not primitive:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("primitive is required")
+            return gateway_pb2.GetMigrationStateResponse(found=False, error="primitive is required")
+        if not cutover_key:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("cutover_key is required")
+            return gateway_pb2.GetMigrationStateResponse(found=False, error="cutover_key is required")
+
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            error = "GetMigrationState: Postgres backend not supported (T19 / VIB-4205 owns the hosted half)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(error)
+            return gateway_pb2.GetMigrationStateResponse(found=False, error=error)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_migration_state"):
+                error = "warm backend does not support get_migration_state"
+                logger.error(
+                    "GetMigrationState unsupported (deployment=%s primitive=%s cutover_key=%s): %s",
+                    deployment_id,
+                    primitive,
+                    cutover_key,
+                    error,
+                )
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.GetMigrationStateResponse(found=False, error=error)
+            row = await warm.get_migration_state(
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+            )
+            if row is None:
+                return gateway_pb2.GetMigrationStateResponse(found=False)
+            data = self._marshal_migration_state_row(row)
+            return gateway_pb2.GetMigrationStateResponse(found=True, data=data)
+        except Exception as e:
+            logger.error(
+                "GetMigrationState SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.GetMigrationStateResponse(found=False, error="internal server error")
+
+    async def UpdateMigrationState(
+        self,
+        request: gateway_pb2.UpdateMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.UpdateMigrationStateResponse:
+        """Partial update of migration_state in-flight progress columns.
+
+        ``backfill_started_at`` is a string with "" sentinel for "don't
+        touch". The counters are ``optional int64`` so 0 stays
+        distinguishable from "not supplied".
+        """
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        if not deployment_id or not primitive or not cutover_key:
+            err = "deployment_id, primitive, and cutover_key are required"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
+
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            err = "UpdateMigrationState: Postgres backend not supported (T19 / VIB-4205)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(err)
+            return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "update_migration_state"):
+                err = "warm backend does not support update_migration_state"
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(err)
+                return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
+            await warm.update_migration_state(
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+                backfill_started_at=request.backfill_started_at or None,
+                rows_synthesized=self._optional_int_field(request, "rows_synthesized"),
+                rows_skipped_already_present=self._optional_int_field(request, "rows_skipped_already_present"),
+            )
+            return gateway_pb2.UpdateMigrationStateResponse(success=True)
+        except Exception as e:
+            logger.error(
+                "UpdateMigrationState SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.UpdateMigrationStateResponse(success=False, error="internal server error")
+
+    async def MarkBackfillComplete(
+        self,
+        request: gateway_pb2.MarkBackfillCompleteRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.MarkBackfillCompleteResponse:
+        """Terminal flip — set complete=1 + final counters + completed_at."""
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        if not deployment_id or not primitive or not cutover_key:
+            err = "deployment_id, primitive, and cutover_key are required"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+        backfill_completed_at = (request.backfill_completed_at or "").strip()
+        if not backfill_completed_at:
+            err = "backfill_completed_at is required"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            err = "MarkBackfillComplete: Postgres backend not supported (T19 / VIB-4205)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(err)
+            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "mark_backfill_complete"):
+                err = "warm backend does not support mark_backfill_complete"
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(err)
+                return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+            await warm.mark_backfill_complete(
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+                rows_synthesized=int(request.rows_synthesized),
+                rows_skipped_already_present=int(request.rows_skipped_already_present),
+                backfill_completed_at=backfill_completed_at,
+            )
+            return gateway_pb2.MarkBackfillCompleteResponse(success=True)
+        except Exception as e:
+            logger.error(
+                "MarkBackfillComplete SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error="internal server error")
+
+    async def GetPositionEventsFiltered(
+        self,
+        request: gateway_pb2.GetPositionEventsFilteredRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionEventsFilteredResponse:
+        """Streamed position_events read for the backfill reader.
+
+        Returns rows in (position_id ASC, timestamp ASC, id ASC) order
+        (the SQLite accessor enforces this — cutover spec §3.5 fold
+        determinism). Fresh deployments with no legacy position_events
+        return an empty list — the backfill driver then iterates zero
+        groups, calls MarkBackfillComplete with counters=0, and the
+        cutover guard flips to complete=1 with no rows synthesized. This
+        is the "no migration needed" fast path (cutover spec §2.4).
+        """
+        deployment_id = (request.deployment_id or "").strip()
+        if not deployment_id:
+            err = "deployment_id is required"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(err)
+            return gateway_pb2.GetPositionEventsFilteredResponse(error=err)
+
+        types = frozenset(t.strip() for t in request.position_types if t.strip())
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            err = "GetPositionEventsFiltered: Postgres backend not supported (T19 / VIB-4205)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(err)
+            return gateway_pb2.GetPositionEventsFilteredResponse(error=err)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_position_events_filtered"):
+                err = "warm backend does not support get_position_events_filtered"
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(err)
+                return gateway_pb2.GetPositionEventsFilteredResponse(error=err)
+            rows = await warm.get_position_events_filtered(
+                deployment_id=deployment_id,
+                position_types=types,
+            )
+            response = gateway_pb2.GetPositionEventsFilteredResponse()
+            for row in rows:
+                response.events.append(_position_event_row_to_proto(row))
+            return response
+        except Exception as e:
+            logger.error("GetPositionEventsFiltered SQLite failed: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.GetPositionEventsFilteredResponse(error="internal server error")
+
+    # crap-allowlist: VIB-4283 — public-contract chokepoint, dict→proto projection-fanout (cc=21 driven by 20 sibling `or ""` / `or 0` field fallbacks); structural per .claude/rules/crap-refactor.md "undecomposable public contract / hot-path budget". Same precedent as `GatewayStateManager.save_accounting_event` (VIB-4196).
+    @staticmethod
+    def _position_registry_row_dict_to_proto(row: dict[str, Any]) -> gateway_pb2.PositionRegistryRow:
+        """Map a WARM-backend row dict to the proto message.
+
+        Pure projection — every field defaults to its proto-3 zero value
+        when missing. ``payload`` re-serializes the dict to canonical JSON
+        bytes (sort_keys=True for determinism); on the unlikely failure
+        path we emit ``b"{}"`` so the wire stays valid.
+
+        cc is dominated by the 20 sibling ``or ""`` / ``or 0`` short-circuits
+        — one per proto field. Allowlisted because the alternative (typed
+        getter helpers called 20 times) is mechanically simpler per radon
+        but objectively worse to read; see VIB-4283 for the planned
+        follow-up (raise coverage to ≥90% OR introduce schema-driven helper).
+        """
+        payload_obj = row.get("payload") or {}
+        try:
+            payload_bytes = json.dumps(payload_obj, sort_keys=True).encode("utf-8")
+        except (TypeError, ValueError):
+            payload_bytes = b"{}"
+        return gateway_pb2.PositionRegistryRow(
+            deployment_id=row.get("deployment_id") or "",
+            chain=row.get("chain") or "",
+            primitive=row.get("primitive") or "",
+            accounting_category=row.get("accounting_category") or "",
+            physical_identity_hash=row.get("physical_identity_hash") or "",
+            semantic_grouping_key=row.get("semantic_grouping_key") or "",
+            grouping_policy_version=row.get("grouping_policy_version") or "",
+            handle=row.get("handle") or "",
+            status=row.get("status") or "",
+            payload=payload_bytes,
+            opened_at_block=int(row.get("opened_at_block") or 0),
+            opened_tx=row.get("opened_tx") or "",
+            closed_at_block=int(row.get("closed_at_block") or 0),
+            closed_tx=row.get("closed_tx") or "",
+            last_reconciled_at_block=int(row.get("last_reconciled_at_block") or 0),
+            matching_policy_version=int(row.get("matching_policy_version") or 1),
+            payload_raw=row.get("payload_raw") or "",
+            payload_decode_error=row.get("payload_decode_error") or "",
+            payload_shape_error=row.get("payload_shape_error") or "",
+        )
+
+    async def GetPositionRegistryOpenRows(
+        self,
+        request: gateway_pb2.GetPositionRegistryOpenRowsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionRegistryOpenRowsResponse:
+        """Read OPEN ``position_registry`` rows for a deployment.
+
+        Routes to the WARM backend's ``get_position_registry_open_rows`` on
+        SQLite. Filters are forwarded as-is — the empty string sentinel
+        means "no filter on that column". Returns gRPC UNIMPLEMENTED on
+        Postgres (T19 / VIB-4205 lands the hosted half).
+
+        The proto wire shape mirrors the dict returned by the SQLite
+        accessor — the framework client adapter re-materializes the dict
+        so the runner sees the same shape across local and gateway-backed
+        runs. ``payload`` is JSON-bytes; the adapter parses it back to a
+        dict. Block / tx anchors use 0 / "" as the "null" sentinel since
+        proto3 scalars have no native null.
+        """
+        deployment_id = (request.deployment_id or "").strip()
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.GetPositionRegistryOpenRowsResponse(error="deployment_id is required")
+
+        chain = self._strip_optional(request.chain)
+        primitive = self._strip_optional(request.primitive)
+        accounting_category = self._strip_optional(request.accounting_category)
+
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            error = "GetPositionRegistryOpenRows: Postgres backend not supported (T19 / VIB-4205 owns the hosted half)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(error)
+            return gateway_pb2.GetPositionRegistryOpenRowsResponse(error=error)
+
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_position_registry_open_rows"):
+                error = "warm backend does not support get_position_registry_open_rows"
+                logger.error("GetPositionRegistryOpenRows unsupported: %s", error)
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.GetPositionRegistryOpenRowsResponse(error=error)
+            rows = await warm.get_position_registry_open_rows(
+                deployment_id,
+                chain=chain,
+                primitive=primitive,
+                accounting_category=accounting_category,
+            )
+            response = gateway_pb2.GetPositionRegistryOpenRowsResponse()
+            for row in rows:
+                response.rows.append(self._position_registry_row_dict_to_proto(row))
+            return response
+        except Exception as e:
+            logger.error("GetPositionRegistryOpenRows SQLite failed: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.GetPositionRegistryOpenRowsResponse(error="internal server error")
+
+    # =========================================================================
+    # SaveLedgerAndRegistry helpers (extracted to keep the handler under the
+    # CRAP gate threshold — see crap-refactor protocol applied to VIB-4208).
+    # Each helper has one job; the handler orchestrates them in sequence.
+    # =========================================================================
+
+    @staticmethod
+    def _validate_save_ledger_and_registry_request(
+        request: gateway_pb2.SaveLedgerAndRegistryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[str, str, str, datetime] | gateway_pb2.SaveLedgerAndRegistryResponse:
+        """Validate request invariants, mirroring SaveLedgerEntry.
+
+        Returns either the validated tuple ``(strategy_id, deployment_id,
+        ledger_id, ts)`` or an error response (with gRPC context already
+        marked). Enforces:
+          * ``ledger.id`` is a non-empty UUID
+          * ``deployment_id`` is non-blank
+          * ``strategy_id`` matches the gateway format (validate +
+            resolve_agent_id, identical to SaveLedgerEntry)
+          * ``timestamp`` is in range
+        CodeRabbit (PR #2230) flagged that the atomic RPC bypassed these
+        invariants; this closes the gap symmetrically with the legacy path.
+        """
+        ledger_id = (request.id or "").strip()
+        if not ledger_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("ledger.id is required")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error="ledger.id is required", error_class="ValueError"
+            )
+        try:
+            uuid.UUID(ledger_id)
+        except ValueError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("ledger.id must be a valid UUID")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error="ledger.id must be a valid UUID", error_class="ValueError"
+            )
+
+        try:
+            strategy_id = validate_strategy_id(request.strategy_id)
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return gateway_pb2.SaveLedgerAndRegistryResponse(success=False, error=str(exc), error_class="ValueError")
+        strategy_id = resolve_agent_id(strategy_id)
+
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error="deployment_id is required", error_class="ValueError"
+            )
+
+        if request.timestamp <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp must be positive")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error="timestamp must be positive", error_class="ValueError"
+            )
+        try:
+            ts = datetime.fromtimestamp(request.timestamp, tz=UTC)
+        except (ValueError, OSError, OverflowError):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("timestamp out of range")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error="timestamp out of range", error_class="ValueError"
+            )
+
+        return strategy_id, deployment_id, ledger_id, ts
+
+    @staticmethod
+    def _decode_registry_payload(
+        request: gateway_pb2.SaveLedgerAndRegistryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> dict[str, Any] | gateway_pb2.SaveLedgerAndRegistryResponse:
+        """Decode ``registry_payload_json`` bytes to a dict.
+
+        Rejects non-object JSON (array / string / number / null) with
+        INVALID_ARGUMENT instead of silently coercing to ``{}`` — addresses
+        CodeRabbit (PR #2230) concern that bad payloads would commit a row
+        with empty payload, dropping data without surfacing a client error.
+        Returns the dict on success or a response on validation failure.
+        """
+        if not request.registry_payload_json:
+            return {}
+        try:
+            parsed = json.loads(request.registry_payload_json.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"registry_payload_json invalid: {exc}")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error=f"registry_payload_json invalid: {exc}", error_class="ValueError"
+            )
+        if not isinstance(parsed, dict):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("registry_payload_json must decode to a JSON object")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False,
+                error="registry_payload_json must decode to a JSON object",
+                error_class="ValueError",
+            )
+        return parsed
+
+    @staticmethod
+    def _build_ledger_entry_from_request(
+        request: gateway_pb2.SaveLedgerAndRegistryRequest,
+        ledger_id: str,
+        strategy_id: str,
+        deployment_id: str,
+        ts: datetime,
+    ) -> Any:
+        """Reconstruct the ``LedgerEntry`` dataclass from the proto request.
+
+        Field order mirrors :meth:`SaveLedgerEntry`. ``strategy_id`` and
+        ``deployment_id`` come from the validated, resolved values rather
+        than the raw request to keep both paths in lockstep.
+        """
+        from almanak.framework.observability.ledger import LedgerEntry
+
+        def _opt_str(b: bytes | None) -> str:
+            return b.decode("utf-8") if b else ""
+
+        return LedgerEntry(
+            id=ledger_id,
+            cycle_id=request.cycle_id,
+            strategy_id=strategy_id,
+            deployment_id=deployment_id,
+            execution_mode=request.execution_mode,
+            timestamp=ts,
+            intent_type=request.intent_type,
+            token_in=request.token_in,
+            amount_in=request.amount_in,
+            token_out=request.token_out,
+            amount_out=request.amount_out,
+            effective_price=request.effective_price,
+            slippage_bps=request.slippage_bps if request.HasField("slippage_bps") else None,
+            gas_used=request.gas_used,
+            gas_usd=request.gas_usd,
+            tx_hash=request.tx_hash,
+            chain=request.chain,
+            protocol=request.protocol,
+            success=request.success,
+            error=request.error,
+            extracted_data_json=_opt_str(request.extracted_data_json),
+            price_inputs_json=_opt_str(request.price_inputs_json),
+            pre_state_json=_opt_str(request.pre_state_json),
+            post_state_json=_opt_str(request.post_state_json),
+        )
+
+    @staticmethod
+    def _build_registry_row_from_request(
+        request: gateway_pb2.SaveLedgerAndRegistryRequest,
+        deployment_id: str,
+        payload_dict: dict[str, Any],
+        context: grpc.aio.ServicerContext,
+    ) -> Any | gateway_pb2.SaveLedgerAndRegistryResponse:
+        """Reconstruct the ``RegistryRow`` dataclass from the proto request.
+
+        Validates ``registry_status`` against the Literal allowed values
+        before assignment (addresses gemini-code-assist (PR #2230) comment
+        about the ``# type: ignore[arg-type]``; the dataclass holds a
+        Literal, not an Enum, so we validate explicitly and the type
+        ignore is removed).
+        """
+        from typing import Literal, cast
+
+        from almanak.framework.accounting.commit import RegistryRow
+
+        status_raw = request.registry_status
+        if status_raw not in ("open", "closed", "reorg_invalidated"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            details = f"registry_status must be one of 'open' / 'closed' / 'reorg_invalidated' (got {status_raw!r})"
+            context.set_details(details)
+            return gateway_pb2.SaveLedgerAndRegistryResponse(success=False, error=details, error_class="ValueError")
+        # Runtime guard above narrows ``status_raw`` to the Literal union;
+        # ``cast`` informs mypy of the narrowing (proto3 fields are typed
+        # as ``str`` on the wire — see gemini PR #2230 thread).
+        status_literal = cast(Literal["open", "closed", "reorg_invalidated"], status_raw)
+
+        return RegistryRow(
+            deployment_id=deployment_id,
+            chain=request.registry_chain,
+            primitive=request.registry_primitive,
+            accounting_category=request.registry_accounting_category,
+            physical_identity_hash=request.registry_physical_identity_hash,
+            semantic_grouping_key=request.registry_semantic_grouping_key,
+            grouping_policy_version=request.registry_grouping_policy_version,
+            handle=request.registry_handle or None,
+            status=status_literal,
+            payload=payload_dict,
+            matching_policy_version=request.registry_matching_policy_version or 1,
+            opened_at_block=(
+                request.registry_opened_at_block if request.HasField("registry_opened_at_block") else None
+            ),
+            opened_tx=request.registry_opened_tx or None,
+            closed_at_block=(
+                request.registry_closed_at_block if request.HasField("registry_closed_at_block") else None
+            ),
+            closed_tx=request.registry_closed_tx or None,
+            last_reconciled_at_block=(
+                request.registry_last_reconciled_at_block
+                if request.HasField("registry_last_reconciled_at_block")
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _build_handle_mapping_from_request(
+        request: gateway_pb2.SaveLedgerAndRegistryRequest,
+    ) -> Any | None:
+        """Reconstruct optional ``HandleMapping``; None when handle is absent."""
+        if not request.handle_mapping_handle:
+            return None
+        from almanak.framework.accounting.commit import HandleMapping
+
+        return HandleMapping(
+            handle=request.handle_mapping_handle,
+            deployment_id=request.handle_mapping_deployment_id,
+            accounting_category=request.handle_mapping_accounting_category,
+        )
+
+    @staticmethod
+    def _classify_save_ledger_and_registry_error(
+        exc: Exception,
+        ledger_id: str,
+    ) -> gateway_pb2.SaveLedgerAndRegistryResponse | None:
+        """Map a backend exception to the typed error response.
+
+        Returns the typed response for known classes (VIB-4200 collision
+        and AccountingPersistenceError); returns ``None`` if the exception
+        should propagate to the generic INTERNAL handler. Keeps the
+        success-path commit out of the broad ``except`` block.
+        """
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.registry_errors import RegistryAutoCollisionError
+
+        if isinstance(exc, RegistryAutoCollisionError):
+            logger.error(
+                "SaveLedgerAndRegistry RegistryAutoCollisionError for id=%s: %s",
+                ledger_id,
+                exc,
+            )
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False,
+                error=str(exc),
+                error_class="RegistryAutoCollisionError",
+            )
+        if isinstance(exc, AccountingPersistenceError):
+            logger.error(
+                "SaveLedgerAndRegistry AccountingPersistenceError for id=%s: %s",
+                ledger_id,
+                exc,
+            )
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False,
+                error=str(exc),
+                error_class="AccountingPersistenceError",
+            )
+        return None
+
+    async def SaveLedgerAndRegistry(
+        self,
+        request: gateway_pb2.SaveLedgerAndRegistryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveLedgerAndRegistryResponse:
+        """Atomic ledger + position_registry + handle commit (T11 / VIB-4197).
+
+        Routes to ``StateManager.save_ledger_and_registry`` which delegates
+        to the SQLite backend's ``save_ledger_and_registry_atomic``. The
+        backend wraps all three writes in a single ``BEGIN IMMEDIATE`` /
+        ``COMMIT`` transaction; failure rolls back atomically. Postgres
+        backend returns gRPC UNIMPLEMENTED (T19 / VIB-4205 owns the hosted
+        half — see metrics-database repo).
+
+        Error contract (matches T11):
+        - RegistryAutoCollisionError → error_class="RegistryAutoCollisionError"
+          (programming bug, NOT infrastructure failure — VIB-4200).
+        - AccountingPersistenceError → error_class="AccountingPersistenceError".
+        - Any other backend exception → error_class="INTERNAL", gRPC INTERNAL.
+        The client adapter raises the matching exception class so the
+        runner's existing fail-closed pipeline handles each one correctly.
+
+        Input validation mirrors :meth:`SaveLedgerEntry` (UUID, non-blank
+        deployment_id, strategy_id format, positive timestamp). Helpers
+        live alongside the handler so the success path stays a thin
+        orchestrator under the CRAP threshold.
+        """
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            error = "SaveLedgerAndRegistry: Postgres backend not supported (T19 / VIB-4205 owns the hosted half)"
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(error)
+            return gateway_pb2.SaveLedgerAndRegistryResponse(success=False, error=error, error_class="UNIMPLEMENTED")
+
+        validated = self._validate_save_ledger_and_registry_request(request, context)
+        if isinstance(validated, gateway_pb2.SaveLedgerAndRegistryResponse):
+            return validated
+        strategy_id, deployment_id, ledger_id, ts = validated
+
+        payload = self._decode_registry_payload(request, context)
+        if isinstance(payload, gateway_pb2.SaveLedgerAndRegistryResponse):
+            return payload
+
+        try:
+            ledger = self._build_ledger_entry_from_request(request, ledger_id, strategy_id, deployment_id, ts)
+            registry = self._build_registry_row_from_request(request, deployment_id, payload, context)
+            if isinstance(registry, gateway_pb2.SaveLedgerAndRegistryResponse):
+                return registry
+            handle = self._build_handle_mapping_from_request(request)
+
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            try:
+                await self._state_manager.save_ledger_and_registry(
+                    ledger=ledger,
+                    registry=registry,
+                    handle=handle,
+                )
+            except Exception as exc:
+                typed = self._classify_save_ledger_and_registry_error(exc, ledger_id)
+                if typed is not None:
+                    return typed
+                raise
+            return gateway_pb2.SaveLedgerAndRegistryResponse(success=True)
+        except Exception as e:
+            logger.error("SaveLedgerAndRegistry SQLite failed for id=%s: %s", ledger_id, e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False, error="internal server error", error_class="INTERNAL"
+            )

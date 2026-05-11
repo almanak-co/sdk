@@ -534,6 +534,41 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.GetLedgerEntryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.GetLedgerEntryResponse.FromString,
                 _registered_method=True)
+        self.UpsertMigrationState = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/UpsertMigrationState',
+                request_serializer=gateway__pb2.UpsertMigrationStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.UpsertMigrationStateResponse.FromString,
+                _registered_method=True)
+        self.GetMigrationState = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetMigrationState',
+                request_serializer=gateway__pb2.GetMigrationStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetMigrationStateResponse.FromString,
+                _registered_method=True)
+        self.UpdateMigrationState = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/UpdateMigrationState',
+                request_serializer=gateway__pb2.UpdateMigrationStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.UpdateMigrationStateResponse.FromString,
+                _registered_method=True)
+        self.MarkBackfillComplete = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/MarkBackfillComplete',
+                request_serializer=gateway__pb2.MarkBackfillCompleteRequest.SerializeToString,
+                response_deserializer=gateway__pb2.MarkBackfillCompleteResponse.FromString,
+                _registered_method=True)
+        self.GetPositionEventsFiltered = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetPositionEventsFiltered',
+                request_serializer=gateway__pb2.GetPositionEventsFilteredRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetPositionEventsFilteredResponse.FromString,
+                _registered_method=True)
+        self.GetPositionRegistryOpenRows = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/GetPositionRegistryOpenRows',
+                request_serializer=gateway__pb2.GetPositionRegistryOpenRowsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GetPositionRegistryOpenRowsResponse.FromString,
+                _registered_method=True)
+        self.SaveLedgerAndRegistry = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SaveLedgerAndRegistry',
+                request_serializer=gateway__pb2.SaveLedgerAndRegistryRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveLedgerAndRegistryResponse.FromString,
+                _registered_method=True)
 
 
 class StateServiceServicer(object):
@@ -711,6 +746,80 @@ class StateServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UpsertMigrationState(self, request, context):
+        """Cutover storage RPCs — per-(deployment_id, primitive, cutover_key)
+        migration_state CRUD + position_registry read + atomic ledger+registry
+        commit (VIB-4208 / T22 of multi-position-tracking epic).
+
+        Backed by SQLite only on the gateway side; the Postgres branch of every
+        handler returns gRPC UNIMPLEMENTED so the framework client adapter
+        (GatewayStateManager) translates that into CutoverStorageNotSupported
+        and the cutover boot guard degrades to the legacy save_ledger_entry
+        path (cutover spec §2.4 pre-T19 contract). The Postgres half + the
+        cross-repo metrics-database migration land in T19 (VIB-4205).
+
+        _POSTGRES_DEFERRED_TABLES in schema_contract.py keeps both
+        migration_state and position_registry out of the hosted boot contract.
+
+        The BackfillReader path (update_migration_state / mark_backfill_complete /
+        get_position_events_filtered / insert_position_registry_row_if_absent)
+        is intentionally NOT wired here. Per cutover spec §2.4, fresh
+        deployments (no legacy position_events to migrate) skip the backfill
+        loop entirely — the boot guard seeds migration_state with
+        position_registry_backfill_complete=1 directly. Legacy-data backfill
+        for hosted Postgres lands with T19 / VIB-4205.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMigrationState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateMigrationState(self, request, context):
+        """In-flight backfill progress writes — cutover spec §3.3.
+        Only the supplied columns are written (partial update).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkBackfillComplete(self, request, context):
+        """Terminal flip — set complete=1 + final counters + completed_at.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPositionEventsFiltered(self, request, context):
+        """Streamed position_events read used by the backfill reader's fold pass.
+        Fresh deployments return [] (no legacy data) — that empty result
+        drives the backfill loop to flip complete=1 with no rows synthesized,
+        which is exactly the cutover spec §2.4 "no migration needed" case.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPositionRegistryOpenRows(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SaveLedgerAndRegistry(self, request, context):
+        """Atomic ledger + position_registry + handle commit (T11 / VIB-4197
+        primitive). On SQLite the gateway delegates to
+        SQLiteStore.save_ledger_and_registry_atomic which wraps all three
+        writes in a single BEGIN IMMEDIATE / COMMIT transaction.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -813,6 +922,41 @@ def add_StateServiceServicer_to_server(servicer, server):
                     servicer.GetLedgerEntry,
                     request_deserializer=gateway__pb2.GetLedgerEntryRequest.FromString,
                     response_serializer=gateway__pb2.GetLedgerEntryResponse.SerializeToString,
+            ),
+            'UpsertMigrationState': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertMigrationState,
+                    request_deserializer=gateway__pb2.UpsertMigrationStateRequest.FromString,
+                    response_serializer=gateway__pb2.UpsertMigrationStateResponse.SerializeToString,
+            ),
+            'GetMigrationState': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMigrationState,
+                    request_deserializer=gateway__pb2.GetMigrationStateRequest.FromString,
+                    response_serializer=gateway__pb2.GetMigrationStateResponse.SerializeToString,
+            ),
+            'UpdateMigrationState': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateMigrationState,
+                    request_deserializer=gateway__pb2.UpdateMigrationStateRequest.FromString,
+                    response_serializer=gateway__pb2.UpdateMigrationStateResponse.SerializeToString,
+            ),
+            'MarkBackfillComplete': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkBackfillComplete,
+                    request_deserializer=gateway__pb2.MarkBackfillCompleteRequest.FromString,
+                    response_serializer=gateway__pb2.MarkBackfillCompleteResponse.SerializeToString,
+            ),
+            'GetPositionEventsFiltered': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPositionEventsFiltered,
+                    request_deserializer=gateway__pb2.GetPositionEventsFilteredRequest.FromString,
+                    response_serializer=gateway__pb2.GetPositionEventsFilteredResponse.SerializeToString,
+            ),
+            'GetPositionRegistryOpenRows': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPositionRegistryOpenRows,
+                    request_deserializer=gateway__pb2.GetPositionRegistryOpenRowsRequest.FromString,
+                    response_serializer=gateway__pb2.GetPositionRegistryOpenRowsResponse.SerializeToString,
+            ),
+            'SaveLedgerAndRegistry': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveLedgerAndRegistry,
+                    request_deserializer=gateway__pb2.SaveLedgerAndRegistryRequest.FromString,
+                    response_serializer=gateway__pb2.SaveLedgerAndRegistryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1359,6 +1503,195 @@ class StateService(object):
             '/almanak.gateway.proto.StateService/GetLedgerEntry',
             gateway__pb2.GetLedgerEntryRequest.SerializeToString,
             gateway__pb2.GetLedgerEntryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpsertMigrationState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/UpsertMigrationState',
+            gateway__pb2.UpsertMigrationStateRequest.SerializeToString,
+            gateway__pb2.UpsertMigrationStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMigrationState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetMigrationState',
+            gateway__pb2.GetMigrationStateRequest.SerializeToString,
+            gateway__pb2.GetMigrationStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateMigrationState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/UpdateMigrationState',
+            gateway__pb2.UpdateMigrationStateRequest.SerializeToString,
+            gateway__pb2.UpdateMigrationStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkBackfillComplete(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/MarkBackfillComplete',
+            gateway__pb2.MarkBackfillCompleteRequest.SerializeToString,
+            gateway__pb2.MarkBackfillCompleteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPositionEventsFiltered(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetPositionEventsFiltered',
+            gateway__pb2.GetPositionEventsFilteredRequest.SerializeToString,
+            gateway__pb2.GetPositionEventsFilteredResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPositionRegistryOpenRows(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/GetPositionRegistryOpenRows',
+            gateway__pb2.GetPositionRegistryOpenRowsRequest.SerializeToString,
+            gateway__pb2.GetPositionRegistryOpenRowsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveLedgerAndRegistry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SaveLedgerAndRegistry',
+            gateway__pb2.SaveLedgerAndRegistryRequest.SerializeToString,
+            gateway__pb2.SaveLedgerAndRegistryResponse.FromString,
             options,
             channel_credentials,
             insecure,

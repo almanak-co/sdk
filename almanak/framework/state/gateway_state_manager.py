@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+import grpc
+
 from almanak.framework.gateway_client import GatewayClient
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.state.state_manager import StateData
@@ -888,47 +890,57 @@ class GatewayStateManager:
             return False
 
     # -------------------------------------------------------------------------
-    # Cutover storage stubs — VIB-4198 / T12. Audit M3 (CodeRabbit).
+    # Cutover storage — VIB-4208 / T22 (SQLite half of T19 / VIB-4205).
     # -------------------------------------------------------------------------
     #
-    # The hosted ``GatewayStateManager`` does NOT implement
-    # ``position_registry`` / ``migration_state`` storage; the corresponding
-    # gateway gRPC RPCs + Postgres DDL ship with T19 (VIB-4205). Until then,
-    # every cutover-storage method on this class explicitly raises
-    # :class:`almanak.framework.migration.CutoverStorageNotSupported` so the
-    # boot guard in ``almanak.framework.runner.cutover.enforce_or_run_cutover``
-    # can detect "this backend cannot host cutover storage" and degrade to
-    # accounting_only mode in a controlled, observable way (cutover spec
-    # §2.4). The previous behavior — having the methods missing entirely so
-    # ``hasattr(sm, "...")`` returned False — was indistinguishable from
-    # "the SDK forgot to implement them" and made the silent-error class
-    # easier to introduce. Explicit raise makes the contract testable.
+    # Round-trips through the gateway's State RPCs. The gateway routes to
+    # the WARM backend's SQLite implementation; on Postgres the gateway
+    # returns gRPC UNIMPLEMENTED and these adapters translate that back
+    # into :class:`almanak.framework.migration.CutoverStorageNotSupported`
+    # so the cutover boot guard degrades cleanly on hosted runs (cutover
+    # spec §2.4 pre-T19 contract).
     #
-    # Removing these stubs is a breaking change tracked by T19 (the same
-    # PR that lands the gateway gRPC + metrics-database DDL).
+    # The Postgres half + the cross-repo metrics-database migration land
+    # in T19 (VIB-4205). One pair of dataclasses (``MigrationStateRow``,
+    # ``RegistryRow`` dict-shape) is reconstructed from the wire bytes here
+    # so the runner sees an identical surface across local and gateway-
+    # backed runs.
+    #
+    # NOTE on `insert_position_registry_row_if_absent`: this method is
+    # only called by `BackfillReader.run()` when there is legacy
+    # position_events data to migrate. For fresh deployments
+    # (Anvil + lp_dual) there is no legacy data, so the backfill loop
+    # iterates zero groups and never calls this. T19's Postgres half
+    # will ship the corresponding RPC when legacy-data backfill on
+    # hosted backends becomes needed.
 
-    async def get_position_registry_open_rows(
-        self,
-        deployment_id: str,
-        *,
-        chain: str | None = None,
-        primitive: str | None = None,
-        accounting_category: str | None = None,
-    ) -> list[dict]:
-        """Audit M3: explicit fail-closed for the hosted backend."""
+    @staticmethod
+    def _translate_unimplemented(exc: Exception) -> Exception:
+        """Map gRPC UNIMPLEMENTED → CutoverStorageNotSupported.
+
+        Audit M3: a backend that does not host cutover storage must
+        signal its absence via :class:`CutoverStorageNotSupported`, not
+        via a silent empty result or a generic RpcError. The cutover
+        boot guard catches that specific exception class and degrades
+        controlled-ly (cutover spec §2.4). Any other gRPC error
+        propagates unchanged — those are loud infrastructure failures
+        the runner must halt on.
+        """
         from almanak.framework.migration import CutoverStorageNotSupported
 
-        raise CutoverStorageNotSupported(
-            "GatewayStateManager: position_registry reads land with T19 "
-            "(VIB-4205); registry-mode dispatch is OFF for hosted runs "
-            "until then."
-        )
-
-    async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
-        """Audit M3: explicit fail-closed for the hosted backend."""
-        from almanak.framework.migration import CutoverStorageNotSupported
-
-        raise CutoverStorageNotSupported("GatewayStateManager: position_registry writes land with T19.")
+        code = getattr(exc, "code", None)
+        if callable(code):
+            try:
+                status = code()
+                if status == grpc.StatusCode.UNIMPLEMENTED:
+                    details = getattr(exc, "details", None)
+                    details_str = details() if callable(details) else str(exc)
+                    return CutoverStorageNotSupported(
+                        f"GatewayStateManager: gateway returned UNIMPLEMENTED — {details_str}"
+                    )
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+        return exc
 
     async def upsert_migration_state(
         self,
@@ -937,10 +949,30 @@ class GatewayStateManager:
         primitive: str,
         cutover_key: str,
     ) -> None:
-        """Audit M3: explicit fail-closed for the hosted backend."""
-        from almanak.framework.migration import CutoverStorageNotSupported
+        """Idempotent baseline migration_state row (cutover spec §2.1).
 
-        raise CutoverStorageNotSupported("GatewayStateManager: migration_state lands with T19.")
+        Raises :class:`CutoverStorageNotSupported` when the gateway's
+        WARM backend is Postgres (T19 / VIB-4205 ships the hosted half).
+        Other failures propagate as the underlying gRPC error so the
+        runner halts loud per the cutover spec.
+        """
+        request = gateway_pb2.UpsertMigrationStateRequest(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+        )
+        try:
+            response = self._client.state.UpsertMigrationState(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+        if not response.success:
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            # An explicit failure return without UNIMPLEMENTED is still
+            # treated as a degrade signal: every server-side path that
+            # returns success=False is either a contract violation
+            # (caller bug) or the documented Postgres-not-supported path.
+            raise CutoverStorageNotSupported(f"GatewayStateManager.upsert_migration_state failed: {response.error}")
 
     async def get_migration_state(
         self,
@@ -949,10 +981,47 @@ class GatewayStateManager:
         primitive: str,
         cutover_key: str,
     ) -> Any | None:
-        """Audit M3: explicit fail-closed for the hosted backend."""
-        from almanak.framework.migration import CutoverStorageNotSupported
+        """Return the parsed ``MigrationStateRow``, or ``None`` when absent.
 
-        raise CutoverStorageNotSupported("GatewayStateManager: migration_state reads land with T19.")
+        Postgres backend raises :class:`CutoverStorageNotSupported` via
+        the gRPC UNIMPLEMENTED translation; the runner's boot guard
+        catches it and degrades to the legacy path.
+        """
+        from almanak.framework.migration.backfill import MigrationStateRow
+
+        request = gateway_pb2.GetMigrationStateRequest(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+        )
+        try:
+            response = self._client.state.GetMigrationState(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+        if not response.found:
+            return None
+        data = response.data
+        try:
+            notes_obj = json.loads(data.notes.decode("utf-8")) if data.notes else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            notes_obj = {}
+        if not isinstance(notes_obj, dict):
+            notes_obj = {}
+        return MigrationStateRow(
+            deployment_id=data.deployment_id,
+            primitive=data.primitive,
+            cutover_key=data.cutover_key,
+            position_registry_backfill_complete=bool(data.position_registry_backfill_complete),
+            backfill_started_at=data.backfill_started_at or None,
+            backfill_completed_at=data.backfill_completed_at or None,
+            backfill_source_table=data.backfill_source_table or "position_events",
+            backfill_reader_version=int(data.backfill_reader_version or 1),
+            rows_synthesized=int(data.rows_synthesized or 0),
+            rows_skipped_already_present=int(data.rows_skipped_already_present or 0),
+            notes=notes_obj,
+            created_at=data.created_at or "",
+            updated_at=data.updated_at or "",
+        )
 
     async def update_migration_state(
         self,
@@ -964,10 +1033,25 @@ class GatewayStateManager:
         rows_synthesized: int | None = None,
         rows_skipped_already_present: int | None = None,
     ) -> None:
-        """Audit M3: explicit fail-closed for the hosted backend."""
-        from almanak.framework.migration import CutoverStorageNotSupported
+        """Partial-update of migration_state in-flight progress columns."""
+        request = gateway_pb2.UpdateMigrationStateRequest(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            backfill_started_at=backfill_started_at or "",
+        )
+        if rows_synthesized is not None:
+            request.rows_synthesized = int(rows_synthesized)
+        if rows_skipped_already_present is not None:
+            request.rows_skipped_already_present = int(rows_skipped_already_present)
+        try:
+            response = self._client.state.UpdateMigrationState(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+        if not response.success:
+            from almanak.framework.migration import CutoverStorageNotSupported
 
-        raise CutoverStorageNotSupported("GatewayStateManager: migration_state updates land with T19.")
+            raise CutoverStorageNotSupported(f"GatewayStateManager.update_migration_state failed: {response.error}")
 
     async def mark_backfill_complete(
         self,
@@ -979,10 +1063,23 @@ class GatewayStateManager:
         rows_skipped_already_present: int,
         backfill_completed_at: str,
     ) -> None:
-        """Audit M3: explicit fail-closed for the hosted backend."""
-        from almanak.framework.migration import CutoverStorageNotSupported
+        """Terminal flip — set ``complete=1`` + final counters + completed_at."""
+        request = gateway_pb2.MarkBackfillCompleteRequest(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            rows_synthesized=int(rows_synthesized),
+            rows_skipped_already_present=int(rows_skipped_already_present),
+            backfill_completed_at=backfill_completed_at,
+        )
+        try:
+            response = self._client.state.MarkBackfillComplete(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+        if not response.success:
+            from almanak.framework.migration import CutoverStorageNotSupported
 
-        raise CutoverStorageNotSupported("GatewayStateManager: migration_state writes land with T19.")
+            raise CutoverStorageNotSupported(f"GatewayStateManager.mark_backfill_complete failed: {response.error}")
 
     async def get_position_events_filtered(
         self,
@@ -990,17 +1087,315 @@ class GatewayStateManager:
         deployment_id: str,
         position_types: frozenset[str],
     ) -> list[dict]:
-        """Audit M3: explicit fail-closed for the hosted backend.
+        """Streamed position_events read used by the backfill loop's fold pass.
 
-        The hosted Postgres position_events table does exist, but the
-        backfill never runs against the hosted backend (T19 lands the
-        full path). Until then, refuse so the boot guard's degrade
-        decision is explicit.
+        Returns rows in (position_id ASC, timestamp ASC, id ASC) order
+        per the SQLite accessor's contract (cutover spec §3.5 fold
+        determinism). Empty list when there are no rows matching the
+        filter (fresh deployment → no legacy data → backfill is a
+        no-op).
+        """
+        request = gateway_pb2.GetPositionEventsFilteredRequest(
+            deployment_id=deployment_id,
+            position_types=sorted(position_types),
+        )
+        try:
+            response = self._client.state.GetPositionEventsFiltered(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+        return [_proto_position_event_to_dict(ev) for ev in response.events]
+
+    @staticmethod
+    def _decode_position_registry_payload(payload_bytes: bytes) -> tuple[Any, str, str, str]:
+        """Decode the proto ``payload`` bytes into ``(obj, raw, decode_error, shape_error)``.
+
+        Mirrors the SQLite-backend's diagnostic fields so a malformed
+        wire payload preserves an audit signal rather than silently
+        producing ``{}``.
+        """
+        if not payload_bytes:
+            return {}, "", "", ""
+        try:
+            parsed = json.loads(payload_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {}, payload_bytes.decode("utf-8", errors="replace"), str(exc), ""
+        if isinstance(parsed, dict):
+            return parsed, "", "", ""
+        return (
+            {},
+            payload_bytes.decode("utf-8", errors="replace"),
+            "",
+            f"expected JSON object, got {type(parsed).__name__}",
+        )
+
+    @staticmethod
+    def _attach_payload_diagnostics(
+        entry: dict[str, Any],
+        row: Any,
+        payload_raw: str,
+        payload_decode_error: str,
+        payload_shape_error: str,
+    ) -> None:
+        """Surface raw/decode/shape diagnostics on the result dict.
+
+        Server-side fields take precedence; client-side decoded values
+        are the fallback when the server did not stamp them (older
+        gateway builds, or local SQLite already rendered them).
+        Iterating the (server, client, key) tuples keeps the helper
+        flat (no per-field if-tree) so CRAP scores cleanly.
+        """
+        fields = (
+            ("payload_raw", row.payload_raw, payload_raw),
+            ("payload_decode_error", row.payload_decode_error, payload_decode_error),
+            ("payload_shape_error", row.payload_shape_error, payload_shape_error),
+        )
+        for key, server_val, client_val in fields:
+            chosen = server_val or client_val
+            if chosen:
+                entry[key] = chosen
+
+    @classmethod
+    def _proto_row_to_registry_dict(cls, row: Any) -> dict[str, Any]:
+        """Map a single ``PositionRegistryRow`` proto message to a dict.
+
+        Pure projection; ``payload`` is JSON-decoded via
+        :meth:`_decode_position_registry_payload` so the runner sees the
+        same shape it would see from the SQLite-direct path.
+        """
+        payload_obj, payload_raw, payload_decode_error, payload_shape_error = cls._decode_position_registry_payload(
+            row.payload
+        )
+        entry: dict[str, Any] = {
+            "deployment_id": row.deployment_id,
+            "chain": row.chain,
+            "primitive": row.primitive,
+            "accounting_category": row.accounting_category,
+            "physical_identity_hash": row.physical_identity_hash,
+            "semantic_grouping_key": row.semantic_grouping_key,
+            "grouping_policy_version": row.grouping_policy_version,
+            "handle": row.handle or None,
+            "status": row.status,
+            "payload": payload_obj,
+            "opened_at_block": row.opened_at_block or None,
+            "opened_tx": row.opened_tx or None,
+            "closed_at_block": row.closed_at_block or None,
+            "closed_tx": row.closed_tx or None,
+            "last_reconciled_at_block": row.last_reconciled_at_block or None,
+            "matching_policy_version": int(row.matching_policy_version),
+        }
+        cls._attach_payload_diagnostics(entry, row, payload_raw, payload_decode_error, payload_shape_error)
+        return entry
+
+    async def get_position_registry_open_rows(
+        self,
+        deployment_id: str,
+        *,
+        chain: str | None = None,
+        primitive: str | None = None,
+        accounting_category: str | None = None,
+    ) -> list[dict]:
+        """Return OPEN ``position_registry`` rows for a deployment.
+
+        The wire shape carries the JSON-encoded payload; this adapter
+        parses it back to a dict so the runner sees a result identical
+        to the SQLite-direct path. Postgres backend raises
+        :class:`CutoverStorageNotSupported` via the UNIMPLEMENTED
+        translation.
+
+        Row-level conversion is delegated to
+        :meth:`_proto_row_to_registry_dict` so this orchestrator stays
+        small. Payload-decode + diagnostic stamping live in the two
+        helpers above.
+        """
+        request = gateway_pb2.GetPositionRegistryOpenRowsRequest(
+            deployment_id=deployment_id,
+            chain=chain or "",
+            primitive=primitive or "",
+            accounting_category=accounting_category or "",
+        )
+        try:
+            response = self._client.state.GetPositionRegistryOpenRows(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+        return [self._proto_row_to_registry_dict(row) for row in response.rows]
+
+    @staticmethod
+    def _build_save_ledger_and_registry_request(
+        ledger: "LedgerEntry",
+        registry: Any,
+        handle: Any,
+    ) -> gateway_pb2.SaveLedgerAndRegistryRequest:
+        """Marshal LedgerEntry + RegistryRow + optional HandleMapping → proto.
+
+        ``ledger`` is a dataclass — fields are declared and present, so
+        direct attribute access is correct. Optional integer columns
+        (slippage_bps, opened_at_block, closed_at_block,
+        last_reconciled_at_block) are set post-construction via the
+        proto's ``HasField`` semantics so unset values stay unset
+        rather than collapsing to zero.
+        """
+
+        def _str_or_empty(val: Any) -> str:
+            if val is None:
+                return ""
+            if isinstance(val, str):
+                return val
+            return str(val)
+
+        def _bytes_or_empty(val: Any) -> bytes:
+            if val is None:
+                return b""
+            if isinstance(val, bytes):
+                return val
+            return str(val).encode("utf-8")
+
+        handle_handle = getattr(handle, "handle", "") if handle is not None else ""
+        handle_deployment_id = getattr(handle, "deployment_id", "") if handle is not None else ""
+        handle_accounting_category = str(getattr(handle, "accounting_category", "")) if handle is not None else ""
+
+        request = gateway_pb2.SaveLedgerAndRegistryRequest(
+            id=ledger.id,
+            cycle_id=ledger.cycle_id or "",
+            strategy_id=ledger.strategy_id or "",
+            deployment_id=ledger.deployment_id or "",
+            execution_mode=ledger.execution_mode or "",
+            timestamp=int(ledger.timestamp.timestamp()),
+            intent_type=_str_or_empty(ledger.intent_type),
+            token_in=_str_or_empty(ledger.token_in),
+            amount_in=_str_or_empty(ledger.amount_in),
+            token_out=_str_or_empty(ledger.token_out),
+            amount_out=_str_or_empty(ledger.amount_out),
+            effective_price=_str_or_empty(ledger.effective_price),
+            gas_used=int(ledger.gas_used or 0),
+            gas_usd=_str_or_empty(ledger.gas_usd),
+            tx_hash=_str_or_empty(ledger.tx_hash),
+            chain=_str_or_empty(ledger.chain),
+            protocol=_str_or_empty(ledger.protocol),
+            success=bool(ledger.success),
+            error=_str_or_empty(ledger.error),
+            extracted_data_json=_bytes_or_empty(ledger.extracted_data_json),
+            price_inputs_json=_bytes_or_empty(ledger.price_inputs_json),
+            pre_state_json=_bytes_or_empty(ledger.pre_state_json),
+            post_state_json=_bytes_or_empty(ledger.post_state_json),
+            registry_chain=registry.chain,
+            registry_primitive=registry.primitive_value(),
+            registry_accounting_category=registry.accounting_category_value(),
+            registry_physical_identity_hash=registry.physical_identity_hash,
+            registry_semantic_grouping_key=registry.semantic_grouping_key,
+            registry_grouping_policy_version=registry.grouping_policy_version,
+            registry_handle=registry.handle or "",
+            registry_status=registry.status,
+            registry_payload_json=registry.payload_json().encode("utf-8"),
+            registry_matching_policy_version=int(registry.matching_policy_version),
+            registry_opened_tx=registry.opened_tx or "",
+            registry_closed_tx=registry.closed_tx or "",
+            handle_mapping_handle=handle_handle,
+            handle_mapping_deployment_id=handle_deployment_id,
+            handle_mapping_accounting_category=handle_accounting_category,
+        )
+        if ledger.slippage_bps is not None:
+            request.slippage_bps = float(ledger.slippage_bps)
+        if registry.opened_at_block is not None:
+            request.registry_opened_at_block = int(registry.opened_at_block)
+        if registry.closed_at_block is not None:
+            request.registry_closed_at_block = int(registry.closed_at_block)
+        if registry.last_reconciled_at_block is not None:
+            request.registry_last_reconciled_at_block = int(registry.last_reconciled_at_block)
+        return request
+
+    @staticmethod
+    def _raise_for_save_ledger_and_registry_response(
+        response: Any,
+        registry: Any,
+        strategy_id: str,
+    ) -> None:
+        """Translate a non-success response to the right typed exception.
+
+        Discriminates VIB-4200 collisions (RegistryAutoCollisionError),
+        Postgres-degrade signals (CutoverStorageNotSupported via
+        UNIMPLEMENTED), and generic infra failures
+        (AccountingPersistenceError). See the in-line note on the
+        ``existing_physical_identity_hash`` sentinel — the rendered
+        message preserves the structured PIH text via the chained
+        ``__cause__``.
+        """
+        from almanak.framework.state.registry_errors import RegistryAutoCollisionError
+
+        if response.error_class == "RegistryAutoCollisionError":
+            raise RegistryAutoCollisionError(
+                semantic_grouping_key=registry.semantic_grouping_key,
+                existing_physical_identity_hash="<unavailable-from-gateway: see error message>",
+                opened_tx="",
+                accounting_category=registry.accounting_category_value(),
+            ) from RuntimeError(response.error)
+        if response.error_class == "UNIMPLEMENTED":
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(f"GatewayStateManager.save_ledger_and_registry: {response.error}")
+        raise AccountingPersistenceError(
+            write_kind=AccountingWriteKind.ACCOUNTING,
+            strategy_id=strategy_id,
+            message=f"SaveLedgerAndRegistry failed via gateway: {response.error or response.error_class}",
+        )
+
+    async def save_ledger_and_registry(
+        self,
+        *,
+        ledger: "LedgerEntry",
+        registry: Any,  # RegistryRow — lazy import to avoid module-load cycle
+        handle: Any = None,  # HandleMapping | None
+    ) -> None:
+        """Atomic ledger + position_registry + handle commit (T11 / VIB-4197).
+
+        Mirrors ``StateManager.save_ledger_and_registry`` on the local
+        path. Failures preserve T11's error contract:
+
+        - ``RegistryAutoCollisionError`` (VIB-4200 programming bug)
+          propagates as that exact class.
+        - ``AccountingPersistenceError`` propagates with
+          ``write_kind=ACCOUNTING``.
+        - Other backend errors wrap in ``AccountingPersistenceError``.
+
+        Postgres backend raises :class:`CutoverStorageNotSupported` via
+        the UNIMPLEMENTED translation. Request marshalling and response
+        error translation live in :meth:`_build_save_ledger_and_registry_request`
+        and :meth:`_raise_for_save_ledger_and_registry_response`.
+        """
+        strategy_id = ledger.strategy_id or ""
+        request = self._build_save_ledger_and_registry_request(ledger, registry, handle)
+
+        try:
+            response = self._client.state.SaveLedgerAndRegistry(request, timeout=self._timeout)
+        except Exception as e:
+            raise self._translate_unimplemented(e) from e
+
+        if response.success:
+            logger.debug(
+                "SaveLedgerAndRegistry ok: id=%s strategy=%s pih=%s",
+                ledger.id,
+                strategy_id,
+                registry.physical_identity_hash,
+            )
+            return
+
+        self._raise_for_save_ledger_and_registry_response(response, registry, strategy_id)
+
+    async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
+        """Not wired for T22 — legacy-data backfill on the gateway lands with T19.
+
+        The backfill loop only calls this method when ``get_position_events_filtered``
+        returns non-empty results. For fresh deployments (the lp_dual /
+        managed-Anvil scope of T22) the event list is empty, the group
+        loop iterates zero times, and this method is never reached. T19
+        / VIB-4205 ships the hosted backfill (including this RPC) when
+        legacy-data migration on hosted Postgres becomes necessary.
         """
         from almanak.framework.migration import CutoverStorageNotSupported
 
         raise CutoverStorageNotSupported(
-            "GatewayStateManager: position_events filtered reads for backfill land with T19."
+            "GatewayStateManager.insert_position_registry_row_if_absent: "
+            "legacy-data backfill on the gateway lands with T19 / VIB-4205. "
+            "Fresh deployments (lp_dual / managed-Anvil) never reach this path."
         )
 
     # -------------------------------------------------------------------------

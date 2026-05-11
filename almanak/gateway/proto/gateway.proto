@@ -219,6 +219,46 @@ service StateService {
   // Ledger entry read — used by AccountingProcessor.drain_one to fetch the
   // transaction_ledger row for category-handler processing in hosted mode.
   rpc GetLedgerEntry(GetLedgerEntryRequest) returns (GetLedgerEntryResponse);
+
+  // Cutover storage RPCs — per-(deployment_id, primitive, cutover_key)
+  // migration_state CRUD + position_registry read + atomic ledger+registry
+  // commit (VIB-4208 / T22 of multi-position-tracking epic).
+  //
+  // Backed by SQLite only on the gateway side; the Postgres branch of every
+  // handler returns gRPC UNIMPLEMENTED so the framework client adapter
+  // (GatewayStateManager) translates that into CutoverStorageNotSupported
+  // and the cutover boot guard degrades to the legacy save_ledger_entry
+  // path (cutover spec §2.4 pre-T19 contract). The Postgres half + the
+  // cross-repo metrics-database migration land in T19 (VIB-4205).
+  //
+  // _POSTGRES_DEFERRED_TABLES in schema_contract.py keeps both
+  // migration_state and position_registry out of the hosted boot contract.
+  //
+  // The BackfillReader path (update_migration_state / mark_backfill_complete /
+  // get_position_events_filtered / insert_position_registry_row_if_absent)
+  // is intentionally NOT wired here. Per cutover spec §2.4, fresh
+  // deployments (no legacy position_events to migrate) skip the backfill
+  // loop entirely — the boot guard seeds migration_state with
+  // position_registry_backfill_complete=1 directly. Legacy-data backfill
+  // for hosted Postgres lands with T19 / VIB-4205.
+  rpc UpsertMigrationState(UpsertMigrationStateRequest) returns (UpsertMigrationStateResponse);
+  rpc GetMigrationState(GetMigrationStateRequest) returns (GetMigrationStateResponse);
+  // In-flight backfill progress writes — cutover spec §3.3.
+  // Only the supplied columns are written (partial update).
+  rpc UpdateMigrationState(UpdateMigrationStateRequest) returns (UpdateMigrationStateResponse);
+  // Terminal flip — set complete=1 + final counters + completed_at.
+  rpc MarkBackfillComplete(MarkBackfillCompleteRequest) returns (MarkBackfillCompleteResponse);
+  // Streamed position_events read used by the backfill reader's fold pass.
+  // Fresh deployments return [] (no legacy data) — that empty result
+  // drives the backfill loop to flip complete=1 with no rows synthesized,
+  // which is exactly the cutover spec §2.4 "no migration needed" case.
+  rpc GetPositionEventsFiltered(GetPositionEventsFilteredRequest) returns (GetPositionEventsFilteredResponse);
+  rpc GetPositionRegistryOpenRows(GetPositionRegistryOpenRowsRequest) returns (GetPositionRegistryOpenRowsResponse);
+  // Atomic ledger + position_registry + handle commit (T11 / VIB-4197
+  // primitive). On SQLite the gateway delegates to
+  // SQLiteStore.save_ledger_and_registry_atomic which wraps all three
+  // writes in a single BEGIN IMMEDIATE / COMMIT transaction.
+  rpc SaveLedgerAndRegistry(SaveLedgerAndRegistryRequest) returns (SaveLedgerAndRegistryResponse);
 }
 
 message LoadStateRequest {
@@ -693,6 +733,223 @@ message LedgerEntryData {
 message GetLedgerEntryResponse {
   bool found = 1;
   LedgerEntryData entry = 2;
+}
+
+// =============================================================================
+// Cutover storage messages (VIB-4208 / T22) — mirrors the 13-column
+// migration_state SQLite schema in almanak/framework/state/backends/sqlite.py.
+// MigrationStateRow (the framework-side dataclass) parses the bytes notes
+// field back into a dict for boot-guard consumers.
+// =============================================================================
+
+message UpsertMigrationStateRequest {
+  string deployment_id = 1;
+  string primitive = 2;     // e.g. "lp", "perp", "lending"
+  string cutover_key = 3;   // narrower scope (matches AccountingCategory.value)
+}
+
+message UpsertMigrationStateResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetMigrationStateRequest {
+  string deployment_id = 1;
+  string primitive = 2;
+  string cutover_key = 3;
+}
+
+// Mirrors the 13 columns of the SQLite migration_state table. The Postgres
+// branch raises gRPC UNIMPLEMENTED rather than returning a default-populated
+// MigrationStateData. ``found=true`` distinguishes "row present" from
+// "row absent, defaults zero" (same pattern as SnapshotData.found).
+message MigrationStateData {
+  string deployment_id = 1;
+  string primitive = 2;
+  string cutover_key = 3;
+  bool position_registry_backfill_complete = 4;
+  string backfill_started_at = 5;        // ISO-8601 UTC, "" when null
+  string backfill_completed_at = 6;      // ISO-8601 UTC, "" when null
+  string backfill_source_table = 7;
+  int32 backfill_reader_version = 8;
+  int64 rows_synthesized = 9;
+  int64 rows_skipped_already_present = 10;
+  bytes notes = 11;                       // JSON-encoded object
+  string created_at = 12;
+  string updated_at = 13;
+}
+
+message GetMigrationStateResponse {
+  bool found = 1;
+  MigrationStateData data = 2;
+  string error = 3;
+}
+
+// Partial-update of migration_state in-flight progress columns. Only the
+// supplied columns are written. Used by `BackfillReader.run()` to stamp
+// `backfill_started_at` at the start and checkpoint
+// `rows_synthesized` / `rows_skipped_already_present` every batch.
+// `optional` fields preserve the "None means don't touch this column"
+// semantics — `0` is a legitimate value for the counters.
+message UpdateMigrationStateRequest {
+  string deployment_id = 1;
+  string primitive = 2;
+  string cutover_key = 3;
+  string backfill_started_at = 4;  // ISO-8601 UTC; "" => don't update
+  optional int64 rows_synthesized = 5;
+  optional int64 rows_skipped_already_present = 6;
+}
+
+message UpdateMigrationStateResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Terminal flip — set position_registry_backfill_complete=1 with final
+// counters + backfill_completed_at. Single statement so the flip is
+// atomic at the SQLite-page level (cutover spec §3.3 step 4).
+message MarkBackfillCompleteRequest {
+  string deployment_id = 1;
+  string primitive = 2;
+  string cutover_key = 3;
+  int64 rows_synthesized = 4;
+  int64 rows_skipped_already_present = 5;
+  string backfill_completed_at = 6;  // ISO-8601 UTC
+}
+
+message MarkBackfillCompleteResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Streamed position_events read for the backfill loop. Filters by
+// (deployment_id, position_type IN position_types) and returns rows
+// ordered by (position_id ASC, timestamp ASC, id ASC). Fresh
+// deployments return an empty list.
+message GetPositionEventsFilteredRequest {
+  string deployment_id = 1;
+  repeated string position_types = 2;  // legacy position_type set (e.g. ["LP"])
+}
+
+message GetPositionEventsFilteredResponse {
+  repeated PositionEventData events = 1;
+  string error = 2;
+}
+
+// Position-registry open-row read (used by the runner's
+// `_refresh_lp_registry_id_cache` and teardown's "what's still open?"
+// query for cutover-flipped primitives). Filters mirror the
+// `SQLiteStore.get_position_registry_open_rows` signature: every filter
+// is optional; status='open' is always applied.
+message GetPositionRegistryOpenRowsRequest {
+  string deployment_id = 1;
+  string chain = 2;                // "" = no filter
+  string primitive = 3;            // "" = no filter
+  string accounting_category = 4;  // "" = no filter
+}
+
+// One row of `position_registry`. Mirrors the 16-column schema in
+// almanak/framework/state/backends/sqlite.py SCHEMA_SQL. The `payload`
+// column is serialized as JSON bytes — the client adapter parses it
+// back to a dict. Block / tx anchors are optional, encoded as 0 / ""
+// when null. The framework adapter maps the wire shape back to the dict
+// shape returned by SQLiteStore.get_position_registry_open_rows (so
+// runner code is identical across local and gateway-backed runs).
+message PositionRegistryRow {
+  string deployment_id = 1;
+  string chain = 2;
+  string primitive = 3;
+  string accounting_category = 4;
+  string physical_identity_hash = 5;
+  string semantic_grouping_key = 6;
+  string grouping_policy_version = 7;
+  string handle = 8;                       // "" when NULL
+  string status = 9;                       // "open" | "closed" | "reorg_invalidated"
+  bytes payload = 10;                      // JSON-encoded dict
+  int64 opened_at_block = 11;              // 0 when NULL
+  string opened_tx = 12;                   // "" when NULL
+  int64 closed_at_block = 13;              // 0 when NULL
+  string closed_tx = 14;                   // "" when NULL
+  int64 last_reconciled_at_block = 15;     // 0 when NULL
+  int32 matching_policy_version = 16;
+  // Diagnostic carry-fields populated by SQLiteStore when payload JSON
+  // is corrupt or non-object. Empty when payload decoded cleanly.
+  // Preserves the same dict shape the local backend returns.
+  string payload_raw = 17;
+  string payload_decode_error = 18;
+  string payload_shape_error = 19;
+}
+
+message GetPositionRegistryOpenRowsResponse {
+  repeated PositionRegistryRow rows = 1;
+  string error = 2;
+}
+
+// Atomic ledger + position_registry + handle commit (T11 / VIB-4197).
+// The LedgerEntry fields mirror SaveLedgerEntryRequest exactly so the
+// SQLite-side reconstruction can reuse the same dataclass. The
+// RegistryRow + HandleMapping fields mirror the dataclasses in
+// almanak/framework/accounting/commit.py.
+message SaveLedgerAndRegistryRequest {
+  // ---- LedgerEntry (mirrors SaveLedgerEntryRequest) ----
+  string id = 1;
+  string cycle_id = 2;
+  string strategy_id = 3;
+  string deployment_id = 4;
+  string execution_mode = 5;
+  int64 timestamp = 6;
+  string intent_type = 7;
+  string token_in = 8;
+  string amount_in = 9;
+  string token_out = 10;
+  string amount_out = 11;
+  string effective_price = 12;
+  optional double slippage_bps = 13;
+  int64 gas_used = 14;
+  string gas_usd = 15;
+  string tx_hash = 16;
+  string chain = 17;
+  string protocol = 18;
+  bool success = 19;
+  string error = 20;
+  bytes extracted_data_json = 21;
+  bytes price_inputs_json = 22;
+  bytes pre_state_json = 23;
+  bytes post_state_json = 24;
+  // ---- RegistryRow ----
+  string registry_chain = 50;                       // intentional gap so adding ledger fields stays contiguous
+  string registry_primitive = 51;
+  string registry_accounting_category = 52;
+  string registry_physical_identity_hash = 53;
+  string registry_semantic_grouping_key = 54;
+  string registry_grouping_policy_version = 55;
+  string registry_handle = 56;                      // "" when None
+  string registry_status = 57;                      // "open" | "closed" | "reorg_invalidated"
+  bytes registry_payload_json = 58;                 // JSON-encoded dict
+  int32 registry_matching_policy_version = 59;
+  optional int64 registry_opened_at_block = 60;
+  string registry_opened_tx = 61;                   // "" when None
+  optional int64 registry_closed_at_block = 62;
+  string registry_closed_tx = 63;                   // "" when None
+  optional int64 registry_last_reconciled_at_block = 64;
+  // ---- HandleMapping (optional — populated when ``handle != ""``) ----
+  string handle_mapping_handle = 80;                // "" => no HandleMapping
+  string handle_mapping_deployment_id = 81;
+  string handle_mapping_accounting_category = 82;
+}
+
+message SaveLedgerAndRegistryResponse {
+  bool success = 1;
+  string error = 2;
+  // Error-discriminator: lets the client adapter distinguish a
+  // RegistryAutoCollisionError (the strategy author forgot a
+  // registry_handle on a multi-NFT-per-pool deployment — programming
+  // bug, NOT an infrastructure failure) from a generic persistence
+  // failure. VIB-4200 / PRD §"Loud Failure, Not Confusing Failure"
+  // requires that collision class to propagate as a distinct exception
+  // mode-uniformly. Empty string when ``success=true`` or on a generic
+  // failure.
+  string error_class = 3;
 }
 
 // =============================================================================
