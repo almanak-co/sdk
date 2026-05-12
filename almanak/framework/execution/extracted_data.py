@@ -169,6 +169,18 @@ class LPCloseData:
         pool_address: V3 pool address that emitted the Burn event (VIB-3940).
             Required input for the framework's slot0 fallback. Empty when the
             parser couldn't identify the pool. Mirrors ``LPOpenData.pool_address``.
+        source: Provenance tag for the on-chain event the close amounts were
+            decoded from. ``"collect"`` = sourced from a ``Collect`` event
+            (principal + already-accrued fees, the truth on transfer);
+            ``"decrease_liquidity"`` = sourced from a ``DecreaseLiquidity``
+            event (principal unlocked into ``tokensOwed`` but not yet
+            transferred). For protocols whose close is a two-tx sequence
+            (Aerodrome Slipstream: ``decreaseLiquidity`` then ``collect``),
+            ResultEnricher uses this tag to prefer the ``Collect``-sourced
+            extraction across receipts so accrued fees on chain are not
+            silently dropped from the registry payload (VIB-4310). Optional
+            for backward compatibility: single-tx parsers may leave it
+            ``None``; the enricher then falls back to first-match semantics.
 
     Example:
         if result.lp_close_data:
@@ -187,6 +199,7 @@ class LPCloseData:
     additional_fees: dict[int, int] | None = None
     current_tick: int | None = None  # VIB-3940
     pool_address: str = ""  # VIB-3940 — for framework slot0 fallback
+    source: str | None = None  # VIB-4310 — "collect" | "decrease_liquidity" | None
 
     @property
     def all_amounts(self) -> list[int]:
@@ -213,9 +226,13 @@ class LPCloseData:
             "amount1_collected": str(self.amount1_collected),
             "fees0": str(self.fees0),
             "fees1": str(self.fees1),
-            "liquidity_removed": str(self.liquidity_removed) if self.liquidity_removed else None,
+            # Preserve measured zero per the "Empty != Zero" invariant
+            # (CLAUDE.md §Accounting). A truthy check would collapse the
+            # measured 0 case to None — CodeRabbit pushback on PR #2256.
+            "liquidity_removed": (str(self.liquidity_removed) if self.liquidity_removed is not None else None),
             "current_tick": self.current_tick,  # VIB-3940
             "pool_address": self.pool_address,  # VIB-3940
+            "source": self.source,  # VIB-4310
         }
         if self.additional_amounts:
             d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}

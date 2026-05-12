@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
-from almanak.framework.execution.extracted_data import BridgeData, SwapAmounts
+from almanak.framework.execution.extracted_data import BridgeData, ProtocolFees, SwapAmounts
 
 logger = logging.getLogger(__name__)
 
@@ -423,17 +423,50 @@ class LiFiReceiptParser:
     # Protocol Fee Extraction (VIB-3204)
     # =============================================================================
 
-    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
-        """Placeholder for LiFi aggregator protocol-fee extraction (VIB-3204).
+    def extract_protocol_fees(
+        self,
+        _receipt: dict[str, Any],
+        *,
+        protocol_fee_usd: Decimal | None = None,
+    ) -> ProtocolFees:
+        """LiFi aggregator protocol-fee extraction.
 
-        LiFi surfaces per-step fees in the quote response at compile
-        time; receipts don't contain a uniform fee event. Threading the
-        quote metadata into parser scope is deferred to a follow-up.
+        LiFi surfaces integrator fees in the quote response at compile time
+        with pre-computed USD values (``estimate.feeCosts[].amountUSD``).
+        On-chain receipts do not carry a uniform fee event, so the parser
+        cannot reconstruct the value from logs alone. The LiFi adapter
+        captures ``quote.estimate.total_fee_usd`` into
+        ``ActionBundle.metadata["protocol_fee_usd"]`` (VIB-3210);
+        ``ResultEnricher`` threads it here.
 
-        Follow-up ticket: "Protocol fee extraction for aggregators
-        (Enso, LiFi) — follow-up to VIB-3204".
+        Args:
+            _receipt: Transaction receipt (unused — fee lives in quote metadata).
+            protocol_fee_usd: USD-denominated total integrator fee, threaded
+                from ``ActionBundle.metadata`` at enrich time. ``None`` when
+                the bundle had no quote metadata attached (legacy code path
+                or non-LiFi callers).
+
+        Returns:
+            Measured ``ProtocolFees`` when the kwarg is populated; otherwise
+            a typed ``ProtocolFees(unavailable_reason=...)`` per VIB-3495
+            so downstream attribution sees "known unavailable" rather than
+            "parser missing".
         """
-        return None
+        if protocol_fee_usd is not None:
+            if protocol_fee_usd < 0:
+                # Fail-fast: a negative integrator fee means upstream sign
+                # corruption (CodeRabbit pushback on PR #2256). Silently
+                # downgrading to ``unavailable`` would mask the bug and let
+                # downstream attribution under-count fees. Surface it.
+                raise ValueError(f"protocol_fee_usd must be non-negative, got {protocol_fee_usd}")
+            return ProtocolFees(
+                total_usd=Decimal(protocol_fee_usd),
+                swap_fee_usd=Decimal(protocol_fee_usd),
+            )
+        return ProtocolFees(
+            total_usd=None,
+            unavailable_reason="lifi_integrator_fee_quote_metadata_unavailable",
+        )
 
     def parse_approval_receipt(
         self,

@@ -1,31 +1,48 @@
-"""Tests for Enso ``extract_protocol_fees`` (VIB-3204 — placeholder).
+"""Tests for Enso ``extract_protocol_fees`` — VIB-3210 typed-unavailable.
 
-CodeRabbit audit fix: regression-guard for the placeholder. The Enso
-parser declares ``"protocol_fees"`` in ``SUPPORTED_EXTRACTIONS`` so the
-``ResultEnricher`` capability gate forwards calls, and the extractor
-itself returns ``None`` until real integrator-fee extraction lands in
-the follow-up VIB-3210. These tests lock that contract so a future
-"helpful" refactor can't silently start emitting
-``ProtocolFees(total_usd=Decimal(0))`` — which would falsely claim
-zero aggregator fee on every Enso swap.
+History:
+
+* VIB-3204 stubbed the parser to ``return None`` until aggregator integrator-fee
+  plumbing landed.
+* VIB-3210 replaced the raw ``None`` with a typed
+  ``ProtocolFees(unavailable_reason=...)`` so downstream attribution can
+  distinguish "known unavailable" from "parser missing". Returning ``None``
+  silently dropped fee accounting on every Enso swap.
+
+These tests pin the post-VIB-3210 contract: every code path returns a
+``ProtocolFees`` instance; raw ``None`` is forbidden. The measured path
+(``protocol_fee_usd`` kwarg present) is covered in
+``tests/unit/execution/test_aggregator_protocol_fees.py``; here we lock
+the receipt-shape paths and the SUPPORTED_EXTRACTIONS contract.
 """
 
 from __future__ import annotations
 
 from almanak.framework.connectors.enso.receipt_parser import EnsoReceiptParser
+from almanak.framework.execution.extracted_data import ProtocolFees
+
+_UNAVAILABLE_REASON = "enso_integrator_fee_quote_metadata_unavailable"
 
 
-class TestEnsoProtocolFeesPlaceholder:
-    def test_empty_receipt_returns_none(self) -> None:
+class TestEnsoProtocolFeesUnavailable:
+    def test_empty_receipt_returns_typed_unavailable(self) -> None:
         parser = EnsoReceiptParser()
-        assert parser.extract_protocol_fees({}) is None
+        out = parser.extract_protocol_fees({})
+        assert isinstance(out, ProtocolFees)
+        assert out.total_usd is None
+        assert out.unavailable_reason == _UNAVAILABLE_REASON
 
-    def test_empty_logs_returns_none(self) -> None:
+    def test_empty_logs_returns_typed_unavailable(self) -> None:
         parser = EnsoReceiptParser()
-        assert parser.extract_protocol_fees({"logs": []}) is None
+        out = parser.extract_protocol_fees({"logs": []})
+        assert isinstance(out, ProtocolFees)
+        assert out.total_usd is None
+        assert out.unavailable_reason == _UNAVAILABLE_REASON
 
-    def test_minimal_shape_returns_none(self) -> None:
-        """A receipt with plausible fields but no fee data still returns None."""
+    def test_minimal_shape_returns_typed_unavailable(self) -> None:
+        """A receipt with plausible fields but no fee data still returns
+        the typed unavailable sentinel — the fee lives in quote metadata,
+        not in logs."""
         parser = EnsoReceiptParser()
         receipt = {
             "status": 1,
@@ -38,12 +55,14 @@ class TestEnsoProtocolFeesPlaceholder:
                 }
             ],
         }
-        assert parser.extract_protocol_fees(receipt) is None
+        out = parser.extract_protocol_fees(receipt)
+        assert isinstance(out, ProtocolFees)
+        assert out.unavailable_reason == _UNAVAILABLE_REASON
 
-    def test_realistic_swap_shape_returns_none(self) -> None:
-        """Even a receipt that looks like a real Enso aggregator swap
-        (with multiple Transfer events) must return None — the parser
-        has no integrator-fee extraction yet."""
+    def test_realistic_swap_shape_returns_typed_unavailable(self) -> None:
+        """Even a realistic Enso aggregator swap receipt returns the typed
+        unavailable sentinel — the parser does not scan logs for fees,
+        because Enso fees are quote-time metadata."""
         parser = EnsoReceiptParser()
         wallet = "0x" + "aa" * 20
         receipt = {
@@ -70,7 +89,9 @@ class TestEnsoProtocolFeesPlaceholder:
                 },
             ],
         }
-        assert parser.extract_protocol_fees(receipt) is None
+        out = parser.extract_protocol_fees(receipt)
+        assert isinstance(out, ProtocolFees)
+        assert out.unavailable_reason == _UNAVAILABLE_REASON
 
     def test_supported_extractions_advertises_protocol_fees(self) -> None:
         """Capability gate regression: the declaration must include

@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.framework.connectors.base.hex_utils import HexDecoder
-from almanak.framework.execution.extracted_data import SwapAmounts
+from almanak.framework.execution.extracted_data import ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -427,18 +427,47 @@ class EnsoReceiptParser:
     # Protocol Fee Extraction (VIB-3204)
     # =============================================================================
 
-    def extract_protocol_fees(self, _receipt: dict[str, Any]) -> None:
-        """Placeholder for Enso aggregator integrator-fee extraction (VIB-3204).
+    def extract_protocol_fees(
+        self,
+        _receipt: dict[str, Any],
+        *,
+        protocol_fee_usd: Decimal | None = None,
+    ) -> ProtocolFees:
+        """Enso aggregator integrator-fee extraction.
 
-        Enso surfaces its integrator fee in the quote response at
-        compile time, not in on-chain receipt events. Threading that
-        metadata through ActionBundle.metadata into the parser is
-        deferred to a follow-up.
+        Enso's quote response surfaces ``feeAmount: list[str]`` — token-
+        denominated wei values per fee leg, without pre-computed USD. The
+        receipt parser layer has no price oracle, so USD conversion has to
+        happen adapter-side before the value lands in
+        ``ActionBundle.metadata["protocol_fee_usd"]``. Until that wiring
+        ships, the kwarg is ``None`` in practice — but the signature is
+        already in place so a future adapter change becomes drop-in.
 
-        Follow-up ticket: "Protocol fee extraction for aggregators
-        (Enso, LiFi) — follow-up to VIB-3204".
+        Returns ``ProtocolFees`` with either the measured value (kwarg
+        threaded in) or a typed ``unavailable_reason`` per VIB-3495 — never
+        raw ``None``. Raw ``None`` is indistinguishable from "parser
+        missing", which VIB-3210 surfaced as a downstream attribution bug.
+
+        Args:
+            _receipt: Transaction receipt (unused — fee lives in quote metadata).
+            protocol_fee_usd: USD-denominated total integrator fee, threaded
+                from ``ActionBundle.metadata`` at enrich time.
         """
-        return None
+        if protocol_fee_usd is not None:
+            if protocol_fee_usd < 0:
+                # Fail-fast: a negative integrator fee means upstream sign
+                # corruption (CodeRabbit pushback on PR #2256). Silently
+                # downgrading to ``unavailable`` would mask the bug and let
+                # downstream attribution under-count fees. Surface it.
+                raise ValueError(f"protocol_fee_usd must be non-negative, got {protocol_fee_usd}")
+            return ProtocolFees(
+                total_usd=Decimal(protocol_fee_usd),
+                swap_fee_usd=Decimal(protocol_fee_usd),
+            )
+        return ProtocolFees(
+            total_usd=None,
+            unavailable_reason="enso_integrator_fee_quote_metadata_unavailable",
+        )
 
 
 __all__ = ["EnsoReceiptParser", "SwapResult"]

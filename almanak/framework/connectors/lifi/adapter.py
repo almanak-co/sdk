@@ -354,6 +354,18 @@ class LiFiAdapter:
                     "step_type": quote.type,
                     "gas_estimate": total_gas,
                     "execution_duration": quote.estimate.execution_duration if quote.estimate else 0,
+                    # VIB-3210 — LiFi's quote API surfaces integrator fees with
+                    # pre-computed USD values (``feeCosts[].amountUSD``). Capture
+                    # the total here so ResultEnricher / LiFi receipt parser can
+                    # emit a measured ``ProtocolFees(total_usd=...)`` rather than
+                    # the legacy ``unavailable_reason`` placeholder. Persisted
+                    # as a string for safe JSON round-trip; consumers re-cast to
+                    # Decimal in the enricher's kwargs builder.
+                    "protocol_fee_usd": (
+                        str(quote.estimate.total_fee_usd)
+                        if quote.estimate is not None and quote.estimate.total_fee_usd is not None
+                        else None
+                    ),
                     # Include parameters for fetching fresh route at execution time
                     "deferred_swap": True,
                     "route_params": {

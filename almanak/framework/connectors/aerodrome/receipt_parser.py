@@ -2179,10 +2179,19 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         This ensures fees already owed before the close are included in the reported
         amounts, not just the principal removed in this transaction.
 
-        The Slipstream close is a two-tx flow (decreaseLiquidity → collect).
-        The Collect event appears in the second tx receipt; the DecreaseLiquidity
-        event appears in the first.  ResultEnricher iterates all receipts and takes
-        the first successful extraction, so the correct receipt will win.
+        Slipstream's close is a **two-transaction sequence**:
+        ``decreaseLiquidity`` → ``collect``. The two events land in
+        different receipts. Each call to this method sees ONE receipt, so it
+        returns either:
+
+        * a ``Collect``-sourced ``LPCloseData`` (``source="collect"``) — the
+          principal + pre-existing fees actually transferred to the recipient;
+        * a ``DecreaseLiquidity``-sourced fallback (``source="decrease_liquidity"``)
+          — the principal unlocked into ``tokensOwed`` but not yet transferred.
+
+        ``ResultEnricher`` aggregates across receipts and prefers the
+        ``Collect``-sourced variant when both are present (VIB-4310). The
+        ``source`` tag is the explicit signal it uses; do not strip it.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
@@ -2222,6 +2231,7 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                         amount1_collected=amount1,
                         fees0=0,
                         fees1=0,
+                        source="collect",
                     )
 
             # Pass 2: fall back to DecreaseLiquidity (first tx receipt in two-tx close).
@@ -2252,6 +2262,7 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                         fees0=0,
                         fees1=0,
                         liquidity_removed=liquidity,
+                        source="decrease_liquidity",
                     )
 
             return None

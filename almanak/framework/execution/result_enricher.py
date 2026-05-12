@@ -60,6 +60,25 @@ _SNAKE_TO_CAMEL = {
 _LEGACY_WARNED: set[tuple[str, str]] = set()
 
 
+# VIB-4310 — Fields whose extraction must scan ALL receipts in a bundle and
+# select the preferred-``source``-tagged variant rather than returning on
+# first ExtractOk. Two-transaction protocol flows (e.g. Aerodrome Slipstream
+# ``decreaseLiquidity`` → ``collect``) emit complementary data across separate
+# receipts: receipt #1 carries DecreaseLiquidity (principal unlocked), receipt
+# #2 carries Collect (principal + accrued fees actually transferred).
+# First-match semantics return the decrease-sourced extraction and silently
+# drop accrued fees from the registry payload.
+#
+# The map's value is the ``source`` tag this aggregator prefers. Parser-side
+# producers (see ``AerodromeSlipstreamReceiptParser.extract_lp_close_data``)
+# stamp every emitted value with the source it was decoded from. Producers
+# that leave ``source=None`` (single-tx parsers) are unaffected — the picker
+# falls back to first-found semantics for un-tagged candidates.
+_AGGREGATE_FIELDS: dict[str, str] = {
+    "lp_close_data": "collect",
+}
+
+
 def _legacy_warn(parser: Any, field: str) -> None:
     """Emit a one-shot DeprecationWarning for parsers that still return raw values.
 
@@ -914,11 +933,20 @@ class ResultEnricher:
         # Iterate receipts. Remember any ExtractError and keep looking — the
         # data might land in a later receipt (multi-tx bundle). Only escalate
         # if no receipt produced Ok.
+        #
+        # For aggregate fields (see ``_AGGREGATE_FIELDS``), we collect every
+        # ExtractOk across receipts and select the preferred-``source``
+        # variant once the loop completes. VIB-4310.
+        aggregate_preferred = _AGGREGATE_FIELDS.get(field)
+        candidates: list[Any] = []
         last_error: ExtractError | None = None
         for receipt in receipts:
             variant = self._invoke_extract(extract_method, parser, receipt, field, extract_kwargs)
 
             if isinstance(variant, ExtractOk):
+                if aggregate_preferred is not None:
+                    candidates.append(variant.value)
+                    continue
                 attached = self._attach_to_result(result, field, variant.value, intent_type)
                 if attached:
                     logger.debug(f"Enrichment: extracted {field}={type(variant.value).__name__} from receipt")
@@ -932,6 +960,18 @@ class ResultEnricher:
                 continue
             # ExtractMissing — benign, continue to next receipt.
 
+        if aggregate_preferred is not None and candidates:
+            chosen = self._select_preferred_aggregate(candidates, aggregate_preferred)
+            attached = self._attach_to_result(result, field, chosen, intent_type)
+            if attached:
+                chosen_source = getattr(chosen, "source", None)
+                logger.debug(
+                    f"Enrichment: extracted {field}={type(chosen).__name__} "
+                    f"(aggregated across {len(candidates)} candidate(s), "
+                    f"chosen source={chosen_source!r}, preferred={aggregate_preferred!r})"
+                )
+                return
+
         if last_error is not None:
             self._handle_extract_error(result, last_error, field, intent_type, parser, protocol)
             return
@@ -940,6 +980,80 @@ class ResultEnricher:
             f"Enrichment: {field} missing from all {len(receipts)} receipt(s) "
             f"(parser={type(parser).__name__}, intent_type={intent_type})"
         )
+
+    @staticmethod
+    def _select_preferred_aggregate(candidates: list[Any], preferred_source: str) -> Any:
+        """Pick the preferred-``source`` candidate from a multi-receipt aggregate,
+        backfilling complementary fields from sibling candidates.
+
+        VIB-4310 — Slipstream LP close emits ``DecreaseLiquidity`` in receipt #1
+        and ``Collect`` in receipt #2. The Collect amounts are the truth on
+        transfer (principal + accrued fees); the DecreaseLiquidity amounts are
+        principal-only.
+
+        Naive "pick preferred wholesale" loses fields the preferred candidate
+        cannot populate from its source receipt — most importantly
+        ``liquidity_removed``, which only DecreaseLiquidity carries. Codex
+        pushback on PR #2256: dropping it would write ``LP_CLOSE`` ledger rows
+        with ``liquidity=None`` even though the value was parsed from
+        receipt #1. Backfill any field that is ``None`` on the chosen
+        candidate from the first sibling that populated it.
+
+        Behaviour:
+        * Pick the first candidate whose ``source`` matches ``preferred_source``;
+          fall back to the first candidate when no tagged match exists
+          (un-tagged single-tx parsers).
+        * For each ``None`` / empty-string field on the chosen candidate, look
+          for a sibling with a populated value and adopt it. Non-``None``
+          fields on the chosen candidate are authoritative — never overwritten.
+        """
+        chosen: Any | None = None
+        for candidate in candidates:
+            if getattr(candidate, "source", None) == preferred_source:
+                chosen = candidate
+                break
+        if chosen is None:
+            chosen = candidates[0]
+
+        # Backfill ``None`` fields from siblings. Use replace() if the
+        # dataclass is frozen; otherwise direct attribute assignment is fine.
+        siblings = [c for c in candidates if c is not chosen]
+        if not siblings:
+            return chosen
+
+        from dataclasses import fields, is_dataclass, replace
+
+        if not is_dataclass(chosen):
+            return chosen
+
+        backfills: dict[str, Any] = {}
+        for f in fields(chosen):
+            current = getattr(chosen, f.name)
+            if current is not None and current != "":
+                continue
+            for sibling in siblings:
+                sibling_value = getattr(sibling, f.name, None)
+                if sibling_value is not None and sibling_value != "":
+                    backfills[f.name] = sibling_value
+                    break
+
+        if not backfills:
+            return chosen
+        try:
+            # ``is_dataclass`` returns True for both instances and the bare
+            # dataclass type; mypy can't narrow ``chosen: Any`` to "instance,
+            # not type", so silence the type-var complaint. The TypeError
+            # fallback below catches the runtime "applied to a type, not an
+            # instance" case.
+            return replace(chosen, **backfills)  # type: ignore[type-var]
+        except TypeError:
+            # Non-frozen / non-replace-able dataclass: fall back to direct
+            # attribute assignment. Preserves the contract (chosen returned
+            # with backfills applied) without forcing the field model to
+            # be replace()-compatible.
+            for name, value in backfills.items():
+                setattr(chosen, name, value)
+            return chosen
 
     @staticmethod
     def _class_has_method(obj: Any, name: str) -> bool:
@@ -1042,14 +1156,7 @@ class ResultEnricher:
                             )
             return kwargs
         if field == "protocol_fees":
-            raw_tier = bundle_metadata.get("selected_fee_tier")
-            if raw_tier in (None, ""):
-                return {}
-            try:
-                return {"fee_tier_bps": int(str(raw_tier))}
-            except (TypeError, ValueError):
-                logger.debug("Could not coerce selected_fee_tier=%r to int; skipping", raw_tier)
-                return {}
+            return ResultEnricher._build_protocol_fees_kwargs(bundle_metadata)
         if field == "bridge_data":
             # VIB-3226: bridge receipts typically do not carry the user-facing
             # symbol or canonical chain names — they encode chain IDs and token
@@ -1069,6 +1176,53 @@ class ResultEnricher:
                 bridge_kwargs["expected_amount_out"] = out_amount
             return bridge_kwargs
         return {}
+
+    @staticmethod
+    def _build_protocol_fees_kwargs(bundle_metadata: dict[str, Any]) -> dict[str, Any]:
+        """Compose ``extract_protocol_fees`` kwargs from compiler metadata.
+
+        Two values feed this signature today:
+
+        * ``fee_tier_bps`` — DEX pool fee tier (VIB-3204), sourced from
+          ``ActionBundle.metadata["selected_fee_tier"]``.
+        * ``protocol_fee_usd`` — aggregator integrator fee in USD
+          (VIB-3210), sourced from
+          ``ActionBundle.metadata["protocol_fee_usd"]``. LiFi captures this
+          at compile time from ``quote.estimate.total_fee_usd``; Enso does
+          not have a USD-denominated quote field yet, so the key stays
+          unset until adapter-side USD conversion ships.
+
+        Extracted from ``_build_extract_kwargs`` so the outer function stays
+        under the CRAP threshold as new fields land.
+        """
+        kwargs: dict[str, Any] = {}
+        raw_tier = bundle_metadata.get("selected_fee_tier")
+        if raw_tier not in (None, ""):
+            try:
+                kwargs["fee_tier_bps"] = int(str(raw_tier))
+            except (TypeError, ValueError):
+                logger.debug(
+                    "Could not coerce selected_fee_tier=%r to int; skipping",
+                    raw_tier,
+                )
+        raw_fee_usd = bundle_metadata.get("protocol_fee_usd")
+        if raw_fee_usd not in (None, ""):
+            try:
+                fee_usd = Decimal(str(raw_fee_usd))
+                if fee_usd.is_finite():
+                    # Always thread the value through, including negatives.
+                    # The parser fail-fasts on negative (CodeRabbit pushback
+                    # on PR #2256): silently dropping a negative here would
+                    # let upstream sign corruption hide. End-to-end fail-fast
+                    # means the kwargs builder is a pure threader; the parser
+                    # is the validator.
+                    kwargs["protocol_fee_usd"] = fee_usd
+            except (InvalidOperation, TypeError, ValueError):
+                logger.debug(
+                    "Could not coerce protocol_fee_usd=%r to Decimal; skipping",
+                    raw_fee_usd,
+                )
+        return kwargs
 
     def _invoke_extract(
         self,
@@ -1205,7 +1359,20 @@ class ResultEnricher:
             result.position_id = value
         elif field == "swap_amounts" and isinstance(value, SwapAmounts):
             result.swap_amounts = value
-        elif field == "lp_close_data" and isinstance(value, LPCloseData):
+        elif field == "lp_close_data":
+            # VIB-4310 — Reject anything that is not LPCloseData. The
+            # aggregate path (``_AGGREGATE_FIELDS``) treats every successful
+            # attach as terminal for that field, so a broken parser that
+            # returns a dict / None / bare int would silently win over a
+            # legitimate sibling candidate from a different receipt. Match
+            # the bridge_data / protocol_fees pattern: log + return False so
+            # the enricher keeps scanning. CodeRabbit pushback on PR #2256.
+            if not isinstance(value, LPCloseData):
+                logger.warning(
+                    "Enrichment: parser returned non-LPCloseData value for 'lp_close_data' "
+                    f"(type={type(value).__name__}); ignoring and continuing receipt scan"
+                )
+                return False
             result.lp_close_data = value
         elif field == "bridge_data":
             # VIB-3226: reject anything that is not BridgeData so a broken
